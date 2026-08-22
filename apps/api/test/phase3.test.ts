@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -90,14 +90,34 @@ describe("capability probe vs. adapter authority", () => {
     db.close();
   });
 
-  it("probes without blocking the event loop", async () => {
-    // A synchronous spawn here would freeze every request and SSE stream.
+  it("never uses a synchronous spawn, which would freeze the whole API", () => {
+    // Asserted structurally rather than by timing, on purpose. "Does not block
+    // the event loop" is unobservable when the spawn is instant, and the spawn
+    // IS instant wherever the CLI is absent (it fails with ENOENT in a
+    // microtask). A setImmediate race therefore passes or fails depending on
+    // whether `claude` happens to be installed — which is nothing to do with
+    // the property under test. The property that matters is that this module
+    // never reaches for the synchronous API: execFileSync on the boot and
+    // daily-job path froze every request, SSE stream and in-flight run for up
+    // to the 5s timeout, per provider.
+    const source = readFileSync(new URL("../src/modules/capability-probe.ts", import.meta.url), "utf8");
+    expect(source).not.toMatch(/\bexecFileSync\b/);
+    expect(source).toMatch(/promisify\(execFile\)/);
+  });
+
+  it("degrades to a well-formed result when the provider CLI is not installed", async () => {
+    // The CI environment has no provider CLIs, which makes it the right place
+    // to assert this: a missing binary must produce "unavailable", not a throw
+    // that would take the daily sync down with it.
     const { probeCapability } = await import("../src/modules/capability-probe.js");
-    let ticked = false;
-    const probe = probeCapability("anthropic");
-    setImmediate(() => { ticked = true; });
-    await probe;
-    expect(ticked).toBe(true);
+    const probe = await probeCapability("anthropic");
+    expect(probe.fingerprint).toBeTruthy();
+    expect(typeof probe.version).toBe("string");
+    expect(probe.version.length).toBeGreaterThan(0);
+
+    // An unknown provider has no CLI to interrogate at all.
+    const unknown = await probeCapability("not-a-real-provider");
+    expect(unknown.version).toBe("in-process");
   });
 });
 
