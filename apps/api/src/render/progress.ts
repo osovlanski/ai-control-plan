@@ -1,7 +1,7 @@
-import type { TaskEnvelope } from "@agent-plane/core";
+import { DEFAULT_REDACTION_RULES, redactText, type RedactionRule, type TaskEnvelope } from "@agent-plane/core";
 
 /** Renders progress.md — a portable human/agent-readable projection of the envelope (DB stays the truth). */
-export function renderProgressMd(envelope: TaskEnvelope, assistantId?: string): string {
+export function renderProgressMd(envelope: TaskEnvelope, assistantId?: string, rules: RedactionRule[] = DEFAULT_REDACTION_RULES): string {
   const lines: string[] = [
     `# ${envelope.taskId}`,
     "",
@@ -40,7 +40,7 @@ export function renderProgressMd(envelope: TaskEnvelope, assistantId?: string): 
   if (envelope.nextAction) {
     lines.push("## Next Action", "", envelope.nextAction, "");
   }
-  return lines.join("\n");
+  return redactText(lines.join("\n"), rules);
 }
 
 function listOr(items: string[], fallback: string): string[] {

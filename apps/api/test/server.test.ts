@@ -36,7 +36,7 @@ describe("api server", () => {
     const body = res.json();
     expect(body.status).toBe("ok");
     expect(body.workspace).toBe("personal");
-    expect(body.migrations).toBe(2);
+    expect(body.migrations).toBe(3);
   });
 
   it("exposes workspace policy without any secrets", async () => {

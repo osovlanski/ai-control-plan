@@ -2,7 +2,7 @@
 
 ## Current phase
 
-**Phase 2 — complete.** The full loop `prompt → route → execute → observe → checkpoint → handoff` now runs end to end, including automatic quota failover. Next: Phase 3 (daily capability sync, catalog change feed, retention, redaction).
+**Phase 3 — complete.** Daily change-driven capability discovery, the catalog change feed, compressed event retention, and boundary redaction are implemented. Next: Phase 4.
 
 ## Done
 
@@ -51,10 +51,10 @@
 
 ## Next
 
-- [ ] Phase 3: daily capability sync (cron) — version/auth/model/config-hash probe, re-`describe()` on change
-- [ ] Phase 3: "what changed today" feed in the Assistant Catalog
-- [ ] Phase 3: event-log retention job (compress tasks completed >30 days)
-- [ ] Phase 3: redaction rules applied to events, rendered files, and handoff packages
+- [x] **Phase 3:** daily change-driven capability probes and idle quota snapshots
+- [x] **Phase 3:** Assistant Catalog "what changed today" feed
+- [x] **Phase 3:** gzip archives for terminal-task events older than 30 days
+- [x] **Phase 3:** pre-insert event and render/handoff redaction
 
 ### Architecture changes made during Phase 2 (with reasons)
 
@@ -71,9 +71,24 @@
 - `fastest` profile has no latency telemetry yet and says so in its explanation; real scoring lands in Phase 5.
 - Cross-provider `resume()` is never used — cross-provider continuation always goes through a fresh `start()` with the handoff package, by design.
 
+### Architecture changes made during Phase 3 (with reasons)
+
+- **Probes remain outside the six-method adapter contract.** Cheap CLI version, auth-state, configured-model, and MCP/skills hashes gate the existing `describe()` call.
+- **Retention archives transactionally in SQLite.** Gzip blobs replace old live rows and the existing event endpoint reads both forms.
+- **Redaction runs at event ingestion.** Only the redacted event reaches SQLite, envelope derivation, or SSE; renderers make a second pass for user-authored data.
+- **Checkpoint commits tolerate same-tree races.** A concurrent checkpoint that already committed the staged tree resolves to clean HEAD.
+
+### Phase 3 limitations
+
+- Idle quota refresh is best-effort from cached manifest limits. Providers exposing quota only in run streams cannot be polled without violating the settled adapter contract.
+- Model discovery uses models named in supported local config when no typed SDK/CLI model-list surface exists.
+- Baseline redaction covers common keys, bearer tokens, JWTs, and secret-style `.env` assignments; it is not a general DLP engine.
+
 ## Log
 
 - 2026-08-21 — Architecture review completed and pushed to `claude/multi-assistant-routing-plan-vw0bwc`.
 - 2026-08-21 — Architecture accepted; Phase 0 scaffolding built and verified (`pnpm dev` boots API + UI against migrated SQLite; typecheck/lint/20 tests green).
 - 2026-08-22 — Phase 1 delivered: real Claude + Codex adapters written against the installed SDKs' type declarations, rule router, orchestrator with SSE and approvals, three UI screens. 45 tests green; core loop verified live end to end.
 - 2026-08-22 — Phase 2 delivered: checkpoints, portable handoff packages, `resets_at`-aware cooldowns, and automatic quota failover. 51 tests green; verified live — a limit on one assistant checkpointed and completed on the other, and an all-limited task parked with the reasons and reset times named.
+
+- 2026-08-22 — Phase 3 delivered: change-driven daily capability probes and catalog feed, compressed 30-day event retention, and pre-persistence/render/handoff redaction.

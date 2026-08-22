@@ -2,6 +2,7 @@ import type { AgentAdapter, AssistantId, CapabilityManifest } from "@agent-plane
 import { ClaudeAdapter, CodexAdapter, FakeAdapter } from "@agent-plane/adapters";
 import type { ResolvedConfig } from "../config.js";
 import type { Db } from "../db/index.js";
+import { probeCapability, type CapabilityProbe } from "./capability-probe.js";
 
 export interface AssistantRow {
   id: string;
@@ -23,6 +24,7 @@ export class Registry {
   constructor(
     private db: Db,
     private config: ResolvedConfig,
+    private capabilityProbe: CapabilityProbe = probeCapability,
   ) {}
 
   /** Seed assistants table + adapter instances from config. Call at boot. */
@@ -98,6 +100,47 @@ export class Registry {
         await this.sync(id);
       } catch {
         // A failing probe must not block boot; the assistant simply has no manifest yet.
+      }
+    }
+  }
+
+  async syncChanged(id: string): Promise<{ changed: boolean; manifest: CapabilityManifest | null }> {
+    const provider = this.config.assistants[id]?.provider;
+    if (!provider) throw new Error(`Unknown assistant: ${id}`);
+    const probe = await this.capabilityProbe(provider);
+    const previous = this.db.prepare("SELECT fingerprint,details FROM capability_probes WHERE assistant_id=?").get(id) as { fingerprint: string; details: string } | undefined;
+    const previousDetails = previous ? JSON.parse(previous.details) as Record<string, unknown> : undefined;
+    const changed = !previous || previous.fingerprint !== probe.fingerprint || !this.manifest(id);
+    let manifest = this.manifest(id);
+    if (changed) {
+      manifest = await this.sync(id);
+      manifest.providerDetail = { ...manifest.providerDetail, version: probe.version, configHash: probe.configHash };
+      if (probe.models.length > 0) manifest.core.models = probe.models.map((model) => ({ id: model }));
+      manifest.core.auth.state = probe.authState === "ok" ? "ok" : "missing";
+      this.db.prepare("UPDATE assistants SET manifest=? WHERE id=?").run(JSON.stringify(manifest), id);
+    }
+    const now = new Date().toISOString();
+    if (previousDetails) {
+      const insertChange = this.db.prepare("INSERT INTO capability_changes (assistant_id,field,old_value,new_value,source,observed_at) VALUES (?,?,?,?, 'runtime-probe',?)");
+      for (const [field, value] of Object.entries({ "provider.version": probe.version, "core.auth.state": probe.authState, "core.models": probe.models.join(","), "provider.configHash": probe.configHash })) {
+        const oldValue = field === "core.models" ? (previousDetails.models as string[] | undefined)?.join(",") : field === "core.auth.state" ? previousDetails.authState : field === "provider.configHash" ? previousDetails.configHash : previousDetails.version;
+        if (String(oldValue ?? "") !== String(value)) insertChange.run(id, field, String(oldValue ?? ""), String(value), now);
+      }
+    }
+    this.db.prepare(`INSERT INTO capability_probes (assistant_id,fingerprint,details,observed_at) VALUES (?,?,?,?)
+      ON CONFLICT(assistant_id) DO UPDATE SET fingerprint=excluded.fingerprint,details=excluded.details,observed_at=excluded.observed_at`)
+      .run(id, probe.fingerprint, JSON.stringify(probe), now);
+    const insert = this.db.prepare("INSERT INTO quota_snapshots (assistant_id,window,used_percent,resets_at,source,observed_at) VALUES (?,?,?,?,?,?)");
+    for (const limit of manifest?.core.limits ?? []) insert.run(id, limit.window, limit.usedPercent, limit.resetsAt ?? null, limit.source, limit.observedAt);
+    return { changed, manifest };
+  }
+
+  async syncChangedAll(): Promise<void> {
+    for (const id of this.adapters.keys()) {
+      try {
+        await this.syncChanged(id);
+      } catch {
+        // One unavailable provider must not prevent other assistants syncing.
       }
     }
   }

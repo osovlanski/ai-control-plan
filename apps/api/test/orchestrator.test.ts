@@ -189,3 +189,28 @@ async function waitFor(predicate: () => boolean, timeoutMs = 5000): Promise<void
     await new Promise((r) => setTimeout(r, 10));
   }
 }
+  it("persists secrets in neither normalized payload nor raw provider data", async () => {
+    const secret = "sk-proj_abcdefghijklmnopqrstuvwxyz012345";
+    const adapter = registry.adapter(FAKE_ID) as unknown as {
+      script: { events: Array<Record<string, unknown>>; ok: boolean };
+    };
+    adapter.script = {
+      ok: true,
+      events: [{
+        type: "message",
+        summary: `Bearer abcdefghijklmnop ${secret}`,
+        payload: { text: `API_TOKEN=${secret}`, access_token: "opaque-token" },
+        raw: { authorization: "Bearer abcdefghijklmnop", env: `PASSWORD=hunter2\nOPENAI_API_KEY=${secret}` },
+      }],
+    };
+    const envelope = tasks.create({ goal: "redaction test" });
+    tasks.transition(envelope.taskId, "ROUTING");
+    const { runId } = await orchestrator.startTask(envelope.taskId, FAKE_ID);
+    await orchestrator.waitForSettled(envelope.taskId);
+    const rows = db.prepare("SELECT payload,raw FROM events WHERE run_id=?").all(runId);
+    const persisted = JSON.stringify(rows);
+    expect(persisted).not.toContain(secret);
+    expect(persisted).not.toContain("opaque-token");
+    expect(persisted).not.toContain("hunter2");
+    expect(persisted).not.toContain("abcdefghijklmnop");
+  });

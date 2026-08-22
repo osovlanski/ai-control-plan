@@ -84,7 +84,14 @@ export async function commitCheckpoint(worktreePath: string, message: string): P
   await git(worktreePath, ["add", "-A"]);
   const staged = await git(worktreePath, ["diff", "--cached", "--name-only"]);
   if (!staged) return git(worktreePath, ["rev-parse", "HEAD"]);
-  await git(worktreePath, ["commit", "-q", "-m", message]);
+  try {
+    await git(worktreePath, ["commit", "-q", "-m", message]);
+  } catch (error) {
+    // Concurrent completion/manual checkpoints may race after staging; if the
+    // other checkpoint committed the same tree, this checkpoint still points
+    // at that durable state.
+    if (await isDirty(worktreePath)) throw error;
+  }
   return git(worktreePath, ["rev-parse", "HEAD"]);
 }
 

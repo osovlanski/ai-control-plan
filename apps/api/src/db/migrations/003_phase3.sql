@@ -1,0 +1,2 @@
+CREATE TABLE capability_probes (assistant_id TEXT PRIMARY KEY REFERENCES assistants(id), fingerprint TEXT NOT NULL, details TEXT NOT NULL, observed_at TEXT NOT NULL);
+CREATE TABLE event_archives (task_id TEXT PRIMARY KEY REFERENCES tasks(id), event_count INTEGER NOT NULL, first_event_at TEXT, last_event_at TEXT, codec TEXT NOT NULL DEFAULT 'gzip-json', data BLOB NOT NULL, archived_at TEXT NOT NULL);

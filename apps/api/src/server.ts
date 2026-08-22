@@ -9,6 +9,7 @@ import { Registry } from "./modules/registry.js";
 import { persistRoutingDecision, route, routingHistory, type RouteRequest } from "./modules/router.js";
 import { TaskEventBus } from "./modules/sse.js";
 import { TaskStore } from "./modules/tasks.js";
+import { EventRetention } from "./modules/retention.js";
 import { renderHandoffMd } from "./render/handoff.js";
 import { renderProgressMd } from "./render/progress.js";
 
@@ -39,6 +40,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   const registry = deps.registry ?? new Registry(db, config);
   const checkpoints = new CheckpointService(db, tasks);
   const cooldowns = new CooldownStore(db);
+  const retention = new EventRetention(db);
   const orchestrator =
     deps.orchestrator ??
     new Orchestrator(db, config, registry, tasks, bus, checkpoints, cooldowns);
@@ -248,7 +250,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
 
   app.get<{ Params: { id: string } }>("/api/tasks/:id/handoffs", (req, reply) => {
     if (!tasks.get(req.params.id)) return reply.status(404).send({ error: "not found" });
-    return db
+    const live = db
       .prepare(
         `SELECT h.id, h.trigger, h.at, h.checkpoint_id,
                 fr.assistant_id AS from_assistant, tr.assistant_id AS to_assistant
@@ -258,6 +260,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
          WHERE h.task_id = ? ORDER BY h.at`,
       )
       .all(req.params.id);
+    return live;
   });
 
   app.get<{ Params: { id: string } }>("/api/tasks/:id/files/handoff.md", (req, reply) => {
@@ -282,7 +285,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   app.get<{ Params: { id: string } }>("/api/tasks/:id/events", (req, reply) => {
     const row = tasks.get(req.params.id);
     if (!row) return reply.status(404).send({ error: "not found" });
-    return db
+    const live = db
       .prepare(
         `SELECT e.run_id, e.seq, e.ts, e.type, e.phase, e.summary, e.payload, r.assistant_id
          FROM events e JOIN runs r ON r.id = e.run_id
@@ -293,6 +296,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
         const e = raw as Record<string, unknown> & { payload: string | null };
         return { ...e, payload: e.payload ? (JSON.parse(e.payload) as unknown) : null };
       });
+    return [...retention.events(req.params.id), ...live];
   });
 
   app.get<{ Params: { id: string } }>("/api/tasks/:id/events/stream", (req, reply) => {

@@ -1,4 +1,4 @@
-import type { TaskEnvelope } from "@agent-plane/core";
+import { DEFAULT_REDACTION_RULES, redactText, type RedactionRule, type TaskEnvelope } from "@agent-plane/core";
 
 /**
  * Opening line of every handoff prompt. Receiving adapters (and the fake
@@ -19,7 +19,7 @@ export interface HandoffContext {
  * Inline: envelope, decisions with provenance, git state, a short activity summary.
  * By reference: full event log and diffs, fetchable from the control plane.
  */
-export function renderHandoffPrompt(envelope: TaskEnvelope, ctx: HandoffContext): string {
+export function renderHandoffPrompt(envelope: TaskEnvelope, ctx: HandoffContext, rules: RedactionRule[] = DEFAULT_REDACTION_RULES): string {
   const parts: string[] = [HANDOFF_MARKER, "", "## Goal", "", envelope.goal.trim()];
 
   if (envelope.constraints.length > 0) {
@@ -87,11 +87,11 @@ export function renderHandoffPrompt(envelope: TaskEnvelope, ctx: HandoffContext)
     envelope.nextAction?.trim() || "Continue the remaining work described above.",
   );
 
-  return parts.join("\n");
+  return redactText(parts.join("\n"), rules);
 }
 
 /** handoff.md — the human-readable projection of the same package. */
-export function renderHandoffMd(envelope: TaskEnvelope, ctx: HandoffContext): string {
+export function renderHandoffMd(envelope: TaskEnvelope, ctx: HandoffContext, rules: RedactionRule[] = DEFAULT_REDACTION_RULES): string {
   return [
     `# Handoff — ${envelope.taskId}`,
     "",
@@ -100,7 +100,7 @@ export function renderHandoffMd(envelope: TaskEnvelope, ctx: HandoffContext): st
     "",
     "---",
     "",
-    renderHandoffPrompt(envelope, ctx),
+    renderHandoffPrompt(envelope, ctx, rules),
   ]
     .filter((line, i, all) => !(line === "" && all[i - 1] === ""))
     .join("\n");

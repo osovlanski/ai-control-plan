@@ -7,7 +7,7 @@ import type {
   RunHandle,
   TaskEnvelope,
 } from "@agent-plane/core";
-import { isTaskState, isTerminal as isTerminalState, newHandoffId } from "@agent-plane/core";
+import { DEFAULT_REDACTION_RULES, isTaskState, isTerminal as isTerminalState, newHandoffId, redactEvent, redactText } from "@agent-plane/core";
 import type { ResolvedConfig } from "../config.js";
 import type { Db } from "../db/index.js";
 import { createTaskWorktree } from "../repo/git.js";
@@ -134,7 +134,7 @@ export class Orchestrator {
       prompt,
       workdir,
       permissionPolicy: { mode: "prompt-on-escalation" as const },
-      env: { redactionRules: [], maxRuntimeMs: this.maxRuntimeMs },
+      env: { redactionRules: DEFAULT_REDACTION_RULES, maxRuntimeMs: this.maxRuntimeMs },
     };
     const handle = priorRef
       ? await adapter.resume(priorRef, runSpec)
@@ -170,7 +170,7 @@ export class Orchestrator {
       gitRef: checkpoint?.gitRef,
       diffStat: checkpoint?.diffStat,
       activitySummary: checkpoint?.activitySummary,
-    });
+    }, DEFAULT_REDACTION_RULES);
   }
 
   /** A prior session on the SAME assistant that this adapter can resume. */
@@ -192,6 +192,7 @@ export class Orchestrator {
     let endedOk: boolean | undefined;
     try {
       for await (const event of run.adapter.events(run.handle)) {
+        const safeEvent = redactEvent(event, DEFAULT_REDACTION_RULES);
         seq += 1;
         insertEvent.run(
           run.runId,
@@ -199,12 +200,12 @@ export class Orchestrator {
           event.ts,
           event.type,
           event.phase ?? null,
-          event.summary,
-          event.payload ? JSON.stringify(event.payload) : null,
-          event.raw !== undefined ? JSON.stringify(event.raw) : null,
+          safeEvent.summary,
+          safeEvent.payload ? JSON.stringify(safeEvent.payload) : null,
+          safeEvent.raw !== undefined ? JSON.stringify(safeEvent.raw) : null,
         );
-        await this.applyEvent(run, event);
-        this.bus.publish(run.taskId, { kind: "event", event: { ...event, seq } });
+        await this.applyEvent(run, safeEvent);
+        this.bus.publish(run.taskId, { kind: "event", event: { ...safeEvent, seq } });
         if (event.type === "error") run.sawError = true;
         if (event.type === "run.ended") {
           endedOk = (event.payload as { ok?: boolean } | undefined)?.ok !== false;
@@ -220,7 +221,7 @@ export class Orchestrator {
         new Date().toISOString(),
         "error",
         null,
-        err instanceof Error ? err.message : String(err),
+        redactText(err instanceof Error ? err.message : String(err), DEFAULT_REDACTION_RULES),
         null,
         null,
       );

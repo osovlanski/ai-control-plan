@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, type Assistant, type TaskSummary, type Workspace } from "./api.js";
+import { api, type Assistant, type CapabilityChange, type TaskSummary, type Workspace } from "./api.js";
 import { NewTask } from "./NewTask.jsx";
 import { TaskDetail } from "./TaskDetail.jsx";
 import { Button, Card, QuotaBar, StateBadge, tokens } from "./ui.jsx";
@@ -117,12 +117,14 @@ function Catalog() {
   const [assistants, setAssistants] = useState<Assistant[]>([]);
   const [cooldowns, setCooldowns] = useState<Array<{ assistantId: string; reason: string; until: string }>>([]);
   const [busy, setBusy] = useState<string | null>(null);
+  const [changes, setChanges] = useState<CapabilityChange[]>([]);
 
   const load = () => {
     void api.assistants().then(setAssistants);
     void api.cooldowns().then(setCooldowns);
+    void api.changes().then(setChanges);
   };
-  useEffect(load, []);
+  useEffect(() => { load(); const timer = setInterval(load, 60_000); return () => clearInterval(timer); }, []);
 
   const sync = async (id: string) => {
     setBusy(id);
@@ -136,6 +138,7 @@ function Catalog() {
 
   return (
     <div style={{ display: "grid", gap: "0.8rem" }}>
+      <Card><strong>What changed today</strong>{changes.filter((c) => Date.now() - Date.parse(c.observed_at) < 86400000).length === 0 ? <p style={{ color: tokens.muted }}>No capability changes observed today.</p> : changes.filter((c) => Date.now() - Date.parse(c.observed_at) < 86400000).map((c, i) => <p key={i} style={{ fontSize: "0.83rem" }}><strong>{c.assistant_id}</strong>: {c.field} — {c.old_value || "(none)"} → {c.new_value || "(none)"}</p>)}</Card>
       {assistants.map((a) => {
         const core = a.manifest?.core;
         const cooldown = cooldowns.find(

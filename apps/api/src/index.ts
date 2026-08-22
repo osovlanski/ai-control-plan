@@ -1,6 +1,8 @@
 import { loadConfig } from "./config.js";
 import { openDb } from "./db/index.js";
 import { buildServer } from "./server.js";
+import { EventRetention } from "./modules/retention.js";
+import { scheduleDailyJobs } from "./modules/jobs.js";
 
 const config = loadConfig();
 const db = openDb(config.dbPath);
@@ -8,7 +10,8 @@ const { app, registry, orchestrator } = buildServer({ config, db });
 
 registry.init();
 const reconciled = orchestrator.reconcileOnBoot();
-await registry.syncAll();
+await registry.syncChangedAll();
+const stopJobs = scheduleDailyJobs(config.sync.dailyHour, registry, new EventRetention(db));
 
 app.log.info(
   {
@@ -30,6 +33,7 @@ try {
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.once(signal, () => {
+    stopJobs();
     void app.close().then(() => {
       db.close();
       process.exit(0);

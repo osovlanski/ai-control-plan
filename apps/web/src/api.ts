@@ -26,6 +26,8 @@ export interface Assistant {
   } | null;
 }
 
+export interface CapabilityChange { assistant_id: string; field: string; old_value: string; new_value: string; source: string; observed_at: string }
+
 export interface TaskSummary {
   id: string;
   goal: string;
@@ -108,6 +110,7 @@ async function req<T>(url: string, init?: RequestInit): Promise<T> {
 export const api = {
   workspace: () => req<Workspace>("/api/workspace"),
   assistants: () => req<Assistant[]>("/api/assistants"),
+  changes: () => req<CapabilityChange[]>("/api/assistants/changes"),
   syncAssistant: (id: string) => req<unknown>(`/api/assistants/${id}/sync`, { method: "POST" }),
   tasks: () => req<TaskSummary[]>("/api/tasks"),
   task: (id: string) => req<TaskDetail>(`/api/tasks/${id}`),
