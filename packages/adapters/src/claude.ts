@@ -20,7 +20,15 @@ interface ClaudeRunState {
   queue: EventQueue<NormalizedEvent>;
   abort: AbortController;
   pendingApprovals: Map<string, (result: PermissionResult) => void>;
+  pendingTools: Map<string, { tool: string; input: Record<string, unknown> }>;
 }
+
+/** Tools that mutate a file on disk, and where to find the path in their input. */
+const FILE_MUTATING_TOOLS: Record<string, { pathKey: string; kind: string }> = {
+  Write: { pathKey: "file_path", kind: "write" },
+  Edit: { pathKey: "file_path", kind: "edit" },
+  NotebookEdit: { pathKey: "notebook_path", kind: "edit" },
+};
 
 /**
  * Claude Code adapter over the Claude Agent SDK.
@@ -78,6 +86,7 @@ export class ClaudeAdapter implements AgentAdapter {
       queue: new EventQueue<NormalizedEvent>(),
       abort: new AbortController(),
       pendingApprovals: new Map(),
+      pendingTools: new Map(),
     };
     this.runs.set(runId, state);
 
@@ -113,7 +122,7 @@ export class ClaudeAdapter implements AgentAdapter {
       state.queue.push({ runId: runId as RunId, ts: e.ts ?? new Date().toISOString(), ...e });
     try {
       for await (const msg of stream) {
-        this.mapMessage(msg, handle, emit);
+        this.mapMessage(msg, handle, state, emit);
       }
       state.queue.end();
     } catch (err) {
@@ -132,6 +141,7 @@ export class ClaudeAdapter implements AgentAdapter {
   private mapMessage(
     msg: SDKMessage,
     handle: RunHandle,
+    state: ClaudeRunState,
     emit: (e: Omit<NormalizedEvent, "runId" | "ts">) => void,
   ): void {
     switch (msg.type) {
@@ -157,6 +167,12 @@ export class ClaudeAdapter implements AgentAdapter {
           if (block.type === "text" && block.text.trim()) {
             emit({ type: "message", summary: truncate(block.text), payload: { text: block.text }, raw: undefined });
           } else if (block.type === "tool_use") {
+            if (block.name in FILE_MUTATING_TOOLS) {
+              state.pendingTools.set(block.id, {
+                tool: block.name,
+                input: block.input as Record<string, unknown>,
+              });
+            }
             emit({
               type: "tool.started",
               summary: `${block.name}(${truncate(JSON.stringify(block.input), 120)})`,
@@ -181,6 +197,21 @@ export class ClaudeAdapter implements AgentAdapter {
                 summary: block.is_error ? "Tool failed" : "Tool completed",
                 payload: { toolUseId: block.tool_use_id },
               });
+              const pending = state.pendingTools.get(block.tool_use_id);
+              if (pending) {
+                state.pendingTools.delete(block.tool_use_id);
+                const spec = FILE_MUTATING_TOOLS[pending.tool];
+                if (!block.is_error && spec) {
+                  const path = pending.input[spec.pathKey];
+                  if (typeof path === "string") {
+                    emit({
+                      type: "file.changed",
+                      summary: `${spec.kind} ${path}`,
+                      payload: { path, kind: spec.kind, tool: pending.tool },
+                    });
+                  }
+                }
+              }
             }
           }
         }

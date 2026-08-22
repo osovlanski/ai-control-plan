@@ -298,8 +298,11 @@ export class Orchestrator {
         break;
       }
       case "file.changed": {
-        const path = (event.payload as { path?: string } | undefined)?.path;
-        if (path && !envelope.artifacts.changedFiles.includes(path)) {
+        const payload = event.payload as { path?: string; ok?: boolean } | undefined;
+        const path = payload?.path;
+        // Adapters (Codex) report attempted-but-failed changes with ok:false;
+        // only a change that actually landed belongs in the envelope.
+        if (path && payload?.ok !== false && !envelope.artifacts.changedFiles.includes(path)) {
           envelope.artifacts.changedFiles.push(path);
           changed = true;
         }
