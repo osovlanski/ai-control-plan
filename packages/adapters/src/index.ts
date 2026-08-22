@@ -1,3 +1,4 @@
 export { ClaudeAdapter } from "./claude.js";
 export { CodexAdapter } from "./codex.js";
-export { NotImplementedYetError } from "./not-implemented.js";
+export { FakeAdapter, type FakeScript } from "./fake.js";
+export { EventQueue } from "./event-queue.js";

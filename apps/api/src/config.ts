@@ -9,6 +9,12 @@ import { parse, stringify } from "yaml";
  * selected at boot. Nothing here ever holds provider credentials —
  * provider CLIs/SDKs authenticate in place.
  */
+export interface AssistantConfig {
+  /** anthropic | openai | fake (dev) — cursor/bedrock arrive in Phase 4. */
+  provider: string;
+  enabled?: boolean;
+}
+
 export interface WorkspaceConfig {
   workspace: string;
   api: {
@@ -16,6 +22,8 @@ export interface WorkspaceConfig {
     host: string;
     port: number;
   };
+  /** Assistant environments this workspace instance may route to. */
+  assistants: Record<string, AssistantConfig>;
   /** Absolute repo paths tasks may touch. Empty = refuse all coding tasks. */
   repoAllowlist: string[];
   failover: {
@@ -37,6 +45,10 @@ export interface ResolvedConfig extends WorkspaceConfig {
 
 const DEFAULTS: Omit<WorkspaceConfig, "workspace"> = {
   api: { host: "127.0.0.1", port: 4176 },
+  assistants: {
+    "personal-claude": { provider: "anthropic" },
+    "personal-codex": { provider: "openai" },
+  },
   repoAllowlist: [],
   failover: {
     auto: true,
@@ -82,6 +94,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ResolvedConfig
   const config: WorkspaceConfig = {
     workspace: file.workspace ?? workspace,
     api: { ...DEFAULTS.api, ...file.api },
+    assistants: file.assistants ?? DEFAULTS.assistants,
     repoAllowlist: file.repoAllowlist ?? DEFAULTS.repoAllowlist,
     failover: { ...DEFAULTS.failover, ...file.failover },
     sync: { ...DEFAULTS.sync, ...file.sync },
@@ -105,6 +118,11 @@ function validate(config: WorkspaceConfig, path: string): void {
   }
   if (!config.repoAllowlist.every((p) => typeof p === "string")) {
     problems.push("repoAllowlist must be a list of paths");
+  }
+  for (const [id, assistant] of Object.entries(config.assistants)) {
+    if (!assistant || typeof assistant.provider !== "string") {
+      problems.push(`assistants.${id} must have a provider`);
+    }
   }
   if (problems.length > 0) {
     throw new Error(`Invalid config at ${path}:\n  - ${problems.join("\n  - ")}`);

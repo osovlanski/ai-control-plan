@@ -2,7 +2,7 @@
 
 ## Current phase
 
-**Phase 0 — complete.** Next: Phase 1 (Claude + Codex adapters, rule router, normalized events, dashboard slice).
+**Phase 1 — complete.** The core loop `prompt → route → execute → observe` runs end to end. Next: Phase 2 (checkpoints, handoff, quota failover).
 
 ## Done
 
@@ -18,6 +18,16 @@
 - [x] **Phase 0:** workspace-instance config loader (`~/.agent-plane/<workspace>/config.yaml`, auto-created, validated, isolated DB per workspace) (+ tests)
 - [x] **Phase 0:** Fastify API — /api/health, /api/workspace, /api/assistants, /api/tasks (+ tests); React/Vite empty UI with /api proxy
 - [x] **Phase 0:** CI workflow (typecheck, lint, test, build); all green locally — 20 tests passing
+- [x] **Phase 1:** `ClaudeAdapter` on the Claude Agent SDK — streaming messages → normalized events, `canUseTool` → `approval.requested` round-trip, `rate_limit_event` (utilization/resetsAt/window) → `usage.updated`/`limit.approaching`/`limit.hit`, session id captured for resume
+- [x] **Phase 1:** `CodexAdapter` on `@openai/codex-sdk` — `runStreamed()` thread events → normalized events, per-turn usage from `turn.completed`, thread id captured for resume; manifest honestly reports `reportsLimits: false` (no quota payload at this SDK layer)
+- [x] **Phase 1:** `FakeAdapter` — deterministic scripted adapter for tests and dev walkthroughs (`[FAKE:APPROVAL]`, `[FAKE:LIMIT]` prompt switches)
+- [x] **Phase 1:** registry with manifest cache, on-demand + boot sync, and capability-diff recording
+- [x] **Phase 1:** rule router — hard filters (auth, capabilities, repo allowlist, quota, cooldown) + `auto`/`preserve-quota`/`fastest` profiles, persisted explanation object, user override
+- [x] **Phase 1:** orchestrator — run lifecycle, append-only event ingestion, envelope derivation from the stream, quota snapshots, approval relay, runtime cap, boot reconciliation of orphaned runs
+- [x] **Phase 1:** git safety — branch `task/<id>` in a dedicated worktree, dirty-tree refusal
+- [x] **Phase 1:** REST + SSE API; `progress.md` rendered projection
+- [x] **Phase 1:** UI — New Task with routing recommendation panel, Task Board, Task Detail (Activity / Usage / Routing / Progress) with inline approvals
+- [x] **Phase 1:** verified live — 45 tests green; full loop exercised against a running server (route explanation → run → 9 normalized events → `progress.md`), approval round-trip, and SSE live tail
 
 ## Key decisions so far
 
@@ -33,12 +43,20 @@
 
 ## Next
 
-- [ ] Phase 1: `ClaudeAdapter` (Claude Agent SDK) + `CodexAdapter` (@openai/codex-sdk) — `describe()`, `start()`, normalized `events()` incl. `usage.updated`
-- [ ] Phase 1: registry manifest cache + on-demand sync; rule router with explanation objects
-- [ ] Phase 1: orchestrator run lifecycle, event persistence, SSE, approval flow-through
-- [ ] Phase 1: UI — New Task + recommendation panel, Task Board, Task Detail (Activity/Usage/Routing)
+- [ ] Phase 2: checkpoint assembly (envelope snapshot + checkpoint commit + diffstat + activity summary)
+- [ ] Phase 2: `handoff.md` + handoff prompt template; manual handoff endpoint/UI
+- [ ] Phase 2: limit monitor — soft-threshold eager checkpoint, `limit.hit` → LIMIT_PAUSED → auto-failover with loud UI banner, `resets_at`-aware cooldowns
+- [ ] Phase 2: same-provider `resume()` wired for pause/continue
+
+### Known Phase-1 limitations (deliberate, revisited in later phases)
+
+- Codex quota percentages are not exposed at the SDK layer; the manifest says so and limit *hits* are caught by error classification. Revisit in Phase 2 if the SDK surfaces `rate_limits`.
+- Codex runs sandboxed with `approvalPolicy: "never"` — interactive approvals are Claude-only for now.
+- `fastest` profile has no latency telemetry yet and says so in its explanation; real scoring lands in Phase 5.
+- Router cooldowns are plumbed through but always empty until Phase 2 populates them.
 
 ## Log
 
 - 2026-08-21 — Architecture review completed and pushed to `claude/multi-assistant-routing-plan-vw0bwc`.
 - 2026-08-21 — Architecture accepted; Phase 0 scaffolding built and verified (`pnpm dev` boots API + UI against migrated SQLite; typecheck/lint/20 tests green).
+- 2026-08-22 — Phase 1 delivered: real Claude + Codex adapters written against the installed SDKs' type declarations, rule router, orchestrator with SSE and approvals, three UI screens. 45 tests green; core loop verified live end to end.

@@ -1,76 +1,191 @@
 import { useEffect, useState } from "react";
+import { api, type Assistant, type TaskSummary, type Workspace } from "./api.js";
+import { NewTask } from "./NewTask.jsx";
+import { TaskDetail } from "./TaskDetail.jsx";
+import { Button, Card, QuotaBar, StateBadge, tokens } from "./ui.jsx";
 
-interface Health {
-  status: string;
-  workspace: string;
-  migrations: number;
-  now: string;
-}
-
-const styles: Record<string, React.CSSProperties> = {
-  page: {
-    fontFamily: "system-ui, -apple-system, sans-serif",
-    maxWidth: 720,
-    margin: "4rem auto",
-    padding: "0 1.5rem",
-    color: "#1a1a2e",
-  },
-  badge: {
-    display: "inline-block",
-    padding: "0.2rem 0.7rem",
-    borderRadius: 999,
-    fontSize: "0.8rem",
-    fontWeight: 600,
-    background: "#e8f0fe",
-    color: "#1a56db",
-    marginLeft: "0.75rem",
-    verticalAlign: "middle",
-  },
-  card: {
-    border: "1px solid #e2e4ea",
-    borderRadius: 12,
-    padding: "1.25rem 1.5rem",
-    marginTop: "1.5rem",
-  },
-  muted: { color: "#6b7280", fontSize: "0.9rem" },
-};
+type View = { screen: "board" } | { screen: "new" } | { screen: "task"; taskId: string } | { screen: "catalog" };
 
 export function App() {
-  const [health, setHealth] = useState<Health | null>(null);
+  const [workspace, setWorkspace] = useState<Workspace | null>(null);
+  const [view, setView] = useState<View>({ screen: "board" });
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    fetch("/api/health")
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`API returned ${r.status}`))))
-      .then(setHealth)
-      .catch((e: Error) => setError(e.message));
+    api.workspace().then(setWorkspace).catch((e: Error) => setError(e.message));
   }, []);
 
   return (
-    <main style={styles.page}>
-      <h1>
-        Agent Control Plane
-        {health && <span style={styles.badge}>{health.workspace}</span>}
-      </h1>
-      <p style={styles.muted}>
-        Routes tasks across complete assistant environments — Phase 0 skeleton.
-      </p>
-
-      <div style={styles.card}>
-        {error && <p style={{ color: "#b91c1c" }}>API unreachable: {error}</p>}
-        {!error && !health && <p style={styles.muted}>Connecting to API…</p>}
-        {health && (
-          <>
-            <p>
-              API status: <strong>{health.status}</strong> · schema migrations applied:{" "}
-              <strong>{health.migrations}</strong>
-            </p>
-            <p style={styles.muted}>
-              Task board, routing recommendations, and the assistant catalog arrive in Phase 1.
-            </p>
-          </>
+    <div style={{ minHeight: "100vh", background: tokens.bg, color: tokens.text }}>
+      <header
+        style={{
+          borderBottom: `1px solid ${tokens.border}`,
+          background: tokens.surface,
+          padding: "0.9rem 1.5rem",
+          display: "flex",
+          alignItems: "center",
+          gap: "1rem",
+        }}
+      >
+        <strong style={{ fontSize: "0.98rem" }}>Agent Control Plane</strong>
+        {workspace && (
+          <span
+            style={{
+              padding: "0.15rem 0.6rem",
+              borderRadius: 999,
+              fontSize: "0.78rem",
+              fontWeight: 600,
+              background: `${tokens.accent}14`,
+              color: tokens.accent,
+              border: `1px solid ${tokens.accent}33`,
+            }}
+          >
+            {workspace.workspace}
+          </span>
         )}
-      </div>
-    </main>
+        <nav style={{ marginLeft: "auto", display: "flex", gap: "0.4rem" }}>
+          <Button variant={view.screen === "board" ? "primary" : "secondary"} onClick={() => setView({ screen: "board" })}>
+            Board
+          </Button>
+          <Button variant={view.screen === "new" ? "primary" : "secondary"} onClick={() => setView({ screen: "new" })}>
+            New task
+          </Button>
+          <Button
+            variant={view.screen === "catalog" ? "primary" : "secondary"}
+            onClick={() => setView({ screen: "catalog" })}
+          >
+            Assistants
+          </Button>
+        </nav>
+      </header>
+
+      <main style={{ maxWidth: 1080, margin: "0 auto", padding: "1.5rem" }}>
+        {error && <p style={{ color: tokens.danger }}>API unreachable: {error}</p>}
+        {view.screen === "board" && <Board onOpen={(taskId) => setView({ screen: "task", taskId })} />}
+        {view.screen === "new" && <NewTask onStarted={(taskId) => setView({ screen: "task", taskId })} />}
+        {view.screen === "task" && (
+          <TaskDetail taskId={view.taskId} onBack={() => setView({ screen: "board" })} />
+        )}
+        {view.screen === "catalog" && <Catalog />}
+      </main>
+    </div>
+  );
+}
+
+function Board({ onOpen }: { onOpen: (taskId: string) => void }) {
+  const [tasks, setTasks] = useState<TaskSummary[]>([]);
+
+  useEffect(() => {
+    const load = () => void api.tasks().then(setTasks);
+    load();
+    const timer = setInterval(load, 4000);
+    return () => clearInterval(timer);
+  }, []);
+
+  if (tasks.length === 0) {
+    return (
+      <Card>
+        <p style={{ margin: 0, color: tokens.muted }}>
+          No tasks yet. Start one from <strong>New task</strong> — the router will explain its choice before anything runs.
+        </p>
+      </Card>
+    );
+  }
+
+  return (
+    <div style={{ display: "grid", gap: "0.7rem" }}>
+      {tasks.map((t) => (
+        <Card key={t.id} style={{ cursor: "pointer" }}>
+          <div onClick={() => onOpen(t.id)}>
+            <div style={{ display: "flex", alignItems: "center", gap: "0.7rem" }}>
+              <code style={{ fontFamily: tokens.mono, fontSize: "0.85rem" }}>{t.id}</code>
+              <StateBadge state={t.state} />
+              {t.phase && <span style={{ fontSize: "0.8rem", color: tokens.muted }}>{t.phase}</span>}
+              <span style={{ marginLeft: "auto", fontSize: "0.78rem", color: tokens.muted }}>
+                {new Date(t.updatedAt).toLocaleString()}
+              </span>
+            </div>
+            <p style={{ margin: "0.5rem 0 0", fontSize: "0.92rem" }}>{t.goal}</p>
+          </div>
+        </Card>
+      ))}
+    </div>
+  );
+}
+
+function Catalog() {
+  const [assistants, setAssistants] = useState<Assistant[]>([]);
+  const [busy, setBusy] = useState<string | null>(null);
+
+  const load = () => void api.assistants().then(setAssistants);
+  useEffect(load, []);
+
+  const sync = async (id: string) => {
+    setBusy(id);
+    try {
+      await api.syncAssistant(id);
+      load();
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <div style={{ display: "grid", gap: "0.8rem" }}>
+      {assistants.map((a) => {
+        const core = a.manifest?.core;
+        return (
+          <Card key={a.id}>
+            <div style={{ display: "flex", alignItems: "center", gap: "0.7rem" }}>
+              <strong style={{ fontSize: "0.95rem" }}>{a.id}</strong>
+              <span style={{ fontSize: "0.8rem", color: tokens.muted }}>{a.provider}</span>
+              {core && (
+                <span
+                  style={{
+                    fontSize: "0.78rem",
+                    color: core.auth.state === "ok" ? tokens.ok : tokens.danger,
+                  }}
+                >
+                  auth: {core.auth.state}
+                  {core.auth.account ? ` (${core.auth.account})` : ""}
+                </span>
+              )}
+              <span style={{ marginLeft: "auto" }}>
+                <Button variant="secondary" onClick={() => void sync(a.id)} disabled={busy === a.id}>
+                  {busy === a.id ? "Syncing…" : "Sync"}
+                </Button>
+              </span>
+            </div>
+            {!core && (
+              <p style={{ margin: "0.6rem 0 0", fontSize: "0.85rem", color: tokens.muted }}>
+                No manifest yet — run a sync to discover capabilities.
+              </p>
+            )}
+            {core && (
+              <>
+                <div style={{ marginTop: "0.6rem", fontSize: "0.83rem", color: tokens.muted }}>
+                  models: {core.models.map((m) => m.id).join(", ") || "—"} · resume:{" "}
+                  {String(core.canResume)} · mcp: {String(core.canMcp)} · reports limits:{" "}
+                  <strong style={{ color: core.reportsLimits ? tokens.ok : tokens.warn }}>
+                    {String(core.reportsLimits)}
+                  </strong>{" "}
+                  · mid-run input: {String(core.supportsMidRunInput)}
+                </div>
+                {core.limits?.map((l) => (
+                  <div key={l.window} style={{ marginTop: "0.4rem" }}>
+                    <QuotaBar usedPercent={l.usedPercent} resetsAt={l.resetsAt} />
+                  </div>
+                ))}
+                {a.manifestUpdatedAt && (
+                  <div style={{ marginTop: "0.5rem", fontSize: "0.78rem", color: tokens.muted }}>
+                    last sync {new Date(a.manifestUpdatedAt).toLocaleString()}
+                  </div>
+                )}
+              </>
+            )}
+          </Card>
+        );
+      })}
+    </div>
   );
 }
