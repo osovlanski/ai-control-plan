@@ -117,13 +117,19 @@ export class FakeAdapter implements AgentAdapter {
       emit(event);
       i += 1;
     }
-    if (run.prompt.includes("[FAKE:LIMIT]")) {
+    // The limit fires only on a fresh start: a run that picked the task up via
+    // handoff must be able to finish it, or a failover test never terminates.
+    if (run.prompt.includes("[FAKE:LIMIT]") && !isHandoff(run.prompt)) {
       emit({
         type: "limit.hit",
         summary: "Fake quota exhausted",
         payload: { quota: [{ window: "5h", usedPercent: 100, resetsAt: new Date(Date.now() + 3_600_000).toISOString() }] },
       });
       return this.finish(state, emit, false, "limit");
+    }
+    if (run.prompt.includes("[FAKE:FAIL]") && !isHandoff(run.prompt)) {
+      emit({ type: "error", summary: "Fake provider crashed" });
+      return this.finish(state, emit, false, "error");
     }
     this.finish(state, emit, this.script.ok !== false);
   }
@@ -182,4 +188,9 @@ export class FakeAdapter implements AgentAdapter {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+/** Mirrors HANDOFF_MARKER from the control plane's handoff renderer. */
+function isHandoff(prompt: string): boolean {
+  return prompt.includes("You are continuing work that another assistant started.");
 }

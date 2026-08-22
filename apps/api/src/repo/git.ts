@@ -69,6 +69,25 @@ export async function worktreeDiffStat(worktreePath: string, baseRef: string): P
   return git(worktreePath, ["diff", "--stat", baseRef]);
 }
 
+/** Paths changed on the task branch since its base, committed or not. */
+export async function worktreeChangedFiles(worktreePath: string, baseRef: string): Promise<string[]> {
+  const out = await git(worktreePath, ["diff", "--name-only", baseRef]);
+  return out ? out.split("\n").filter(Boolean) : [];
+}
+
+/**
+ * Commits everything in the worktree as a checkpoint. Returns the commit sha,
+ * or null when the tree is clean (a checkpoint with nothing new is not an error —
+ * the envelope snapshot still has value).
+ */
+export async function commitCheckpoint(worktreePath: string, message: string): Promise<string | null> {
+  await git(worktreePath, ["add", "-A"]);
+  const staged = await git(worktreePath, ["diff", "--cached", "--name-only"]);
+  if (!staged) return git(worktreePath, ["rev-parse", "HEAD"]);
+  await git(worktreePath, ["commit", "-q", "-m", message]);
+  return git(worktreePath, ["rev-parse", "HEAD"]);
+}
+
 export async function removeTaskWorktree(repoPath: string, worktreePath: string): Promise<void> {
   await git(repoPath, ["worktree", "remove", "--force", worktreePath]);
 }

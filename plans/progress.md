@@ -2,7 +2,7 @@
 
 ## Current phase
 
-**Phase 1 — complete.** The core loop `prompt → route → execute → observe` runs end to end. Next: Phase 2 (checkpoints, handoff, quota failover).
+**Phase 2 — complete.** The full loop `prompt → route → execute → observe → checkpoint → handoff` now runs end to end, including automatic quota failover. Next: Phase 3 (daily capability sync, catalog change feed, retention, redaction).
 
 ## Done
 
@@ -28,6 +28,14 @@
 - [x] **Phase 1:** REST + SSE API; `progress.md` rendered projection
 - [x] **Phase 1:** UI — New Task with routing recommendation panel, Task Board, Task Detail (Activity / Usage / Routing / Progress) with inline approvals
 - [x] **Phase 1:** verified live — 45 tests green; full loop exercised against a running server (route explanation → run → 9 normalized events → `progress.md`), approval round-trip, and SSE live tail
+- [x] **Phase 2:** `CheckpointService` — envelope snapshot + checkpoint commit on the task branch + diffstat + digested activity summary; git-derived file list reconciles what the agent never announced
+- [x] **Phase 2:** handoff package (`renderHandoffPrompt` / `handoff.md`) — constraints marked inviolable, agent decisions marked revisitable, git state and activity digest inline, full history by reference
+- [x] **Phase 2:** limit monitor — soft-threshold (85%) eager checkpoint, `limit.hit` → LIMIT_PAUSED → checkpoint → reroute → HANDING_OFF → RUNNING on the next assistant; all-limited parks in WAITING_INPUT naming what to wait for
+- [x] **Phase 2:** `CooldownStore` — `resets_at`-aware routing penalties, surfaced as hard-filter reasons in the routing explanation and in the assistant catalog
+- [x] **Phase 2:** failure-triggered failover, gated on an actual provider error (a user-denied approval is an intentional stop, not a provider fault)
+- [x] **Phase 2:** manual handoff endpoint + UI; same-provider `resume()` wired; one worktree reused across handoffs so work carries over
+- [x] **Phase 2:** UI — live failover banners, Handoff tab (handoffs + checkpoints + package link), cooldown warnings in the catalog
+- [x] **Phase 2:** verified live — 51 tests green; a limit on one assistant automatically checkpointed, rerouted, and completed on the other, with both routing decisions recorded
 
 ## Key decisions so far
 
@@ -43,20 +51,29 @@
 
 ## Next
 
-- [ ] Phase 2: checkpoint assembly (envelope snapshot + checkpoint commit + diffstat + activity summary)
-- [ ] Phase 2: `handoff.md` + handoff prompt template; manual handoff endpoint/UI
-- [ ] Phase 2: limit monitor — soft-threshold eager checkpoint, `limit.hit` → LIMIT_PAUSED → auto-failover with loud UI banner, `resets_at`-aware cooldowns
-- [ ] Phase 2: same-provider `resume()` wired for pause/continue
+- [ ] Phase 3: daily capability sync (cron) — version/auth/model/config-hash probe, re-`describe()` on change
+- [ ] Phase 3: "what changed today" feed in the Assistant Catalog
+- [ ] Phase 3: event-log retention job (compress tasks completed >30 days)
+- [ ] Phase 3: redaction rules applied to events, rendered files, and handoff packages
 
-### Known Phase-1 limitations (deliberate, revisited in later phases)
+### Architecture changes made during Phase 2 (with reasons)
 
-- Codex quota percentages are not exposed at the SDK layer; the manifest says so and limit *hits* are caught by error classification. Revisit in Phase 2 if the SDK surfaces `rate_limits`.
+- **`WAITING_INPUT → HANDING_OFF` added to the state machine.** A task parked because everything was rate-limited is exactly the case where the user manually reroutes it; the original transition table forbade it.
+- **Failure-failover now requires an observed `error` event,** not merely a non-ok run. A user denying an approval ends the run !ok, and rerouting there is wrong — the next assistant would ask the same question.
+- **A handoff claims the task's next transition before cancelling the current run,** so the draining run cannot race it into a terminal state.
+- **Terminal tasks refuse handoff.** Continuing finished work is a follow-up task, not a handoff; terminal stays terminal.
+- **`completed` de-duplicates against the whole list,** not just the last entry: after a handoff the next assistant re-narrates the same steps, and the package degraded with every hop.
+
+### Known limitations (deliberate, revisited in later phases)
+
+- Codex quota percentages are not exposed at the SDK layer (verified against the installed type declarations); the manifest reports `reportsLimits: false` and limit *hits* are caught by error classification. Failover works for Codex on the hit, just without an early warning.
 - Codex runs sandboxed with `approvalPolicy: "never"` — interactive approvals are Claude-only for now.
 - `fastest` profile has no latency telemetry yet and says so in its explanation; real scoring lands in Phase 5.
-- Router cooldowns are plumbed through but always empty until Phase 2 populates them.
+- Cross-provider `resume()` is never used — cross-provider continuation always goes through a fresh `start()` with the handoff package, by design.
 
 ## Log
 
 - 2026-08-21 — Architecture review completed and pushed to `claude/multi-assistant-routing-plan-vw0bwc`.
 - 2026-08-21 — Architecture accepted; Phase 0 scaffolding built and verified (`pnpm dev` boots API + UI against migrated SQLite; typecheck/lint/20 tests green).
 - 2026-08-22 — Phase 1 delivered: real Claude + Codex adapters written against the installed SDKs' type declarations, rule router, orchestrator with SSE and approvals, three UI screens. 45 tests green; core loop verified live end to end.
+- 2026-08-22 — Phase 2 delivered: checkpoints, portable handoff packages, `resets_at`-aware cooldowns, and automatic quota failover. 51 tests green; verified live — a limit on one assistant checkpointed and completed on the other, and an all-limited task parked with the reasons and reset times named.

@@ -26,6 +26,12 @@ describe("task state machine", () => {
     expect(canTransition("WAITING_INPUT", "ROUTING")).toBe(true);
   });
 
+  it("lets the user manually move parked work onward", () => {
+    // The recovery path when automatic failover found nowhere to go.
+    expect(canTransition("WAITING_INPUT", "HANDING_OFF")).toBe(true);
+    expect(canTransition("HANDING_OFF", "RUNNING")).toBe(true);
+  });
+
   it("allows cancel from every non-terminal state", () => {
     for (const state of TASK_STATES.filter((s) => !isTerminal(s))) {
       expect(canTransition(state, "CANCELLED"), `${state} -> CANCELLED`).toBe(true);

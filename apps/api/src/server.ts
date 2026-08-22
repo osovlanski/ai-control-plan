@@ -2,11 +2,14 @@ import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
 import type { AssistantId, RoutingProfile } from "@agent-plane/core";
 import type { ResolvedConfig } from "./config.js";
 import { appliedMigrations, type Db } from "./db/index.js";
+import { CheckpointService } from "./modules/checkpoint.js";
+import { CooldownStore } from "./modules/cooldown.js";
 import { Orchestrator } from "./modules/orchestrator.js";
 import { Registry } from "./modules/registry.js";
 import { persistRoutingDecision, route, routingHistory, type RouteRequest } from "./modules/router.js";
 import { TaskEventBus } from "./modules/sse.js";
 import { TaskStore } from "./modules/tasks.js";
+import { renderHandoffMd } from "./render/handoff.js";
 import { renderProgressMd } from "./render/progress.js";
 
 export interface ServerDeps {
@@ -25,6 +28,8 @@ export interface BuiltServer {
   orchestrator: Orchestrator;
   tasks: TaskStore;
   bus: TaskEventBus;
+  checkpoints: CheckpointService;
+  cooldowns: CooldownStore;
 }
 
 export function buildServer(deps: ServerDeps): BuiltServer {
@@ -32,7 +37,11 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   const bus = deps.bus ?? new TaskEventBus();
   const tasks = deps.tasks ?? new TaskStore(db);
   const registry = deps.registry ?? new Registry(db, config);
-  const orchestrator = deps.orchestrator ?? new Orchestrator(db, config, registry, tasks, bus);
+  const checkpoints = new CheckpointService(db, tasks);
+  const cooldowns = new CooldownStore(db);
+  const orchestrator =
+    deps.orchestrator ??
+    new Orchestrator(db, config, registry, tasks, bus, checkpoints, cooldowns);
 
   const app = Fastify({ logger: true });
 
@@ -47,7 +56,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
       profile: row.profile,
       needsRepo: row.repo_path !== null,
       repoPathAllowed: repoAllowed(row.repo_path),
-      cooldowns: new Map(), // Phase 2: failure/limit cooldowns feed in here
+      cooldowns: cooldowns.active(),
       userOverride,
     };
     const explanation = route(
@@ -98,6 +107,8 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   });
 
   app.get("/api/assistants/changes", () => registry.recentChanges());
+
+  app.get("/api/cooldowns", () => cooldowns.list());
 
   // ---- Tasks ----
 
@@ -208,6 +219,66 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     }
   });
 
+  app.post<{ Params: { id: string } }>("/api/tasks/:id/checkpoint", async (req, reply) => {
+    if (!tasks.get(req.params.id)) return reply.status(404).send({ error: "not found" });
+    try {
+      const cp = await orchestrator.createCheckpoint(req.params.id);
+      return { id: cp.id, gitRef: cp.gitRef, diffStat: cp.diffStat, at: cp.at };
+    } catch (err) {
+      return reply.status(500).send({ error: message(err) });
+    }
+  });
+
+  app.get<{ Params: { id: string } }>("/api/tasks/:id/checkpoints", (req, reply) => {
+    if (!tasks.get(req.params.id)) return reply.status(404).send({ error: "not found" });
+    return checkpoints.list(req.params.id);
+  });
+
+  app.post<{ Params: { id: string }; Body: { to?: AssistantId } }>(
+    "/api/tasks/:id/handoff",
+    async (req, reply) => {
+      if (!tasks.get(req.params.id)) return reply.status(404).send({ error: "not found" });
+      try {
+        return await orchestrator.handoff(req.params.id, req.body?.to);
+      } catch (err) {
+        return reply.status(409).send({ error: message(err) });
+      }
+    },
+  );
+
+  app.get<{ Params: { id: string } }>("/api/tasks/:id/handoffs", (req, reply) => {
+    if (!tasks.get(req.params.id)) return reply.status(404).send({ error: "not found" });
+    return db
+      .prepare(
+        `SELECT h.id, h.trigger, h.at, h.checkpoint_id,
+                fr.assistant_id AS from_assistant, tr.assistant_id AS to_assistant
+         FROM handoffs h
+         LEFT JOIN runs fr ON fr.id = h.from_run_id
+         LEFT JOIN runs tr ON tr.id = h.to_run_id
+         WHERE h.task_id = ? ORDER BY h.at`,
+      )
+      .all(req.params.id);
+  });
+
+  app.get<{ Params: { id: string } }>("/api/tasks/:id/files/handoff.md", (req, reply) => {
+    if (!tasks.get(req.params.id)) return reply.status(404).send({ error: "not found" });
+    const cp = checkpoints.latest(req.params.id);
+    if (!cp) return reply.status(404).send({ error: "no checkpoint yet — take one first" });
+    const from = cp.runId
+      ? (db.prepare("SELECT assistant_id FROM runs WHERE id = ?").get(cp.runId) as
+          | { assistant_id: string }
+          | undefined)
+      : undefined;
+    reply.type("text/markdown; charset=utf-8");
+    return renderHandoffMd(cp.envelope, {
+      reason: "Prepared handoff package",
+      fromAssistantId: from?.assistant_id,
+      gitRef: cp.gitRef,
+      diffStat: cp.diffStat,
+      activitySummary: cp.activitySummary,
+    });
+  });
+
   app.get<{ Params: { id: string } }>("/api/tasks/:id/events", (req, reply) => {
     const row = tasks.get(req.params.id);
     if (!row) return reply.status(404).send({ error: "not found" });
@@ -249,7 +320,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     return renderProgressMd(tasks.envelope(req.params.id), lastRun?.assistant_id);
   });
 
-  return { app, registry, orchestrator, tasks, bus };
+  return { app, registry, orchestrator, tasks, bus, checkpoints, cooldowns };
 }
 
 function sseHeaders(reply: FastifyReply): void {

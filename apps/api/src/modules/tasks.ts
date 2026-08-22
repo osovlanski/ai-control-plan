@@ -17,6 +17,9 @@ export interface TaskRow {
   profile: RoutingProfile;
   repo_path: string | null;
   branch: string | null;
+  /** Isolated worktree the task's runs execute in; shared across handoffs. */
+  worktree_path: string | null;
+  base_ref: string | null;
   envelope: string;
   created_at: string;
   updated_at: string;
@@ -91,12 +94,15 @@ export class TaskStore {
     return envelope;
   }
 
-  setBranch(taskId: string, branch: string): void {
+  /** Records the task's isolated worktree; every later run (handoffs included) reuses it. */
+  setWorktree(taskId: string, worktreePath: string, branch: string, baseRef: string): void {
     const envelope = this.envelope(taskId);
     if (envelope.repository) envelope.repository.branch = branch;
     this.db
-      .prepare("UPDATE tasks SET branch = ?, envelope = ?, updated_at = ? WHERE id = ?")
-      .run(branch, JSON.stringify(envelope), new Date().toISOString(), taskId);
+      .prepare(
+        "UPDATE tasks SET branch = ?, worktree_path = ?, base_ref = ?, envelope = ?, updated_at = ? WHERE id = ?",
+      )
+      .run(branch, worktreePath, baseRef, JSON.stringify(envelope), new Date().toISOString(), taskId);
   }
 
   /** Tasks left RUNNING by a previous process (crash) — reconciled at boot. */

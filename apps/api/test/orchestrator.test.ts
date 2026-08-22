@@ -5,6 +5,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { AssistantId } from "@agent-plane/core";
 import { loadConfig, type ResolvedConfig } from "../src/config.js";
 import { openDb, type Db } from "../src/db/index.js";
+import { CheckpointService } from "../src/modules/checkpoint.js";
+import { CooldownStore } from "../src/modules/cooldown.js";
 import { Orchestrator } from "../src/modules/orchestrator.js";
 import { Registry } from "../src/modules/registry.js";
 import { TaskEventBus, type TaskStreamPayload } from "../src/modules/sse.js";
@@ -16,6 +18,8 @@ let config: ResolvedConfig;
 let registry: Registry;
 let tasks: TaskStore;
 let bus: TaskEventBus;
+let checkpoints: CheckpointService;
+let cooldowns: CooldownStore;
 let orchestrator: Orchestrator;
 
 const FAKE_ID = "personal-fake" as AssistantId;
@@ -35,10 +39,13 @@ beforeEach(async () => {
   await registry.sync(FAKE_ID);
   tasks = new TaskStore(db);
   bus = new TaskEventBus();
-  orchestrator = new Orchestrator(db, config, registry, tasks, bus);
+  checkpoints = new CheckpointService(db, tasks);
+  cooldowns = new CooldownStore(db);
+  orchestrator = new Orchestrator(db, config, registry, tasks, bus, checkpoints, cooldowns);
 });
 
-afterEach(() => {
+afterEach(async () => {
+  await orchestrator.shutdown();
   db.close();
   rmSync(home, { recursive: true, force: true });
 });
@@ -51,7 +58,7 @@ describe("orchestrator end-to-end (fake adapter)", () => {
 
     tasks.transition(envelope.taskId, "ROUTING");
     const { runId } = await orchestrator.startTask(envelope.taskId, FAKE_ID);
-    await orchestrator.waitForIdle(envelope.taskId);
+    await orchestrator.waitForSettled(envelope.taskId);
 
     const finalRow = tasks.get(envelope.taskId)!;
     expect(finalRow.state).toBe("COMPLETED");
@@ -102,7 +109,7 @@ describe("orchestrator end-to-end (fake adapter)", () => {
 
     await waitFor(() => requestId !== undefined);
     await orchestrator.respondApproval(envelope.taskId, requestId!, true);
-    await orchestrator.waitForIdle(envelope.taskId);
+    await orchestrator.waitForSettled(envelope.taskId);
 
     expect(tasks.get(envelope.taskId)!.state).toBe("COMPLETED");
   });
@@ -120,7 +127,7 @@ describe("orchestrator end-to-end (fake adapter)", () => {
     await orchestrator.startTask(envelope.taskId, FAKE_ID);
     await waitFor(() => requestId !== undefined);
     await orchestrator.respondApproval(envelope.taskId, requestId!, false);
-    await orchestrator.waitForIdle(envelope.taskId);
+    await orchestrator.waitForSettled(envelope.taskId);
 
     expect(tasks.get(envelope.taskId)!.state).toBe("FAILED");
   });
@@ -129,7 +136,7 @@ describe("orchestrator end-to-end (fake adapter)", () => {
     const envelope = tasks.create({ goal: "Burn the quota [FAKE:LIMIT]" });
     tasks.transition(envelope.taskId, "ROUTING");
     const { runId } = await orchestrator.startTask(envelope.taskId, FAKE_ID);
-    await orchestrator.waitForIdle(envelope.taskId);
+    await orchestrator.waitForSettled(envelope.taskId);
 
     const limitEvents = db
       .prepare("SELECT type FROM events WHERE run_id = ? AND type LIKE 'limit.%'")
@@ -166,7 +173,7 @@ describe("orchestrator end-to-end (fake adapter)", () => {
       "INSERT INTO runs (id, task_id, assistant_id, state, started_at) VALUES ('orphan-run', ?, ?, 'ACTIVE', 't')",
     ).run(envelope.taskId, FAKE_ID);
 
-    const fresh = new Orchestrator(db, config, registry, tasks, bus);
+    const fresh = new Orchestrator(db, config, registry, tasks, bus, checkpoints, cooldowns);
     expect(fresh.reconcileOnBoot()).toBe(1);
     expect(tasks.get(envelope.taskId)!.state).toBe("FAILED");
     expect(

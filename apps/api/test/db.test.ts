@@ -19,9 +19,9 @@ afterEach(() => {
 
 describe("migrations", () => {
   it("applies 001_init and is idempotent", () => {
-    expect(appliedMigrations(db)).toEqual(["001_init.sql"]);
+    expect(appliedMigrations(db)).toEqual(["001_init.sql", "002_handoff.sql"]);
     const again = openDb(join(dir, "test.db"));
-    expect(appliedMigrations(again)).toEqual(["001_init.sql"]);
+    expect(appliedMigrations(again)).toEqual(["001_init.sql", "002_handoff.sql"]);
     again.close();
   });
 
@@ -34,6 +34,7 @@ describe("migrations", () => {
       "assistants",
       "capability_changes",
       "checkpoints",
+      "cooldowns",
       "events",
       "handoffs",
       "quota_snapshots",

@@ -134,4 +134,29 @@ export const api = {
       body: JSON.stringify({ kind: "approval", requestId, approved }),
     }),
   cancel: (id: string) => req<{ ok: true }>(`/api/tasks/${id}/cancel`, { method: "POST" }),
+  checkpoint: (id: string) =>
+    req<{ id: string; gitRef: string | null; at: string }>(`/api/tasks/${id}/checkpoint`, {
+      method: "POST",
+    }),
+  checkpoints: (id: string) =>
+    req<Array<{ id: string; reason: string; at: string; gitRef: string | null }>>(
+      `/api/tasks/${id}/checkpoints`,
+    ),
+  handoff: (id: string, to?: string) =>
+    req<{ runId: string; assistantId: string }>(`/api/tasks/${id}/handoff`, {
+      method: "POST",
+      body: JSON.stringify({ to }),
+    }),
+  handoffs: (id: string) =>
+    req<
+      Array<{
+        id: string;
+        trigger: string;
+        at: string;
+        from_assistant: string | null;
+        to_assistant: string | null;
+      }>
+    >(`/api/tasks/${id}/handoffs`),
+  cooldowns: () =>
+    req<Array<{ assistantId: string; reason: string; until: string }>>("/api/cooldowns"),
 };

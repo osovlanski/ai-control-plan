@@ -35,7 +35,9 @@ const TRANSITIONS: Record<TaskState, readonly TaskState[]> = {
     "CANCELLED",
   ],
   // WAITING_INPUT → ROUTING: user asks to re-route (e.g. after quota reset).
-  WAITING_INPUT: ["RUNNING", "ROUTING", "FAILED", "CANCELLED"],
+  // WAITING_INPUT → HANDING_OFF: user manually moves parked work to another
+  // assistant — the recovery path when failover found nowhere to go.
+  WAITING_INPUT: ["RUNNING", "ROUTING", "HANDING_OFF", "FAILED", "CANCELLED"],
   LIMIT_PAUSED: ["HANDING_OFF", "WAITING_INPUT", "CANCELLED"],
   HANDING_OFF: ["RUNNING", "WAITING_INPUT", "FAILED", "CANCELLED"],
   COMPLETED: [],

@@ -115,9 +115,13 @@ function Board({ onOpen }: { onOpen: (taskId: string) => void }) {
 
 function Catalog() {
   const [assistants, setAssistants] = useState<Assistant[]>([]);
+  const [cooldowns, setCooldowns] = useState<Array<{ assistantId: string; reason: string; until: string }>>([]);
   const [busy, setBusy] = useState<string | null>(null);
 
-  const load = () => void api.assistants().then(setAssistants);
+  const load = () => {
+    void api.assistants().then(setAssistants);
+    void api.cooldowns().then(setCooldowns);
+  };
   useEffect(load, []);
 
   const sync = async (id: string) => {
@@ -134,8 +138,11 @@ function Catalog() {
     <div style={{ display: "grid", gap: "0.8rem" }}>
       {assistants.map((a) => {
         const core = a.manifest?.core;
+        const cooldown = cooldowns.find(
+          (c) => c.assistantId === a.id && Date.parse(c.until) > Date.now(),
+        );
         return (
-          <Card key={a.id}>
+          <Card key={a.id} style={cooldown ? { borderColor: `${tokens.warn}66` } : undefined}>
             <div style={{ display: "flex", alignItems: "center", gap: "0.7rem" }}>
               <strong style={{ fontSize: "0.95rem" }}>{a.id}</strong>
               <span style={{ fontSize: "0.8rem", color: tokens.muted }}>{a.provider}</span>
@@ -156,6 +163,12 @@ function Catalog() {
                 </Button>
               </span>
             </div>
+            {cooldown && (
+              <p style={{ margin: "0.6rem 0 0", fontSize: "0.85rem", color: tokens.warn }}>
+                Cooling down: {cooldown.reason} — routing will skip it until{" "}
+                {new Date(cooldown.until).toLocaleTimeString()}.
+              </p>
+            )}
             {!core && (
               <p style={{ margin: "0.6rem 0 0", fontSize: "0.85rem", color: tokens.muted }}>
                 No manifest yet — run a sync to discover capabilities.
