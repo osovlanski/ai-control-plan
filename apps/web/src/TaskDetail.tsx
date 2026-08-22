@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import { api, type RoutingExplanation, type TaskDetail as Detail, type TaskEvent } from "./api.js";
+import { api, type Comparison, type RoutingExplanation, type TaskDetail as Detail, type TaskEvent } from "./api.js";
 import { Button, Card, StateBadge, tokens } from "./ui.jsx";
 
-type Tab = "activity" | "usage" | "routing" | "progress" | "handoff";
+type Tab = "activity" | "usage" | "routing" | "progress" | "handoff" | "compare";
 
 interface PendingApproval {
   requestId: string;
@@ -28,6 +28,7 @@ export function TaskDetail({ taskId, onBack }: { taskId: string; onBack: () => v
   const [checkpoints, setCheckpoints] = useState<
     Array<{ id: string; reason: string; at: string; gitRef: string | null }>
   >([]);
+  const [comparison, setComparison] = useState<Comparison | null>(null);
   const [busy, setBusy] = useState(false);
   const [tab, setTab] = useState<Tab>("activity");
   const timelineRef = useRef<HTMLDivElement>(null);
@@ -40,6 +41,7 @@ export function TaskDetail({ taskId, onBack }: { taskId: string; onBack: () => v
     void api.routing(taskId).then(setRouting);
     void api.handoffs(taskId).then(setHandoffs);
     void api.checkpoints(taskId).then(setCheckpoints);
+    void api.comparison(taskId).then(setComparison).catch(() => setComparison(null));
   };
 
   useEffect(() => {
@@ -171,7 +173,7 @@ export function TaskDetail({ taskId, onBack }: { taskId: string; onBack: () => v
       )}
 
       <div style={{ display: "flex", gap: "0.4rem", marginBottom: "0.9rem" }}>
-        {(["activity", "usage", "routing", "progress", "handoff"] as Tab[]).map((t) => (
+        {(["activity", "usage", "routing", "progress", "handoff", "compare"] as Tab[]).map((t) => (
           <Button key={t} variant={tab === t ? "primary" : "secondary"} onClick={() => setTab(t)}>
             {t[0]!.toUpperCase() + t.slice(1)}
           </Button>
@@ -272,6 +274,78 @@ export function TaskDetail({ taskId, onBack }: { taskId: string; onBack: () => v
               View rendered progress.md →
             </a>
           </p>
+        </Card>
+      )}
+
+      {tab === "compare" && (
+        <Card>
+          {!comparison || comparison.competitors.length < 2 ? (
+            <p style={{ color: tokens.muted, fontSize: "0.9rem", margin: 0 }}>
+              This task ran on a single assistant. Start a task in Compare mode to see competitors side by side.
+            </p>
+          ) : (
+            <>
+              <p style={{ marginTop: 0, fontSize: "0.85rem", color: tokens.muted }}>
+                {comparison.decided
+                  ? `Decided by ${comparison.decided.decidedBy}${comparison.decided.mergedRef ? ` · merged ${comparison.decided.mergedRef.slice(0, 8)}` : ""}`
+                  : "Both finished — pick the result to keep. The rejected branch stays inspectable."}
+              </p>
+              <div style={{ display: "grid", gridTemplateColumns: `repeat(${comparison.competitors.length}, minmax(0, 1fr))`, gap: "0.8rem" }}>
+                {comparison.competitors.map((c) => (
+                  <div
+                    key={c.runId}
+                    style={{
+                      border: `1px solid ${c.outcome === "winner" ? tokens.ok : tokens.border}`,
+                      background: c.outcome === "winner" ? `${tokens.ok}0d` : "transparent",
+                      borderRadius: 8,
+                      padding: "0.75rem",
+                      opacity: c.outcome === "rejected" ? 0.6 : 1,
+                    }}
+                  >
+                    <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
+                      <strong style={{ fontSize: "0.9rem" }}>{c.assistantId}</strong>
+                      {c.outcome && (
+                        <span style={{ fontSize: "0.72rem", fontWeight: 600, color: c.outcome === "winner" ? tokens.ok : tokens.muted }}>
+                          {c.outcome.toUpperCase()}
+                        </span>
+                      )}
+                    </div>
+                    <div style={{ fontSize: "0.8rem", color: tokens.muted, marginTop: "0.35rem" }}>
+                      {c.durationMs !== null && <>⏱ {(c.durationMs / 1000).toFixed(1)}s</>}
+                      {c.tests && <> · ✓{c.tests.passed ?? 0}/✗{c.tests.failed ?? 0}</>}
+                      {c.usage?.outputTokens !== undefined && <> · {(c.usage.inputTokens ?? 0) + c.usage.outputTokens} tok</>}
+                    </div>
+                    {c.diff && (
+                      <div style={{ fontSize: "0.8rem", marginTop: "0.35rem" }}>
+                        <span style={{ color: tokens.ok }}>+{c.diff.insertions}</span>{" "}
+                        <span style={{ color: tokens.danger }}>−{c.diff.deletions}</span>{" "}
+                        <span style={{ color: tokens.muted }}>across {c.diff.changedFiles.length} file(s)</span>
+                      </div>
+                    )}
+                    {c.branch && (
+                      <code style={{ fontFamily: tokens.mono, fontSize: "0.72rem", color: tokens.muted }}>{c.branch}</code>
+                    )}
+                    {!comparison.decided && state === "WAITING_INPUT" && (
+                      <div style={{ marginTop: "0.6rem" }}>
+                        <Button
+                          disabled={busy}
+                          onClick={() => {
+                            setBusy(true);
+                            void api
+                              .resolveComparison(taskId, c.runId)
+                              .then(refresh)
+                              .finally(() => setBusy(false));
+                          }}
+                        >
+                          Keep this
+                        </Button>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
         </Card>
       )}
 

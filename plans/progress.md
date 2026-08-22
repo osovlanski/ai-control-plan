@@ -2,7 +2,7 @@
 
 ## Current phase
 
-**Phase 4 — complete.** The work workspace, its stricter policy defaults, and the Bedrock and Cursor adapters are in. Next: Phase 5 (parallel execution, telemetry-fed routing).
+**Phase 5 — complete. All planned phases are delivered.** Parallel comparison and race modes run in isolated worktrees, and the routing profiles are now fed by measurements from the user's own runs.
 
 ## Done
 
@@ -78,6 +78,35 @@
 - [x] **Phase 4:** `CursorAdapter` scaffold with the unverified event mapping quarantined in one function that fails loudly
 - [x] **Phase 4:** verified live — two instances side by side; work routed across three providers with Cursor honestly excluded, zero personal data in the work DB, allowlist returning 403/201 correctly
 
+- [x] **Phase 5:** Compare mode — one worktree and branch per competitor, side-by-side diff/tests/duration/tokens, user picks the winner, winning branch merges into the task branch while the rejected one stays inspectable
+- [x] **Phase 5:** Race mode — first success wins and the losers are cancelled so parallel runs stop burning quota
+- [x] **Phase 5:** `TelemetryService` — rolling per-assistant, per-task-kind metrics derived from the existing runs/events tables (no second source of truth, no synthetic benchmarks)
+- [x] **Phase 5:** `fastest`, `best-quality` and `lowest-tokens` profiles now use those measurements behind the unchanged `route()` interface, degrading to stable order and saying so when no measurement exists
+- [x] **Phase 5:** UI — Compare tab with per-competitor diff/test/token stats and a "keep this" action, Compare/Race launch buttons, measured profiles in the picker
+- [x] **Phase 5:** verified live — two assistants ran in genuinely separate git worktrees, the winner's commit merged into the task branch, the loser's branch survived, race mode cancelled the loser, and `fastest` switched from a placeholder to a real measurement
+
+### Phase 5 delivery notes
+
+- **The orchestrator's core invariant changed.** Its active-run map was keyed by
+  task id since Phase 1; a task may now have several runs in flight, so it is
+  keyed by run id with a per-task index. Single-run paths (handoff, approval,
+  checkpoint) go through `soleRun()` or iterate the task's runs.
+- **Competitor branches are siblings, not children:** `task/<id>--<assistant>`.
+  Git refs are a filesystem hierarchy, so `refs/heads/task/<id>` existing as a
+  file makes `refs/heads/task/<id>/<assistant>` impossible to create. Found by
+  running it, not by reading about it.
+- **The parallel marker is independent of the worktree.** Conflating them broke
+  non-repo comparisons (planning, research), where there is no worktree at all
+  and the second competitor tripped the single-run guard.
+- **Scores prefer the most specific evidence available per assistant:**
+  task-kind scores where they exist, falling back to that assistant's overall
+  record rather than discarding a real measurement because it came from a
+  different kind of task.
+- **Deferred by design:** specialist pipelines (plan → implement → review) and
+  the independent-reviewer mode. The plan sequences them after Compare and
+  Race, and neither is needed for the success condition. No synthetic eval
+  suite was added — telemetry from real runs has not yet missed anything.
+
 ### Phase 4 delivery notes (what is verified, and what is not)
 
 Provider surfaces differ in how far they could be verified from the build
@@ -147,6 +176,7 @@ regression tests:
 - 2026-08-21 — Architecture review completed and pushed to `claude/multi-assistant-routing-plan-vw0bwc`.
 - 2026-08-21 — Architecture accepted; Phase 0 scaffolding built and verified (`pnpm dev` boots API + UI against migrated SQLite; typecheck/lint/20 tests green).
 - 2026-08-22 — Phase 1 delivered: real Claude + Codex adapters written against the installed SDKs' type declarations, rule router, orchestrator with SSE and approvals, three UI screens. 45 tests green; core loop verified live end to end.
+- 2026-08-22 — Phase 5 delivered: parallel Compare/Race in isolated worktrees, winner merge, and telemetry-fed routing profiles. 99 tests green; verified live end to end. All planned phases complete.
 - 2026-08-22 — Phase 4 delivered: work workspace with stricter defaults, Bedrock adapter against verified SDK types, Cursor scaffold with quarantined mapping. 85 tests green; two instances verified side by side with honest cross-provider filtering.
 - 2026-08-22 — Phase 3 (implemented in Codex) reviewed here: features sound, three seam defects fixed — probe/manifest authority inversion, blocking subprocess, unguarded daily job. 69 tests green; env-authenticated assistant verified routable again against a running server.
 - 2026-08-22 — Phase 2 delivered: checkpoints, portable handoff packages, `resets_at`-aware cooldowns, and automatic quota failover. 51 tests green; verified live — a limit on one assistant checkpointed and completed on the other, and an all-limited task parked with the reasons and reset times named.

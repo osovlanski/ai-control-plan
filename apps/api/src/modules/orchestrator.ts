@@ -10,7 +10,13 @@ import type {
 import { DEFAULT_REDACTION_RULES, isTaskState, isTerminal as isTerminalState, newHandoffId, redactEvent, redactText } from "@agent-plane/core";
 import type { ResolvedConfig } from "../config.js";
 import type { Db } from "../db/index.js";
-import { createTaskWorktree } from "../repo/git.js";
+import {
+  createAssistantWorktree,
+  createTaskBranch,
+  createTaskWorktree,
+  mergeWinner,
+  runDiffSummary,
+} from "../repo/git.js";
 import { renderHandoffPrompt } from "../render/handoff.js";
 import { renderTaskPrompt } from "../render/prompt.js";
 import type { CheckpointReason, CheckpointService } from "./checkpoint.js";
@@ -48,6 +54,15 @@ export interface StartOptions {
   /** Handoff reason, rendered into the receiving agent's prompt. */
   reason?: string;
   fromAssistantId?: string;
+  /**
+   * This run is one competitor in a parallel group. Kept separate from the
+   * worktree because a non-repo comparison (planning, research) has no
+   * worktree at all — conflating them made the second competitor trip the
+   * single-run guard.
+   */
+  parallel?: boolean;
+  /** The competitor's own worktree, when the task touches a repository. */
+  worktree?: { worktreePath: string; branch: string; baseRef: string };
 }
 
 const DEFAULT_MAX_RUNTIME_MS = 30 * 60 * 1000;
@@ -58,7 +73,11 @@ const DEFAULT_MAX_RUNTIME_MS = 30 * 60 * 1000;
  * assistant, which resumes from the portable handoff package (arch §8).
  */
 export class Orchestrator {
-  private active = new Map<string, ActiveRun>(); // keyed by taskId
+  /**
+   * Keyed by runId, not taskId: since Phase 5 a task may have several runs in
+   * flight at once (one worktree per competing assistant).
+   */
+  private active = new Map<string, ActiveRun>();
 
   constructor(
     private db: Db,
@@ -88,8 +107,18 @@ export class Orchestrator {
     return reconciled;
   }
 
+  private runsOfTask(taskId: string): ActiveRun[] {
+    return [...this.active.values()].filter((r) => r.taskId === taskId);
+  }
+
+  /** The sole active run, when a task has exactly one (single-mode paths). */
+  private soleRun(taskId: string): ActiveRun | undefined {
+    const runs = this.runsOfTask(taskId);
+    return runs.length === 1 ? runs[0] : undefined;
+  }
+
   isActive(taskId: string): boolean {
-    return this.active.has(taskId);
+    return this.runsOfTask(taskId).length > 0;
   }
 
   async startTask(
@@ -97,16 +126,19 @@ export class Orchestrator {
     assistantId: AssistantId,
     options: StartOptions = {},
   ): Promise<{ runId: string }> {
-    if (this.active.has(taskId)) throw new Error(`Task ${taskId} already has an active run`);
+    if (!options.parallel && this.isActive(taskId)) {
+      throw new Error(`Task ${taskId} already has an active run`);
+    }
     const adapter = this.registry.adapter(assistantId);
     let row = this.tasks.get(taskId);
     if (!row) throw new Error(`Unknown task ${taskId}`);
     let envelope = this.tasks.envelope(taskId);
 
     // Repo tasks run in an isolated worktree on branch task/<id>. A handoff
-    // reuses the existing tree so the next assistant inherits the work.
-    let workdir = row.worktree_path ?? this.config.dir;
-    if (envelope.repository && !row.worktree_path) {
+    // reuses the existing tree so the next assistant inherits the work; a
+    // parallel competitor brings its own so two assistants never share one.
+    let workdir = options.worktree?.worktreePath ?? row.worktree_path ?? this.config.dir;
+    if (envelope.repository && !options.worktree && !row.worktree_path) {
       const worktree = await createTaskWorktree(
         envelope.repository.path,
         envelope.taskId,
@@ -123,7 +155,9 @@ export class Orchestrator {
         ? this.renderHandoffFor(taskId, envelope, options)
         : renderTaskPrompt(envelope);
 
-    envelope = this.tasks.transition(taskId, "RUNNING");
+    if (this.tasks.get(taskId)!.state !== "RUNNING") {
+      envelope = this.tasks.transition(taskId, "RUNNING");
+    }
     this.publishState(taskId, envelope, assistantId);
 
     // Same-provider continuation resumes the provider session; cross-provider
@@ -145,9 +179,18 @@ export class Orchestrator {
     const startedAt = new Date().toISOString();
     this.db
       .prepare(
-        "INSERT INTO runs (id, task_id, assistant_id, provider_session_ref, state, started_at) VALUES (?, ?, ?, ?, 'ACTIVE', ?)",
+        `INSERT INTO runs (id, task_id, assistant_id, provider_session_ref, state, started_at, worktree_path, branch)
+         VALUES (?, ?, ?, ?, 'ACTIVE', ?, ?, ?)`,
       )
-      .run(handle.runId, taskId, assistantId, handle.providerSessionRef ?? null, startedAt);
+      .run(
+        handle.runId,
+        taskId,
+        assistantId,
+        handle.providerSessionRef ?? null,
+        startedAt,
+        options.worktree?.worktreePath ?? null,
+        options.worktree?.branch ?? null,
+      );
 
     const run: ActiveRun = {
       runId: handle.runId,
@@ -159,7 +202,7 @@ export class Orchestrator {
         void adapter.cancel(handle);
       }, this.maxRuntimeMs),
     };
-    this.active.set(taskId, run);
+    this.active.set(handle.runId, run);
     void this.consume(run);
     return { runId: handle.runId };
   }
@@ -229,7 +272,7 @@ export class Orchestrator {
       );
     } finally {
       clearTimeout(run.timeout);
-      this.active.delete(run.taskId);
+      this.active.delete(run.runId);
       const ok = endedOk ?? false;
       void this.settleRun(run, ok).catch(() => {
         // Settling is best-effort: a shutting-down process must not raise here.
@@ -348,6 +391,11 @@ export class Orchestrator {
     const row = this.tasks.get(run.taskId);
     if (!row || row.state !== "RUNNING") return; // cancelled, or already settled
 
+    if (row.mode !== "single") {
+      await this.settleParallelRun(row.mode, run, ok);
+      return;
+    }
+
     const limited = run.limit !== undefined;
     const shouldFailover =
       (limited && this.triggerEnabled("quota")) ||
@@ -452,7 +500,7 @@ export class Orchestrator {
       );
     }
 
-    const current = this.active.get(taskId);
+    const current = this.soleRun(taskId);
     const fromAssistantId = current?.assistantId ?? this.lastAssistant(taskId);
 
     if (current) {
@@ -537,24 +585,37 @@ export class Orchestrator {
   }
 
   async createCheckpoint(taskId: string, reason: CheckpointReason = "manual") {
-    return this.checkpoints.create(taskId, this.active.get(taskId)?.runId ?? null, reason);
+    return this.checkpoints.create(taskId, this.soleRun(taskId)?.runId ?? null, reason);
   }
 
+  /**
+   * Approvals carry a request id that is unique across a task's runs, so a
+   * parallel comparison can have several assistants waiting at once.
+   */
   async respondApproval(taskId: string, requestId: string, approved: boolean): Promise<void> {
-    const run = this.active.get(taskId);
-    if (!run) throw new Error(`No active run for task ${taskId}`);
-    if (!run.adapter.send) throw new Error(`Assistant ${run.assistantId} does not accept input`);
-    await run.adapter.send(run.handle, { kind: "approval", requestId, approved });
+    const runs = this.runsOfTask(taskId);
+    if (runs.length === 0) throw new Error(`No active run for task ${taskId}`);
+    for (const run of runs) {
+      if (!run.adapter.send) continue;
+      try {
+        await run.adapter.send(run.handle, { kind: "approval", requestId, approved });
+        return;
+      } catch {
+        // Not this run's pending approval; try the next competitor.
+      }
+    }
+    throw new Error(`No run of task ${taskId} is waiting on approval ${requestId}`);
   }
 
   async cancelTask(taskId: string): Promise<void> {
-    const run = this.active.get(taskId);
+    const runs = this.runsOfTask(taskId);
     const envelope = this.tasks.transition(taskId, "CANCELLED");
-    this.publishState(taskId, envelope, run?.assistantId);
-    if (run) {
+    this.publishState(taskId, envelope, runs[0]?.assistantId);
+    for (const run of runs) {
+      run.handingOff = true; // the task is already terminal; do not re-settle it
       await run.adapter.cancel(run.handle);
-      await this.checkpoints.create(taskId, run.runId, "cancel");
     }
+    if (runs.length > 0) await this.checkpoints.create(taskId, runs[0]!.runId, "cancel");
   }
 
   private notice(taskId: string, level: "info" | "warn", text: string): void {
@@ -587,10 +648,224 @@ export class Orchestrator {
 
   private async waitUntilInactive(taskId: string, timeoutMs = 10_000): Promise<void> {
     const start = Date.now();
-    while (this.active.has(taskId)) {
+    while (this.isActive(taskId)) {
       if (Date.now() - start > timeoutMs) throw new Error(`Task ${taskId} still active after ${timeoutMs}ms`);
       await new Promise((r) => setTimeout(r, 10));
     }
+  }
+
+  /**
+   * Starts one run per assistant, each in its own worktree (arch §11 — never
+   * two assistants in one working tree).
+   *
+   * compare: every competitor finishes, then the user picks a winner.
+   * race:    the first competitor to succeed wins and the rest are cancelled.
+   *
+   * Parallel execution multiplies quota and token spend, so it is never a
+   * default — the caller asks for it explicitly.
+   */
+  async startParallel(
+    taskId: string,
+    assistantIds: AssistantId[],
+    mode: "compare" | "race",
+  ): Promise<{ runs: Array<{ runId: string; assistantId: string }> }> {
+    if (assistantIds.length < 2) throw new Error("Parallel execution needs at least two assistants");
+    if (this.isActive(taskId)) throw new Error(`Task ${taskId} already has an active run`);
+    const row = this.tasks.get(taskId);
+    if (!row) throw new Error(`Unknown task ${taskId}`);
+    if (row.state !== "CREATED" && row.state !== "ROUTING") {
+      throw new Error(`Task ${taskId} is ${row.state}; only a fresh task can start a parallel comparison`);
+    }
+
+    this.tasks.setMode(taskId, mode);
+    if (row.state === "CREATED") this.tasks.transition(taskId, "ROUTING");
+    const envelope = this.tasks.envelope(taskId);
+
+    // A shared base branch, then one branch + worktree per competitor off it,
+    // so the diffs are directly comparable and the winner merges cleanly.
+    const worktrees = new Map<string, { worktreePath: string; branch: string; baseRef: string }>();
+    if (envelope.repository) {
+      const { branch: base, baseRef } = await createTaskBranch(envelope.repository.path, taskId);
+      this.tasks.setWorktree(taskId, row.worktree_path ?? "", base, baseRef);
+      for (const assistantId of assistantIds) {
+        const wt = await createAssistantWorktree(
+          envelope.repository.path,
+          taskId,
+          assistantId,
+          join(this.config.dir, "worktrees"),
+          base,
+        );
+        worktrees.set(assistantId, { worktreePath: wt.path, branch: wt.branch, baseRef: wt.baseRef });
+      }
+    }
+
+    const started: Array<{ runId: string; assistantId: string }> = [];
+    for (const assistantId of assistantIds) {
+      const { runId } = await this.startTask(taskId, assistantId, {
+        parallel: true,
+        worktree: worktrees.get(assistantId),
+      });
+      started.push({ runId, assistantId });
+    }
+    this.notice(
+      taskId,
+      "info",
+      `${mode === "race" ? "Racing" : "Comparing"} ${assistantIds.join(" vs ")} in separate worktrees.`,
+    );
+    return { runs: started };
+  }
+
+  /** A competitor finished. Decide whether the task itself is done. */
+  private async settleParallelRun(mode: string, run: ActiveRun, ok: boolean): Promise<void> {
+    const siblingsRunning = this.runsOfTask(run.taskId).length > 0;
+
+    if (mode === "race" && ok) {
+      // First success takes it; the rest are cancelled to stop burning quota.
+      this.db.prepare("UPDATE runs SET outcome = 'winner' WHERE id = ?").run(run.runId);
+      for (const other of this.runsOfTask(run.taskId)) {
+        other.handingOff = true;
+        this.db.prepare("UPDATE runs SET outcome = 'rejected' WHERE id = ?").run(other.runId);
+        await other.adapter.cancel(other.handle);
+      }
+      await this.finishComparison(run.taskId, run.runId, "race", `${run.assistantId} finished first`);
+      return;
+    }
+
+    if (siblingsRunning) return; // others still working; nothing to decide yet
+
+    if (mode === "race") {
+      // Everyone failed: treat it as a normal failed task rather than a stall.
+      const envelope = this.tasks.transition(run.taskId, "FAILED");
+      this.publishState(run.taskId, envelope, run.assistantId);
+      this.notice(run.taskId, "warn", "Every racing assistant failed.");
+      return;
+    }
+
+    // compare: all competitors are done — the user decides.
+    await this.checkpoints.create(run.taskId, run.runId, "completion");
+    const envelope = this.tasks.transition(run.taskId, "WAITING_INPUT");
+    this.publishState(run.taskId, envelope);
+    this.notice(run.taskId, "info", "All competitors finished — review the comparison and pick a winner.");
+  }
+
+  /** Side-by-side view of a comparison: diff size, tests, duration, tokens. */
+  async comparison(taskId: string): Promise<{
+    mode: string;
+    decided: { winnerRunId: string | null; decidedBy: string; mergedRef: string | null; at: string } | null;
+    competitors: Array<Record<string, unknown>>;
+  }> {
+    const row = this.tasks.get(taskId);
+    if (!row) throw new Error(`Unknown task ${taskId}`);
+    const runs = this.db
+      .prepare(
+        `SELECT id, assistant_id, state, usage, started_at, ended_at, worktree_path, branch, outcome
+         FROM runs WHERE task_id = ? ORDER BY started_at`,
+      )
+      .all(taskId) as Array<{
+      id: string;
+      assistant_id: string;
+      state: string;
+      usage: string | null;
+      started_at: string;
+      ended_at: string | null;
+      worktree_path: string | null;
+      branch: string | null;
+      outcome: string | null;
+    }>;
+
+    const competitors = await Promise.all(
+      runs.map(async (r) => {
+        const tests = this.db
+          .prepare("SELECT payload FROM events WHERE run_id = ? AND type = 'test.result' ORDER BY seq DESC LIMIT 1")
+          .get(r.id) as { payload: string | null } | undefined;
+        let diff: { diffStat: string; changedFiles: string[]; insertions: number; deletions: number } | null = null;
+        if (r.worktree_path && row.base_ref) {
+          diff = await runDiffSummary(r.worktree_path, row.base_ref).catch(() => null);
+        }
+        return {
+          runId: r.id,
+          assistantId: r.assistant_id,
+          state: r.state,
+          outcome: r.outcome,
+          branch: r.branch,
+          durationMs: r.ended_at ? Date.parse(r.ended_at) - Date.parse(r.started_at) : null,
+          usage: r.usage ? (JSON.parse(r.usage) as unknown) : null,
+          tests: tests?.payload ? (JSON.parse(tests.payload) as unknown) : null,
+          diff,
+        };
+      }),
+    );
+
+    const decision = this.db
+      .prepare("SELECT winner_run_id, decided_by, merged_ref, at FROM comparisons WHERE task_id = ? ORDER BY id DESC LIMIT 1")
+      .get(taskId) as
+      | { winner_run_id: string | null; decided_by: string; merged_ref: string | null; at: string }
+      | undefined;
+
+    return {
+      mode: row.mode,
+      decided: decision
+        ? {
+            winnerRunId: decision.winner_run_id,
+            decidedBy: decision.decided_by,
+            mergedRef: decision.merged_ref,
+            at: decision.at,
+          }
+        : null,
+      competitors,
+    };
+  }
+
+  /** The user picks a winner; its branch merges into the shared task branch. */
+  async resolveComparison(taskId: string, winnerRunId: string, reason?: string): Promise<{ mergedRef: string | null }> {
+    const row = this.tasks.get(taskId);
+    if (!row) throw new Error(`Unknown task ${taskId}`);
+    if (row.state !== "WAITING_INPUT") {
+      throw new Error(`Task ${taskId} is ${row.state}; only a finished comparison can be resolved`);
+    }
+    const winner = this.db.prepare("SELECT id, branch FROM runs WHERE id = ? AND task_id = ?").get(winnerRunId, taskId) as
+      | { id: string; branch: string | null }
+      | undefined;
+    if (!winner) throw new Error(`Run ${winnerRunId} is not part of task ${taskId}`);
+    return this.finishComparison(taskId, winnerRunId, "user", reason);
+  }
+
+  private async finishComparison(
+    taskId: string,
+    winnerRunId: string,
+    decidedBy: "user" | "race",
+    reason?: string,
+  ): Promise<{ mergedRef: string | null }> {
+    this.db.prepare("UPDATE runs SET outcome = 'winner' WHERE id = ?").run(winnerRunId);
+    this.db
+      .prepare("UPDATE runs SET outcome = 'rejected' WHERE task_id = ? AND id != ? AND outcome IS NULL")
+      .run(taskId, winnerRunId);
+
+    const envelope = this.tasks.envelope(taskId);
+    const winner = this.db.prepare("SELECT branch, assistant_id FROM runs WHERE id = ?").get(winnerRunId) as
+      | { branch: string | null; assistant_id: string }
+      | undefined;
+
+    let mergedRef: string | null = null;
+    if (envelope.repository && winner?.branch) {
+      // Losing branches are left intact so a rejected attempt stays inspectable.
+      mergedRef = (await mergeWinner(envelope.repository.path, envelope.repository.branch, winner.branch).catch(
+        () => null,
+      ))?.mergedRef ?? null;
+    }
+
+    this.db
+      .prepare("INSERT INTO comparisons (task_id, winner_run_id, decided_by, reason, merged_ref, at) VALUES (?, ?, ?, ?, ?, ?)")
+      .run(taskId, winnerRunId, decidedBy, reason ?? null, mergedRef, new Date().toISOString());
+
+    const updated = this.tasks.transition(taskId, "COMPLETED");
+    this.publishState(taskId, updated, winner?.assistant_id);
+    this.notice(
+      taskId,
+      "info",
+      `${winner?.assistant_id ?? "winner"} selected${mergedRef ? ` and merged into ${envelope.repository?.branch}` : ""}.`,
+    );
+    return { mergedRef };
   }
 
   /**
@@ -602,7 +877,7 @@ export class Orchestrator {
     const start = Date.now();
     for (;;) {
       const row = this.tasks.get(taskId);
-      if (row && resting.has(row.state) && !this.active.has(taskId)) return row.state;
+      if (row && resting.has(row.state) && !this.isActive(taskId)) return row.state;
       if (Date.now() - start > timeoutMs) {
         throw new Error(`Task ${taskId} did not settle in ${timeoutMs}ms (state ${row?.state})`);
       }

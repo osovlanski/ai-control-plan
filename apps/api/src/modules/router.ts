@@ -1,5 +1,6 @@
 import type { AssistantId, CapabilityManifest, RoutingExplanation, RoutingProfile } from "@agent-plane/core";
 import type { Db } from "../db/index.js";
+import type { AssistantScore } from "./telemetry.js";
 
 export interface RouteCandidate {
   id: AssistantId;
@@ -15,6 +16,12 @@ export interface RouteRequest {
   /** Assistants excluded by cooldown (failed/limited recently), with reason. */
   cooldowns: Map<string, string>;
   userOverride?: AssistantId;
+  /**
+   * Rolling telemetry from the user's own runs. Absent until enough runs
+   * exist — profiles must degrade to their rule behaviour and say so, never
+   * pretend to a measurement they do not have.
+   */
+  scores?: Map<string, AssistantScore>;
 }
 
 /**
@@ -68,13 +75,65 @@ export function route(req: RouteRequest, candidates: RouteCandidate[]): RoutingE
         tieBreaker: sorted.length > 1 ? `over ${sorted[1]!.assistantId}` : undefined,
       };
     }
-    case "fastest":
-      // No latency telemetry yet (Phase 5): deterministic stable order, stated honestly.
+    case "fastest": {
+      // Real measurement now that Phase 5 records it — but only where it exists.
+      const timed = eligible
+        .map((e) => ({ e, ms: req.scores?.get(e.assistantId)?.medianDurationMs }))
+        .filter((x): x is { e: typeof eligible[number]; ms: number } => x.ms !== undefined);
+      if (timed.length === 0) {
+        return {
+          candidates: evaluated,
+          ruleFired: "fastest: no latency telemetry yet, first eligible by stable order",
+          chosen: eligible[0]!.assistantId,
+        };
+      }
+      timed.sort((a, b) => a.ms - b.ms);
       return {
         candidates: evaluated,
-        ruleFired: "fastest: no latency telemetry yet, first eligible by stable order",
-        chosen: eligible[0]!.assistantId,
+        ruleFired: `fastest: lowest median run time (${formatMs(timed[0]!.ms)} over ${req.scores?.get(timed[0]!.e.assistantId)?.runs ?? 0} runs)`,
+        chosen: timed[0]!.e.assistantId,
+        tieBreaker: timed.length > 1 ? `over ${timed[1]!.e.assistantId}` : undefined,
       };
+    }
+    case "best-quality": {
+      // Quality proxy from the user's real workload: did runs finish, did the
+      // tests they ran pass, and did work have to be handed off elsewhere.
+      const ranked = eligible
+        .map((e) => ({ e, score: qualityScore(req.scores?.get(e.assistantId)) }))
+        .filter((x): x is { e: typeof eligible[number]; score: number } => x.score !== undefined);
+      if (ranked.length === 0) {
+        return {
+          candidates: evaluated,
+          ruleFired: "best-quality: no telemetry yet, first eligible by stable order",
+          chosen: eligible[0]!.assistantId,
+        };
+      }
+      ranked.sort((a, b) => b.score - a.score);
+      return {
+        candidates: evaluated,
+        ruleFired: `best-quality: highest measured success/test/reliability score (${ranked[0]!.score.toFixed(2)})`,
+        chosen: ranked[0]!.e.assistantId,
+        tieBreaker: ranked.length > 1 ? `over ${ranked[1]!.e.assistantId}` : undefined,
+      };
+    }
+    case "lowest-tokens": {
+      const measured = eligible
+        .map((e) => ({ e, tokens: req.scores?.get(e.assistantId)?.medianTokens }))
+        .filter((x): x is { e: typeof eligible[number]; tokens: number } => x.tokens !== undefined);
+      if (measured.length === 0) {
+        return {
+          candidates: evaluated,
+          ruleFired: "lowest-tokens: no usage telemetry yet, first eligible by stable order",
+          chosen: eligible[0]!.assistantId,
+        };
+      }
+      measured.sort((a, b) => a.tokens - b.tokens);
+      return {
+        candidates: evaluated,
+        ruleFired: `lowest-tokens: lowest median tokens per run (${measured[0]!.tokens})`,
+        chosen: measured[0]!.e.assistantId,
+      };
+    }
     case "auto":
     default: {
       // Config order is the preference order; quota headroom breaks ties when known.
@@ -110,4 +169,20 @@ export function routingHistory(db: Db, taskId: string): unknown[] {
       .prepare("SELECT chosen_assistant_id, explanation, at FROM routing_decisions WHERE task_id = ? ORDER BY id")
       .all(taskId) as Array<{ chosen_assistant_id: string | null; explanation: string; at: string }>
   ).map((r) => ({ chosen: r.chosen_assistant_id, at: r.at, explanation: JSON.parse(r.explanation) as unknown }));
+}
+
+/** Sub-second runs must not render as a misleading "0s" in the explanation. */
+function formatMs(ms: number): string {
+  return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`;
+}
+
+/**
+ * Blends the three signals telemetry can honestly supply. Weighted, not
+ * averaged: finishing at all matters most, then whether the tests the assistant
+ * ran actually passed, then whether its work had to be rescued by someone else.
+ */
+function qualityScore(score: AssistantScore | undefined): number | undefined {
+  if (!score || score.runs === 0) return undefined;
+  const reliability = score.runs > 0 ? 1 - Math.min(1, score.failovers / score.runs) : 1;
+  return 0.5 * score.successRate + 0.3 * (score.testPassRate ?? score.successRate) + 0.2 * reliability;
 }

@@ -1,4 +1,4 @@
-import type { RoutingProfile, TaskEnvelope, TaskId, TaskState } from "@agent-plane/core";
+import type { RoutingProfile, TaskEnvelope, TaskId, TaskMode, TaskState } from "@agent-plane/core";
 import { assertTransition, isTaskState, newTaskId } from "@agent-plane/core";
 import type { Db } from "../db/index.js";
 
@@ -15,6 +15,7 @@ export interface TaskRow {
   state: TaskState;
   activity_phase: string | null;
   profile: RoutingProfile;
+  mode: TaskMode;
   repo_path: string | null;
   branch: string | null;
   /** Isolated worktree the task's runs execute in; shared across handoffs. */
@@ -92,6 +93,13 @@ export class TaskStore {
       .prepare("UPDATE tasks SET state = ?, envelope = ?, updated_at = ? WHERE id = ?")
       .run(to, JSON.stringify(envelope), new Date().toISOString(), taskId);
     return envelope;
+  }
+
+  /** Compare/race mode is set when a parallel group starts. */
+  setMode(taskId: string, mode: TaskMode): void {
+    this.db
+      .prepare("UPDATE tasks SET mode = ?, updated_at = ? WHERE id = ?")
+      .run(mode, new Date().toISOString(), taskId);
   }
 
   /** Records the task's isolated worktree; every later run (handoffs included) reuses it. */

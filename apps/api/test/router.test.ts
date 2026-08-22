@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { AssistantId, CapabilityManifest } from "@agent-plane/core";
 import { route, type RouteCandidate, type RouteRequest } from "../src/modules/router.js";
+import type { AssistantScore } from "../src/modules/telemetry.js";
 
 function manifest(overrides: {
   auth?: "ok" | "missing";
@@ -113,5 +114,78 @@ describe("router", () => {
     );
     expect(result.chosen).toBe("codex");
     expect(result.candidates.find((c) => c.assistantId === "claude")!.filterFailures[0]).toMatch(/cooldown/);
+  });
+});
+
+describe("telemetry-fed profiles", () => {
+  const score = (over: Partial<AssistantScore>): AssistantScore => ({
+    assistantId: "x",
+    runs: 5,
+    successRate: 1,
+    failovers: 0,
+    errors: 0,
+    ...over,
+  });
+
+  it("fastest uses measured median duration once it exists", () => {
+    const result = route(
+      baseReq({
+        profile: "fastest",
+        scores: new Map([
+          ["claude", score({ medianDurationMs: 90_000 })],
+          ["codex", score({ medianDurationMs: 30_000 })],
+        ]),
+      }),
+      [candidate("claude", manifest({})), candidate("codex", manifest({}))],
+    );
+    expect(result.chosen).toBe("codex");
+    expect(result.ruleFired).toMatch(/lowest median run time/);
+  });
+
+  it("says so plainly when it has no measurement, instead of implying one", () => {
+    const result = route(baseReq({ profile: "fastest" }), [
+      candidate("claude", manifest({})),
+      candidate("codex", manifest({})),
+    ]);
+    expect(result.ruleFired).toMatch(/no latency telemetry yet/);
+  });
+
+  it("renders sub-second medians honestly rather than as 0s", () => {
+    const result = route(
+      baseReq({ profile: "fastest", scores: new Map([["claude", score({ medianDurationMs: 4 })]]) }),
+      [candidate("claude", manifest({}))],
+    );
+    expect(result.ruleFired).toContain("4ms");
+    expect(result.ruleFired).not.toContain("0s");
+  });
+
+  it("best-quality weighs success, tests, and failovers together", () => {
+    const result = route(
+      baseReq({
+        profile: "best-quality",
+        scores: new Map([
+          // Finishes every run but its work keeps getting handed off elsewhere.
+          ["claude", score({ successRate: 1, testPassRate: 1, failovers: 5, runs: 5 })],
+          ["codex", score({ successRate: 0.9, testPassRate: 0.95, failovers: 0, runs: 5 })],
+        ]),
+      }),
+      [candidate("claude", manifest({})), candidate("codex", manifest({}))],
+    );
+    expect(result.chosen).toBe("codex");
+  });
+
+  it("lowest-tokens ranks by measured median tokens", () => {
+    const result = route(
+      baseReq({
+        profile: "lowest-tokens",
+        scores: new Map([
+          ["claude", score({ medianTokens: 9000 })],
+          ["codex", score({ medianTokens: 2000 })],
+        ]),
+      }),
+      [candidate("claude", manifest({})), candidate("codex", manifest({}))],
+    );
+    expect(result.chosen).toBe("codex");
+    expect(result.ruleFired).toContain("2000");
   });
 });

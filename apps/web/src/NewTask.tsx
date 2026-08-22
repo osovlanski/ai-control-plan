@@ -36,6 +36,22 @@ export function NewTask({ onStarted }: { onStarted: (taskId: string) => void }) 
     }
   };
 
+  const eligible = explanation?.candidates.filter((c) => c.passedFilters) ?? [];
+
+  const startParallel = async (mode: "compare" | "race") => {
+    if (!taskId) return;
+    setError(null);
+    setBusy(true);
+    try {
+      await api.startParallel(taskId, eligible.map((c) => c.assistantId), mode);
+      onStarted(taskId);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const start = async (assistantId?: string) => {
     if (!taskId) return;
     setError(null);
@@ -79,12 +95,20 @@ export function NewTask({ onStarted }: { onStarted: (taskId: string) => void }) 
           <select value={profile} onChange={(e) => setProfile(e.target.value)} style={inputStyle}>
             <option value="auto">Auto</option>
             <option value="preserve-quota">Preserve Quota</option>
-            <option value="fastest">Fastest</option>
+            <option value="fastest">Fastest (measured)</option>
+            <option value="best-quality">Best Quality (measured)</option>
+            <option value="lowest-tokens">Lowest Tokens (measured)</option>
           </select>
         </Field>
         <Button onClick={previewRoute} disabled={busy || goal.trim().length === 0}>
           {taskId ? "Re-route" : "Preview routing"}
         </Button>
+        {explanation && explanation.candidates.filter((c) => c.passedFilters).length > 1 && (
+          <p style={{ fontSize: "0.8rem", color: tokens.muted, marginTop: "0.8rem" }}>
+            Running in parallel multiplies quota and token spend, so it is never automatic — use the buttons
+            in the recommendation panel to compare or race deliberately.
+          </p>
+        )}
         {error && <p style={{ color: tokens.danger, fontSize: "0.85rem" }}>{error}</p>}
       </Card>
 
@@ -140,9 +164,21 @@ export function NewTask({ onStarted }: { onStarted: (taskId: string) => void }) 
               </div>
             ))}
             {explanation.chosen ? (
-              <Button onClick={() => void start()} disabled={busy}>
-                Run recommended
-              </Button>
+              <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
+                <Button onClick={() => void start()} disabled={busy}>
+                  Run recommended
+                </Button>
+                {eligible.length > 1 && (
+                  <>
+                    <Button variant="secondary" disabled={busy} onClick={() => void startParallel("compare")}>
+                      Compare {eligible.length}
+                    </Button>
+                    <Button variant="secondary" disabled={busy} onClick={() => void startParallel("race")}>
+                      Race {eligible.length}
+                    </Button>
+                  </>
+                )}
+              </div>
             ) : (
               <p style={{ color: tokens.danger, fontSize: "0.85rem" }}>
                 No eligible assistant — every candidate failed a hard filter.

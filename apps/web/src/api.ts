@@ -162,4 +162,45 @@ export const api = {
     >(`/api/tasks/${id}/handoffs`),
   cooldowns: () =>
     req<Array<{ assistantId: string; reason: string; until: string }>>("/api/cooldowns"),
+  startParallel: (id: string, assistants: string[], mode: "compare" | "race") =>
+    req<{ runs: Array<{ runId: string; assistantId: string }> }>(`/api/tasks/${id}/parallel`, {
+      method: "POST",
+      body: JSON.stringify({ assistants, mode }),
+    }),
+  comparison: (id: string) => req<Comparison>(`/api/tasks/${id}/comparison`),
+  resolveComparison: (id: string, winnerRunId: string, reason?: string) =>
+    req<{ mergedRef: string | null }>(`/api/tasks/${id}/comparison/resolve`, {
+      method: "POST",
+      body: JSON.stringify({ winnerRunId, reason }),
+    }),
+  scores: () => req<AssistantScore[]>("/api/scores"),
 };
+
+export interface Competitor {
+  runId: string;
+  assistantId: string;
+  state: string;
+  outcome: string | null;
+  branch: string | null;
+  durationMs: number | null;
+  usage: { inputTokens?: number; outputTokens?: number } | null;
+  tests: { passed?: number; failed?: number } | null;
+  diff: { diffStat: string; changedFiles: string[]; insertions: number; deletions: number } | null;
+}
+
+export interface Comparison {
+  mode: string;
+  decided: { winnerRunId: string | null; decidedBy: string; mergedRef: string | null; at: string } | null;
+  competitors: Competitor[];
+}
+
+export interface AssistantScore {
+  assistantId: string;
+  runs: number;
+  successRate: number;
+  medianDurationMs?: number;
+  medianTokens?: number;
+  testPassRate?: number;
+  failovers: number;
+  errors: number;
+}

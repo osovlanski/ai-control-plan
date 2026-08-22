@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -18,10 +18,18 @@ afterEach(() => {
 });
 
 describe("migrations", () => {
-  it("applies 001_init and is idempotent", () => {
-    expect(appliedMigrations(db)).toEqual(["001_init.sql", "002_handoff.sql", "003_phase3.sql"]);
+  it("applies every migration on disk, in order, and is idempotent", () => {
+    // Derived from the migrations directory rather than a hardcoded list: this
+    // test is about ordering and idempotency, and hardcoding the set made it
+    // fail for no real reason in three consecutive phases.
+    const onDisk = readdirSync(new URL("../src/db/migrations", import.meta.url))
+      .filter((f) => f.endsWith(".sql"))
+      .sort();
+    expect(onDisk.length).toBeGreaterThan(0);
+    expect(appliedMigrations(db)).toEqual(onDisk);
+
     const again = openDb(join(dir, "test.db"));
-    expect(appliedMigrations(again)).toEqual(["001_init.sql", "002_handoff.sql", "003_phase3.sql"]);
+    expect(appliedMigrations(again)).toEqual(onDisk); // re-opening applies nothing new
     again.close();
   });
 
@@ -35,6 +43,7 @@ describe("migrations", () => {
       "capability_changes",
       "capability_probes",
       "checkpoints",
+      "comparisons",
       "cooldowns",
       "event_archives",
       "events",

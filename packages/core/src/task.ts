@@ -4,8 +4,20 @@ import type { TaskState } from "./state-machine.js";
 /** Informational only — annotates events/UI, never drives orchestration. */
 export type ActivityPhase = "planning" | "editing" | "testing" | "reviewing";
 
-/** v1 routing profiles (revised architecture §6). More arrive with metered providers. */
-export type RoutingProfile = "auto" | "preserve-quota" | "fastest";
+/**
+ * Routing profiles. The first three are rule-based and always available; the
+ * telemetry-fed ones degrade to stable order (and say so in the explanation)
+ * until enough of the user's own runs exist to measure.
+ */
+export type RoutingProfile =
+  | "auto"
+  | "preserve-quota"
+  | "fastest"
+  | "best-quality"
+  | "lowest-tokens";
+
+/** How a task executes across assistants (Phase 5). */
+export type TaskMode = "single" | "compare" | "race";
 
 export interface TaskDecision {
   text: string;

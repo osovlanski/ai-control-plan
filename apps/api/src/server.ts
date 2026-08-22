@@ -9,6 +9,7 @@ import { Registry } from "./modules/registry.js";
 import { persistRoutingDecision, route, routingHistory, type RouteRequest } from "./modules/router.js";
 import { TaskEventBus } from "./modules/sse.js";
 import { TaskStore } from "./modules/tasks.js";
+import { TelemetryService, classifyGoal } from "./modules/telemetry.js";
 import { EventRetention } from "./modules/retention.js";
 import { renderHandoffMd } from "./render/handoff.js";
 import { renderProgressMd } from "./render/progress.js";
@@ -31,6 +32,7 @@ export interface BuiltServer {
   bus: TaskEventBus;
   checkpoints: CheckpointService;
   cooldowns: CooldownStore;
+  telemetry: TelemetryService;
 }
 
 export function buildServer(deps: ServerDeps): BuiltServer {
@@ -40,6 +42,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   const registry = deps.registry ?? new Registry(db, config);
   const checkpoints = new CheckpointService(db, tasks);
   const cooldowns = new CooldownStore(db);
+  const telemetry = new TelemetryService(db);
   const retention = new EventRetention(db);
   const orchestrator =
     deps.orchestrator ??
@@ -60,6 +63,11 @@ export function buildServer(deps: ServerDeps): BuiltServer {
       repoPathAllowed: repoAllowed(row.repo_path),
       cooldowns: cooldowns.active(),
       userOverride,
+      // Most specific evidence available, per assistant: scores for this kind
+      // of task where they exist (coding skill says little about review
+      // skill), falling back to that assistant's overall record rather than
+      // discarding a real measurement just because it came from another kind.
+      scores: preferSpecific(telemetry.scores(), telemetry.scores(classifyGoal(row.goal))),
     };
     const explanation = route(
       req,
@@ -282,6 +290,47 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     });
   });
 
+  app.post<{ Params: { id: string }; Body: { assistants?: AssistantId[]; mode?: "compare" | "race" } }>(
+    "/api/tasks/:id/parallel",
+    async (req, reply) => {
+      const { assistants, mode } = req.body ?? {};
+      if (!Array.isArray(assistants) || assistants.length < 2) {
+        return reply.status(400).send({ error: "Provide at least two assistants to run in parallel" });
+      }
+      try {
+        return await orchestrator.startParallel(req.params.id, assistants, mode ?? "compare");
+      } catch (err) {
+        return reply.status(409).send({ error: message(err) });
+      }
+    },
+  );
+
+  app.get<{ Params: { id: string } }>("/api/tasks/:id/comparison", async (req, reply) => {
+    try {
+      return await orchestrator.comparison(req.params.id);
+    } catch (err) {
+      return reply.status(404).send({ error: message(err) });
+    }
+  });
+
+  app.post<{ Params: { id: string }; Body: { winnerRunId?: string; reason?: string } }>(
+    "/api/tasks/:id/comparison/resolve",
+    async (req, reply) => {
+      const { winnerRunId, reason } = req.body ?? {};
+      if (!winnerRunId) return reply.status(400).send({ error: "winnerRunId is required" });
+      try {
+        return await orchestrator.resolveComparison(req.params.id, winnerRunId, reason);
+      } catch (err) {
+        return reply.status(409).send({ error: message(err) });
+      }
+    },
+  );
+
+  app.get<{ Querystring: { kind?: string } }>("/api/scores", (req) => {
+    // What the router is actually measuring, so a recommendation can be checked.
+    return [...telemetry.scores(req.query.kind).values()];
+  });
+
   app.get<{ Params: { id: string } }>("/api/tasks/:id/events", (req, reply) => {
     const row = tasks.get(req.params.id);
     if (!row) return reply.status(404).send({ error: "not found" });
@@ -324,7 +373,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     return renderProgressMd(tasks.envelope(req.params.id), lastRun?.assistant_id);
   });
 
-  return { app, registry, orchestrator, tasks, bus, checkpoints, cooldowns };
+  return { app, registry, orchestrator, tasks, bus, checkpoints, cooldowns, telemetry };
 }
 
 function sseHeaders(reply: FastifyReply): void {
@@ -343,4 +392,11 @@ function send(reply: FastifyReply, payload: unknown): void {
 
 function message(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/** Overall scores as the base, kind-specific ones overriding where present. */
+function preferSpecific<T>(overall: Map<string, T>, specific: Map<string, T>): Map<string, T> {
+  const merged = new Map(overall);
+  for (const [id, score] of specific) merged.set(id, score);
+  return merged;
 }
