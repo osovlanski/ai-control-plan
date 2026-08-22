@@ -2,7 +2,7 @@
 
 ## Current phase
 
-**Phase 3 — complete, with three post-review fixes applied.** Daily change-driven capability discovery, the catalog change feed, compressed event retention, and boundary redaction are implemented and reviewed. Next: Phase 4.
+**Phase 4 — complete.** The work workspace, its stricter policy defaults, and the Bedrock and Cursor adapters are in. Next: Phase 5 (parallel execution, telemetry-fed routing).
 
 ## Done
 
@@ -69,7 +69,40 @@
 - Codex quota percentages are not exposed at the SDK layer (verified against the installed type declarations); the manifest reports `reportsLimits: false` and limit *hits* are caught by error classification. Failover works for Codex on the hit, just without an early warning.
 - Codex runs sandboxed with `approvalPolicy: "never"` — interactive approvals are Claude-only for now.
 - `fastest` profile has no latency telemetry yet and says so in its explanation; real scoring lands in Phase 5.
+- Bedrock auth detection proves credentials exist locally, not that they may invoke a specific ARN — deliberately no network call on the boot/daily-sync path. A misconfigured ARN surfaces as `AccessDeniedException` on first invoke, which fails the run and cools the assistant down rather than misrouting to it forever.
+- Cursor is unroutable until its CLI is installed and the mapping calibrated; the manifest reports `auth: missing` and `mappingVerified: false`, so the router excludes it with a stated reason.
 - Cross-provider `resume()` is never used — cross-provider continuation always goes through a fresh `start()` with the handoff package, by design.
+
+- [x] **Phase 4:** work-workspace instance — per-workspace policy defaults (work starts with approval-gated failover and no assumed assistants), instance approval mode wired into every run, repo allowlist enforced
+- [x] **Phase 4:** `BedrockAdapter` written against the real `@aws-sdk/client-bedrock-agentcore` 3.1116 type declarations
+- [x] **Phase 4:** `CursorAdapter` scaffold with the unverified event mapping quarantined in one function that fails loudly
+- [x] **Phase 4:** verified live — two instances side by side; work routed across three providers with Cursor honestly excluded, zero personal data in the work DB, allowlist returning 403/201 correctly
+
+### Phase 4 delivery notes (what is verified, and what is not)
+
+Provider surfaces differ in how far they could be verified from the build
+environment, and the adapters say so rather than pretending otherwise:
+
+- **Bedrock — types verified, live service not.** `@aws-sdk/client-bedrock-agentcore`
+  was installed and its declarations read directly (the Phase 1 method).
+  Confirmed from types: `InvokeAgentRuntimeCommand` requires
+  `{ agentRuntimeArn, payload }`; `runtimeSessionId` round-trips on request and
+  response, so `canResume: true`; `ThrottlingException` and
+  `ServiceQuotaExceededException` are typed, so limit *hits* feed the existing
+  failover path. AWS is metered rather than plan-quota'd, so there is no
+  used-percent and `reportsLimits` stays false — the same honest shape as Codex.
+  `execution` is reported as false/unknown because what a *deployed* agent can
+  do is not discoverable from here, and a guess would feed router hard filters.
+  `providerDetail.verifiedAgainstLiveService: false`.
+- **Cursor — structure real, mapping quarantined.** The CLI was not installed and
+  cursor.com is egress-blocked, so the JSON event shape could not be verified by
+  any means. Process lifecycle, cancellation, manifest and registry wiring are
+  real and tested; the single unverified piece is `mapCursorLine`, which throws
+  `CursorSchemaError` naming the calibration path instead of inventing plausible
+  events. `canResume` is reported false on purpose: a wrong `true` breaks resume
+  at runtime, a wrong `false` only costs a fresh start — asymmetric risk.
+  To finish: capture `agent -p --output-format json` output on a machine with
+  the CLI, run it through `calibrateFromSamples`, extend `mapCursorLine`.
 
 ### Phase 3 review fixes (found reviewing the Codex implementation)
 
@@ -114,6 +147,7 @@ regression tests:
 - 2026-08-21 — Architecture review completed and pushed to `claude/multi-assistant-routing-plan-vw0bwc`.
 - 2026-08-21 — Architecture accepted; Phase 0 scaffolding built and verified (`pnpm dev` boots API + UI against migrated SQLite; typecheck/lint/20 tests green).
 - 2026-08-22 — Phase 1 delivered: real Claude + Codex adapters written against the installed SDKs' type declarations, rule router, orchestrator with SSE and approvals, three UI screens. 45 tests green; core loop verified live end to end.
+- 2026-08-22 — Phase 4 delivered: work workspace with stricter defaults, Bedrock adapter against verified SDK types, Cursor scaffold with quarantined mapping. 85 tests green; two instances verified side by side with honest cross-provider filtering.
 - 2026-08-22 — Phase 3 (implemented in Codex) reviewed here: features sound, three seam defects fixed — probe/manifest authority inversion, blocking subprocess, unguarded daily job. 69 tests green; env-authenticated assistant verified routable again against a running server.
 - 2026-08-22 — Phase 2 delivered: checkpoints, portable handoff packages, `resets_at`-aware cooldowns, and automatic quota failover. 51 tests green; verified live — a limit on one assistant checkpointed and completed on the other, and an all-limited task parked with the reasons and reset times named.
 

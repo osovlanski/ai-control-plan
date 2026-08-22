@@ -133,7 +133,9 @@ export class Orchestrator {
       taskId: envelope.taskId,
       prompt,
       workdir,
-      permissionPolicy: { mode: "prompt-on-escalation" as const },
+      // Instance policy, not a hardcoded default: a work workspace can demand
+      // approval on escalation while a personal one runs broadly auto-approved.
+      permissionPolicy: { mode: this.config.policy.approvalMode },
       env: { redactionRules: DEFAULT_REDACTION_RULES, maxRuntimeMs: this.maxRuntimeMs },
     };
     const handle = priorRef

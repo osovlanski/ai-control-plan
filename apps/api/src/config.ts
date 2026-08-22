@@ -10,10 +10,19 @@ import { parse, stringify } from "yaml";
  * provider CLIs/SDKs authenticate in place.
  */
 export interface AssistantConfig {
-  /** anthropic | openai | fake (dev) — cursor/bedrock arrive in Phase 4. */
+  /** anthropic | openai | cursor | bedrock | fake (dev). */
   provider: string;
   enabled?: boolean;
+  /**
+   * Provider-specific settings. Bedrock needs the deployed AgentCore agent to
+   * invoke (it is a hosting platform, not a discoverable assistant), so that
+   * comes from configuration rather than capability discovery.
+   */
+  options?: Record<string, unknown>;
 }
+
+/** How far an assistant may act before it must ask (arch §12.7). */
+export type ApprovalMode = "auto-approve" | "prompt-on-escalation" | "read-only";
 
 export interface WorkspaceConfig {
   workspace: string;
@@ -26,6 +35,10 @@ export interface WorkspaceConfig {
   assistants: Record<string, AssistantConfig>;
   /** Absolute repo paths tasks may touch. Empty = refuse all coding tasks. */
   repoAllowlist: string[];
+  policy: {
+    /** Applied to every run this instance starts. */
+    approvalMode: ApprovalMode;
+  };
   failover: {
     auto: boolean;
     softThresholdPct: number;
@@ -43,13 +56,14 @@ export interface ResolvedConfig extends WorkspaceConfig {
   dbPath: string;
 }
 
-const DEFAULTS: Omit<WorkspaceConfig, "workspace"> = {
+const PERSONAL_DEFAULTS: Omit<WorkspaceConfig, "workspace"> = {
   api: { host: "127.0.0.1", port: 4176 },
   assistants: {
     "personal-claude": { provider: "anthropic" },
     "personal-codex": { provider: "openai" },
   },
   repoAllowlist: [],
+  policy: { approvalMode: "prompt-on-escalation" },
   failover: {
     auto: true,
     softThresholdPct: 85,
@@ -57,6 +71,24 @@ const DEFAULTS: Omit<WorkspaceConfig, "workspace"> = {
   },
   sync: { dailyHour: 7 },
 };
+
+/**
+ * A non-personal workspace starts stricter and opts in, rather than starting
+ * permissive and hoping the user tightens it: automatic failover is
+ * approval-gated (rerouting work code to another provider is a decision, not a
+ * default) and no assistants are assumed present.
+ */
+const WORK_DEFAULTS: Omit<WorkspaceConfig, "workspace"> = {
+  ...PERSONAL_DEFAULTS,
+  api: { host: "127.0.0.1", port: 4186 },
+  assistants: {},
+  policy: { approvalMode: "prompt-on-escalation" },
+  failover: { ...PERSONAL_DEFAULTS.failover, auto: false },
+};
+
+function defaultsFor(workspace: string): Omit<WorkspaceConfig, "workspace"> {
+  return workspace === "personal" ? PERSONAL_DEFAULTS : WORK_DEFAULTS;
+}
 
 export function configHome(env: NodeJS.ProcessEnv = process.env): string {
   return env.AGENT_PLANE_HOME ?? join(homedir(), ".agent-plane");
@@ -85,6 +117,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ResolvedConfig
     writeFileSync(configPath, renderDefaultConfig(workspace), "utf8");
   }
 
+  const defaults = defaultsFor(workspace);
   const raw: unknown = parse(readFileSync(configPath, "utf8"));
   if (raw !== null && (typeof raw !== "object" || Array.isArray(raw))) {
     throw new Error(`${configPath} must be a YAML mapping`);
@@ -93,11 +126,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ResolvedConfig
 
   const config: WorkspaceConfig = {
     workspace: file.workspace ?? workspace,
-    api: { ...DEFAULTS.api, ...file.api },
-    assistants: file.assistants ?? DEFAULTS.assistants,
-    repoAllowlist: file.repoAllowlist ?? DEFAULTS.repoAllowlist,
-    failover: { ...DEFAULTS.failover, ...file.failover },
-    sync: { ...DEFAULTS.sync, ...file.sync },
+    api: { ...defaults.api, ...file.api },
+    assistants: file.assistants ?? defaults.assistants,
+    repoAllowlist: file.repoAllowlist ?? defaults.repoAllowlist,
+    policy: { ...defaults.policy, ...file.policy },
+    failover: { ...defaults.failover, ...file.failover },
+    sync: { ...defaults.sync, ...file.sync },
   };
 
   validate(config, configPath);
@@ -119,6 +153,10 @@ function validate(config: WorkspaceConfig, path: string): void {
   if (!config.repoAllowlist.every((p) => typeof p === "string")) {
     problems.push("repoAllowlist must be a list of paths");
   }
+  const modes: ApprovalMode[] = ["auto-approve", "prompt-on-escalation", "read-only"];
+  if (!modes.includes(config.policy.approvalMode)) {
+    problems.push(`policy.approvalMode must be one of ${modes.join(" | ")}, got ${config.policy.approvalMode}`);
+  }
   for (const [id, assistant] of Object.entries(config.assistants)) {
     if (!assistant || typeof assistant.provider !== "string") {
       problems.push(`assistants.${id} must have a provider`);
@@ -130,7 +168,7 @@ function validate(config: WorkspaceConfig, path: string): void {
 }
 
 function renderDefaultConfig(workspace: string): string {
-  const doc = { workspace, ...DEFAULTS };
+  const doc = { workspace, ...defaultsFor(workspace) };
   return [
     `# Agent Control Plane — workspace "${workspace}"`,
     "# This instance IS the workspace: its DB, policy, and repo allowlist live here.",

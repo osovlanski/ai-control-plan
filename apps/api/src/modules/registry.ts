@@ -1,5 +1,13 @@
 import type { AgentAdapter, AssistantId, CapabilityManifest } from "@agent-plane/core";
-import { ClaudeAdapter, CodexAdapter, FakeAdapter } from "@agent-plane/adapters";
+import {
+  BedrockAdapter,
+  ClaudeAdapter,
+  CodexAdapter,
+  CursorAdapter,
+  FakeAdapter,
+  type BedrockOptions,
+  type CursorOptions,
+} from "@agent-plane/adapters";
 import type { ResolvedConfig } from "../config.js";
 import type { Db } from "../db/index.js";
 import { probeCapability, type CapabilityProbe } from "./capability-probe.js";
@@ -34,7 +42,7 @@ export class Registry {
        ON CONFLICT(id) DO UPDATE SET provider = excluded.provider, enabled = excluded.enabled`,
     );
     for (const [id, cfg] of Object.entries(this.config.assistants)) {
-      this.adapters.set(id, createAdapter(id as AssistantId, cfg.provider));
+      this.adapters.set(id, createAdapter(id as AssistantId, cfg.provider, cfg.options ?? {}));
       upsert.run(id, cfg.provider, cfg.enabled === false ? 0 : 1);
     }
     // Config removals: disable rows for assistants no longer configured.
@@ -169,16 +177,28 @@ export class Registry {
   }
 }
 
-function createAdapter(id: AssistantId, provider: string): AgentAdapter {
+function createAdapter(
+  id: AssistantId,
+  provider: string,
+  options: Record<string, unknown> = {},
+): AgentAdapter {
   switch (provider) {
     case "anthropic":
       return new ClaudeAdapter(id);
     case "openai":
       return new CodexAdapter(id);
+    case "cursor":
+      return new CursorAdapter(id, options as CursorOptions);
+    case "bedrock":
+      // Bedrock hosts YOUR agent: the runtime ARN is configuration, not
+      // something the plane can discover (review §2.4).
+      return new BedrockAdapter(id, options as BedrockOptions);
     case "fake":
       return new FakeAdapter(id);
     default:
-      throw new Error(`Unsupported provider "${provider}" for assistant ${id} (Phase 1 supports anthropic, openai, fake)`);
+      throw new Error(
+        `Unsupported provider "${provider}" for assistant ${id} (supported: anthropic, openai, cursor, bedrock, fake)`,
+      );
   }
 }
 
