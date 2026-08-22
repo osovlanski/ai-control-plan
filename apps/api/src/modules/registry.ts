@@ -113,17 +113,23 @@ export class Registry {
     const changed = !previous || previous.fingerprint !== probe.fingerprint || !this.manifest(id);
     let manifest = this.manifest(id);
     if (changed) {
+      // describe() IS the runtime probe and outranks anything scraped from local
+      // config (evidence priority, review §3.4). The cheap probe only decides
+      // WHETHER to re-describe; it must never author core manifest values, or a
+      // config-file guess silently overrides the adapter's own answer — which
+      // once marked env-authenticated assistants "auth missing" and made the
+      // router filter them out entirely.
       manifest = await this.sync(id);
       manifest.providerDetail = { ...manifest.providerDetail, version: probe.version, configHash: probe.configHash };
-      if (probe.models.length > 0) manifest.core.models = probe.models.map((model) => ({ id: model }));
-      manifest.core.auth.state = probe.authState === "ok" ? "ok" : "missing";
       this.db.prepare("UPDATE assistants SET manifest=? WHERE id=?").run(JSON.stringify(manifest), id);
     }
     const now = new Date().toISOString();
     if (previousDetails) {
+      // Only what the probe uniquely knows. Manifest-level changes (models,
+      // auth, capabilities) are already diffed and recorded by sync().
       const insertChange = this.db.prepare("INSERT INTO capability_changes (assistant_id,field,old_value,new_value,source,observed_at) VALUES (?,?,?,?, 'runtime-probe',?)");
-      for (const [field, value] of Object.entries({ "provider.version": probe.version, "core.auth.state": probe.authState, "core.models": probe.models.join(","), "provider.configHash": probe.configHash })) {
-        const oldValue = field === "core.models" ? (previousDetails.models as string[] | undefined)?.join(",") : field === "core.auth.state" ? previousDetails.authState : field === "provider.configHash" ? previousDetails.configHash : previousDetails.version;
+      for (const [field, value] of Object.entries({ "provider.version": probe.version, "provider.configHash": probe.configHash })) {
+        const oldValue = field === "provider.configHash" ? previousDetails.configHash : previousDetails.version;
         if (String(oldValue ?? "") !== String(value)) insertChange.run(id, field, String(oldValue ?? ""), String(value), now);
       }
     }
@@ -135,14 +141,23 @@ export class Registry {
     return { changed, manifest };
   }
 
-  async syncChangedAll(): Promise<void> {
+  /**
+   * One unavailable provider must not block the others, but a permanently
+   * failing probe must not be invisible either — failures are returned so the
+   * caller can log them rather than swallowed here.
+   */
+  async syncChangedAll(): Promise<{ synced: number; failed: Array<{ id: string; error: string }> }> {
+    const failed: Array<{ id: string; error: string }> = [];
+    let synced = 0;
     for (const id of this.adapters.keys()) {
       try {
         await this.syncChanged(id);
-      } catch {
-        // One unavailable provider must not prevent other assistants syncing.
+        synced += 1;
+      } catch (err) {
+        failed.push({ id, error: err instanceof Error ? err.message : String(err) });
       }
     }
+    return { synced, failed };
   }
 
   recentChanges(limit = 50): unknown[] {

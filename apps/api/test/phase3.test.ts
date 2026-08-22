@@ -6,7 +6,7 @@ import { loadConfig } from "../src/config.js";
 import { openDb } from "../src/db/index.js";
 import { Registry } from "../src/modules/registry.js";
 import { EventRetention } from "../src/modules/retention.js";
-import { msUntilDailyHour } from "../src/modules/jobs.js";
+import { msUntilDailyHour, scheduleDailyJobs } from "../src/modules/jobs.js";
 const dirs: string[] = [];
 afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 function setup() {
@@ -16,15 +16,24 @@ function setup() {
   return { db, config };
 }
 describe("Phase 3 jobs", () => {
-  it("skips describe while the cheap fingerprint is unchanged and records model changes", async () => {
+  it("skips describe while the fingerprint is unchanged, and re-describes when it moves", async () => {
     const { db, config } = setup(); let models = ["fake-1"];
-    const registry = new Registry(db, config, async () => ({ fingerprint: models.join(","), version: "1.0", authState: "ok", models, configHash: "abc" }));
+    const registry = new Registry(db, config, async () => ({ fingerprint: models.join(","), version: "1.0", authState: "ok", models, configHash: models.join(",") }));
     registry.init(); const describe = vi.spyOn(registry.adapter("personal-fake"), "describe");
     await registry.syncChanged("personal-fake"); await registry.syncChanged("personal-fake");
     expect(describe).toHaveBeenCalledTimes(1);
     models = ["fake-1", "fake-2"]; await registry.syncChanged("personal-fake");
     expect(describe).toHaveBeenCalledTimes(2);
-    expect(registry.recentChanges()).toEqual(expect.arrayContaining([expect.objectContaining({ field: "core.models", new_value: "fake-1,fake-2" })]));
+    // The probe reports what it uniquely knows (config identity). Capability
+    // changes themselves come from describe() via sync()'s manifest diff, so a
+    // config edit that does not change what the assistant can do is recorded
+    // as a config change — not as a phantom model change.
+    expect(registry.recentChanges()).toEqual(
+      expect.arrayContaining([expect.objectContaining({ field: "provider.configHash" })]),
+    );
+    expect(registry.recentChanges()).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ field: "core.models" })]),
+    );
     db.close();
   });
   it("gzip-archives old terminal-task events transactionally", () => {
@@ -39,5 +48,90 @@ describe("Phase 3 jobs", () => {
   });
   it("schedules the next local configured hour", () => {
     expect(msUntilDailyHour(7, new Date("2026-08-22T06:30:00"))).toBe(30 * 60 * 1000);
+  });
+});
+
+describe("capability probe vs. adapter authority", () => {
+  it("keeps describe()'s auth answer when the probe cannot see env credentials", async () => {
+    const { db, config } = setup();
+    // The real-world shape of the bug: the adapter authenticates via an env
+    // var, the file-only probe sees nothing. Lower-priority local-config
+    // evidence must not overwrite the runtime probe's answer, or the router
+    // hard-filters a perfectly usable assistant.
+    const registry = new Registry(db, config, async () => ({
+      fingerprint: "fp-1",
+      version: "1.0",
+      authState: "missing",
+      models: [],
+      configHash: "abc",
+    }));
+    registry.init();
+    await registry.syncChanged("personal-fake");
+
+    const manifest = registry.manifest("personal-fake")!;
+    expect(manifest.core.auth.state).toBe("ok"); // from describe(), not the probe
+    expect(manifest.providerDetail.version).toBe("1.0"); // probe still enriches
+    db.close();
+  });
+
+  it("does not let a config scrape replace the adapter's model list", async () => {
+    const { db, config } = setup();
+    const registry = new Registry(db, config, async () => ({
+      fingerprint: "fp-1",
+      version: "1.0",
+      authState: "ok",
+      models: ["scraped-from-config"],
+      configHash: "abc",
+    }));
+    registry.init();
+    await registry.syncChanged("personal-fake");
+
+    expect(registry.manifest("personal-fake")!.core.models.map((m) => m.id)).toEqual(["fake-1"]);
+    db.close();
+  });
+
+  it("probes without blocking the event loop", async () => {
+    // A synchronous spawn here would freeze every request and SSE stream.
+    const { probeCapability } = await import("../src/modules/capability-probe.js");
+    let ticked = false;
+    const probe = probeCapability("anthropic");
+    setImmediate(() => { ticked = true; });
+    await probe;
+    expect(ticked).toBe(true);
+  });
+});
+
+describe("daily job resilience", () => {
+  it("survives a failing job, reports it, and still reschedules", async () => {
+    const { db, config } = setup();
+    const registry = new Registry(db, config, async () => {
+      throw new Error("probe exploded");
+    });
+    registry.init();
+    const retention = {
+      archive: () => {
+        throw new Error("archive exploded");
+      },
+    } as unknown as EventRetention;
+    const errors: string[] = [];
+
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-22T06:00:00"));
+    const stop = scheduleDailyJobs(7, registry, retention, {
+      error: (_detail, message) => errors.push(message),
+    });
+
+    // First firing: both halves throw. Neither may escape as an unhandled
+    // throw (that would kill the API process), and the job must re-arm.
+    await vi.advanceTimersByTimeAsync(60 * 60 * 1000 + 100);
+    expect(errors).toEqual(["daily capability sync failed", "daily event retention failed"]);
+
+    // Second firing proves the reschedule survived the failure.
+    await vi.advanceTimersByTimeAsync(24 * 60 * 60 * 1000);
+    expect(errors).toHaveLength(4);
+
+    stop();
+    vi.useRealTimers();
+    db.close();
   });
 });

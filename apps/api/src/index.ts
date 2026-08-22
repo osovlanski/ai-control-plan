@@ -11,7 +11,7 @@ const { app, registry, orchestrator } = buildServer({ config, db });
 registry.init();
 const reconciled = orchestrator.reconcileOnBoot();
 await registry.syncChangedAll();
-const stopJobs = scheduleDailyJobs(config.sync.dailyHour, registry, new EventRetention(db));
+const stopJobs = scheduleDailyJobs(config.sync.dailyHour, registry, new EventRetention(db), app.log);
 
 app.log.info(
   {

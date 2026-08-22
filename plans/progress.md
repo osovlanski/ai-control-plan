@@ -2,7 +2,7 @@
 
 ## Current phase
 
-**Phase 3 — complete.** Daily change-driven capability discovery, the catalog change feed, compressed event retention, and boundary redaction are implemented. Next: Phase 4.
+**Phase 3 — complete, with three post-review fixes applied.** Daily change-driven capability discovery, the catalog change feed, compressed event retention, and boundary redaction are implemented and reviewed. Next: Phase 4.
 
 ## Done
 
@@ -71,6 +71,31 @@
 - `fastest` profile has no latency telemetry yet and says so in its explanation; real scoring lands in Phase 5.
 - Cross-provider `resume()` is never used — cross-provider continuation always goes through a fresh `start()` with the handoff package, by design.
 
+### Phase 3 review fixes (found reviewing the Codex implementation)
+
+The Phase 3 features were implemented well — redaction in particular correctly
+covers `Event.raw` pre-insert, with an end-to-end test. Three defects were found
+in the seams between the new code and existing invariants, all now fixed with
+regression tests:
+
+- **Probe overwrote the adapter's manifest, making authenticated assistants
+  unroutable.** `syncChanged` replaced `core.auth.state` and `core.models` with
+  values the cheap probe scraped from config files. The probe only checks
+  credential *files*, so an assistant authenticated via `ANTHROPIC_API_KEY` was
+  marked `auth: missing` at every boot and hard-filtered out of routing — while
+  the routing explanation read like a legitimate decision. This inverted the
+  evidence hierarchy (review §3.4): `describe()` *is* the runtime probe and
+  outranks local-config. The cheap probe now only decides **whether** to
+  re-`describe()`, and enriches `providerDetail` with version/configHash.
+- **`execFileSync` blocked the event loop** on the boot and daily-job path — up
+  to 5s per provider with no requests served, no SSE delivered, and in-flight
+  runs stalled. Now async `execFile`.
+- **The daily job could crash the process and kill its own reschedule.**
+  `retention.archive()` threw synchronously inside the timer callback with no
+  guard, and a throw also skipped `schedule()`, silently ending the daily job
+  forever. Both halves are now contained and always re-arm; `syncChangedAll`
+  reports per-assistant failures instead of swallowing them silently.
+
 ### Architecture changes made during Phase 3 (with reasons)
 
 - **Probes remain outside the six-method adapter contract.** Cheap CLI version, auth-state, configured-model, and MCP/skills hashes gate the existing `describe()` call.
@@ -89,6 +114,7 @@
 - 2026-08-21 — Architecture review completed and pushed to `claude/multi-assistant-routing-plan-vw0bwc`.
 - 2026-08-21 — Architecture accepted; Phase 0 scaffolding built and verified (`pnpm dev` boots API + UI against migrated SQLite; typecheck/lint/20 tests green).
 - 2026-08-22 — Phase 1 delivered: real Claude + Codex adapters written against the installed SDKs' type declarations, rule router, orchestrator with SSE and approvals, three UI screens. 45 tests green; core loop verified live end to end.
+- 2026-08-22 — Phase 3 (implemented in Codex) reviewed here: features sound, three seam defects fixed — probe/manifest authority inversion, blocking subprocess, unguarded daily job. 69 tests green; env-authenticated assistant verified routable again against a running server.
 - 2026-08-22 — Phase 2 delivered: checkpoints, portable handoff packages, `resets_at`-aware cooldowns, and automatic quota failover. 51 tests green; verified live — a limit on one assistant checkpointed and completed on the other, and an all-limited task parked with the reasons and reset times named.
 
 - 2026-08-22 — Phase 3 delivered: change-driven daily capability probes and catalog feed, compressed 30-day event retention, and pre-persistence/render/handoff redaction.
