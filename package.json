@@ -1,0 +1,25 @@
+{
+  "name": "agent-plane",
+  "private": true,
+  "version": "0.1.0",
+  "description": "AI Agent Control Plane — routes tasks across complete assistant environments",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "packageManager": "pnpm@10.33.0",
+  "scripts": {
+    "dev": "concurrently -k -n api,web -c blue,green \"pnpm --filter @agent-plane/api dev\" \"pnpm --filter @agent-plane/web dev\"",
+    "typecheck": "pnpm -r typecheck",
+    "lint": "eslint .",
+    "test": "pnpm -r --if-present test",
+    "build": "pnpm -r --if-present build"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.34.0",
+    "concurrently": "^9.2.0",
+    "eslint": "^9.34.0",
+    "typescript": "^5.9.2",
+    "typescript-eslint": "^8.40.0"
+  }
+}
