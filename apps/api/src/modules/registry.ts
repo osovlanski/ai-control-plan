@@ -5,8 +5,10 @@ import {
   CodexAdapter,
   CursorAdapter,
   FakeAdapter,
+  OpenRouterCodexAdapter,
   type BedrockOptions,
   type CursorOptions,
+  type OpenRouterOptions,
 } from "@agent-plane/adapters";
 import type { ResolvedConfig } from "../config.js";
 import type { Db } from "../db/index.js";
@@ -115,7 +117,7 @@ export class Registry {
   async syncChanged(id: string): Promise<{ changed: boolean; manifest: CapabilityManifest | null }> {
     const provider = this.config.assistants[id]?.provider;
     if (!provider) throw new Error(`Unknown assistant: ${id}`);
-    const probe = await this.capabilityProbe(provider);
+    const probe = await this.capabilityProbe(provider, this.config.assistants[id]?.options ?? {});
     const previous = this.db.prepare("SELECT fingerprint,details FROM capability_probes WHERE assistant_id=?").get(id) as { fingerprint: string; details: string } | undefined;
     const previousDetails = previous ? JSON.parse(previous.details) as Record<string, unknown> : undefined;
     const changed = !previous || previous.fingerprint !== probe.fingerprint || !this.manifest(id);
@@ -187,6 +189,8 @@ function createAdapter(
       return new ClaudeAdapter(id);
     case "openai":
       return new CodexAdapter(id);
+    case "openrouter":
+      return new OpenRouterCodexAdapter(id, options as OpenRouterOptions);
     case "cursor":
       return new CursorAdapter(id, options as CursorOptions);
     case "bedrock":
@@ -197,7 +201,7 @@ function createAdapter(
       return new FakeAdapter(id);
     default:
       throw new Error(
-        `Unsupported provider "${provider}" for assistant ${id} (supported: anthropic, openai, cursor, bedrock, fake)`,
+        `Unsupported provider "${provider}" for assistant ${id} (supported: anthropic, openai, openrouter, cursor, bedrock, fake)`,
       );
   }
 }

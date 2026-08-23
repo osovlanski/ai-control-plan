@@ -4,6 +4,37 @@ An agnostic control plane that catalogs your available AI assistant environments
 
 It routes between **complete assistant environments** (runtime + models + skills + MCP + tools + account limits), not bare LLM APIs.
 
+## Experimental Ox Alpha evaluation
+
+Ox Alpha is an OpenRouter model, not a standalone coding-agent environment. The
+control plane can evaluate it inside the Codex harness so shell, filesystem,
+streaming events, checkpoints, and Compare mode remain available.
+
+Keep the key outside configuration and source control:
+
+```bash
+export OPENROUTER_API_KEY="sk-or-..."
+```
+
+Add this opt-in assistant to the active workspace's
+`~/.agent-plane/<workspace>/config.yaml`:
+
+```yaml
+assistants:
+  personal-claude: { provider: anthropic }
+  personal-codex: { provider: openai }
+  personal-ox-alpha:
+    provider: openrouter
+    options:
+      model: stealth/ox-alpha
+      reasoningEffort: high
+```
+
+Then use Compare mode on representative tasks before allowing automatic
+routing. Ox Alpha is an anonymous preview model and its provider retains prompts
+and completions, so do not send sensitive or proprietary repositories unless
+that data policy is acceptable. It is deliberately not enabled by default.
+
 ## Status
 
 Architecture review phase — no implementation yet.

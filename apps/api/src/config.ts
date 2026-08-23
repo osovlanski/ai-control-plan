@@ -10,7 +10,7 @@ import { parse, stringify } from "yaml";
  * provider CLIs/SDKs authenticate in place.
  */
 export interface AssistantConfig {
-  /** anthropic | openai | cursor | bedrock | fake (dev). */
+  /** anthropic | openai | openrouter | cursor | bedrock | fake (dev). */
   provider: string;
   enabled?: boolean;
   /**

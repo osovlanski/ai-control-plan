@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AssistantId } from "@agent-plane/core";
-import { BedrockAdapter, CursorSchemaError, calibrateFromSamples, mapCursorLine, parseAgentOutput } from "../src/index.js";
+import { BedrockAdapter, CursorSchemaError, OpenRouterCodexAdapter, calibrateFromSamples, mapCursorLine, parseAgentOutput } from "../src/index.js";
 
 describe("Cursor mapping quarantine", () => {
   it("maps the shapes it does recognise", () => {
@@ -70,5 +70,24 @@ describe("Bedrock adapter", () => {
     ]);
     expect(parseAgentOutput("plain text", "text/plain")).toEqual(["plain text"]);
     expect(parseAgentOutput("", "application/json")).toEqual([]);
+  });
+});
+
+describe("OpenRouter Codex adapter", () => {
+  it("reports Ox Alpha as an agent-harness model and never embeds credentials", async () => {
+    const previous = process.env.OPENROUTER_API_KEY;
+    process.env.OPENROUTER_API_KEY = "test-secret-not-for-network";
+    try {
+      const manifest = await new OpenRouterCodexAdapter("personal-ox" as AssistantId).describe();
+      expect(manifest.provider).toBe("openrouter");
+      expect(manifest.core.models).toEqual([{ id: "stealth/ox-alpha", displayName: "Ox Alpha (preview)" }]);
+      expect(manifest.core.execution).toEqual({ shell: true, filesystem: true, web: "unknown" });
+      expect(manifest.core.auth).toEqual({ state: "ok", account: "env:OPENROUTER_API_KEY" });
+      expect(JSON.stringify(manifest)).not.toContain("test-secret-not-for-network");
+      expect(manifest.providerDetail).toMatchObject({ agentHarness: "codex", experimental: true });
+    } finally {
+      if (previous === undefined) delete process.env.OPENROUTER_API_KEY;
+      else process.env.OPENROUTER_API_KEY = previous;
+    }
   });
 });

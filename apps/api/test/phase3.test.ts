@@ -119,6 +119,26 @@ describe("capability probe vs. adapter authority", () => {
     const unknown = await probeCapability("not-a-real-provider");
     expect(unknown.version).toBe("in-process");
   });
+
+  it("fingerprints the configured OpenRouter credential variable", async () => {
+    const { probeCapability } = await import("../src/modules/capability-probe.js");
+    const name = "TEST_OPENROUTER_KEY_FOR_PROBE";
+    const previous = process.env[name];
+    delete process.env[name];
+    try {
+      const missing = await probeCapability("openrouter", { apiKeyEnv: name });
+      expect(missing.authState).toBe("missing");
+
+      process.env[name] = "test-only-secret";
+      const present = await probeCapability("openrouter", { apiKeyEnv: name });
+      expect(present.authState).toBe("ok");
+      expect(present.fingerprint).not.toBe(missing.fingerprint);
+      expect(JSON.stringify(present)).not.toContain("test-only-secret");
+    } finally {
+      if (previous === undefined) delete process.env[name];
+      else process.env[name] = previous;
+    }
+  });
 });
 
 describe("daily job resilience", () => {
