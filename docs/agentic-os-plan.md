@@ -107,13 +107,44 @@ One instance per machine stays the workspace/isolation model. Nothing in the Pha
 kernel is discarded; the Composer is inserted **between intake and the orchestrator**, and the
 existing router becomes stage 2 of it.
 
-### 3.1 AgentSpec — the central new artifact
+### 3.1 Normative ownership and lifecycle invariants
 
-A persisted, explainable description of the agent composed for one task. This is to the
-Agentic OS what `RoutingDecision` is to the control plane today — and it embeds one.
+These constraints are part of the architecture, not implementation guidance:
+
+1. **A composition is an immutable revision.** A task may have several composition revisions:
+   the initial run, parallel competitors, or a re-composition after failover. Every run points at
+   exactly one revision. A revision snapshots asset IDs **and content digests**, registry revision,
+   compiler version, rendered-bundle digest, policy revision and provisioning fidelity.
+2. **The control plane owns run state and ephemeral files.** Cockpit owns machine-global inventory
+   and config. Cockpit returns metadata and deterministic bundle content; it never accepts an
+   arbitrary directory and writes into a control-plane worktree.
+3. **Global config is never the silent fallback.** If requested isolation is unsupported, the
+   CompositionDecision says so before execution and policy either rejects the run or explicitly
+   permits an `ambient` fidelity tier.
+4. **Failover is a new composition revision.** Cross-harness handoff revalidates asset
+   compatibility, permissions, secrets, budget and bundle rendering for the destination. A
+   same-provider resume reuses the original immutable profile unless an explicit re-composition
+   is requested.
+5. **All cross-repo writes are idempotent and authenticated.** Registry reads are versioned;
+   usage postbacks have event IDs; retries cannot double count. Loopback is transport scope, not
+   authentication.
+6. **Assets and retrieved memory are untrusted inputs.** Lineage describes provenance/drift, not
+   safety. Auto-attachment additionally requires an allowed content digest, a current security
+   review, compatible capability requirements and workspace policy approval.
+7. **Selection may correctly choose no optional assets.** Composition optimizes task fit and
+   least privilege; it never attaches skills merely to satisfy a count.
+
+### 3.2 CompositionRevision and AgentSpec — the central new artifacts
+
+A persisted, explainable and immutable description of the agent composed for one run or a set
+of deliberately equivalent runs. This is to the Agentic OS what `RoutingDecision` is to the
+control plane today — and it embeds one. `Task.agentSpecId` is therefore replaced by a run's
+`compositionRevisionId`; the task may separately point at its latest recommended revision.
 
 ```yaml
 agent_spec:
+  schema_version: 1
+  composition_revision_id: CR-2001-1
   task_id: AG-2001
   intent:                      # stage-1 output; heuristic first, LLM-assist later
     kind: coding | planning | review | research | ops | content
@@ -122,19 +153,23 @@ agent_spec:
     risk: low | normal | high          # gates approval policy
   harness: claude-code | codex | cursor | bedrock      # stage-2 (existing router)
   model: { primary: ModelRef, fallbacks: [ModelRef], reasoning_effort?: low|med|high }
-  assets:                      # stage-3; every ref carries lineage status at compose time
-    skills: [{ id, source: library|local, lineage: clean|edited|... }]
-    mcp_servers: [{ id, scope: [tools allowed] }]
-    subagents: [{ id }]
+  registry: { revision: 1842, observed_at: "...", stale: false }
+  assets:                      # immutable refs, not mutable catalog pointers
+    skills: [{ id, revision, digest, source, lineage, security_review_id }]
+    mcp_servers: [{ id, revision, digest, tools_allowed: [...], secret_refs: [...] }]
+    subagents: [{ id, revision, digest }]
   context:                     # stage-4; rendered by the context compiler, per-run
     fragments: [typescript-style, repo:cockpit]
-    memory_bundles: [{ id, files: [...], reason: "linked from repo notes" }]
+    memory_bundles: [{ id, revision, digest, members: [...], reason: "linked from repo notes" }]
     rendered_system_prompt_ref: <blob>
+    bundle_digest: sha256:...
+    compiler: { version: 1, tokenizer: claude-sonnet, estimated_tokens: 8120 }
   policy:                      # stage-5
     permission: auto | prompt-on-escalation
     tool_allowlist: [...]
     budget: { max_tokens, max_cost_usd, max_runtime_ms }
   workspace: { repo, branch: task/AG-2001, worktree }
+  provisioning: { requested: isolated, achieved: full|partial|ambient, profile_digest: sha256:... }
   explanation_ref: <CompositionDecision id>
 ```
 
@@ -142,7 +177,7 @@ agent_spec:
 candidates considered, filters applied, what was chosen and why, and any user override —
 rendered in the UI *before* start, exactly like the routing recommendation panel today.
 
-### 3.2 Composer pipeline (stages)
+### 3.3 Composer pipeline (stages)
 
 1. **Intent classification** — v1 is the existing heuristic classifier (prompt + repo flags),
    extended with domain tagging from repo signals (languages, frameworks in the worktree).
@@ -152,22 +187,24 @@ rendered in the UI *before* start, exactly like the routing recommendation panel
    widen from "assistant" to "assistant × model" where the manifest lists multiple models.
    All existing hard filters, profiles, cooldowns, and telemetry scoring apply as-is.
 3. **Asset retrieval** — query the Asset Registry for skills/MCP/subagents matching the intent
-   (tag match first; vector retrieval optional later). Hard rules: an asset with lineage
-   `orphaned` or `update-available` past a staleness threshold is flagged in the explanation;
-   third-party assets accepted from the trends scan are only auto-attached if their lineage is
-   `clean` and they are on the workspace allowlist — otherwise they require a one-click opt-in.
+   (tag match first; vector retrieval optional later). Apply hard filters before ranking:
+   harness/model/OS compatibility, required binaries and secrets, conflicts, workspace policy,
+   content-digest allowlist and current security review. Lineage `clean` is useful provenance but
+   is not a trust decision. Ranking is deterministic for equal inputs, records positive and
+   negative evidence, and permits selecting no optional assets.
 4. **Context assembly** — call the context compiler with the selected fragments + memory
-   bundles and render a **per-run bundle** (system prompt / `CLAUDE.md` / `AGENTS.md` for the
-   task worktree) instead of the machine-global files. Size-budgeted: the compiler already
-   knows fragment priorities; the Composer gives it a token budget and it renders in priority
-   order, recording what was cut.
+   bundles and request a **per-run bundle** (system prompt / `CLAUDE.md` / `AGENTS.md`) instead
+   of machine-global files. Cockpit returns content plus a manifest; the control plane writes it
+   into its own worktree/profile. Rendering is token-budgeted for the selected model/tokenizer,
+   deterministic, and records included and excluded fragments with reasons.
 5. **Policy + budget** — from intent risk + workspace defaults (personal: broad auto-approve;
-   work: prompt-on-escalation), plus per-task cost/runtime caps that the orchestrator's
-   existing runtime-cap and limit-monitor machinery enforces.
+   work: prompt-on-escalation), plus per-task token/cost/runtime caps. Runtime enforcement exists;
+   M2 adds explicit token/cost accounting semantics, including provider reports that arrive late
+   or are cumulative, and defines cancel/overrun behavior when a hard cap cannot be exact.
 6. **Explain + confirm** — persist the CompositionDecision; the UI shows the full spec with
    per-stage reasons; user can override any stage (recorded, feeds telemetry).
 
-### 3.3 Provisioning (the adapter extension)
+### 3.4 Provisioning (the adapter extension)
 
 The one genuinely new adapter responsibility: start a run against a **generated profile**
 without touching global config.
@@ -175,9 +212,14 @@ without touching global config.
 ```ts
 interface AgentAdapter {
   // ...existing six methods unchanged...
-  /** Materialize the spec's assets into an isolated, disposable profile for this run.
-      Returns what start() needs. Throws NotSupportedError per-capability, honestly. */
-  provision?(spec: AgentSpec): Promise<ProvisionedProfile>;
+  /** Produce an inspectable plan without writing. */
+  prepare?(spec: AgentSpec): Promise<ProvisioningPlan>;
+  /** Atomically materialize an isolated profile owned by the control plane. */
+  provision?(plan: ProvisioningPlan): Promise<ProvisionedProfile>;
+  /** Prove the requested isolation/assets are effective before start(). */
+  verify?(profile: ProvisionedProfile): Promise<ProvisioningVerification>;
+  /** Idempotent cleanup after terminal run or retention expiry. */
+  dispose?(profile: ProvisionedProfile): Promise<void>;
 }
 ```
 
@@ -192,32 +234,42 @@ Per adapter, honestly tiered like everything else in the manifest:
 
 Rule: provisioning writes **only inside the task worktree or a per-run temp profile dir** —
 never into `~/.claude` / `~/.codex` / `~/.cursor`. Cockpit remains the sole writer of the
-machine-global config; the OS composes ephemeral overlays.
+machine-global config; the OS composes ephemeral overlays. Applying a plan is atomic and
+idempotent; generated files carry ownership metadata and never overwrite an unowned worktree
+file. Secret values are resolved at launch and are neither stored in AgentSpec nor rendered to
+disk. Profiles have a retention policy for same-provider resume and crash-safe garbage collection.
 
-### 3.4 Asset Registry (cockpit becomes the OS package manager)
+### 3.5 Asset Registry (cockpit becomes the OS package manager)
 
-The Composer needs to query, not scrape. Cockpit gains a read API (loopback, same trust model
-as its UI) — or, minimally, a versioned file contract — exposing:
+The Composer needs to query, not scrape. Cockpit gains a versioned, authenticated loopback API
+with separate read and postback credentials, exposing:
 
 ```text
-GET /api/registry/assets?kind=skill|agent|hook|mcp|fragment&assistant=&tag=
-      → [{ id, kind, name, description, tags, targets, lineage: {status, sourceUrl, stars},
-           installedAt, lastUsedAt?, stats?: { runs, tokensMedian, successRate } }]
-GET /api/registry/fragments/:name          # raw fragment for the context compiler
-GET /api/registry/memory/bundles?repo=&tags=
-GET /api/registry/memory/findings          # garden output, machine-readable
+GET /api/v1/registry/assets?kind=&assistant=&tag=&cursor=&limit=
+      → { registryRevision, nextCursor?, assets: [{ id, revision, digest, kind, nativeKind,
+           name, description, tags, targets, compatibility, requirements, conflicts,
+           lineage, trust, installedAt, lastUsedAt?, stats? }] }
+GET /api/v1/registry/assets/:id/revisions/:revision/content
+GET /api/v1/registry/fragments/:name
+GET /api/v1/registry/memory/bundles?repo=&tags=&cursor=
+GET /api/v1/registry/memory/findings       # garden output, machine-readable
 ```
 
-The control plane's registry module federates this into its own catalog (cached, synced by the
-existing daily sync), so the Composer works even when cockpit is briefly down, and the
+Responses carry schema version, ETag and deterministic ordering. Incremental sync includes
+tombstones. The API defines bounded payloads, structured errors, partial-result behavior and a
+registry revision. The control plane's registry module federates this into its own catalog
+(cached, synced by the existing daily sync), so the Composer works even when cockpit is briefly down, and the
 Assistant Catalog UI can show "what this environment has installed" from real data instead of
-the opaque `provider` bag.
+the opaque `provider` bag. Workspace policy defines a maximum cache age; stale data is visible
+in CompositionDecision and may block high-risk runs.
 
 The reverse edge closes the learning loop: after each run the control plane POSTs per-asset
-usage back (`skill X attached, invoked N times, task succeeded, tokens/cost share`), which
-cockpit stores next to lineage — this is the ground truth behind "which skills actually pay."
+usage back as idempotent events (`eventId`, asset revision, attached, invocation count,
+observed outcome and attribution method). Cockpit stores operational usage separately from the
+versioned lineage ledger and joins by immutable asset revision. Attachment, invocation and
+causal value remain distinct; telemetry must not claim that an attached asset caused success.
 
-### 3.5 Memory Service
+### 3.6 Memory Service
 
 - **Read path (compose time):** memory bundles are selected by repo + tag + graph proximity
   (files linked from the repo's notes), filtered by Garden health — `stale`/`duplicate`
@@ -232,28 +284,29 @@ cockpit stores next to lineage — this is the ground truth behind "which skills
   power stage-3/4 retrieval and the Knowledge tab; the 3D graph mockup's "vector index" nodes
   visualize these. Pure enhancement — tag/graph retrieval must work without it.
 
-### 3.6 Economics Ledger (the dashboard's substrate)
+### 3.7 Economics Ledger (the dashboard's substrate)
 
-One append-only store, one writer path:
+One append-only logical ledger with one idempotent ingestion authority:
 
 ```text
-UsageRecord   runId?, sessionRef?, source(plane|cockpit-import), assistantId, model,
-              tokensIn, tokensOut, cachedTokens, costUsd?, apiEquivalentUsd, at
+UsageRecord   eventId, runId?, provider, sessionRef?, source, assistantId, model,
+              accounting(delta|cumulative), tokensIn, tokensOut, cachedTokens,
+              costUsd?, apiEquivalentUsd, pricingVersion, observedAt
 SubscriptionPlan  provider, name, monthlyUsd, includedQuota, renewsAt
 AssetUsage    assetId, runId, invoked, outcome, at
 SavingsEstimate   runId|assetId, minutesSavedEstimate, method(model-estimate|user-set), at
 ```
 
-- The control plane's `usage.updated` events are the primary source; cockpit's session
-  parsers (Claude/Codex logs) become **importers** into the same store with dedup by session
-  ref — ending the double-count.
+- The control plane owns ingestion. Its `usage.updated` events are primary; cockpit's session
+  parsers submit import events through the same idempotent boundary. Dedup keys include provider
+  and session ref, and source precedence plus delta-vs-cumulative semantics are explicit.
 - `apiEquivalentUsd` prices subscription tokens at API list price — that single derived column
   powers "Tokens used $174 vs flat $240 → 0.7× ROI" and the tier advisor.
 - "Skills saved $X" is explicitly an **estimate**: minutes-saved per run is model-estimated,
   labeled as such (the mockup's "AI-estimated, click to tune"), and user-tunable per asset.
   Net ROI = savings estimate − spend, always shown with its assumptions.
 
-### 3.7 Operator UI (the shell)
+### 3.8 Operator UI (the shell)
 
 Merge direction (recommendation, see §6): the control-plane web app absorbs cockpit's tabs
 over time; until then, one shared header/nav shell links the two locally. Target screens
@@ -282,34 +335,35 @@ loop), in dependency order.
 
 | # | Change | Notes |
 |---|---|---|
-| M0 | **Contracts package** — `AgentSpec`, `CompositionDecision`, `AssetRef`+lineage enum, `UsageRecord`, registry API types | Single source of truth both repos consume. Lives in `ai-control-plan/packages/contracts`; cockpit consumes it (git dep or published private pkg) |
+| M0 | **Versioned contracts package** — schemas for `CompositionRevision`, `AgentSpec`, `CompositionDecision`, registry and telemetry plus OpenAPI | Independently versioned artifact consumed by both repos; generated types are convenience, JSON Schema/OpenAPI are the wire authority. No moving-branch git dependency |
 
 ### ai-control-plan
 
 | # | Change | Builds on |
 |---|---|---|
-| M1 | Domain + migrations: `AgentSpec`, `CompositionDecision`, `AssetUsage` tables; Task gains `agentSpecId` | existing migration runner |
+| M1 | Domain + migrations: immutable `CompositionRevision`, `AgentSpec`, `CompositionDecision`, `AssetUsage` tables; Run gains `compositionRevisionId` | existing migration runner |
 | M2 | **Composer module** (module #6) with the 6-stage pipeline; existing router called as stage 2 unchanged | router, classifier |
-| M3 | Adapter `provision()` for Claude and Codex (per-run profile dir + worktree files); RunSpec gains `profile` | adapters, git worktrees |
+| M3 | Adapter prepare/provision/verify/dispose lifecycle for Claude and Codex; RunSpec gains an immutable verified profile | adapters, git worktrees |
 | M4 | Registry federation: consume cockpit's registry API into the catalog; extend daily sync + CapabilityChange to assets | registry module |
-| M5 | Context-bundle request path: call cockpit's compiler for per-run rendering (or vendor the render fn via contracts pkg) | — |
-| M6 | Composition telemetry: per-asset attribution on run end → POST back to cockpit; extend the Phase-5 scorer to read it | telemetry |
+| M5 | Context-bundle request path: Cockpit returns deterministic bundle content + manifest; control plane writes and owns it | M9 |
+| M6 | Idempotent composition telemetry: distinguish attached/invoked/validated and observed outcome; shadow-score before affecting selection | telemetry |
 | M7 | UI: New Task shows the full CompositionDecision (not just routing); Task Detail gains a "Composition" tab | existing panels |
 
 ### cockpit
 
 | # | Change | Builds on |
 |---|---|---|
-| M8 | **Registry read API** (`/api/registry/...` above) over Installed + lineage + fragments + memory | installed/lineage/context modules |
-| M9 | Context compiler: **per-run bundle target** — render selected fragments to a caller-supplied dir with a token budget, no drift-tracking (ephemeral) | Spec B compiler |
-| M10 | Accept per-asset usage postbacks; store next to lineage; show "used N times / last outcome" in Installed | lineage ledger |
-| M11 | Usage unification: session parsers write `UsageRecord`s (dedup by session ref) instead of a private shape | Usage/Retro tabs |
+| M8 | **Versioned registry API** (`/api/v1/registry/...` above) over Installed + lineage + fragments + memory, with auth, revisions and tombstones | installed/lineage/context modules |
+| M9 | Context compiler: pure **per-run bundle target** returning selected content + manifest under a tokenizer-aware budget | Spec B compiler |
+| M10 | Accept idempotent per-asset usage events into an operational ledger; show attachment/invocation/outcome separately | Usage/Retro infrastructure |
+| M11 | Usage unification: session parsers submit provider-qualified `UsageRecord` imports to the control-plane ingestion boundary | Usage/Retro tabs |
 
-**Definition of done for the mandatory core:** one prompt entered in the UI produces a fully
-explained AgentSpec (harness, model, 2+ selected skills, scoped MCP list, composed context
-bundle with a memory file, budget); the run executes in a worktree with **only** that profile
-visible to the agent; on completion, per-asset usage appears in cockpit's Installed tab and
-the composition outcome is queryable for the scorer.
+**Definition of done for the mandatory core:** representative prompts produce fully explained,
+immutable AgentSpecs (including a legitimate zero-optional-asset case); each run executes with
+only its verified profile visible. Same-provider resume reuses the snapshot, while a simulated
+cross-provider failover creates and explains a compatible new revision. Bundle/profile digests
+make the run reproducible; duplicate telemetry delivery does not double count; observed asset
+usage and validation outcome are queryable without claiming unsupported causal attribution.
 
 ## 5. Optional changes (features from the mockups)
 
@@ -345,9 +399,9 @@ None block the core; each lists its prerequisite.
 
 | Phase | Content | Success condition |
 |---|---|---|
-| **6 — Contracts & registry** | M0, M8, M4, M11 | Control-plane catalog lists every cockpit asset with lineage; one deduped UsageRecord stream |
-| **7 — Composer & provisioning** | M1, M2, M3, M5, M7 | The §4 definition-of-done demo, minus learning |
-| **8 — Learning loop & memory** | M6, M9 (if not pulled into 7), M10, O6 | Composition scorer demonstrably prefers assets with better outcomes; a stale memory bundle is visibly demoted |
+| **6 — Contracts, threat model & registry** | M0, M8, M4, M11 | Versioned contract tests pass in both repos; catalog sync handles revisions, tombstones, auth, stale cache and deduped usage |
+| **7 — Bundles, Composer & provisioning** | M9, M5, M1, M2, M3, M7 | Deterministic bundle and verified isolated profile; resume, failover and parallel-run lifecycle demonstrated |
+| **8 — Learning loop & memory** | M6, M10, O6 | Telemetry is idempotent; shadow scoring is inspectable; a stale memory bundle is visibly demoted without automatically changing production selection |
 | **9 — Economics & insights** | O1–O4, O10 | Dashboard matches mockups with honest chips; tier advice derived from real ledger |
 | **10 — Depth** | O5, O7, O8, O9, O11, O12 | per feature |
 
@@ -363,16 +417,40 @@ starts until the previous one's success condition is shown live.
 2. **Registry availability coupling.** The Composer must not hard-depend on cockpit being up:
    federated cache in the control plane (M4) is mandatory, not an optimization.
 3. **Third-party asset safety.** Trends-scan skills are third-party code now being
-   *auto-attached* to agents. The lineage gate in stage 3 (clean + allowlisted, else opt-in)
-   is a security boundary and must be enforced in the Composer, not the UI.
+   *auto-attached* to agents. Content-digest allowlisting, a current security review,
+   compatibility checks and workspace policy are the security boundary and must be enforced in
+   the Composer, not the UI; `lineage: clean` alone never authorizes attachment.
 4. **Economics honesty.** ROI numbers built on estimated minutes-saved can rot into fiction.
    Every derived figure carries its method chip (`guessed` / `estimated` / `measured`) end to
    end — the mockups already gesture at this; make it a schema field, not a CSS class.
 5. **Double counting** during the M11 transition — dedup by provider session ref must land
    with the importer, not after.
 6. **Scope creep via the dashboard.** The nine cards are queries, not subsystems. Any card
-   needing a new store beyond §3.6 gets deferred, not grown.
-7. **Open decisions to make before Phase 7:** (a) contracts distribution (workspace path dep
-   vs published package); (b) embedding runtime for O7 (local model vs API — privacy default
+   needing a new store beyond §3.7 gets deferred, not grown.
+7. **Open decisions to make before Phase 7:** (a) contracts artifact distribution and release
+   process (private registry vs pinned release artifact; never a moving branch); (b) embedding runtime for O7 (local model vs API — privacy default
    says local); (c) whether stage-1 LLM assist (O8) is worth its per-task cost, decided by
    measuring heuristic misroutes first; (d) single-port Operator UI now vs linked shells.
+8. **Composition reproducibility.** Mutable catalog IDs make old decisions impossible to audit.
+   Mitigation: snapshot revisions and content/bundle/profile digests on every CompositionRevision.
+9. **Failover/profile mismatch.** A profile composed for Claude may be invalid or unsafe in
+   Codex. Mitigation: cross-harness failover always recomposes and verifies; it never translates
+   silently or reuses an incompatible overlay.
+10. **Filesystem and secret leakage.** A remote compiler writing caller-selected paths or a
+    generated MCP file containing credentials breaks the ownership boundary. Mitigation: Cockpit
+    returns content only; the control plane writes bounded paths and resolves secret references
+    in memory at launch.
+11. **False attribution.** Successful runs with attached assets do not prove those assets helped.
+    Mitigation: distinguish attached, invoked and validated outcomes; begin with shadow scoring,
+    expose the attribution method and require stronger evidence before automatic ranking changes.
+
+## 8. Revision notes
+
+### 2026-08-26 — contract and lifecycle hardening
+
+- Replaced task-level mutable AgentSpec linkage with immutable per-run CompositionRevisions.
+- Made resume, failover, parallel execution, profile retention and cleanup explicit.
+- Strengthened registry versioning, compatibility, trust, authentication and idempotency.
+- Moved worktree writes to the control plane and made Cockpit's bundle API pure.
+- Corrected the M5/M9 phase dependency and removed the artificial two-skill acceptance target.
+- Defined conservative telemetry semantics before economics or learning influences selection.
