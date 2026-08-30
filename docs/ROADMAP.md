@@ -20,3 +20,4 @@
 ## Avoid
 
 - Duplicating Cockpit's tooling-management UI or building a generalized multi-tenant cloud before local reliability is proven.
+- Decide whether to merge `docs/agentic-os-plan.md` into the primary repository documentation.

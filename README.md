@@ -53,6 +53,7 @@ normalized-event contract version is `1.0`.
 | [`docs/architecture-review.md`](docs/architecture-review.md) | Review: verified provider capabilities, challenged assumptions, KEEP / CHANGE / REMOVE / DEFER |
 | [`docs/revised-architecture.md`](docs/revised-architecture.md) | The accepted target architecture |
 | [`plans/implementation-plan.md`](plans/implementation-plan.md) | Phased delivery plan (Phase 0–5) |
+| [`docs/agentic-os-plan.md`](docs/agentic-os-plan.md) | Agentic OS — design & change plan (Phases 6–10, proposed) |
 | [`plans/progress.md`](plans/progress.md) | Living progress log |
 
 ## Run and verify
