@@ -5,3 +5,4 @@ export * from "./events.js";
 export * from "./capabilities.js";
 export * from "./adapter.js";
 export * from "./redaction.js";
+export * from "./contracts.js";

@@ -141,6 +141,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ResolvedConfig
 
 function validate(config: WorkspaceConfig, path: string): void {
   const problems: string[] = [];
+  const loopbackHosts = new Set(["127.0.0.1", "::1", "localhost"]);
+  if (!loopbackHosts.has(config.api.host)) {
+    problems.push(`api.host must be a loopback address until authenticated remote mode exists, got ${config.api.host}`);
+  }
   if (!Number.isInteger(config.api.port) || config.api.port < 1 || config.api.port > 65535) {
     problems.push(`api.port must be 1-65535, got ${config.api.port}`);
   }
