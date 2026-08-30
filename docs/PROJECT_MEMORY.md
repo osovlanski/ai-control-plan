@@ -13,3 +13,4 @@ AI Agent Control Plane routes work across complete assistant environments (Claud
 - Weaknesses: large orchestration module, no authenticated remote mode, no frontend tests, limited production packaging/observability.
 - Portfolio: the source of truth for control/execution-plane contracts. `ai-control-plan-agentic-os` is a worktree branch adding a proposed plan, not a separate product. Cockpit is a plausible UX/observability consumer, not currently integrated.
 - Open questions: intended trust boundary for the API; whether remote execution is actually required; ownership/versioning of contracts shared with Cockpit.
+This is not an independent product: it is the `docs/agentic-os-contract-lifecycle` documentation worktree of `ai-control-plan`. The branch proposes later Agentic OS lifecycle phases; proposals must not be reported as shipped features. Build/run/test and architecture match the parent repository; do not evolve duplicate application code here.

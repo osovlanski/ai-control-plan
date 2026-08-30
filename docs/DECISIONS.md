@@ -7,3 +7,7 @@
 - Use normalized events and portable checkpoints as the handoff boundary. Supported by core contracts and orchestration implementation.
 - Use SQLite for the local-first prototype. Supported by API dependencies and migrations.
 - Remote runners and broader Agentic OS services remain proposals, not accepted implementation commitments.
+- Maintain this as a documentation worktree of the control plane, proven by Git worktree metadata and common history.
+- Treat the Agentic OS lifecycle/contracts as proposed until merged and implemented.
+- Preserve the existing control-plane adapter/event/checkpoint boundaries as the base of any wider platform.
+- No evidence supports an independent deployment or product identity for this worktree.
