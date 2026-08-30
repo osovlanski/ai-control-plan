@@ -61,4 +61,11 @@ describe("workspace config", () => {
     writeFileSync(join(dir, "config.yaml"), "api:\n  port: 99999\n");
     expect(() => loadConfig(env())).toThrow(/api\.port/);
   });
+
+  it("rejects non-loopback API binds until authenticated remote mode exists", () => {
+    const dir = join(home, "personal");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "config.yaml"), "api:\n  host: 0.0.0.0\n  port: 4176\n");
+    expect(() => loadConfig(env())).toThrow(/api\.host must be a loopback address/);
+  });
 });

@@ -39,20 +39,30 @@ export class CheckpointService {
     if (row.worktree_path && row.base_ref) {
       try {
         gitRef = await commitCheckpoint(row.worktree_path, `checkpoint(${taskId}): ${reason}`);
-        diffStat = await worktreeDiffStat(row.worktree_path, row.base_ref);
-        // Reconcile the envelope's file list with what git actually shows —
-        // the agent may have touched files it never announced in an event.
-        const changed = await worktreeChangedFiles(row.worktree_path, row.base_ref);
-        if (changed.length > 0) {
-          envelope.artifacts.changedFiles = Array.from(
-            new Set([...envelope.artifacts.changedFiles, ...changed]),
-          );
-          envelope.artifacts.diffRef = gitRef ?? undefined;
-          this.tasks.saveEnvelope(envelope);
-        }
       } catch {
-        // A git failure must not lose the checkpoint — the envelope snapshot
+        // A commit failure must not lose the checkpoint — the envelope snapshot
         // is the part handoff cannot do without.
+      }
+
+      // Diff inspection is best-effort and must not erase a durable commit ref.
+      // This also handles runners where the worktree's base ref is temporarily
+      // unavailable even though the checkpoint commit itself succeeded.
+      if (gitRef) {
+        try {
+          diffStat = await worktreeDiffStat(row.worktree_path, row.base_ref);
+          // Reconcile the envelope's file list with what git actually shows —
+          // the agent may have touched files it never announced in an event.
+          const changed = await worktreeChangedFiles(row.worktree_path, row.base_ref);
+          if (changed.length > 0) {
+            envelope.artifacts.changedFiles = Array.from(
+              new Set([...envelope.artifacts.changedFiles, ...changed]),
+            );
+            envelope.artifacts.diffRef = gitRef;
+            this.tasks.saveEnvelope(envelope);
+          }
+        } catch {
+          // A diff failure does not invalidate the checkpoint commit.
+        }
       }
     }
 

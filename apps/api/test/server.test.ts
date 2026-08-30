@@ -29,6 +29,18 @@ function makeApp(): BuiltServer {
 }
 
 describe("api server", () => {
+  it("publishes a versioned read-only integration contract", async () => {
+    const { app } = makeApp();
+    const res = await app.inject({ method: "GET", url: "/api/meta" });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({
+      apiVersion: "1.0",
+      eventVersion: "1.0",
+      workspace: "personal",
+      capabilities: ["tasks.read", "events.read", "events.stream", "routing.read"],
+    });
+  });
+
   it("reports health with workspace and migration count", async () => {
     const { app } = makeApp();
     const res = await app.inject({ method: "GET", url: "/api/health" });

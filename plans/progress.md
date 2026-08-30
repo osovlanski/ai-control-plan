@@ -4,6 +4,8 @@
 
 **Phase 5 — complete. All planned phases are delivered.** Parallel comparison and race modes run in isolated worktrees, and the routing profiles are now fed by measurements from the user's own runs.
 
+**Live verification against real providers (2026-08-22) — see log entry below for the full report.** Two real defects found and fixed in `claude.ts`/`orchestrator.ts`; everything else in the core loop, handoff, parallel compare, and telemetry worked against real `claude`/`codex` CLIs on the first try.
+
 ## Done
 
 - [x] Reviewed the original proposal (`docs/original-plan.md`)
@@ -171,6 +173,86 @@ regression tests:
 - Model discovery uses models named in supported local config when no typed SDK/CLI model-list surface exists.
 - Baseline redaction covers common keys, bearer tokens, JWTs, and secret-style `.env` assignments; it is not a general DLP engine.
 
+### Live provider verification (2026-08-22) — findings and fixes
+
+First run against real `claude` and `codex` CLIs (previously only exercised via
+`FakeAdapter`). Full loop worked end to end: capability discovery, routing,
+run/stream/checkpoint, manual cross-provider handoff, parallel compare with
+merge, and telemetry-fed `fastest` routing. Two real defects found and fixed;
+one environment limitation found and left alone (not this repo's bug).
+
+**Fixed — `ClaudeAdapter` never emitted `file.changed`.** `mapMessage` only
+produced `tool.started`/`tool.completed` for `Write`/`Edit`/`NotebookEdit`
+calls, even though the normalized event set (arch §4) defines `file.changed`
+as part of the closed v1 set and `CodexAdapter` already implements it from
+`file_change` items. `progress.md`'s "Changed Files" only looked right by
+accident, via the git-derived reconciliation in `checkpoint.ts`. Fixed by
+tracking pending file-mutating tool calls by `toolUseId` in `claude.ts` and
+emitting `file.changed` (`path`, `kind`, `tool`) when their `tool_result`
+comes back non-error. Verified live: a real `Write` call for `hello.txt` now
+produces a `file.changed` event.
+
+**Fixed — orchestrator ignored the `ok` flag on `file.changed` events.**
+`CodexAdapter` already reports failed writes with `ok: item.status ===
+"completed"` in the payload (a real, intentional signal), but
+`orchestrator.ts`'s `applyEvent` added the path to
+`envelope.artifacts.changedFiles` unconditionally. Caught live: a Codex run
+whose sandbox rejected every write (see below) still showed the never-created
+file in `progress.md`'s "Changed Files" and in the parallel-compare diff
+summary. Fixed by skipping the add when `payload.ok === false`. Verified live
+on a second Codex run under the same sandbox failure: "Changed Files" is now
+correctly empty.
+
+**Not fixed — Codex CLI's own sandbox fails in this container.** Every real
+Codex run here failed to write any file, with `bwrap: loopback: Failed
+RTM_NEWADDR: Operation not permitted` (also reproduced with the bare `codex
+exec -s workspace-write` CLI, no plane involved). Codex's bundled bubblewrap
+sandbox tries to set up a loopback network device for `workspace-write` mode
+and this container doesn't grant the capability (`bubblewrap` isn't even on
+PATH here — codex falls back to a bundled copy). This is a host/container
+permission issue, not an `ai-control-plan` bug — not touched. One side effect
+worth knowing: `CodexAdapter` maps the SDK's `turn.completed` unconditionally
+to `run.ended {ok:true}` (that's genuinely what the typed event means — the
+turn completed; there's no other typed success/failure signal at this SDK
+layer), so a Codex run that self-reports total failure in its final message
+still ends `ok:true` and counts as a telemetry success. This is consistent
+with the project's existing policy against inferring outcomes from message
+text, but it means `/api/scores` successRate for Codex is currently
+optimistic in an environment where its sandbox can't write at all.
+
+**Observed, reported as a judgment call, not fixed — `handoff.md`'s "Errors
+encountered" section is noisy on manual handoff.** Cancelling a run to hand
+it off makes the Claude/Codex adapter's stream throw (abort), which both
+adapters classify as a generic `error` event ("Claude Code process aborted by
+user"). This is harmless functionally — `orchestrator.ts` sets
+`run.handingOff = true` before every cancel path (manual handoff, `/cancel`,
+shutdown, race-mode loser cleanup), so `settleRun` always returns early and
+this never triggers spurious failure-based failover — but the same `error`
+event still feeds `checkpoint.ts`'s `summarizeActivity`, so a fresh assistant
+reading `handoff.md` sees an "Errors encountered" line that looks like a
+provider fault when it was actually an intentional handoff. Distinguishing
+"aborted because we're handing off" from "aborted because something broke"
+from the error text alone would be a fragile heuristic; flagging instead of
+fixing.
+
+**Also observed:** `checkpoint.ts`'s `summarizeActivity` digest lists recent
+tool calls as bare "Tool completed" / "Tool completed" / "Tool completed" for
+Claude-originated runs, because `tool.completed`'s `summary` field never
+carried the tool name (only `tool.started` did). Real handoff.md output showed
+this — it's a content-quality gap in the handoff package, not a correctness
+bug, and not fixed here.
+
+Everything else matched the CHECK list exactly: `run.started` carried a real
+`providerSessionRef` (visible in the `runs` table even when the SSE client
+connected after the event fired — a test-script timing artifact, not a
+mapping bug); `usage.updated` carried real token counts and cost for Claude
+and real token counts for Codex; cross-provider handoff continued in the same
+worktree/branch without redoing already-checkpointed work; parallel compare
+produced two real worktrees/branches, a real diff for the working competitor,
+and a clean merge onto `task/<id>` with the loser's branch surviving;
+`fastest` routing cited a real measurement ("16.3s over 3 runs") instead of
+the "no latency telemetry yet" placeholder.
+
 ## Log
 
 - 2026-08-21 — Architecture review completed and pushed to `claude/multi-assistant-routing-plan-vw0bwc`.
@@ -182,3 +264,4 @@ regression tests:
 - 2026-08-22 — Phase 2 delivered: checkpoints, portable handoff packages, `resets_at`-aware cooldowns, and automatic quota failover. 51 tests green; verified live — a limit on one assistant checkpointed and completed on the other, and an all-limited task parked with the reasons and reset times named.
 
 - 2026-08-22 — Phase 3 delivered: change-driven daily capability probes and catalog feed, compressed 30-day event retention, and pre-persistence/render/handoff redaction.
+- 2026-08-22 — First live run against real `claude`/`codex` CLIs (all prior verification used `FakeAdapter`). Found and fixed two real defects: `ClaudeAdapter` never emitted `file.changed` (added), and the orchestrator ignored the `ok:false` flag Codex's adapter already sends on failed writes (now respected). Found and left alone: Codex's own bundled sandbox can't write files in this container (`bwrap: loopback` permission error, reproduced outside the plane too) — a host limitation, not a repo bug. 83 tests green after the fixes; full loop re-verified live end to end including cross-provider handoff and parallel compare with merge.

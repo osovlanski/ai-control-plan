@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { Codex, type Thread, type ThreadEvent, type ThreadItem } from "@openai/codex-sdk";
+import { Codex, type CodexOptions, type Thread, type ThreadEvent, type ThreadItem } from "@openai/codex-sdk";
 import type {
   AgentAdapter,
   AssistantId,
@@ -20,6 +20,15 @@ interface CodexRunState {
   abort: AbortController;
 }
 
+export interface CodexAdapterOptions {
+  /** Capability-provider label; execution still uses the Codex agent runtime. */
+  provider?: string;
+  models?: CapabilityManifest["core"]["models"];
+  authEnvVars?: string[];
+  providerDetail?: Record<string, unknown>;
+  codex?: CodexOptions;
+}
+
 /**
  * OpenAI Codex adapter over @openai/codex-sdk (JSONL event stream).
  *
@@ -32,29 +41,32 @@ interface CodexRunState {
  *   (workspace-write, approvalPolicy "never"); supportsMidRunInput: false.
  */
 export class CodexAdapter implements AgentAdapter {
-  private codex = new Codex();
+  private codex: Codex;
   private runs = new Map<string, CodexRunState>();
 
-  constructor(readonly id: AssistantId) {}
+  constructor(readonly id: AssistantId, private options: CodexAdapterOptions = {}) {
+    this.codex = new Codex(options.codex);
+  }
 
   async describe(): Promise<CapabilityManifest> {
     return {
       assistantId: this.id,
-      provider: "openai",
+      provider: this.options.provider ?? "openai",
       core: {
-        models: [{ id: "default", displayName: "Codex default (CLI-configured)" }],
+        models: this.options.models ?? [{ id: "default", displayName: "Codex default (CLI-configured)" }],
         canResume: true, // resumeThread(threadId); threads persisted in ~/.codex/sessions
         canMcp: true,
         supportsMidRunInput: false,
         reportsUsage: true,
         reportsLimits: false, // no quota-% payload at this SDK layer; limit hits via error classification
         execution: { shell: true, filesystem: true, web: "unknown" },
-        auth: detectAuth(),
+        auth: detectAuth(this.options.authEnvVars),
       },
       providerDetail: {
         runtime: "@openai/codex-sdk",
         sandboxModes: ["read-only", "workspace-write", "danger-full-access"],
         approvalPolicies: ["never", "on-request", "on-failure", "untrusted"],
+        ...this.options.providerDetail,
       },
       evidence: { source: "local-config", observedAt: new Date().toISOString() },
     };
@@ -246,7 +258,11 @@ export class CodexAdapter implements AgentAdapter {
   }
 }
 
-function detectAuth(): CapabilityManifest["core"]["auth"] {
+function detectAuth(authEnvVars?: string[]): CapabilityManifest["core"]["auth"] {
+  if (authEnvVars) {
+    const configured = authEnvVars.find((name) => process.env[name]);
+    return configured ? { state: "ok", account: `env:${configured}` } : { state: "missing" };
+  }
   if (process.env.OPENAI_API_KEY || process.env.CODEX_API_KEY) {
     return { state: "ok", account: "env-credential" };
   }

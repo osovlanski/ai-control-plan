@@ -106,18 +106,35 @@ describe("capability probe vs. adapter authority", () => {
   });
 
   it("degrades to a well-formed result when the provider CLI is not installed", async () => {
-    // The CI environment has no provider CLIs, which makes it the right place
-    // to assert this: a missing binary must produce "unavailable", not a throw
-    // that would take the daily sync down with it.
-    const { probeCapability } = await import("../src/modules/capability-probe.js");
-    const probe = await probeCapability("anthropic");
-    expect(probe.fingerprint).toBeTruthy();
-    expect(typeof probe.version).toBe("string");
-    expect(probe.version.length).toBeGreaterThan(0);
+    // Use an impossible binary name rather than assuming what is installed on
+    // the developer or CI machine. The old test called the real Claude CLI and
+    // raced Vitest's 5s timeout against the probe's own 5s timeout.
+    const { probeCapability, probeVersion } = await import("../src/modules/capability-probe.js");
+    await expect(probeVersion("agent-plane-command-that-does-not-exist")).resolves.toBe("unavailable");
 
     // An unknown provider has no CLI to interrogate at all.
     const unknown = await probeCapability("not-a-real-provider");
     expect(unknown.version).toBe("in-process");
+  });
+
+  it("fingerprints the configured OpenRouter credential variable", async () => {
+    const { probeCapability } = await import("../src/modules/capability-probe.js");
+    const name = "TEST_OPENROUTER_KEY_FOR_PROBE";
+    const previous = process.env[name];
+    delete process.env[name];
+    try {
+      const missing = await probeCapability("openrouter", { apiKeyEnv: name });
+      expect(missing.authState).toBe("missing");
+
+      process.env[name] = "test-only-secret";
+      const present = await probeCapability("openrouter", { apiKeyEnv: name });
+      expect(present.authState).toBe("ok");
+      expect(present.fingerprint).not.toBe(missing.fingerprint);
+      expect(JSON.stringify(present)).not.toContain("test-only-secret");
+    } finally {
+      if (previous === undefined) delete process.env[name];
+      else process.env[name] = previous;
+    }
   });
 });
 

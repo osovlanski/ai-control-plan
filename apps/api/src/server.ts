@@ -1,5 +1,11 @@
 import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
-import type { AssistantId, RoutingProfile } from "@agent-plane/core";
+import {
+  CONTROL_PLANE_API_VERSION,
+  NORMALIZED_EVENT_VERSION,
+  OBSERVABILITY_CAPABILITIES,
+  type AssistantId,
+  type RoutingProfile,
+} from "@agent-plane/core";
 import type { ResolvedConfig } from "./config.js";
 import { appliedMigrations, type Db } from "./db/index.js";
 import { CheckpointService } from "./modules/checkpoint.js";
@@ -80,6 +86,13 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     persistRoutingDecision(db, taskId, explanation);
     return explanation;
   };
+
+  app.get("/api/meta", () => ({
+    apiVersion: CONTROL_PLANE_API_VERSION,
+    eventVersion: NORMALIZED_EVENT_VERSION,
+    workspace: config.workspace,
+    capabilities: OBSERVABILITY_CAPABILITIES,
+  }));
 
   app.get("/api/health", () => ({
     status: "ok",
