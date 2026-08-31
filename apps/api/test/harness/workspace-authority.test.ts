@@ -3,7 +3,7 @@
  * symlink-escape containment, session-owned write paths, and the reduced-env
  * cwd-pinned command boundary (§3, H-I11).
  */
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -99,6 +99,37 @@ describe("resolveWrite", () => {
       throw new Error("no throw");
     } catch (e) {
       expect((e as WorkspaceError).check).toBe("write-symlink-escape");
+    }
+  });
+});
+
+describe("artifactExists", () => {
+  it("reports a plain in-worktree file as present and a missing one as absent", () => {
+    writeFileSync(join(worktree, "built.txt"), "ok");
+    expect(authority.artifactExists(worktree, "built.txt")).toBe(true);
+    expect(authority.artifactExists(worktree, "nope.txt")).toBe(false);
+    expect(authority.artifactExists(worktree, "dist")).toBe(false);
+    mkdirSync(join(worktree, "dist"));
+    expect(authority.artifactExists(worktree, "dist")).toBe(true); // a directory counts
+  });
+
+  it("follows an in-worktree symlink (present) but a dangling one reads as missing", () => {
+    writeFileSync(join(worktree, "real.txt"), "ok");
+    symlinkSync(join(worktree, "real.txt"), join(worktree, "link.txt"));
+    symlinkSync(join(worktree, "gone.txt"), join(worktree, "dangling.txt"));
+    expect(authority.artifactExists(worktree, "link.txt")).toBe(true);
+    expect(authority.artifactExists(worktree, "dangling.txt")).toBe(false);
+  });
+
+  it("rejects an absolute path, a ../ escape and a symlink that escapes the worktree", () => {
+    expect(() => authority.artifactExists(worktree, "/etc/passwd")).toThrow(WorkspaceError);
+    expect(() => authority.artifactExists(worktree, "../session-2/x")).toThrow(WorkspaceError);
+    symlinkSync(outside, join(worktree, "escape"));
+    try {
+      authority.artifactExists(worktree, "escape/secret");
+      throw new Error("no throw");
+    } catch (e) {
+      expect((e as WorkspaceError).check).toBe("artifact-symlink-escape");
     }
   });
 });

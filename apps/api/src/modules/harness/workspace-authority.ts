@@ -21,7 +21,15 @@
  * cgroup/job-object confinement with the remote-runner boundary if it matters.
  */
 import { spawn } from "node:child_process";
-import { closeSync, constants as fsConstants, mkdirSync, openSync, realpathSync, writeSync } from "node:fs";
+import {
+  closeSync,
+  constants as fsConstants,
+  existsSync,
+  mkdirSync,
+  openSync,
+  realpathSync,
+  writeSync,
+} from "node:fs";
 import { dirname, isAbsolute, resolve, sep } from "node:path";
 
 export class WorkspaceError extends Error {
@@ -243,9 +251,11 @@ export class WorkspaceAuthority {
     if (!contains(canonicalRoot, existingReal) && existingReal !== canonicalRoot) {
       throw new WorkspaceError("artifact-symlink-escape", `${relative} resolves via a symlink outside the worktree`);
     }
-    // deepestRealpath returns the target itself when it fully resolves, or its
-    // nearest existing ancestor when it does not — so equality means it exists.
-    return existingReal === target;
+    // Containment is proven; decide existence independently of realpath equality
+    // so an in-worktree symlinked artifact still reads as present (a symlink
+    // makes realpath(target) !== target). `existsSync` follows links, so a
+    // dangling in-worktree symlink correctly reads as missing.
+    return existsSync(target);
   }
 
   /** The env a verification command sees — allowlist minus the dangerous-name blocklist. */

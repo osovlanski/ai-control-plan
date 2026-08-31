@@ -174,6 +174,8 @@ class RunContext {
   /** Resolved by a tick that wants the event loop to stop racing a hung iterator. */
   private readonly abort = deferred();
   private isolationVerified = false;
+  /** The effective spec adapter.start received (secretEnv stripped) — for the isolation probe. */
+  private effectiveSpec: RunSpec | undefined;
 
   constructor(
     private sessionId: string,
@@ -242,28 +244,34 @@ class RunContext {
     // probe sees the exact launch config (spec + provider ref) it is verifying,
     // and before RUNNING so a below-`required` result fails the session first.
     if (this.request.policy.isolation.required === "full") {
-      const verified = this.d.verifyIsolation
-        ? await this.d.verifyIsolation({
+      let verified = false;
+      let probeError: string | undefined;
+      if (this.d.verifyIsolation) {
+        try {
+          verified = await this.d.verifyIsolation({
             sessionId: this.sessionId,
-            runSpec: this.request.runSpec,
+            // the EFFECTIVE spec adapter.start received (toolPolicy + runControl
+            // folded in), with the transient secretEnv already stripped (§3).
+            runSpec: this.effectiveSpec ?? this.request.runSpec,
             providerSessionRef: handle.providerSessionRef,
-          })
-        : false;
+          });
+        } catch (err) {
+          probeError = redactMessage(err);
+        }
+      }
       if (!verified) {
         await safeCancel(adapter, handle);
         const cp = await this.attemptCheckpoint("cancel");
-        return this.finalize(
-          "STARTING",
-          "FAILED",
-          {
-            failure: {
-              kind: SessionRunner.UNENFORCEABLE,
-              retryable: false,
-              message: "per-session provider-process containment verification did not confirm a full sandbox",
-            },
-            checkpoint: cp,
+        return this.finalize("STARTING", "FAILED", {
+          failure: {
+            kind: SessionRunner.UNENFORCEABLE,
+            retryable: false,
+            message: probeError
+              ? `per-session provider-process containment verification failed: ${probeError}`
+              : "per-session provider-process containment verification did not confirm a full sandbox",
           },
-        );
+          checkpoint: cp,
+        });
       }
       this.isolationVerified = true;
     }
@@ -526,12 +534,13 @@ class RunContext {
     if (p.isolation.required === "full" && !declaresSandbox) {
       return "isolation.required full requires an OS/provider process sandbox that this adapter does not declare";
     }
-    // `partial` = the Harness's own worktree + profile discipline is in force,
-    // which needs the workspace authority. Without it (and without a declared
-    // sandbox) the achievable tier is only `ambient` — reject rather than report
-    // a tier we cannot back (H-I10).
-    if (p.isolation.required === "partial" && !this.d.authority && !declaresSandbox) {
-      return "isolation.required partial requires the workspace authority (worktree + profile discipline) or a declared sandbox";
+    // `partial` = the Harness's own worktree + profile discipline is in force:
+    // it needs BOTH the workspace authority AND a request worktree for it to
+    // bind to. Without that (and without a declared sandbox) the achievable tier
+    // is only `ambient` — reject rather than report a tier we cannot back (H-I10).
+    const worktreeDiscipline = !!this.d.authority && !!this.request.context.worktree;
+    if (p.isolation.required === "partial" && !worktreeDiscipline && !declaresSandbox) {
+      return "isolation.required partial requires the workspace authority bound to a request worktree, or a declared sandbox";
     }
     if ((this.request.context.secretRefs?.length ?? 0) > 0 && !this.d.secretResolver) {
       return "request names secretRefs but no secret resolver is configured to resolve them at launch";
@@ -554,6 +563,7 @@ class RunContext {
 
   private async startProvider(adapter: AgentAdapter): Promise<RunHandle> {
     const spec = this.effectiveRunSpec();
+    this.effectiveSpec = spec as RunSpec; // secretEnv is deleted in the finally below
 
     // Resolve secret REFERENCES at the launch boundary; values are transient,
     // injected by the adapter, dropped straight after (§3). Construction +
@@ -940,10 +950,10 @@ class RunContext {
     //  - `ambient` otherwise.
     const declaresSandbox =
       h?.processIsolation === "os-sandbox" || h?.processIsolation === "provider-sandbox";
-    const harnessDiscipline = !!this.d.authority;
+    const worktreeDiscipline = !!this.d.authority && !!this.request.context.worktree;
     const isolation = this.isolationVerified
       ? "full"
-      : declaresSandbox || harnessDiscipline
+      : declaresSandbox || worktreeDiscipline
         ? "partial"
         : "ambient";
     return { tools, budget, isolation };

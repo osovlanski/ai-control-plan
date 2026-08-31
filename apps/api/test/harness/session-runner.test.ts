@@ -552,18 +552,57 @@ describe("isolation tiers (§3)", () => {
     const result = await runner.run(fullReq());
     expect(result.outcome).toBe("completed");
     expect(result.enforcement.isolation).toBe("full");
-    expect(probedSpec).toMatchObject({ prompt: "do the thing" }); // the exact launch config
+    // The probe gets the EFFECTIVE launch spec, not the bare request runSpec.
+    expect(probedSpec).toMatchObject({
+      prompt: "do the thing",
+      runControl: { executionRequestId: "erq_1" },
+    });
   });
 
-  it("fails the session (policy_unenforceable) before RUNNING when the probe does not confirm", async () => {
+  it("cancels the launched provider and finalizes once when the probe does not confirm", async () => {
+    const fake = countingFake();
+    let cancels = 0;
+    const realCancel = fake.cancel.bind(fake);
+    fake.cancel = async (h) => {
+      cancels += 1;
+      return realCancel(h);
+    };
+    const checkpointCalls: string[] = [];
+    const runner = new SessionRunner(
+      deps(fake, {
+        ...withRegistry(sandboxManifest, fake),
+        verifyIsolation: () => false,
+        checkpoints: {
+          create: async (_t, _s, reason) => {
+            checkpointCalls.push(reason);
+            return { id: `ckpt_${checkpointCalls.length}`, gitRef: null };
+          },
+        },
+      }),
+    );
+    const result = await runner.run(fullReq());
+    expect(result.failure?.kind).toBe("policy_unenforceable");
+    expect(store.get(sessionOf())!.state).toBe("FAILED"); // never reached RUNNING
+    expect(startCount).toBe(1); // start() DID run — probe is post-launch
+    expect(cancels).toBe(1);
+    expect(checkpointCalls).toEqual(["cancel"]); // exactly one checkpoint attempt
+    expect(store.result(sessionOf())).toEqual(result); // finalized exactly once
+  });
+
+  it("treats a throwing probe as a failed verification (cancels + fails the session)", async () => {
     const fake = countingFake();
     const runner = new SessionRunner(
-      deps(fake, { ...withRegistry(sandboxManifest, fake), verifyIsolation: () => false }),
+      deps(fake, {
+        ...withRegistry(sandboxManifest, fake),
+        verifyIsolation: () => {
+          throw new Error("probe blew up");
+        },
+      }),
     );
     const result = await runner.run(fullReq());
     expect(result.outcome).toBe("failed");
     expect(result.failure?.kind).toBe("policy_unenforceable");
-    expect(store.get(sessionOf())!.state).toBe("FAILED"); // never reached RUNNING
+    expect(result.failure?.message).toContain("probe blew up");
   });
 
   it("rejects 'full' at Prepare (no adapter.start) when the manifest declares no sandbox", async () => {
@@ -607,6 +646,16 @@ describe("isolation tiers (§3)", () => {
     const runner = new SessionRunner(deps(fake, withRegistry(MANIFEST, fake)));
     const result = await runner.run(
       request({ policy: { ...request().policy, isolation: { required: "partial" } } }),
+    );
+    expect(result.failure?.kind).toBe("policy_unenforceable");
+    expect(startCount).toBe(0);
+  });
+
+  it("rejects 'partial' at Prepare when the authority is present but the request has no worktree", async () => {
+    const authority = new WorkspaceAuthority({ repoAllowlist: [dir], worktreeRoot: dir });
+    const runner = new SessionRunner(deps(countingFake(), { authority }));
+    const result = await runner.run(
+      request({ context: {}, policy: { ...request().policy, isolation: { required: "partial" } } }),
     );
     expect(result.failure?.kind).toBe("policy_unenforceable");
     expect(startCount).toBe(0);
