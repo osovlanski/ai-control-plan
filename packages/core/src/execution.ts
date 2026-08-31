@@ -1,0 +1,308 @@
+/**
+ * Control Plane ↔ Execution Harness contract (execution-harness §2).
+ *
+ * Provider-neutral. Every top-level contract type carries its own `schemaVersion`
+ * (starting at 1), independent of `CONTROL_PLANE_API_VERSION`. Reuse over
+ * invention: `RunSpec`, `PermissionPolicy`, `UsagePayload`, `NormalizedEvent` and
+ * the adapter contract are kept; these types wrap rather than replace them.
+ *
+ * These are types + one pure canonicalization helper only (`fingerprint.ts`).
+ * Nothing here imports a provider or a runtime.
+ */
+
+import type { RunSpec, PermissionPolicy } from "./adapter.js";
+import type { ModelRef } from "./capabilities.js";
+import type { AssistantId, ExecutionSessionId, ProviderSessionRef, TaskId } from "./ids.js";
+import type { UsagePayload, VerificationKind } from "./events.js";
+import type { ExecutionSessionState, TerminalSessionState } from "./session-state.js";
+
+// ---------------------------------------------------------------------------
+// ExecutionRequest — what the Control Plane hands the Harness
+// ---------------------------------------------------------------------------
+
+/**
+ * Immutable once accepted. Persisted identity is `requestFingerprint` (a digest
+ * over a canonical projection of every execution-affecting and
+ * authorization-relevant field — see `fingerprint.ts`). Resubmitting an
+ * `executionRequestId` with the SAME fingerprint returns the same session;
+ * resubmitting with a DIFFERENT fingerprint is a conflict, never an idempotent
+ * retry. Exact byte replay is a non-goal — replay is semantic (re-render from
+ * provenance) and the prompt digest is the integrity witness.
+ */
+export interface ExecutionRequest {
+  schemaVersion: 1;
+  /** Idempotency key. Resubmission with the same fingerprint returns the same session. */
+  executionRequestId: string;
+  taskId: TaskId;
+  /** Opaque to the Harness — carried for observability joins, never read by logic. */
+  correlation?: { parentTaskId?: TaskId; groupId?: string };
+  /** 1..n; a retry is a NEW request with `attempt + 1`, issued by the Control Plane. */
+  attempt: number;
+  /** Decided by the Control Plane. The Harness never changes it (H-I1). */
+  assistantId: AssistantId;
+  model?: ModelRef;
+  /** AgentSpec link (Agentic OS era); absent pre-Composer. */
+  compositionRevisionId?: string;
+  /** Explainability back-pointer to the routing decision. */
+  routingDecisionRef: string;
+  runSpec: RunSpec;
+  policy: ExecutionPolicy;
+  context: ExecutionContext;
+  /** May be empty. */
+  verification: VerificationSpec[];
+  origin: ExecutionOrigin;
+}
+
+export type ExecutionOrigin =
+  | { kind: "fresh" }
+  | { kind: "resume"; sessionId: ExecutionSessionId; checkpointId: string }
+  | { kind: "handoff"; envelopeId: string };
+
+export interface ExecutionPolicy {
+  budget: BudgetPolicy;
+  /** The only authoritative runtime deadline. `hardMs` is truly hard (local clock). */
+  timeout: { idleMs?: number; hardMs: number };
+  /** Existing type. The Harness enforces; the Control Plane defines. */
+  approval: PermissionPolicy;
+  tools: ToolPolicy;
+  checkpoint: { onSoftLimit: boolean; periodicMs?: number };
+  /**
+   * Minimum acceptable provider-process isolation fidelity (§3 tiers). An
+   * explicit contract field, never implicit policy interpretation. Prepare
+   * rejects (`policy_unenforceable`) when the verifiable tier is below
+   * `required`; a per-session verification below `required` fails the session
+   * before RUNNING. The achieved tier is always reported on the result.
+   */
+  isolation: { required: IsolationTier };
+}
+
+export type IsolationTier = "full" | "partial" | "ambient";
+
+export interface BudgetPolicy {
+  /**
+   * Token/cost accounting ONLY. Runtime has exactly one authoritative field:
+   * `ExecutionPolicy.timeout.hardMs`. `RunSpec.env.maxRuntimeMs` is derived from
+   * it at Prepare and validated equal — never a second deadline.
+   */
+  maxTokens?: number;
+  /** Requires `pricingVersion` when `enforcement` is "bounded". */
+  maxCostUsd?: number;
+  /** Versioned pricing table used to derive cost from tokens. */
+  pricingVersion?: string;
+  /**
+   * "bounded": requires the adapter manifest to declare a quantitative
+   * usage-reporting contract (`usageReporting`), proven by the conformance suite.
+   * The guard evaluates the cap at every usage event and cancels on observed
+   * excess; residual risk is bounded by `maxUnreportedTokens` and recorded as
+   * `overrun`. A reporting gap cancels with `budget_exceeded`. Prepare rejects
+   * bounded when the contract is undeclared/unproven, accounting mode is "none",
+   * or (for cost caps) `pricingVersion` is absent.
+   * "advisory": records overruns without cancelling.
+   * There is no "hard" token/cost mode.
+   */
+  enforcement: "bounded" | "advisory";
+}
+
+export interface ToolPolicy {
+  allow?: string[];
+  deny?: string[];
+  /**
+   * "preventive": requires a callable enforcement path (adapter consumes
+   * `RunSpec.toolPolicy` before any tool executes). Prepare rejects preventive
+   * mode when the manifest's `toolGating` is not "preventive"
+   * (`policy_unenforceable`).
+   * "audit": explicitly accepted detect-and-record mode — a matched deny still
+   * ends the session (FAILED, tool_denied) but the side effect may already have
+   * happened. Silent downgrade never occurs (H-I10).
+   */
+  mode: "preventive" | "audit";
+}
+
+export interface ExecutionContext {
+  worktree?: { repoPath: string; branch: string; worktreePath: string; baseRef: string };
+  /** Composed context bundle digests (Agentic OS era). */
+  bundleRefs?: string[];
+  /** When `origin.kind === "handoff"`. */
+  envelopeId?: string;
+  priorCheckpointId?: string;
+}
+
+// ---------------------------------------------------------------------------
+// ExecutionSession — durable record of one attempt to execute one request
+// ---------------------------------------------------------------------------
+
+/** One session IS one `runs` row (§10). */
+export interface ExecutionSession {
+  sessionId: ExecutionSessionId;
+  executionRequestId: string;
+  state: ExecutionSessionState;
+  /** Optimistic-concurrency counter; every write is a CAS (H-I12). */
+  version: number;
+  /** Fencing token of the owning SessionRunner (§9). */
+  leaseToken?: string;
+  leaseExpiresAt?: string;
+  providerSessionRef?: ProviderSessionRef;
+  /** §9 start-intent / start-ack protocol. */
+  providerStartAcked: boolean;
+  /** Durable cancellation intent. */
+  cancelRequested: boolean;
+  /** CAS winner of terminalization (replaces the in-memory `handingOff` flag). */
+  settlementOwner?: string;
+  attempt: number;
+  startedAt?: string;
+  endedAt?: string;
+}
+
+// ---------------------------------------------------------------------------
+// ExecutionResult — one per terminal session (H-I3), persisted in the terminal CAS
+// ---------------------------------------------------------------------------
+
+export interface ExecutionResult {
+  schemaVersion: 1;
+  sessionId: ExecutionSessionId;
+  /** The session's terminal state verbatim (§5) — never a live state. */
+  terminalState: TerminalSessionState;
+  /**
+   * DERIVED from `terminalState` by the fixed mapping in `session-state.ts`
+   * (`outcomeOf`). Execution and verification are reported SEPARATELY and never
+   * folded into each other: `outcome` describes what the provider execution did;
+   * `verification` describes what the checks found. `outcome: "completed"` with
+   * `verification.passed === false` is legal and expected — the Control Plane
+   * decides the task verdict (H-I6).
+   */
+  outcome: "completed" | "failed" | "cancelled" | "timed_out" | "yielded";
+  yield?: { kind: "reroute" | "handoff" | "limit"; detail: RerouteRequest | HandoffRequest };
+  /** Present iff outcome is failed/timed_out. */
+  failure?: ExecutionFailure;
+  /** Present iff cancelled. */
+  cancellation?: { requestedBy: "user" | "plane"; at: string };
+  /** Absent when no `VerificationSpec` was given. */
+  verification?: EvaluationResult;
+  artifacts: ExecutionArtifact[];
+  usage: UsagePayload & { accounting: "delta" | "cumulative" | "none"; overrun?: UsagePayload };
+  checkpoint: { attempted: boolean; committed: boolean; checkpointId?: string; gitRef?: string };
+  /** Honesty record (H-I10). What was ACTUALLY enforced, not what was requested. */
+  enforcement: {
+    tools: "preventive" | "audit" | "none";
+    budget: "bounded" | "advisory" | "none";
+    isolation: IsolationTier;
+  };
+}
+
+/**
+ * Normalized failure taxonomy — replaces provider error strings at the boundary.
+ * NOTE: cancellation is an outcome, not a failure. `verification_failed` is NOT a
+ * Harness failure kind — failed checks ride on `verification`.
+ */
+export type FailureKind =
+  | "provider_fault"
+  | "auth"
+  | "quota"
+  | "timeout"
+  | "budget_exceeded"
+  | "tool_denied"
+  | "workspace"
+  | "policy_unenforceable"
+  | "orphaned"
+  | "internal";
+
+export interface ExecutionFailure {
+  kind: FailureKind;
+  retryable: boolean;
+  /** Redacted before persistence; size-capped. */
+  providerDetail?: unknown;
+  message: string;
+}
+
+export interface ExecutionArtifact {
+  kind: "diff" | "file_list" | "test_report" | "checkpoint" | "rendered_output";
+  /** checkpoint id, git ref, event range — never inline blobs. */
+  ref: string;
+  /** Size-capped like event summaries. */
+  summary: string;
+}
+
+// ---------------------------------------------------------------------------
+// Verification  (`VerificationKind` is exported from ./events.js)
+// ---------------------------------------------------------------------------
+
+export interface VerificationSpec {
+  name: string;
+  kind: VerificationKind;
+  /** Validated + executed by the WorkspaceAuthority (§3), NOT via adapter tools. */
+  command?: string;
+  /** `required: false` checks report but never affect outcome. */
+  required: boolean;
+}
+
+export interface EvaluationResult {
+  /** All `required` checks passed. */
+  passed: boolean;
+  checks: Array<{
+    name: string;
+    kind: VerificationKind;
+    passed: boolean;
+    required: boolean;
+    summary: string;
+    ref?: string;
+  }>;
+}
+
+// ---------------------------------------------------------------------------
+// Handoff (§7) & Reroute (§8)
+// ---------------------------------------------------------------------------
+
+export interface HandoffEnvelope {
+  schemaVersion: 1;
+  envelopeId: string;
+  taskId: TaskId;
+  /**
+   * The durable anchor. Envelope fields are derived FROM this checkpoint's
+   * immutable snapshot, never from the live mutable task envelope.
+   */
+  checkpointId: string;
+  objective: string;
+  currentSubtask?: string;
+  completedActions: string[];
+  outstanding: string[];
+  /** Provenance-tagged. */
+  decisions: Array<{ text: string; madeBy: string; at: string }>;
+  artifacts: {
+    gitRef?: string;
+    diffStat?: string;
+    changedFiles: string[];
+    lastTests?: unknown;
+  };
+  verificationStatus?: EvaluationResult;
+  /** Digests / names — reconstructable state only. */
+  contextRefs: string[];
+  /** Paths, never contents. */
+  workspace: { repoPath: string; branch: string };
+  fromAssistantId: AssistantId;
+  reason: string;
+}
+
+/** A request to hand off — the Harness yields; the Control Plane picks a target. */
+export interface HandoffRequest {
+  sessionId: ExecutionSessionId;
+  taskId: TaskId;
+  envelopeId: string;
+  reason: string;
+}
+
+export interface RerouteRequest {
+  sessionId: ExecutionSessionId;
+  taskId: TaskId;
+  reason:
+    | "capability_missing"
+    | "auth_failed"
+    | "quota_exhausted"
+    | "repeated_provider_fault"
+    | "model_unsuitable";
+  /** Points at persisted events. */
+  evidence: Array<{ eventSeq: number; summary: string }>;
+  /** Checkpoint attempt recorded per H-I4 semantics. */
+  checkpointId?: string;
+  /** The Harness proposes no target — typed boundary (H-I1). */
+  suggestion?: never;
+}

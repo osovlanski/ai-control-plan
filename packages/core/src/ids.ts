@@ -6,6 +6,12 @@ export type AssistantId = string & { readonly __brand: "AssistantId" };
 export type CheckpointId = string & { readonly __brand: "CheckpointId" };
 export type HandoffId = string & { readonly __brand: "HandoffId" };
 
+/**
+ * Execution-harness session id. One session IS one `runs` row (§10); the brand
+ * keeps it from being confused with the provider-side `ProviderSessionRef`.
+ */
+export type ExecutionSessionId = string & { readonly __brand: "ExecutionSessionId" };
+
 /** Opaque provider-side session/thread reference (Claude session id, Codex thread id, ...). */
 export type ProviderSessionRef = string & { readonly __brand: "ProviderSessionRef" };
 
@@ -32,4 +38,8 @@ export function newCheckpointId(): CheckpointId {
 
 export function newHandoffId(): HandoffId {
   return `ho_${uuid()}` as HandoffId;
+}
+
+export function newExecutionSessionId(): ExecutionSessionId {
+  return `es_${uuid()}` as ExecutionSessionId;
 }
