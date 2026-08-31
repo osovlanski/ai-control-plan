@@ -33,6 +33,7 @@ import type {
   UsagePayload,
   VerificationSpec,
 } from "@agent-plane/core";
+import { existsSync } from "node:fs";
 import { newExecutionSessionId, outcomeOf } from "@agent-plane/core";
 import type { SessionStore } from "./session-store.js";
 import type { EventRecorder } from "./event-recorder.js";
@@ -779,24 +780,38 @@ class RunContext {
       let passed = false;
       let summary = "skipped (no workspace authority)";
       if (authority && worktree && spec.command) {
-        const remaining = Math.max(
-          1000,
-          this.snapshot.startedAtMs + this.request.policy.timeout.hardMs - this.runner.clock(),
-        );
-        try {
-          const r = await authority.runCommand({
-            command: spec.command,
-            worktreePath: worktree,
-            timeoutMs: remaining,
-          });
-          passed = r.exitCode === 0 && !r.timedOut;
-          summary = `${spec.command} → exit ${r.exitCode}${r.timedOut ? " (timed out)" : ""}`;
-        } catch (err) {
-          summary = `command rejected: ${redactMessage(err)}`;
+        if (spec.kind === "artifact_exists") {
+          // A path check, not a subprocess: resolve it through the authority
+          // (rejects `..`, absolute, symlink escape) then stat it.
+          try {
+            const target = authority.resolveWrite(worktree, spec.command);
+            passed = existsSync(target);
+            summary = `artifact ${spec.command} ${passed ? "exists" : "missing"}`;
+          } catch (err) {
+            summary = `artifact path rejected: ${redactMessage(err)}`;
+          }
+        } else {
+          const remaining = Math.max(
+            1000,
+            this.snapshot.startedAtMs + this.request.policy.timeout.hardMs - this.runner.clock(),
+          );
+          try {
+            const r = await authority.runCommand({
+              command: spec.command,
+              worktreePath: worktree,
+              timeoutMs: remaining,
+            });
+            passed = r.exitCode === 0 && !r.timedOut;
+            summary = `${spec.command} → exit ${r.exitCode}${r.timedOut ? " (timed out)" : ""}`;
+          } catch (err) {
+            summary = `command rejected: ${redactMessage(err)}`;
+          }
         }
       }
       checks.push({ name: spec.name, kind: spec.kind, passed, required: spec.required, summary });
     }
+    // `required: false` checks report but never move the needle (H-I6 stays a
+    // Control-Plane call; the Harness only says what passed).
     const passed = checks.filter((c) => c.required).every((c) => c.passed);
     return { passed, checks };
   }

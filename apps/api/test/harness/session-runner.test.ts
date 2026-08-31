@@ -5,7 +5,7 @@
  * duplicate-execution prevention, workspace rejection, successful-execution +
  * failed-verification (H-I6), and restart recovery of a finished session.
  */
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -448,6 +448,151 @@ describe("successful execution + failed verification (H-I6)", () => {
 
     const vr = events(sessionOf()).find((e) => e.type === "verification.result");
     expect(JSON.parse(vr!.payload!)).toMatchObject({ passed: false });
+  });
+});
+
+describe("secret broker at the launch boundary (§3)", () => {
+  /**
+   * A fake whose start() keeps a live reference to the spec object plus a
+   * snapshot of `secretEnv` taken synchronously at the call.
+   */
+  function capturingFake(): {
+    adapter: AgentAdapter;
+    specRef: () => Record<string, unknown> | undefined;
+    secretEnvAtStart: () => unknown;
+  } {
+    const fake = new FakeAdapter("a1" as AssistantId);
+    let ref: Record<string, unknown> | undefined;
+    let atStart: unknown;
+    const realStart = fake.start.bind(fake);
+    fake.start = async (spec) => {
+      ref = spec as unknown as Record<string, unknown>;
+      atStart = spec.secretEnv ? { ...spec.secretEnv } : undefined;
+      startCount += 1;
+      return realStart(spec);
+    };
+    return { adapter: fake, specRef: () => ref, secretEnvAtStart: () => atStart };
+  }
+
+  const CANARY = "canary-launch-only-abcdefghij";
+
+  it("passes resolved refs to adapter.start.secretEnv, drops them after, and never persists them", async () => {
+    const { adapter, specRef, secretEnvAtStart } = capturingFake();
+    const runner = new SessionRunner(
+      deps(adapter, { secretResolver: (ref) => (ref === "PRIMARY_REF" ? CANARY : undefined) }),
+    );
+    const result = await runner.run(request({ context: { secretRefs: ["PRIMARY_REF"] } }));
+    expect(result.outcome).toBe("completed");
+
+    // The resolved value reached the adapter launch env at start()...
+    expect(secretEnvAtStart()).toEqual({ PRIMARY_REF: CANARY });
+    // ...and the runner deleted it from the spec object once launch returned (§3).
+    expect(specRef()!.secretEnv).toBeUndefined();
+
+    // It never touched the persisted request row (canonical projection / fingerprint).
+    const row = db
+      .prepare("SELECT canonical_projection, request_fingerprint FROM execution_requests WHERE id = 'erq_1'")
+      .get() as { canonical_projection: string; request_fingerprint: string };
+    expect(row.canonical_projection).not.toContain(CANARY);
+    expect(row.canonical_projection).toContain("PRIMARY_REF"); // the NAME is fine
+    expect(row.request_fingerprint).not.toContain(CANARY);
+  });
+
+  it("a verification command run through the authority does not see the secret", async () => {
+    const authority = new WorkspaceAuthority({ repoAllowlist: [dir], worktreeRoot: dir });
+    const runner = new SessionRunner(
+      deps(countingFake(), { authority, secretResolver: () => CANARY }),
+    );
+    const result = await runner.run(
+      request({
+        context: { worktree: { repoPath: dir, branch: "b", worktreePath: dir, baseRef: "r" }, secretRefs: ["PRIMARY_REF"] },
+        // exits 0 only when PRIMARY_REF is absent from the reduced env
+        verification: [{ name: "no-leak", kind: "command", command: 'test -z "$PRIMARY_REF"', required: true }],
+      }),
+    );
+    expect(result.outcome).toBe("completed");
+    expect(result.verification?.passed).toBe(true);
+  });
+});
+
+describe("isolation tiers (§3)", () => {
+  const sandboxManifest: CapabilityManifest = {
+    ...MANIFEST,
+    harness: { ...MANIFEST.harness!, processIsolation: "os-sandbox" },
+  };
+  const withRegistry = (m: CapabilityManifest, adapter: AgentAdapter): Partial<RunnerDeps> => ({
+    registry: { adapter: () => adapter, manifest: () => m },
+  });
+
+  it("reports isolation 'full' when the manifest declares a sandbox and the per-session probe confirms it", async () => {
+    const fake = countingFake();
+    const runner = new SessionRunner(
+      deps(fake, { ...withRegistry(sandboxManifest, fake), verifyIsolation: () => true }),
+    );
+    const result = await runner.run(request({ policy: { ...request().policy, isolation: { required: "full" } } }));
+    expect(result.outcome).toBe("completed");
+    expect(result.enforcement.isolation).toBe("full");
+  });
+
+  it("fails before RUNNING when the per-session containment probe does not confirm", async () => {
+    const fake = countingFake();
+    const runner = new SessionRunner(
+      deps(fake, { ...withRegistry(sandboxManifest, fake), verifyIsolation: () => false }),
+    );
+    const result = await runner.run(request({ policy: { ...request().policy, isolation: { required: "full" } } }));
+    expect(result.outcome).toBe("failed");
+    expect(result.failure?.kind).toBe("policy_unenforceable");
+    expect(startCount).toBe(0);
+  });
+
+  it("rejects 'full' at Prepare when the manifest declares no sandbox", async () => {
+    const fake = countingFake();
+    const runner = new SessionRunner(
+      deps(fake, { ...withRegistry(MANIFEST, fake), verifyIsolation: () => true }),
+    );
+    const result = await runner.run(request({ policy: { ...request().policy, isolation: { required: "full" } } }));
+    expect(result.outcome).toBe("failed");
+    expect(result.failure?.kind).toBe("policy_unenforceable");
+    expect(startCount).toBe(0);
+  });
+});
+
+describe("verification hardening (§2)", () => {
+  it("supports kind 'artifact_exists' via the workspace authority", async () => {
+    const authority = new WorkspaceAuthority({ repoAllowlist: [dir], worktreeRoot: dir });
+    writeFileSync(join(dir, "built.txt"), "ok");
+    const runner = new SessionRunner(deps(countingFake(), { authority }));
+    const result = await runner.run(
+      request({
+        context: { worktree: { repoPath: dir, branch: "b", worktreePath: dir, baseRef: "r" } },
+        verification: [
+          { name: "present", kind: "artifact_exists", command: "built.txt", required: true },
+          { name: "absent", kind: "artifact_exists", command: "missing.txt", required: false },
+          { name: "escape", kind: "artifact_exists", command: "../etc/passwd", required: false },
+        ],
+      }),
+    );
+    expect(result.verification?.checks.find((c) => c.name === "present")).toMatchObject({ passed: true });
+    expect(result.verification?.checks.find((c) => c.name === "absent")).toMatchObject({ passed: false });
+    expect(result.verification?.checks.find((c) => c.name === "escape")!.summary).toContain("rejected");
+    // Only the required check counts — the two required:false failures don't flip it.
+    expect(result.verification?.passed).toBe(true);
+  });
+
+  it("required:false checks report but never flip passed", async () => {
+    const authority = new WorkspaceAuthority({ repoAllowlist: [dir], worktreeRoot: dir });
+    const runner = new SessionRunner(deps(countingFake(), { authority }));
+    const result = await runner.run(
+      request({
+        context: { worktree: { repoPath: dir, branch: "b", worktreePath: dir, baseRef: "r" } },
+        verification: [
+          { name: "advisory", kind: "command", command: "exit 1", required: false },
+          { name: "gate", kind: "command", command: "exit 0", required: true },
+        ],
+      }),
+    );
+    expect(result.verification?.checks.find((c) => c.name === "advisory")).toMatchObject({ passed: false, required: false });
+    expect(result.verification?.passed).toBe(true);
   });
 });
 
