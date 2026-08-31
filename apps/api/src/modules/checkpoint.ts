@@ -36,9 +36,27 @@ export class CheckpointService {
     let gitRef: string | null = null;
     let diffStat: string | null = null;
 
-    if (row.worktree_path && row.base_ref) {
+    // Session-scoped resolution (§4): a checkpoint belongs to the run that made
+    // it, not the task. A parallel competitor works in its own worktree, so
+    // resolving from the task row would let it commit a sibling's tree
+    // (review R1). The shared base_ref stays task-level — the diff is against
+    // the common branch point.
+    let sessionWorktree: string | null = null;
+    if (runId) {
+      const runRow = this.db
+        .prepare("SELECT task_id, worktree_path FROM runs WHERE id = ?")
+        .get(runId) as { task_id: string; worktree_path: string | null } | undefined;
+      if (!runRow) throw new Error(`Unknown run ${runId}`);
+      if (runRow.task_id !== taskId) {
+        throw new Error(`Run ${runId} belongs to task ${runRow.task_id}, not ${taskId}`);
+      }
+      sessionWorktree = runRow.worktree_path;
+    }
+    const worktreePath = sessionWorktree ?? row.worktree_path;
+
+    if (worktreePath && row.base_ref) {
       try {
-        gitRef = await commitCheckpoint(row.worktree_path, `checkpoint(${taskId}): ${reason}`);
+        gitRef = await commitCheckpoint(worktreePath, `checkpoint(${taskId}): ${reason}`);
       } catch {
         // A commit failure must not lose the checkpoint — the envelope snapshot
         // is the part handoff cannot do without.
@@ -49,10 +67,10 @@ export class CheckpointService {
       // unavailable even though the checkpoint commit itself succeeded.
       if (gitRef) {
         try {
-          diffStat = await worktreeDiffStat(row.worktree_path, row.base_ref);
+          diffStat = await worktreeDiffStat(worktreePath, row.base_ref);
           // Reconcile the envelope's file list with what git actually shows —
           // the agent may have touched files it never announced in an event.
-          const changed = await worktreeChangedFiles(row.worktree_path, row.base_ref);
+          const changed = await worktreeChangedFiles(worktreePath, row.base_ref);
           if (changed.length > 0) {
             envelope.artifacts.changedFiles = Array.from(
               new Set([...envelope.artifacts.changedFiles, ...changed]),
@@ -72,10 +90,11 @@ export class CheckpointService {
 
     this.db
       .prepare(
-        `INSERT INTO checkpoints (id, task_id, run_id, envelope_snapshot, git_ref, diff_stat, activity_summary, reason, at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO checkpoints
+           (id, task_id, run_id, session_id, envelope_snapshot, git_ref, diff_stat, activity_summary, reason, at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(id, taskId, runId, JSON.stringify(envelope), gitRef, diffStat, activitySummary, reason, at);
+      .run(id, taskId, runId, runId, JSON.stringify(envelope), gitRef, diffStat, activitySummary, reason, at);
 
     return { id, taskId, runId, envelope, gitRef, diffStat, activitySummary, at };
   }
