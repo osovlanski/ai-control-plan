@@ -21,8 +21,11 @@ import type {
 } from "@agent-plane/core";
 import { FakeAdapter, type FakeScript } from "@agent-plane/adapters";
 import { openDb, type Db } from "../../src/db/index.js";
+import { CheckpointService } from "../../src/modules/checkpoint.js";
+import { TaskStore } from "../../src/modules/tasks.js";
 import { ApprovalService } from "../../src/modules/harness/approval-service.js";
 import { EventRecorder } from "../../src/modules/harness/event-recorder.js";
+import { HandoffService } from "../../src/modules/harness/handoff.js";
 import { SessionRunner, type RunnerDeps } from "../../src/modules/harness/session-runner.js";
 import { SessionStore } from "../../src/modules/harness/session-store.js";
 import { WorkspaceAuthority } from "../../src/modules/harness/workspace-authority.js";
@@ -421,6 +424,38 @@ describe("successful execution + failed verification (H-I6)", () => {
 
     const vr = events(sessionOf()).find((e) => e.type === "verification.result");
     expect(JSON.parse(vr!.payload!)).toMatchObject({ passed: false });
+  });
+});
+
+describe("handoff envelope on YIELD (§7)", () => {
+  it("assembles a ready envelope from the checkpoint snapshot in the terminal transaction", async () => {
+    const tasks = new TaskStore(db);
+    const checkpoints = new CheckpointService(db, tasks);
+    const handoffSvc = new HandoffService(db);
+    const runner = new SessionRunner(
+      deps(
+        countingFake({
+          ok: false,
+          events: [{ type: "limit.hit", summary: "5h quota exhausted", payload: { quota: [{ window: "5h", usedPercent: 100 }] } }],
+        }),
+        { checkpoints, handoff: handoffSvc },
+      ),
+    );
+
+    const result = await runner.run(request());
+    expect(result.outcome).toBe("yielded");
+    expect(result.yield?.kind).toBe("limit");
+
+    const envelopeId = (result.yield!.detail as { envelopeId: string }).envelopeId;
+    const row = db
+      .prepare("SELECT state, checkpoint_id, from_assistant_id FROM handoff_envelopes WHERE id = ?")
+      .get(envelopeId) as { state: string; checkpoint_id: string; from_assistant_id: string };
+    expect(row.state).toBe("ready");
+    expect(row.from_assistant_id).toBe("a1");
+    const cp = db.prepare("SELECT session_id FROM checkpoints WHERE id = ?").get(row.checkpoint_id) as {
+      session_id: string;
+    };
+    expect(cp.session_id).toBe(sessionOf());
   });
 });
 
