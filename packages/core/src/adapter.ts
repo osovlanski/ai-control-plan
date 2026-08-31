@@ -50,6 +50,13 @@ export interface RunSpec {
   toolPolicy?: { allow?: string[]; deny?: string[]; mode: "preventive" | "audit" };
   /** Passed to provider SDKs as an idempotency key where supported (§6, §9). */
   runControl?: { executionRequestId: string };
+  /**
+   * Transient launch-env secrets resolved by the Harness SecretBroker (§3)
+   * immediately before start/resume. NEVER persisted, NEVER part of the request
+   * fingerprint — the adapter injects these into the provider launch environment
+   * and the Harness drops them right after.
+   */
+  secretEnv?: Record<string, string>;
 }
 
 export type PermissionPolicy =

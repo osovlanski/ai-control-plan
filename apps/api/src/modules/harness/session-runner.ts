@@ -41,6 +41,7 @@ import type { HandoffService } from "./handoff.js";
 import type { Db } from "../../db/index.js";
 import type { WorkspaceAuthority } from "./workspace-authority.js";
 import { WorkspaceError } from "./workspace-authority.js";
+import { SecretBroker, type SecretResolver } from "./secret-broker.js";
 import {
   accumulateTokens,
   evaluateGuards,
@@ -75,6 +76,14 @@ export interface RunnerDeps {
   runnerId?: string;
   /** Poll interval while a session is AWAITING_APPROVAL. */
   approvalPollMs?: number;
+  /** Resolves the request's secret REFERENCES at the launch boundary (§3). */
+  secretResolver?: SecretResolver;
+  /**
+   * Per-session provider-process containment probe (§3). Returns true when the
+   * declared OS/provider sandbox is verified active for THIS launch config.
+   * Absent ⇒ the session reports at most `partial` isolation.
+   */
+  verifyIsolation?: (sessionId: string) => Promise<boolean> | boolean;
 }
 
 const POLICY_UNENFORCEABLE = "policy_unenforceable" as const;
@@ -157,6 +166,7 @@ class RunContext {
   private embeddedFailure: ExecutionFailure | undefined;
   /** Resolved by a tick that wants the event loop to stop racing a hung iterator. */
   private readonly abort = deferred();
+  private isolationVerified = false;
 
   constructor(
     private sessionId: string,
@@ -196,6 +206,25 @@ class RunContext {
         const message = err instanceof WorkspaceError ? err.message : String(err);
         return this.finalizeFailure("FAILED", { kind: "workspace", retryable: false, message }, "PREPARED");
       }
+    }
+
+    // Per-session provider-process containment verification (§3): a `full`
+    // requirement that passed Prepare's manifest check must still be PROVEN for
+    // this exact launch config before RUNNING — a declaration is never a proof.
+    if (this.request.policy.isolation.required === "full") {
+      const verified = this.d.verifyIsolation ? await this.d.verifyIsolation(this.sessionId) : false;
+      if (!verified) {
+        return this.finalizeFailure(
+          "FAILED",
+          {
+            kind: SessionRunner.UNENFORCEABLE,
+            retryable: false,
+            message: "per-session provider-process containment verification did not confirm a full sandbox",
+          },
+          "PREPARED",
+        );
+      }
+      this.isolationVerified = true;
     }
 
     // --- Execute + Observe ---------------------------------------------
@@ -494,14 +523,28 @@ class RunContext {
 
   private async startProvider(adapter: AgentAdapter): Promise<RunHandle> {
     const spec = this.effectiveRunSpec();
-    if (this.request.origin.kind === "resume") {
-      const prior = this.d.store.get(this.request.origin.sessionId as string);
-      const ref = prior?.providerSessionRef;
-      if (ref && typeof adapter.resume === "function") {
-        return adapter.resume(ref as ProviderSessionRef, spec);
-      }
+
+    // Resolve secret REFERENCES at the launch boundary; values are transient,
+    // injected by the adapter, dropped straight after (§3).
+    const refs = this.request.context.secretRefs ?? [];
+    let broker: SecretBroker | undefined;
+    if (refs.length > 0 && this.d.secretResolver) {
+      broker = new SecretBroker(this.d.secretResolver, refs);
+      spec.secretEnv = broker.resolve(refs);
     }
-    return adapter.start(spec);
+    try {
+      if (this.request.origin.kind === "resume") {
+        const prior = this.d.store.get(this.request.origin.sessionId as string);
+        const ref = prior?.providerSessionRef;
+        if (ref && typeof adapter.resume === "function") {
+          return await adapter.resume(ref as ProviderSessionRef, spec);
+        }
+      }
+      return await adapter.start(spec);
+    } finally {
+      broker?.dispose();
+      delete spec.secretEnv;
+    }
   }
 
   private observe(event: NormalizedEvent): void {
@@ -842,13 +885,16 @@ class RunContext {
         : p.budget.maxTokens !== undefined || p.budget.maxCostUsd !== undefined
           ? "advisory"
           : "none";
-    // No per-session containment verification yet (Phase 5) → never report "full".
-    const isolation =
-      h?.processIsolation === "os-sandbox" || h?.processIsolation === "provider-sandbox"
+    // `full` is reported ONLY when a per-session containment probe confirmed it
+    // for this exact launch (§3) — a manifest declaration alone caps at
+    // `partial`. `ambient` only when nothing better was required or declared.
+    const declaresSandbox =
+      h?.processIsolation === "os-sandbox" || h?.processIsolation === "provider-sandbox";
+    const isolation = this.isolationVerified
+      ? "full"
+      : declaresSandbox || p.isolation.required === "partial"
         ? "partial"
-        : p.isolation.required === "ambient"
-          ? "ambient"
-          : "partial";
+        : "ambient";
     return { tools, budget, isolation };
   }
 

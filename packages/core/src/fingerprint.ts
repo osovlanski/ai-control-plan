@@ -91,8 +91,9 @@ export function canonicalRequestProjection(
   const promptDigest = digestString(request.runSpec.prompt);
   // The full runSpec, with the prompt swapped for its digest so no free text
   // reaches the stored provenance. Spreading keeps any future runSpec field
-  // covered automatically (`prompt` explicitly dropped via `undefined`).
-  const { prompt: _prompt, ...runSpecRest } = request.runSpec;
+  // covered automatically. `prompt` and `secretEnv` (a transient launch-time
+  // value, §3) are explicitly dropped — they never enter the fingerprint.
+  const { prompt: _prompt, secretEnv: _secretEnv, ...runSpecRest } = request.runSpec;
   const projection: Record<string, unknown> = {
     executionRequestId: request.executionRequestId,
     taskId: request.taskId,
@@ -101,7 +102,7 @@ export function canonicalRequestProjection(
     model: request.model ?? null,
     compositionRevisionId: request.compositionRevisionId ?? null,
     routingDecisionRef: request.routingDecisionRef,
-    runSpec: { ...runSpecRest, prompt: undefined, promptDigest },
+    runSpec: { ...runSpecRest, prompt: undefined, secretEnv: undefined, promptDigest },
     policy: request.policy,
     verification: request.verification,
     origin: request.origin,

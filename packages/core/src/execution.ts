@@ -125,6 +125,12 @@ export interface ExecutionContext {
   /** When `origin.kind === "handoff"`. */
   envelopeId?: string;
   priorCheckpointId?: string;
+  /**
+   * Names (not values) of secrets the provider launch may use. The Harness's
+   * SecretBroker (§3) resolves ONLY these, at the launch boundary; values never
+   * enter the persisted request, the fingerprint, or any diagnostic.
+   */
+  secretRefs?: string[];
 }
 
 // ---------------------------------------------------------------------------
