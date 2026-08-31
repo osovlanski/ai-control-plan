@@ -127,7 +127,7 @@ describe("005_harness on a legacy DB", () => {
     ).not.toThrow();
   });
 
-  it("006 upgrades an already-applied 005 handoff_envelopes to the start_ambiguous protocol", () => {
+  it("006 rebuilds an already-applied 005 handoff_envelopes, preserving rows and FKs", () => {
     // Apply through 005 only.
     const upTo005 = join(dir, "upto-005");
     cpSync(MIGRATIONS, upTo005, { recursive: true });
@@ -135,31 +135,66 @@ describe("005_harness on a legacy DB", () => {
       if (/^\d+_/.test(f) && Number(f.slice(0, 3)) >= 6) rmSync(join(upTo005, f));
     }
     migrate(db, upTo005);
-    const cols005 = (
-      db.prepare("PRAGMA table_info(handoff_envelopes)").all() as Array<{ name: string }>
-    ).map((c) => c.name);
-    expect(cols005).not.toContain("start_attempted_at");
+    expect(
+      (db.prepare("PRAGMA table_info(handoff_envelopes)").all() as Array<{ name: string }>).map((c) => c.name),
+    ).not.toContain("start_attempted_at");
 
-    // Now the real dir carries 006 forward.
-    expect(migrate(db, MIGRATIONS)).toContain("006_harness_handoff.sql");
-    const cols006 = (
-      db.prepare("PRAGMA table_info(handoff_envelopes)").all() as Array<{ name: string }>
-    ).map((c) => c.name);
-    expect(cols006).toEqual(expect.arrayContaining(["claimed_at", "start_attempted_at"]));
-
-    // The new state is accepted; an old-vocabulary value that never existed is not.
-    const insertEnv = db.prepare(
+    // Seed one envelope per 005-era state, plus a claimed one with a real
+    // execution_requests FK, so the rebuild's row-copy + FK survival is exercised.
+    db.prepare(
       `INSERT INTO checkpoints (id, task_id, run_id, envelope_snapshot, reason, at)
          VALUES ('ck', 'AG-1', 'r-active', '{}', 'handoff', 't')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO execution_requests
+         (id, task_id, attempt, assistant_id, routing_decision_ref, request_fingerprint,
+          fingerprint_algorithm, prompt_source, prompt_source_ref, rendered_prompt_digest, policy,
+          verification, origin, origin_envelope_id, canonical_projection, created_at)
+       VALUES ('req-c', 'AG-1', 2, 'a1', 'rd', 'fp', 'alg', 'handoff', 'env-claimed', 'd', '{}', '[]',
+               '{"kind":"handoff","envelopeId":"env-claimed"}', 'env-claimed', '{}', 't')`,
+    ).run();
+    const insEnv = db.prepare(
+      `INSERT INTO handoff_envelopes
+         (id, task_id, checkpoint_id, envelope, state, claimed_by_request_id, from_assistant_id, reason, created_at, updated_at)
+       VALUES (?, 'AG-1', 'ck', '{"k":1}', ?, ?, 'a1', 'r', 't', 't')`,
     );
-    insertEnv.run();
+    insEnv.run("env-ready", "ready", null);
+    insEnv.run("env-claimed", "claimed", "req-c");
+    insEnv.run("env-consumed", "consumed", null);
+    insEnv.run("env-released", "released", null);
+
+    // 006 rebuilds the table.
+    expect(migrate(db, MIGRATIONS)).toContain("006_harness_handoff.sql");
+    expect(
+      (db.prepare("PRAGMA table_info(handoff_envelopes)").all() as Array<{ name: string }>).map((c) => c.name),
+    ).toEqual(expect.arrayContaining(["claimed_at", "start_attempted_at"]));
+
+    // Every seeded row survived with its state, envelope JSON and claim FK.
+    const rows = db
+      .prepare("SELECT id, state, envelope, claimed_by_request_id FROM handoff_envelopes ORDER BY id")
+      .all() as Array<{ id: string; state: string; envelope: string; claimed_by_request_id: string | null }>;
+    expect(rows.map((r) => [r.id, r.state, r.claimed_by_request_id])).toEqual([
+      ["env-claimed", "claimed", "req-c"],
+      ["env-consumed", "consumed", null],
+      ["env-ready", "ready", null],
+      ["env-released", "released", null],
+    ]);
+    expect(rows.every((r) => r.envelope === '{"k":1}')).toBe(true);
+    expect(db.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+    expect(
+      (db.prepare("SELECT name FROM sqlite_master WHERE type='index'").all() as Array<{ name: string }>).map(
+        (r) => r.name,
+      ),
+    ).toContain("idx_handoff_envelopes_task");
+
+    // The new state is accepted post-rebuild; a bogus one is not.
     const env = db.prepare(
       `INSERT INTO handoff_envelopes
          (id, task_id, checkpoint_id, envelope, state, from_assistant_id, reason, created_at, updated_at)
        VALUES (?, 'AG-1', 'ck', '{}', ?, 'a1', 'r', 't', 't')`,
     );
-    expect(() => env.run("e1", "start_ambiguous")).not.toThrow();
-    expect(() => env.run("e2", "bogus")).toThrow();
+    expect(() => env.run("env-sa", "start_ambiguous")).not.toThrow();
+    expect(() => env.run("env-bogus", "telepathy")).toThrow();
   });
 
   it("enforces one live successor per handoff envelope", () => {

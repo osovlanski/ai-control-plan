@@ -59,11 +59,11 @@ function insertSuccessorReq(id: string, envelopeId: string): (d: Db) => void {
       .prepare(
         `INSERT INTO execution_requests
            (id, task_id, attempt, assistant_id, routing_decision_ref, request_fingerprint,
-            fingerprint_algorithm, prompt_source, rendered_prompt_digest, policy, verification,
-            origin, origin_envelope_id, canonical_projection, created_at)
-         VALUES (?, 'AG-1', 2, 'a2', 'rd', ?, 'alg', 'handoff', 'd', '{}', '[]', ?, ?, '{}', 't')`,
+            fingerprint_algorithm, prompt_source, prompt_source_ref, rendered_prompt_digest, policy,
+            verification, origin, origin_envelope_id, canonical_projection, created_at)
+         VALUES (?, 'AG-1', 2, 'a2', 'rd', ?, 'alg', 'handoff', ?, 'd', '{}', '[]', ?, ?, '{}', 't')`,
       )
-      .run(id, `fp_${id}`, JSON.stringify({ kind: "handoff", envelopeId }), envelopeId);
+      .run(id, `fp_${id}`, envelopeId, JSON.stringify({ kind: "handoff", envelopeId }), envelopeId);
 }
 
 function makeReady(): string {
@@ -158,7 +158,7 @@ describe("claim protocol", () => {
   it("markConsumed moves claimed → consumed", () => {
     const id = makeReady();
     handoff.claim(id, { requestId: "s1", insertRequest: insertSuccessorReq("s1", id) });
-    handoff.markConsumed(id);
+    handoff.markConsumed(id, "s1");
     expect(handoff.get(id)!.state).toBe("consumed");
   });
 });
@@ -176,7 +176,7 @@ describe("start_ambiguous", () => {
   it("pins the claim: automatic expiry is prohibited, only recovery may settle", () => {
     const id = makeReady();
     handoff.claim(id, { requestId: "s1", insertRequest: insertSuccessorReq("s1", id) });
-    handoff.enterStartAmbiguous(id);
+    handoff.enterStartAmbiguous(id, "s1");
     expect(handoff.get(id)!.state).toBe("start_ambiguous");
 
     clock = new Date(clock.getTime() + 10 * 60_000);
@@ -193,7 +193,7 @@ describe("start_ambiguous", () => {
   it("recovery establishing execution settles to consumed", () => {
     const id = makeReady();
     handoff.claim(id, { requestId: "s1", insertRequest: insertSuccessorReq("s1", id) });
-    handoff.enterStartAmbiguous(id);
+    handoff.enterStartAmbiguous(id, "s1");
     handoff.settleAmbiguous(id, { executionEstablished: true }, "s1");
     expect(handoff.get(id)!.state).toBe("consumed");
   });
@@ -201,7 +201,7 @@ describe("start_ambiguous", () => {
   it("refuses to settle for a request that does not own the claim", () => {
     const id = makeReady();
     handoff.claim(id, { requestId: "s1", insertRequest: insertSuccessorReq("s1", id) });
-    handoff.enterStartAmbiguous(id);
+    handoff.enterStartAmbiguous(id, "s1");
     expect(() => handoff.settleAmbiguous(id, { executionEstablished: true }, "s-stale")).toThrow(
       HandoffClaimError,
     );

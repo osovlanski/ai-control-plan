@@ -164,22 +164,40 @@ export class HandoffService {
 
       successor.insertRequest(this.db);
 
-      // Do not trust the callback — verify the row it claims to have written (§7):
-      // id, origin envelope and task must all match, else roll back.
+      // Do not trust the callback — verify EVERY handoff-identity field on the
+      // row it claims to have written (§7): the denormalized origin_envelope_id,
+      // the origin JSON's envelopeId/kind, prompt_source(_ref), and the task.
       const req = this.db
-        .prepare("SELECT id, task_id, origin_envelope_id FROM execution_requests WHERE id = ?")
+        .prepare(
+          `SELECT id, task_id, origin_envelope_id, prompt_source, prompt_source_ref,
+                  json_extract(origin, '$.kind')       AS origin_kind,
+                  json_extract(origin, '$.envelopeId') AS origin_env
+             FROM execution_requests WHERE id = ?`,
+        )
         .get(successor.requestId) as
-        | { id: string; task_id: string; origin_envelope_id: string | null }
+        | {
+            id: string;
+            task_id: string;
+            origin_envelope_id: string | null;
+            prompt_source: string;
+            prompt_source_ref: string | null;
+            origin_kind: string | null;
+            origin_env: string | null;
+          }
         | undefined;
       if (
         !req ||
         req.id !== successor.requestId ||
+        req.task_id !== env.task_id ||
         req.origin_envelope_id !== envelopeId ||
-        req.task_id !== env.task_id
+        req.origin_kind !== "handoff" ||
+        req.origin_env !== envelopeId ||
+        req.prompt_source !== "handoff" ||
+        req.prompt_source_ref !== envelopeId
       ) {
         throw new HandoffClaimError(
           envelopeId,
-          "successor request row does not match the envelope (id/task/origin mismatch)",
+          "successor request row does not match the envelope (id/task/origin/prompt-source mismatch)",
         );
       }
 
@@ -208,28 +226,41 @@ export class HandoffService {
     }
   }
 
-  /** adapter.start has been attempted — pin the claim; automatic expiry is now prohibited (§7). */
-  enterStartAmbiguous(envelopeId: string): void {
+  /**
+   * adapter.start has been attempted — pin the claim; automatic expiry is now
+   * prohibited (§7). CASes on `claimed_by_request_id` so a delayed start from a
+   * superseded request cannot move a re-claimed envelope.
+   *
+   * NOTE (Phase 7): §7 requires this flip to commit in the SAME transaction as
+   * the destination session's durable start intent (§9 step 2). The runner does
+   * not yet drive the claim protocol, so that co-commit is wired with the
+   * orchestrator cutover / recovery work — see docs/harness-implementation-progress.md.
+   */
+  enterStartAmbiguous(envelopeId: string, requestId: string): void {
     const at = this.now().toISOString();
     const info = this.db
       .prepare(
         `UPDATE handoff_envelopes SET state = 'start_ambiguous', start_attempted_at = ?, updated_at = ?
-         WHERE id = ? AND state = 'claimed'`,
+         WHERE id = ? AND state = 'claimed' AND claimed_by_request_id = ?`,
       )
-      .run(at, at, envelopeId);
-    if (info.changes !== 1) throw new HandoffClaimError(envelopeId, "cannot enter start_ambiguous (not 'claimed')");
+      .run(at, at, envelopeId, requestId);
+    if (info.changes !== 1) {
+      throw new HandoffClaimError(envelopeId, "cannot enter start_ambiguous (not 'claimed' by this request)");
+    }
   }
 
   /** Durable start acknowledged — execution provably began consuming the envelope (§7). */
-  markConsumed(envelopeId: string): void {
+  markConsumed(envelopeId: string, requestId: string): void {
     const at = this.now().toISOString();
     const info = this.db
       .prepare(
         `UPDATE handoff_envelopes SET state = 'consumed', updated_at = ?
-         WHERE id = ? AND state IN ('claimed', 'start_ambiguous')`,
+         WHERE id = ? AND state IN ('claimed', 'start_ambiguous') AND claimed_by_request_id = ?`,
       )
-      .run(at, envelopeId);
-    if (info.changes !== 1) throw new HandoffClaimError(envelopeId, "cannot mark consumed");
+      .run(at, envelopeId, requestId);
+    if (info.changes !== 1) {
+      throw new HandoffClaimError(envelopeId, "cannot mark consumed (not claimed by this request)");
+    }
   }
 
   /**

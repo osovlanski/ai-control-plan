@@ -293,6 +293,30 @@ describe("reroute yield (H-I1)", () => {
     expect(detail.evidence.length).toBeGreaterThan(0);
     expect(detail.suggestion).toBeUndefined();
   });
+
+  it("carries a checkpointId the plane can resolve to the assembled envelope (§8)", async () => {
+    const tasks = new TaskStore(db);
+    const checkpoints = new CheckpointService(db, tasks);
+    const handoffSvc = new HandoffService(db);
+    const script: FakeScript = {
+      ok: false,
+      events: [{ type: "error", summary: "model cannot do this", payload: { kind: "model_unsuitable" } }],
+    };
+    const runner = new SessionRunner(
+      deps(countingFake(script), { checkpoints, handoff: handoffSvc }),
+    );
+    const result = await runner.run(request());
+
+    expect(result.yield?.kind).toBe("reroute");
+    const detail = result.yield!.detail as { checkpointId?: string; envelopeId?: never };
+    expect(detail).not.toHaveProperty("envelopeId"); // §8: reroute carries no envelope id
+    expect(detail.checkpointId).toBeTruthy();
+
+    const found = handoffSvc.byCheckpoint(detail.checkpointId!);
+    expect(found).toHaveLength(1);
+    expect(found[0]!.state).toBe("ready");
+    expect(handoffSvc.bySourceSession(sessionOf())[0]!.id).toBe(found[0]!.id);
+  });
 });
 
 describe("provider failure normalization", () => {
