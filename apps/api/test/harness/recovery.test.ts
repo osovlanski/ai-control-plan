@@ -356,6 +356,22 @@ describe("HarnessRecovery — delivery_unknown approval settlement (§4)", () =>
     expect(store.get(id)!.state).toBe("RUNNING");
   });
 
+  it("holds an `answered` row (never delivered) when the ack lookup is negative — no live handle to re-deliver on", async () => {
+    // §4 redelivery-on-recovery needs a resumed provider session (deferred); recovery only
+    // does ack-lookup-or-hold-and-surface.
+    const id = seedSession({ reqId: "erq_answered2", to: "AWAITING_APPROVAL", providerSessionRef: "psr_7c" });
+    const ap = new ApprovalService(db);
+    ap.request(id, "prq_1", "apr_1");
+    ap.answer(id, "prq_1", "approved", "user");
+
+    await recovery({ canResume: true, approvalAckLookup: true, ackResult: false }).reconcileOnBoot();
+
+    expect(new ApprovalService(db).get(id, "prq_1")!.state).toBe("answered"); // still undelivered
+    expect(store.get(id)!.state).toBe("AWAITING_APPROVAL");
+    const held = recoveryEvents(id).find((e) => e.action === "approval_delivery_held");
+    expect(held?.detail).toContain("provider reports no acknowledgement");
+  });
+
   it("holds the approval when the ack lookup returns false — session stays AWAITING_APPROVAL", async () => {
     const id = seedSession({ reqId: "erq_ack2", to: "AWAITING_APPROVAL", providerSessionRef: "psr_8" });
     seedDeliveryUnknown(id);

@@ -39,7 +39,9 @@ Rules for the rest of the work:
 | `54f17cd` | Phase 6 follow-up r2 | Codex: `GET /api/sessions?groupId=&parentTaskId=` + parent index + web `sessionsByGroup/Parent`; result served only if shape is `{outcome:string,...}` else null; **`SessionRunner.finalize()` now redacts `failure.message`+`failure.providerDetail`** (was an H-I13 leak from `error`-event summaries); TaskDetail clears session on taskId change; UI guards nested `result.enforcement`. Also lands Phase 7 scaffolding (all additive, unused there): manifest `approvalAckLookup`/`approvalIdempotentRedelivery`, `recovery.decision` event type + `RecoveryDecisionPayload`, `SessionStore.incrementDirectiveAttempt`/`markDirectiveFailed`/`appendRecoveryEvent`. |
 | `dbe156e` | Phase 7 (WIP) | `recovery.ts` — `HarnessRecovery` (boot reconcile v2, lease sweeper, directive replay, `delivery_unknown` settlement). Compiled only, no tests, unwired. |
 | `430b6e8` | Phase 7 | `recovery.test.ts` + `fault-injection.test.ts` (maps H-I3/4/8/12/14) + `server.test.ts` boot assertion. `Orchestrator.reconcileOnBoot()` is now `async`, runs `HarnessRecovery.reconcileOnBoot()` first and scopes the legacy blanket fail-all to `execution_request_id IS NULL` rows. `buildServer` builds the deps (`SessionStore`, `ApprovalService`, `CheckpointService` **is** structurally a `RunnerCheckpoints`, `Registry` **is** structurally the `{adapter,manifest}` facade) and owns a 60s `sweepExpiredLeases()` `setInterval` (`.unref()`, cleared on `app.close()`). `/api/sessions/:id` audit filter now includes `recovery.decision`. |
-| _this_ | Phase 7 follow-up | Codex Phase 7 findings (see below). Atomic `SessionStore.resumeFromApproval` (approval→delivered + session→RUNNING in one tx); recovery now settles `answered`/`delivering`/`delivery_unknown` (not just `delivery_unknown`); a durable `cancelRequested` is honored ahead of resume/orphan → terminal `CANCELLED` + checkpoint attempt (`recomputeUsage` for the VERIFYING-completion result from persisted `usage.updated` events); `resume_offered` emitted once (`hasRecoveryDecision` guard) so periodic sweeps don't re-announce; `renewLease` after the awaited settle steps; directive-failure detail goes through core `redactValue` not a hand-rolled `sk-` regex. API 265 / core 37 / adapters 8 / web 3, lint clean. |
+| `a9a2364` | Phase 7 follow-up | Codex Phase 7 findings (see below). Atomic `SessionStore.resumeFromApproval` (approval→delivered + session→RUNNING in one tx); recovery now settles `answered`/`delivering`/`delivery_unknown` (not just `delivery_unknown`); a durable `cancelRequested` is honored ahead of resume/orphan → terminal `CANCELLED` + checkpoint attempt (`recomputeUsage` for the VERIFYING-completion result from persisted `usage.updated` events); `resume_offered` emitted once (`hasRecoveryDecision` guard) so periodic sweeps don't re-announce; `renewLease` after the awaited settle steps; directive-failure detail goes through core `redactValue` not a hand-rolled `sk-` regex. API 265 / core 37 / adapters 8 / web 3, lint clean. |
+
+| _this_ | Phase 7 follow-up r2 | Codex follow-up review: `recoverSession` now wraps the decision in `decide()` and catches `SessionCasConflictError` → a fence lost mid-recovery (TTL burned through an await, or a settlement race) ends that session's recovery cleanly (`skipped`, `recovery_aborted` event) instead of throwing out of the batch; `renewLease` return is checked and aborts on failure; `approval_delivery_held` now distinguishes "provider reports no acknowledgement" from "no ack lookup available"; added the `answered`-row negative-ack hold test. API 266 / core 37 / adapters 8 / web 3, lint clean. |
 
 Codex reviewed the diff of every phase and each follow-up; findings were folded
 into the follow-up commits. **All Codex findings through Phase 6 are resolved.**
@@ -51,7 +53,13 @@ into the follow-up commits. **All Codex findings through Phase 6 are resolved.**
   every sweep → emit-once guard; no lease renew across awaits → `renewLease`;
   VERIFYING result fabricated zero usage → recomputed from events; hand-rolled
   redaction → core `redactValue`.
-- *Kept as approved-design / deferred (not bugs):* checkpoint side effect before
+- *Follow-up r2 (second Codex pass):* fenced-CAS-lost-mid-recovery now caught,
+  not thrown out of the batch; `renewLease` failure aborts; held-event reason
+  disambiguated.
+- *Kept as approved-design / deferred (not bugs):* `approvalIdempotentRedelivery`
+  re-send on recovery (needs a resumed provider session — §4 exit chosen by the
+  Control Plane, not recovery; recovery is ack-lookup-or-hold-and-surface);
+  checkpoint side effect before
   the `applied` CAS (git commit can't co-commit with SQLite; a duplicate recovery
   checkpoint is benign — this is the design's at-least-once replay, §4);
   `appendRecoveryEvent` `MAX(seq)+1` without a lease CAS (single-process

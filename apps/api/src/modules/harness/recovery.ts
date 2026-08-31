@@ -24,7 +24,7 @@ import type {
   ExecutionSession,
 } from "@agent-plane/core";
 import { redactValue } from "@agent-plane/core";
-import type { SessionStore } from "./session-store.js";
+import { SessionCasConflictError, type SessionStore } from "./session-store.js";
 import type { ApprovalService } from "./approval-service.js";
 import type { RunnerCheckpoints } from "./session-runner.js";
 
@@ -111,6 +111,28 @@ export class HarnessRecovery {
     this.deps.store.appendRecoveryEvent(sessionId, "lease_taken_over");
 
     try {
+      return await this.decide(sessionId, s0, lease);
+    } catch (err) {
+      // A fenced CAS that lost its lease (TTL burned through during an awaited
+      // checkpoint/probe, or a settlement race) is the DESIGNED outcome, not a
+      // corruption (§9). End recovery of this session cleanly; the next boot or
+      // sweep retries it under a fresh token.
+      if (err instanceof SessionCasConflictError) {
+        this.deps.store.appendRecoveryEvent(sessionId, "recovery_aborted", redact(err));
+        return { sessionId, action: "skipped", detail: "lost the fencing lease mid-recovery" };
+      }
+      throw err;
+    } finally {
+      this.deps.store.releaseLease(sessionId, lease);
+    }
+  }
+
+  private async decide(
+    sessionId: string,
+    s0: ExecutionSession,
+    lease: string,
+  ): Promise<SessionRecoveryOutcome> {
+    {
       // 1. Replay any unapplied guard directives (may orphan the session).
       const replay = await this.replayDirectives(sessionId, lease);
       if (replay.orphaned) return { sessionId, action: "orphaned", detail: replay.detail };
@@ -140,8 +162,11 @@ export class HarnessRecovery {
       s = this.deps.store.get(sessionId)!;
       if (isTerminal(s.state)) return { sessionId, action: "already_terminal" };
       // The awaited steps above may have burned into the lease TTL — re-fence
-      // before the remaining writes so a concurrent sweep cannot take over.
-      this.deps.store.renewLease(sessionId, lease);
+      // before the remaining writes. If the token is already gone a sweep has
+      // taken over; stop here rather than fight its CAS.
+      if (!this.deps.store.renewLease(sessionId, lease)) {
+        return { sessionId, action: "skipped", detail: "lost the fencing lease mid-recovery" };
+      }
 
       // 3. Crashed mid-VERIFYING: execution had finished, so complete it — with
       //    no verification (it was never durably recorded); §5. Usage is
@@ -173,8 +198,6 @@ export class HarnessRecovery {
       this.finalize(sessionId, s, lease, "FAILED", { failure, checkpoint });
       this.deps.store.appendRecoveryEvent(sessionId, "orphaned", checkpoint.committed ? "checkpoint committed" : "checkpoint not committed");
       return { sessionId, action: "orphaned" };
-    } finally {
-      this.deps.store.releaseLease(sessionId, lease);
     }
   }
 
@@ -239,9 +262,10 @@ export class HarnessRecovery {
     const rows = this.deps.approvals.unsettled(sessionId).filter((r) => undelivered.has(r.state));
     if (rows.length === 0) return;
     const manifest = this.deps.registry.manifest(assistantOf(this.deps.store, sessionId));
+    const canLookup = !!(manifest?.harness?.approvalAckLookup && this.deps.approvalAckLookup);
     for (const r of rows) {
-      if (manifest?.harness?.approvalAckLookup && this.deps.approvalAckLookup) {
-        const acked = await this.deps.approvalAckLookup(sessionId, r.providerRequestId);
+      if (canLookup) {
+        const acked = await this.deps.approvalAckLookup!(sessionId, r.providerRequestId);
         if (acked) {
           const s = this.deps.store.get(sessionId)!;
           if (s.state === "AWAITING_APPROVAL") {
@@ -257,10 +281,14 @@ export class HarnessRecovery {
           continue;
         }
       }
+      // Held — and the two reasons drive different operator/retry decisions:
+      // "provider queried, reports no acknowledgement" vs "provider cannot be queried".
       this.deps.store.appendRecoveryEvent(
         sessionId,
         "approval_delivery_held",
-        `${r.providerRequestId}: delivery unconfirmed, no ack lookup — held for operator/plane resolution`,
+        canLookup
+          ? `${r.providerRequestId}: provider reports no acknowledgement — held for operator/plane resolution`
+          : `${r.providerRequestId}: delivery unconfirmed, no ack lookup available — held for operator/plane resolution`,
       );
     }
   }
