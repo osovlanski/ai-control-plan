@@ -472,6 +472,43 @@ export class SessionStore {
       .run(this.iso(), id);
   }
 
+  /** Recovery replay bookkeeping (§4): bump the attempt counter, return the new count. */
+  incrementDirectiveAttempt(id: number): number {
+    this.db.prepare("UPDATE guard_directives SET attempts = attempts + 1 WHERE id = ?").run(id);
+    return (
+      this.db.prepare("SELECT attempts FROM guard_directives WHERE id = ?").get(id) as {
+        attempts: number;
+      }
+    ).attempts;
+  }
+
+  /** A directive that permanently fails replay — its session is orphan-failed (§9). */
+  markDirectiveFailed(id: number): void {
+    this.db
+      .prepare("UPDATE guard_directives SET status = 'failed', applied_at = ? WHERE id = ?")
+      .run(this.iso(), id);
+  }
+
+  /**
+   * Append a `recovery.decision` audit event to a session's timeline (§9, §11).
+   * Append-only, next-seq — the caller holds the lease, so no CAS is needed for
+   * a witness that never mutates session state.
+   */
+  appendRecoveryEvent(sessionId: string, action: string, detail?: string): number {
+    const seq =
+      (
+        this.db.prepare("SELECT COALESCE(MAX(seq), 0) + 1 AS n FROM events WHERE run_id = ?").get(sessionId) as {
+          n: number;
+        }
+      ).n;
+    this.db
+      .prepare(
+        "INSERT INTO events (run_id, seq, ts, type, summary, payload) VALUES (?, ?, ?, 'recovery.decision', ?, ?)",
+      )
+      .run(sessionId, seq, this.iso(), `recovery: ${action}${detail ? ` — ${detail}` : ""}`, JSON.stringify({ action, detail }));
+    return seq;
+  }
+
   pendingDirectives(sessionId: string): Array<{ id: number; guard: string; directive: string; payload: unknown }> {
     return (
       this.db

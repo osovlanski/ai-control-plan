@@ -43,13 +43,17 @@ describe("web API client", () => {
     expect(got.sessionState).toBe("COMPLETED");
     expect(got.state).toBe("ENDED_OK"); // dual-field window
     expect(got.correlation).toEqual({ parentTaskId: "AG-0", groupId: "g1" });
-    expect(got.result?.enforcement.isolation).toBe("partial");
+    expect(got.result?.outcome).toBe("completed");
+    expect(got.result?.enforcement?.isolation).toBe("partial");
     expect(got.result?.verification?.passed).toBe(false);
+    expect(got.checkpoints[0]!.gitRef).toBeNull();
     expect(got.audit[0]!.type).toBe("guard.decision");
     expect(fetchMock).toHaveBeenCalledWith("/api/sessions/es_1", expect.any(Object));
 
     await api.sessions("AG-1");
     expect(fetchMock).toHaveBeenLastCalledWith("/api/tasks/AG-1/sessions", expect.any(Object));
+    await api.sessionsByGroup("g1");
+    expect(fetchMock).toHaveBeenLastCalledWith("/api/sessions?groupId=g1", expect.any(Object));
   });
 
   it("surfaces the API error message for failed workflows", async () => {

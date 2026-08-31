@@ -176,6 +176,10 @@ export const api = {
   scores: () => req<AssistantScore[]>("/api/scores"),
   sessions: (taskId: string) => req<SessionSummary[]>(`/api/tasks/${taskId}/sessions`),
   session: (id: string) => req<SessionDetail>(`/api/sessions/${id}`),
+  sessionsByGroup: (groupId: string) =>
+    req<SessionSummary[]>(`/api/sessions?groupId=${encodeURIComponent(groupId)}`),
+  sessionsByParent: (parentTaskId: string) =>
+    req<SessionSummary[]>(`/api/sessions?parentTaskId=${encodeURIComponent(parentTaskId)}`),
 };
 
 /** One row of the Execution Harness session list for a task (§11 drill-down). */
@@ -191,6 +195,7 @@ export interface SessionSummary {
   providerStartAcked: boolean;
   cancelRequested: boolean;
   settlementOwner: string | null;
+  correlation: { parentTaskId: string | null; groupId: string | null };
   startedAt: string | null;
   endedAt: string | null;
 }
@@ -200,9 +205,10 @@ export interface SessionResult {
   terminalState: string;
   failure?: { kind: string; retryable: boolean; message: string };
   verification?: { passed: boolean; checks: Array<{ name: string; passed: boolean; required: boolean; summary: string }> };
-  enforcement: { tools: string; budget: string; isolation: string };
-  usage: { inputTokens?: number; outputTokens?: number; accounting: string };
-  checkpoint: { attempted: boolean; committed: boolean; checkpointId?: string; gitRef?: string };
+  /** Optional in the type because a corrupt durable row can be missing it. */
+  enforcement?: { tools: string; budget: string; isolation: string };
+  usage?: { inputTokens?: number; outputTokens?: number; accounting: string };
+  checkpoint?: { attempted: boolean; committed: boolean; checkpointId?: string; gitRef?: string };
 }
 
 export interface SessionRequestView {
@@ -223,11 +229,12 @@ export interface SessionRequestView {
   createdAt: string;
 }
 
-export interface SessionDetail extends SessionSummary {
+export interface SessionDetail extends Omit<SessionSummary, "correlation"> {
   taskId: string;
   version: number;
   providerSessionRef: string | null;
   lease: { expiresAt: string | null } | null;
+  /** null when the request row is missing/corrupt. */
   correlation: { parentTaskId: string | null; groupId: string | null } | null;
   request: SessionRequestView | null;
   /** verification + enforcement live inside `result`, not duplicated. */

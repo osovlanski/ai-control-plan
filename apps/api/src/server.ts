@@ -395,14 +395,36 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     if (!tasks.get(req.params.id)) return reply.status(404).send({ error: "not found" });
     const rows = db
       .prepare(
-        `SELECT id, execution_request_id, assistant_id, session_state, state, attempt,
-                provider_start_acked, cancel_requested, settlement_owner, started_at, ended_at
-           FROM runs
-          WHERE task_id = ? AND execution_request_id IS NOT NULL
-          ORDER BY started_at, id`,
+        `SELECT r.id, r.execution_request_id, r.assistant_id, r.session_state, r.state, r.attempt,
+                r.provider_start_acked, r.cancel_requested, r.settlement_owner, r.started_at, r.ended_at,
+                er.parent_task_id, er.group_id
+           FROM runs r JOIN execution_requests er ON er.id = r.execution_request_id
+          WHERE r.task_id = ?
+          ORDER BY r.started_at, r.id`,
       )
       .all(req.params.id) as Array<Record<string, unknown>>;
     return rows.map(sessionSummary);
+  });
+
+  // Correlated navigation (§11): sessions across a subtask GROUP or under a
+  // PARENT task — the fan-out the single-task list above cannot express.
+  app.get<{ Querystring: { groupId?: string; parentTaskId?: string } }>("/api/sessions", (req, reply) => {
+    const { groupId, parentTaskId } = req.query;
+    if (!groupId && !parentTaskId) {
+      return reply.status(400).send({ error: "provide groupId or parentTaskId" });
+    }
+    const where = groupId ? "er.group_id = ?" : "er.parent_task_id = ?";
+    const rows = db
+      .prepare(
+        `SELECT r.id, r.execution_request_id, r.assistant_id, r.session_state, r.state, r.attempt,
+                r.provider_start_acked, r.cancel_requested, r.settlement_owner, r.started_at, r.ended_at,
+                er.parent_task_id, er.group_id, r.task_id
+           FROM runs r JOIN execution_requests er ON er.id = r.execution_request_id
+          WHERE ${where}
+          ORDER BY r.started_at, r.id`,
+      )
+      .all((groupId ?? parentTaskId) as string) as Array<Record<string, unknown>>;
+    return rows.map((r) => ({ ...sessionSummary(r), taskId: r.task_id }));
   });
 
   app.get<{ Params: { id: string } }>("/api/sessions/:id", (req, reply) => {
@@ -428,7 +450,15 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     const resultRow = db
       .prepare("SELECT result FROM execution_results WHERE session_id = ?")
       .get(req.params.id) as { result: string } | undefined;
-    const result = resultRow ? (safeJson(resultRow.result) as Record<string, unknown> | null) : null;
+    // A well-formed ExecutionResult is an object with a string `outcome` and an
+    // `enforcement` object; anything else (corrupt row) degrades to null so a
+    // client never dereferences `result.enforcement.tools` on garbage.
+    const parsed = resultRow ? safeJson(resultRow.result) : null;
+    const result =
+      parsed && typeof parsed === "object" && !Array.isArray(parsed) &&
+      typeof (parsed as Record<string, unknown>).outcome === "string"
+        ? (parsed as Record<string, unknown>)
+        : null;
 
     const checkpoints = (
       db
@@ -578,7 +608,7 @@ function safeJson(value: string): unknown {
   }
 }
 
-/** One row of `GET /api/tasks/:id/sessions`. */
+/** One row of the session-list endpoints. */
 function sessionSummary(r: Record<string, unknown>): Record<string, unknown> {
   return {
     sessionId: r.id,
@@ -590,6 +620,7 @@ function sessionSummary(r: Record<string, unknown>): Record<string, unknown> {
     providerStartAcked: r.provider_start_acked === 1,
     cancelRequested: r.cancel_requested === 1,
     settlementOwner: r.settlement_owner,
+    correlation: { parentTaskId: r.parent_task_id ?? null, groupId: r.group_id ?? null },
     startedAt: r.started_at,
     endedAt: r.ended_at,
   };

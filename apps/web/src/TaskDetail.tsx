@@ -61,6 +61,9 @@ export function TaskDetail({ taskId, onBack }: { taskId: string; onBack: () => v
   };
 
   useEffect(() => {
+    // A new task: drop anything shown for the previous one before refetching.
+    setSession(null);
+    setSessions([]);
     void api.events(taskId).then(setEvents);
     refresh();
 
@@ -460,8 +463,12 @@ export function TaskDetail({ taskId, onBack }: { taskId: string; onBack: () => v
               {session.result && (
                 <p style={{ fontSize: "0.84rem", margin: "0 0 0.4rem" }}>
                   outcome <strong>{session.result.outcome}</strong>
-                  {" · "}enforcement: tools {session.result.enforcement.tools}, budget{" "}
-                  {session.result.enforcement.budget}, isolation {session.result.enforcement.isolation}
+                  {session.result.enforcement && (
+                    <>
+                      {" · "}enforcement: tools {session.result.enforcement.tools}, budget{" "}
+                      {session.result.enforcement.budget}, isolation {session.result.enforcement.isolation}
+                    </>
+                  )}
                   {session.result.verification && (
                     <>
                       {" · "}verification{" "}

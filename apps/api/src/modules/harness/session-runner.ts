@@ -34,7 +34,7 @@ import type {
   UsagePayload,
   VerificationSpec,
 } from "@agent-plane/core";
-import { newExecutionSessionId, outcomeOf } from "@agent-plane/core";
+import { newExecutionSessionId, outcomeOf, redactValue } from "@agent-plane/core";
 import type { SessionStore } from "./session-store.js";
 import type { EventRecorder } from "./event-recorder.js";
 import type { ApprovalService } from "./approval-service.js";
@@ -886,7 +886,16 @@ class RunContext {
       sessionId: this.sessionId as ExecutionResult["sessionId"],
       terminalState: to,
       outcome: outcomeOf(to),
-      failure: parts.failure,
+      // `failure.message` can carry a provider error string lifted from an
+      // `error` event summary — redact it before it lands in the durable result
+      // (H-I13: nothing persisted comes from the unredacted policy view).
+      failure: parts.failure
+        ? {
+            ...parts.failure,
+            message: redactValue(parts.failure.message).slice(0, 2000),
+            providerDetail: parts.failure.providerDetail ? redactValue(parts.failure.providerDetail) : undefined,
+          }
+        : undefined,
       cancellation: parts.cancellation,
       verification: parts.verification,
       yield: parts.yield,

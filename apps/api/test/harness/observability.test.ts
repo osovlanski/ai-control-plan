@@ -115,10 +115,23 @@ describe("GET /api/tasks/:id/sessions", () => {
         providerStartAcked: true,
         cancelRequested: false,
         settlementOwner: null,
+        correlation: { parentTaskId: "AG-parent", groupId: "grp-7" },
         startedAt: "t0",
         endedAt: "t9",
       },
     ]);
+  });
+
+  it("navigates sessions by correlation group and by parent task", async () => {
+    const byGroup = await built.app.inject({ method: "GET", url: "/api/sessions?groupId=grp-7" });
+    expect(byGroup.statusCode).toBe(200);
+    expect(byGroup.json().map((s: { sessionId: string }) => s.sessionId)).toEqual([SESSION]);
+
+    const byParent = await built.app.inject({ method: "GET", url: "/api/sessions?parentTaskId=AG-parent" });
+    expect(byParent.json().map((s: { sessionId: string }) => s.sessionId)).toEqual([SESSION]);
+
+    expect((await built.app.inject({ method: "GET", url: "/api/sessions" })).statusCode).toBe(400);
+    expect((await built.app.inject({ method: "GET", url: "/api/sessions?groupId=nope" })).json()).toEqual([]);
   });
 
   it("404s for an unknown task", async () => {
@@ -192,6 +205,13 @@ describe("GET /api/sessions/:id", () => {
     const body = res.json();
     expect(body.request.policy).toBeNull(); // the bad column degrades to null...
     expect(body.result.outcome).toBe("completed"); // ...the rest of the read survives
+  });
+
+  it("degrades a syntactically-valid-but-wrong-shape result row to null (no client crash)", async () => {
+    db.prepare("UPDATE execution_results SET result = '[]' WHERE session_id = ?").run(SESSION);
+    const res = await built.app.inject({ method: "GET", url: `/api/sessions/${SESSION}` });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().result).toBeNull(); // not `[]` — a client won't read result.enforcement.tools off it
   });
 });
 
@@ -282,5 +302,54 @@ describe("drill-down over a REAL SessionRunner execution (shape + leak check)", 
     const raw = res.payload;
     expect(raw).not.toContain(CANARY);
     expect(raw).not.toMatch(/sk-[A-Za-z0-9]{6,}/);
+  });
+
+  it("redacts a provider token that reached failure.message before it is served", async () => {
+    const store = new SessionStore(db);
+    const fake = new FakeAdapter("a1" as AssistantId, {
+      ok: false,
+      events: [{ type: "error", summary: `auth failed with ${PLANTED}`, payload: { kind: "auth_failed" } }],
+    });
+    const runner = new SessionRunner({
+      store,
+      recorder: new EventRecorder(db),
+      approvals: new ApprovalService(db),
+      checkpoints: { create: async () => ({ id: "ckR", gitRef: null }) },
+      registry: { adapter: () => fake, manifest: () => MANIFEST },
+      approvalPollMs: 5,
+    });
+    const result = await runner.run({
+      schemaVersion: 1,
+      executionRequestId: "erq_fail_1",
+      taskId: TASK as TaskId,
+      attempt: 1,
+      assistantId: "a1" as AssistantId,
+      routingDecisionRef: "rd",
+      runSpec: {
+        taskId: TASK as TaskId,
+        prompt: "p",
+        workdir: home,
+        permissionPolicy: { mode: "auto-approve" },
+        env: { redactionRules: [], maxRuntimeMs: 60_000 },
+      },
+      policy: {
+        budget: { enforcement: "advisory" },
+        timeout: { hardMs: 60_000 },
+        approval: { mode: "auto-approve" },
+        tools: { mode: "audit" },
+        checkpoint: { onSoftLimit: true },
+        isolation: { required: "ambient" },
+      },
+      context: {},
+      verification: [],
+      origin: { kind: "fresh" },
+    });
+    expect(result.outcome).toBe("failed");
+    expect(result.failure?.message).not.toContain(PLANTED); // redacted in finalize()
+
+    const sid = store.forRequest("erq_fail_1")!.sessionId as string;
+    const res = await built.app.inject({ method: "GET", url: `/api/sessions/${sid}` });
+    expect(res.payload).not.toMatch(/sk-[A-Za-z0-9]{6,}/);
+    expect(res.json().result.failure.message).toContain("[REDACTED]");
   });
 });

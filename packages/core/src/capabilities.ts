@@ -69,6 +69,17 @@ export interface CapabilityManifest {
     };
     toolGating: "preventive" | "none";
     approvalRelay: boolean;
+    /**
+     * The provider exposes a queryable acknowledgement for a relayed approval, so
+     * a `delivery_unknown` recovery can probe and settle it deterministically (§4).
+     */
+    approvalAckLookup?: boolean;
+    /**
+     * The conformance suite has proven that re-sending the SAME
+     * `provider_request_id` answer is accepted-or-no-op for this adapter, so a
+     * `delivery_unknown` recovery may safely re-deliver (§4).
+     */
+    approvalIdempotentRedelivery?: boolean;
     processIsolation: "os-sandbox" | "provider-sandbox" | "none";
     provisioningContractVersion?: string;
   };

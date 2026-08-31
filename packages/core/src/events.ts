@@ -27,6 +27,7 @@ export const EVENT_TYPES = [
   "checkpoint.created",
   "verification.result",
   "guard.decision",
+  "recovery.decision",
 ] as const;
 
 export type NormalizedEventType = (typeof EVENT_TYPES)[number];
@@ -181,6 +182,25 @@ export interface ErrorEventPayload {
 }
 
 /**
+ * Payload for `recovery.decision` — an append-only witness of what boot
+ * reconcile / the lease sweeper / directive replay / approval settlement did to
+ * a session after a crash (§9). Durable so Cockpit can tell "orphaned" from
+ * "resume offered" from "held".
+ */
+export interface RecoveryDecisionPayload {
+  action:
+    | "resume_offered"
+    | "orphaned"
+    | "completed_from_verifying"
+    | "directive_replayed"
+    | "directive_failed"
+    | "approval_ack_confirmed"
+    | "approval_delivery_held"
+    | "lease_taken_over";
+  detail?: string;
+}
+
+/**
  * Per-type payload contract for the whole closed event set (§2 — "every event
  * type gets a typed payload interface in `packages/core`"). The wire shape on
  * `NormalizedEvent.payload` stays a loose bag for migration-free persistence;
@@ -205,6 +225,7 @@ export interface EventPayloads {
   "checkpoint.created": CheckpointCreatedPayload;
   "verification.result": VerificationResultPayload;
   "guard.decision": GuardDecisionPayload;
+  "recovery.decision": RecoveryDecisionPayload;
 }
 
 /** Compile-time proof `EventPayloads` has an entry for every event type. */
