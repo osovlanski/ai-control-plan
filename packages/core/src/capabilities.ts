@@ -52,6 +52,26 @@ export interface CapabilityManifest {
     /** Best-effort pre-routing quota view; refreshed continuously from run events. */
     limits?: QuotaWindowState[];
   };
+  /**
+   * Execution-harness capability declarations (execution-harness §6). Optional:
+   * when absent the Harness assumes the least-capable defaults (accounting
+   * "none", `toolGating` "none", `processIsolation` "none", `approvalRelay`
+   * derived from `adapter.send`). A claim here is only honest once the adapter
+   * conformance suite (§12) proves the callable behavior behind it — until then
+   * Prepare rejects policies that would rely on it.
+   */
+  harness?: {
+    usageAccounting: "delta" | "cumulative" | "none";
+    /** Quantitative usage-reporting contract — required for bounded budget enforcement (§2). */
+    usageReporting?: {
+      cadence: "per-message" | { periodicMs: number };
+      maxUnreportedTokens: number;
+    };
+    toolGating: "preventive" | "none";
+    approvalRelay: boolean;
+    processIsolation: "os-sandbox" | "provider-sandbox" | "none";
+    provisioningContractVersion?: string;
+  };
   /** Provider-specific detail: skills/plugins (Claude), sandbox (Codex), rules (Cursor), deployed agents (Bedrock). */
   providerDetail: Record<string, unknown>;
   evidence: {

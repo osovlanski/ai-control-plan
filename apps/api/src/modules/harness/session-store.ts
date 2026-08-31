@@ -321,6 +321,13 @@ export class SessionStore {
       to: TerminalSessionState;
       settlementOwner: string;
       result: ExecutionResult;
+      /**
+       * Runs inside the SAME transaction as the terminal CAS + result insert.
+       * The handoff/reroute path uses it to commit the envelope + `handoffs` row
+       * atomically with the source session's terminalization (§7). Throwing
+       * rolls the whole terminalization back.
+       */
+      extra?: (db: Db) => void;
     },
   ): ExecutionResult {
     if (input.result.sessionId !== sessionId) {
@@ -340,6 +347,7 @@ export class SessionStore {
            VALUES (?, ?, ?, ?, ?)`,
         )
         .run(sessionId, input.to, input.result.outcome, JSON.stringify(input.result), this.iso());
+      input.extra?.(this.db);
     });
     tx();
     return input.result;
@@ -420,6 +428,83 @@ export class SessionStore {
       )
       .run(expiresIso, sessionId, token, this.iso());
     return info.changes === 1;
+  }
+
+  /** Drop a lease this runner holds (clean handback when a run finishes). */
+  releaseLease(sessionId: string, token: string): boolean {
+    const info = this.db
+      .prepare(
+        "UPDATE runs SET lease_token = NULL, lease_expires_at = NULL WHERE id = ? AND lease_token = ?",
+      )
+      .run(sessionId, token);
+    return info.changes === 1;
+  }
+
+  /**
+   * Record a guard directive as `pending`, keyed to its triggering event seq
+   * (§4). Meant to be called from inside the recorder batch's `inTransaction`
+   * hook so it commits atomically with that event. Returns the row id; the
+   * runner CASes it to `applied` once the action succeeds. A crash between the
+   * two leaves a `pending` row for the Phase 7 replay worker.
+   */
+  recordPendingDirective(
+    sessionId: string,
+    eventSeq: number,
+    guard: string,
+    directive: string,
+    payload: unknown,
+  ): number {
+    const info = this.db
+      .prepare(
+        `INSERT INTO guard_directives (session_id, event_seq, guard, directive, payload, status, created_at)
+         VALUES (?, ?, ?, ?, ?, 'pending', ?)`,
+      )
+      .run(sessionId, eventSeq, guard, directive, JSON.stringify(payload), this.iso());
+    return Number(info.lastInsertRowid);
+  }
+
+  markDirectiveApplied(id: number): void {
+    this.db
+      .prepare("UPDATE guard_directives SET status = 'applied', applied_at = ? WHERE id = ? AND status = 'pending'")
+      .run(this.iso(), id);
+  }
+
+  pendingDirectives(sessionId: string): Array<{ id: number; guard: string; directive: string; payload: unknown }> {
+    return (
+      this.db
+        .prepare("SELECT id, guard, directive, payload FROM guard_directives WHERE session_id = ? AND status = 'pending' ORDER BY id")
+        .all(sessionId) as Array<{ id: number; guard: string; directive: string; payload: string }>
+    ).map((r) => ({ id: r.id, guard: r.guard, directive: r.directive, payload: JSON.parse(r.payload) }));
+  }
+
+  /**
+   * Atomic approval pause (§4, H-I14): insert the durable approvals row AND CAS
+   * the session RUNNING → AWAITING_APPROVAL in one transaction, so a pending
+   * approval and a paused session can never disagree. The `approval.requested`
+   * audit event is already durable from the preceding recorder batch.
+   */
+  pauseForApproval(
+    sessionId: string,
+    input: { expectedVersion: number; leaseToken: string; approvalId: string; providerRequestId: string },
+  ): ExecutionSession {
+    const at = this.iso();
+    const tx = this.db.transaction(() => {
+      this.db
+        .prepare(
+          `INSERT INTO approvals (id, session_id, provider_request_id, state, created_at, updated_at)
+           VALUES (?, ?, ?, 'pending', ?, ?)
+           ON CONFLICT(session_id, provider_request_id) DO NOTHING`,
+        )
+        .run(input.approvalId, sessionId, input.providerRequestId, at, at);
+      this.transition(sessionId, {
+        expectedVersion: input.expectedVersion,
+        from: "RUNNING",
+        to: "AWAITING_APPROVAL",
+        leaseToken: input.leaseToken,
+      });
+    });
+    tx();
+    return this.get(sessionId)!;
   }
 
   /**
