@@ -29,11 +29,11 @@ import type {
   ProviderSessionRef,
   RerouteRequest,
   RunHandle,
+  RunSpec,
   TerminalSessionState,
   UsagePayload,
   VerificationSpec,
 } from "@agent-plane/core";
-import { existsSync } from "node:fs";
 import { newExecutionSessionId, outcomeOf } from "@agent-plane/core";
 import type { SessionStore } from "./session-store.js";
 import type { EventRecorder } from "./event-recorder.js";
@@ -80,11 +80,17 @@ export interface RunnerDeps {
   /** Resolves the request's secret REFERENCES at the launch boundary (§3). */
   secretResolver?: SecretResolver;
   /**
-   * Per-session provider-process containment probe (§3). Returns true when the
-   * declared OS/provider sandbox is verified active for THIS launch config.
-   * Absent ⇒ the session reports at most `partial` isolation.
+   * Per-session provider-process containment probe (§3) — the "equivalent
+   * adapter probe" §3 allows in place of a provisioning `verify()` call. Given
+   * the exact launch config (spec + provider ref), returns true when the
+   * declared OS/provider sandbox is verified active for THIS session. Absent ⇒
+   * a `full` requirement fails the session before RUNNING.
    */
-  verifyIsolation?: (sessionId: string) => Promise<boolean> | boolean;
+  verifyIsolation?: (probe: {
+    sessionId: string;
+    runSpec: RunSpec;
+    providerSessionRef?: ProviderSessionRef;
+  }) => Promise<boolean> | boolean;
 }
 
 const POLICY_UNENFORCEABLE = "policy_unenforceable" as const;
@@ -209,25 +215,6 @@ class RunContext {
       }
     }
 
-    // Per-session provider-process containment verification (§3): a `full`
-    // requirement that passed Prepare's manifest check must still be PROVEN for
-    // this exact launch config before RUNNING — a declaration is never a proof.
-    if (this.request.policy.isolation.required === "full") {
-      const verified = this.d.verifyIsolation ? await this.d.verifyIsolation(this.sessionId) : false;
-      if (!verified) {
-        return this.finalizeFailure(
-          "FAILED",
-          {
-            kind: SessionRunner.UNENFORCEABLE,
-            retryable: false,
-            message: "per-session provider-process containment verification did not confirm a full sandbox",
-          },
-          "PREPARED",
-        );
-      }
-      this.isolationVerified = true;
-    }
-
     // --- Execute + Observe ---------------------------------------------
     this.transition("PREPARED", "STARTING"); // durable start intent (§9)
     const adapter = this.d.registry.adapter(this.request.assistantId);
@@ -247,6 +234,38 @@ class RunContext {
         expectedVersion: this.version,
         leaseToken: this.lease,
       }).version;
+    }
+
+    // Per-session provider-process containment verification (§3): a `full`
+    // requirement that passed Prepare's manifest check must still be PROVEN for
+    // THIS launch — a declaration is never a proof. Run it after start() so the
+    // probe sees the exact launch config (spec + provider ref) it is verifying,
+    // and before RUNNING so a below-`required` result fails the session first.
+    if (this.request.policy.isolation.required === "full") {
+      const verified = this.d.verifyIsolation
+        ? await this.d.verifyIsolation({
+            sessionId: this.sessionId,
+            runSpec: this.request.runSpec,
+            providerSessionRef: handle.providerSessionRef,
+          })
+        : false;
+      if (!verified) {
+        await safeCancel(adapter, handle);
+        const cp = await this.attemptCheckpoint("cancel");
+        return this.finalize(
+          "STARTING",
+          "FAILED",
+          {
+            failure: {
+              kind: SessionRunner.UNENFORCEABLE,
+              retryable: false,
+              message: "per-session provider-process containment verification did not confirm a full sandbox",
+            },
+            checkpoint: cp,
+          },
+        );
+      }
+      this.isolationVerified = true;
     }
 
     let firstEvent = true;
@@ -503,8 +522,19 @@ class RunContext {
         return "bounded cost caps are not enforceable yet (no pricing table) — use a token cap or advisory mode";
       }
     }
-    if (p.isolation.required === "full" && h?.processIsolation !== "os-sandbox" && h?.processIsolation !== "provider-sandbox") {
+    const declaresSandbox = h?.processIsolation === "os-sandbox" || h?.processIsolation === "provider-sandbox";
+    if (p.isolation.required === "full" && !declaresSandbox) {
       return "isolation.required full requires an OS/provider process sandbox that this adapter does not declare";
+    }
+    // `partial` = the Harness's own worktree + profile discipline is in force,
+    // which needs the workspace authority. Without it (and without a declared
+    // sandbox) the achievable tier is only `ambient` — reject rather than report
+    // a tier we cannot back (H-I10).
+    if (p.isolation.required === "partial" && !this.d.authority && !declaresSandbox) {
+      return "isolation.required partial requires the workspace authority (worktree + profile discipline) or a declared sandbox";
+    }
+    if ((this.request.context.secretRefs?.length ?? 0) > 0 && !this.d.secretResolver) {
+      return "request names secretRefs but no secret resolver is configured to resolve them at launch";
     }
     return undefined;
   }
@@ -526,14 +556,17 @@ class RunContext {
     const spec = this.effectiveRunSpec();
 
     // Resolve secret REFERENCES at the launch boundary; values are transient,
-    // injected by the adapter, dropped straight after (§3).
+    // injected by the adapter, dropped straight after (§3). Construction +
+    // resolution happen INSIDE the try so a mid-resolution failure still runs
+    // `broker.dispose()` (the broker also clears partial state on a failed
+    // resolve). `secretRefs` with no resolver is rejected at Prepare.
     const refs = this.request.context.secretRefs ?? [];
     let broker: SecretBroker | undefined;
-    if (refs.length > 0 && this.d.secretResolver) {
-      broker = new SecretBroker(this.d.secretResolver, refs);
-      spec.secretEnv = broker.resolve(refs);
-    }
     try {
+      if (refs.length > 0 && this.d.secretResolver) {
+        broker = new SecretBroker(this.d.secretResolver, refs);
+        spec.secretEnv = broker.resolve(refs);
+      }
       if (this.request.origin.kind === "resume") {
         const prior = this.d.store.get(this.request.origin.sessionId as string);
         const ref = prior?.providerSessionRef;
@@ -781,11 +814,10 @@ class RunContext {
       let summary = "skipped (no workspace authority)";
       if (authority && worktree && spec.command) {
         if (spec.kind === "artifact_exists") {
-          // A path check, not a subprocess: resolve it through the authority
-          // (rejects `..`, absolute, symlink escape) then stat it.
+          // A path check, not a subprocess — still through the authority (H-I11):
+          // it rejects `..`, absolute and symlink escapes and does the stat.
           try {
-            const target = authority.resolveWrite(worktree, spec.command);
-            passed = existsSync(target);
+            passed = authority.artifactExists(worktree, spec.command);
             summary = `artifact ${spec.command} ${passed ? "exists" : "missing"}`;
           } catch (err) {
             summary = `artifact path rejected: ${redactMessage(err)}`;
@@ -900,14 +932,18 @@ class RunContext {
         : p.budget.maxTokens !== undefined || p.budget.maxCostUsd !== undefined
           ? "advisory"
           : "none";
-    // `full` is reported ONLY when a per-session containment probe confirmed it
-    // for this exact launch (§3) — a manifest declaration alone caps at
-    // `partial`. `ambient` only when nothing better was required or declared.
+    // ACHIEVED tier, not requested (H-I10):
+    //  - `full` only when the per-session containment probe confirmed it (§3);
+    //  - `partial` when the Harness's own worktree/profile discipline is in
+    //    force (the workspace authority) or the manifest declares a sandbox we
+    //    could not per-session prove — a declaration caps at `partial`;
+    //  - `ambient` otherwise.
     const declaresSandbox =
       h?.processIsolation === "os-sandbox" || h?.processIsolation === "provider-sandbox";
+    const harnessDiscipline = !!this.d.authority;
     const isolation = this.isolationVerified
       ? "full"
-      : declaresSandbox || p.isolation.required === "partial"
+      : declaresSandbox || harnessDiscipline
         ? "partial"
         : "ambient";
     return { tools, budget, isolation };

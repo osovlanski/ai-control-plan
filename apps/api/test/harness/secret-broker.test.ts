@@ -49,8 +49,10 @@ describe("SecretBroker", () => {
     }, ["A", "B"]);
 
     expect(() => broker.resolve(["A", "B"])).toThrow(SecretResolutionError);
-    // A was consulted, B failed — but the caller gets nothing back at all.
+    // A was consulted, B failed — the caller gets nothing back...
     expect(seen).toEqual(["A", "B"]);
+    // ...and A's value is not retained in memory either.
+    expect(broker.resolvedCount).toBe(0);
   });
 
   it("treats an empty-string value as unresolved (names the ref, not the value)", () => {

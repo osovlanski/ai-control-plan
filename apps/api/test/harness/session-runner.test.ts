@@ -116,7 +116,10 @@ function request(over: Partial<ExecutionRequest> = {}): ExecutionRequest {
       approval: { mode: "auto-approve" },
       tools: { mode: "audit" },
       checkpoint: { onSoftLimit: true },
-      isolation: { required: "partial" },
+      // Default: no workspace authority in `deps`, so `ambient` is the honest
+      // achievable tier. Tests that wire an authority or need a stricter tier
+      // override `policy.isolation`.
+      isolation: { required: "ambient" },
     },
     context: {},
     verification: [],
@@ -498,6 +501,14 @@ describe("secret broker at the launch boundary (§3)", () => {
     expect(row.request_fingerprint).not.toContain(CANARY);
   });
 
+  it("rejects a request that names secretRefs when no resolver is configured (before adapter.start)", async () => {
+    const runner = new SessionRunner(deps(countingFake())); // no secretResolver
+    const result = await runner.run(request({ context: { secretRefs: ["PRIMARY_REF"] } }));
+    expect(result.outcome).toBe("failed");
+    expect(result.failure?.kind).toBe("policy_unenforceable");
+    expect(startCount).toBe(0);
+  });
+
   it("a verification command run through the authority does not see the secret", async () => {
     const authority = new WorkspaceAuthority({ repoAllowlist: [dir], worktreeRoot: dir });
     const runner = new SessionRunner(
@@ -524,34 +535,79 @@ describe("isolation tiers (§3)", () => {
     registry: { adapter: () => adapter, manifest: () => m },
   });
 
-  it("reports isolation 'full' when the manifest declares a sandbox and the per-session probe confirms it", async () => {
+  const fullReq = () => request({ policy: { ...request().policy, isolation: { required: "full" } } });
+
+  it("reports 'full' when the manifest declares a sandbox and the per-session probe confirms it for this launch", async () => {
     const fake = countingFake();
+    let probedSpec: unknown;
     const runner = new SessionRunner(
-      deps(fake, { ...withRegistry(sandboxManifest, fake), verifyIsolation: () => true }),
+      deps(fake, {
+        ...withRegistry(sandboxManifest, fake),
+        verifyIsolation: (p) => {
+          probedSpec = p.runSpec;
+          return true;
+        },
+      }),
     );
-    const result = await runner.run(request({ policy: { ...request().policy, isolation: { required: "full" } } }));
+    const result = await runner.run(fullReq());
     expect(result.outcome).toBe("completed");
     expect(result.enforcement.isolation).toBe("full");
+    expect(probedSpec).toMatchObject({ prompt: "do the thing" }); // the exact launch config
   });
 
-  it("fails before RUNNING when the per-session containment probe does not confirm", async () => {
+  it("fails the session (policy_unenforceable) before RUNNING when the probe does not confirm", async () => {
     const fake = countingFake();
     const runner = new SessionRunner(
       deps(fake, { ...withRegistry(sandboxManifest, fake), verifyIsolation: () => false }),
     );
-    const result = await runner.run(request({ policy: { ...request().policy, isolation: { required: "full" } } }));
+    const result = await runner.run(fullReq());
     expect(result.outcome).toBe("failed");
     expect(result.failure?.kind).toBe("policy_unenforceable");
-    expect(startCount).toBe(0);
+    expect(store.get(sessionOf())!.state).toBe("FAILED"); // never reached RUNNING
   });
 
-  it("rejects 'full' at Prepare when the manifest declares no sandbox", async () => {
+  it("rejects 'full' at Prepare (no adapter.start) when the manifest declares no sandbox", async () => {
     const fake = countingFake();
     const runner = new SessionRunner(
       deps(fake, { ...withRegistry(MANIFEST, fake), verifyIsolation: () => true }),
     );
-    const result = await runner.run(request({ policy: { ...request().policy, isolation: { required: "full" } } }));
-    expect(result.outcome).toBe("failed");
+    const result = await runner.run(fullReq());
+    expect(result.failure?.kind).toBe("policy_unenforceable");
+    expect(startCount).toBe(0);
+  });
+
+  it("a declared sandbox with NO probe configured caps the result at 'partial' and 'full' still fails", async () => {
+    const fake = countingFake();
+    const runner = new SessionRunner(deps(fake, withRegistry(sandboxManifest, fake)));
+    const result = await runner.run(fullReq()); // no verifyIsolation dep
+    expect(result.failure?.kind).toBe("policy_unenforceable");
+  });
+
+  it("reports 'partial' for a worktree-disciplined session that did not require 'full'", async () => {
+    const authority = new WorkspaceAuthority({ repoAllowlist: [dir], worktreeRoot: dir });
+    const runner = new SessionRunner(deps(countingFake(), { authority }));
+    const result = await runner.run(
+      request({
+        context: { worktree: { repoPath: dir, branch: "b", worktreePath: dir, baseRef: "r" } },
+        policy: { ...request().policy, isolation: { required: "partial" } },
+      }),
+    );
+    expect(result.outcome).toBe("completed");
+    expect(result.enforcement.isolation).toBe("partial");
+  });
+
+  it("accepts 'ambient' and reports it when nothing better is in force", async () => {
+    const result = await new SessionRunner(deps(countingFake())).run(request());
+    expect(result.outcome).toBe("completed");
+    expect(result.enforcement.isolation).toBe("ambient");
+  });
+
+  it("rejects 'partial' at Prepare when only 'ambient' is achievable (no authority, no sandbox)", async () => {
+    const fake = countingFake();
+    const runner = new SessionRunner(deps(fake, withRegistry(MANIFEST, fake)));
+    const result = await runner.run(
+      request({ policy: { ...request().policy, isolation: { required: "partial" } } }),
+    );
     expect(result.failure?.kind).toBe("policy_unenforceable");
     expect(startCount).toBe(0);
   });

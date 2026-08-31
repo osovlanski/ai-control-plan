@@ -223,6 +223,31 @@ export class WorkspaceAuthority {
     });
   }
 
+  /**
+   * Contained existence check for a `VerificationSpec` of kind `artifact_exists`
+   * (§2). The relative path is validated the same way a write is (no `..`, no
+   * absolute, no symlink escape on the existing prefix); the answer is a plain
+   * boolean. All Harness filesystem activity goes through this class (H-I11) —
+   * `SessionRunner` never stats a path itself.
+   */
+  artifactExists(worktreePath: string, relative: string): boolean {
+    if (isAbsolute(relative)) {
+      throw new WorkspaceError("artifact-absolute", `${relative} must be relative to the session worktree`);
+    }
+    const canonicalRoot = this.canonical(worktreePath, "worktree-realpath");
+    const target = resolve(canonicalRoot, relative);
+    if (!contains(canonicalRoot, target) && target !== canonicalRoot) {
+      throw new WorkspaceError("artifact-escape", `${relative} escapes the session worktree`);
+    }
+    const existingReal = this.deepestRealpath(target);
+    if (!contains(canonicalRoot, existingReal) && existingReal !== canonicalRoot) {
+      throw new WorkspaceError("artifact-symlink-escape", `${relative} resolves via a symlink outside the worktree`);
+    }
+    // deepestRealpath returns the target itself when it fully resolves, or its
+    // nearest existing ancestor when it does not — so equality means it exists.
+    return existingReal === target;
+  }
+
   /** The env a verification command sees — allowlist minus the dangerous-name blocklist. */
   reducedEnv(): Record<string, string> {
     const allow = new Set<string>([...DEFAULT_ENV_ALLOWLIST, ...(this.opts.envAllowlist ?? [])]);

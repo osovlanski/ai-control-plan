@@ -53,18 +53,29 @@ export class SecretBroker {
   ): Record<string, string> {
     if (this.disposed) throw new Error("SecretBroker already disposed");
     const env: Record<string, string> = {};
-    for (const ref of refs) {
-      if (!this.allowedRefs.includes(ref)) {
-        throw new SecretResolutionError(ref, "is not in this request's allowed secret references");
+    try {
+      for (const ref of refs) {
+        if (!this.allowedRefs.includes(ref)) {
+          throw new SecretResolutionError(ref, "is not in this request's allowed secret references");
+        }
+        const value = this.resolver(ref);
+        if (value === undefined || value === "") {
+          throw new SecretResolutionError(ref, "could not be resolved");
+        }
+        this.resolved.set(ref, value);
+        env[refToEnvName(ref)] = value;
       }
-      const value = this.resolver(ref);
-      if (value === undefined || value === "") {
-        throw new SecretResolutionError(ref, "could not be resolved");
-      }
-      this.resolved.set(ref, value);
-      env[refToEnvName(ref)] = value;
+    } catch (err) {
+      // All-or-nothing: a partial resolution leaves nothing behind in memory.
+      this.resolved.clear();
+      throw err;
     }
     return env;
+  }
+
+  /** Test/inspection aid: how many values are currently held in memory. */
+  get resolvedCount(): number {
+    return this.resolved.size;
   }
 
   /** Drop every resolved value. Called by the driver right after launch. */
