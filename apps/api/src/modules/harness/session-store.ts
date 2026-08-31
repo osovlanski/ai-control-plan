@@ -490,9 +490,67 @@ export class SessionStore {
   }
 
   /**
+   * Atomic §4-recovery settlement of a relayed approval whose delivery a crash
+   * left unconfirmed: mark the approval `delivered` AND CAS the paused session
+   * `AWAITING_APPROVAL → RUNNING` in ONE transaction, so a crash can never leave
+   * a `delivered` approval on a still-`AWAITING_APPROVAL` session (a state the
+   * recovery worklist would then never revisit).
+   */
+  resumeFromApproval(
+    sessionId: string,
+    providerRequestId: string,
+    input: { expectedVersion: number; leaseToken: string },
+  ): ExecutionSession {
+    const at = this.iso();
+    const tx = this.db.transaction(() => {
+      this.db
+        .prepare(
+          `UPDATE approvals SET state = 'delivered', delivered_at = ?, delivery_note = NULL, updated_at = ?
+           WHERE session_id = ? AND provider_request_id = ?
+             AND state IN ('answered','delivering','delivery_unknown')`,
+        )
+        .run(at, at, sessionId, providerRequestId);
+      this.transition(sessionId, {
+        expectedVersion: input.expectedVersion,
+        from: "AWAITING_APPROVAL",
+        to: "RUNNING",
+        leaseToken: input.leaseToken,
+      });
+    });
+    tx();
+    return this.get(sessionId)!;
+  }
+
+  /** True iff a `recovery.decision` event with this `action` is already on the timeline. */
+  hasRecoveryDecision(sessionId: string, action: string): boolean {
+    return !!this.db
+      .prepare(
+        "SELECT 1 FROM events WHERE run_id = ? AND type = 'recovery.decision' AND json_extract(payload, '$.action') = ? LIMIT 1",
+      )
+      .get(sessionId, action);
+  }
+
+  /** Parsed `usage.updated` payloads for a session, in seq order — for recovery budget recompute (§9). */
+  usageEvents(sessionId: string): Array<{ inputTokens?: number; outputTokens?: number }> {
+    return (
+      this.db
+        .prepare("SELECT payload FROM events WHERE run_id = ? AND type = 'usage.updated' ORDER BY seq")
+        .all(sessionId) as Array<{ payload: string | null }>
+    )
+      .map((r) => {
+        try {
+          return r.payload ? (JSON.parse(r.payload) as { inputTokens?: number; outputTokens?: number }) : {};
+        } catch {
+          return {};
+        }
+      });
+  }
+
+  /**
    * Append a `recovery.decision` audit event to a session's timeline (§9, §11).
    * Append-only, next-seq — the caller holds the lease, so no CAS is needed for
-   * a witness that never mutates session state.
+   * a witness that never mutates session state; the `UNIQUE(run_id, seq)` index
+   * still rejects a racing double-insert.
    */
   appendRecoveryEvent(sessionId: string, action: string, detail?: string): number {
     const seq =

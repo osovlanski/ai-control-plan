@@ -102,7 +102,11 @@ function seedSession(opts: {
   return id;
 }
 
-function manifest(opts: { canResume?: boolean; approvalAckLookup?: boolean }): CapabilityManifest {
+function manifest(opts: {
+  canResume?: boolean;
+  approvalAckLookup?: boolean;
+  accounting?: "delta" | "cumulative" | "none";
+}): CapabilityManifest {
   return {
     assistantId: "a1" as AssistantId,
     provider: "fake",
@@ -117,7 +121,7 @@ function manifest(opts: { canResume?: boolean; approvalAckLookup?: boolean }): C
       auth: { state: "ok" },
     },
     harness: {
-      usageAccounting: "none",
+      usageAccounting: opts.accounting ?? "none",
       toolGating: "none",
       approvalRelay: true,
       processIsolation: "none",
@@ -132,6 +136,7 @@ function recovery(opts: {
   canResume?: boolean;
   approvalAckLookup?: boolean;
   ackResult?: boolean;
+  accounting?: "delta" | "cumulative" | "none";
   checkpoints?: RunnerCheckpoints;
   maxDirectiveAttempts?: number;
 } = {}): HarnessRecovery {
@@ -231,6 +236,44 @@ describe("HarnessRecovery.reconcileOnBoot", () => {
     expect(out).toEqual([]); // liveSessions() no longer lists it
     expect(resultRows(id)).toBe(1); // still exactly one result row (H-I3)
   });
+
+  it("offers resume only once — a later sweep of the still-live session is skipped, not re-announced", async () => {
+    const id = seedSession({ reqId: "erq_once2", to: "RUNNING", providerSessionRef: "psr_1x" });
+
+    expect((await recovery({ canResume: true }).reconcileOnBoot())[0]!.action).toBe("resume_offered");
+    const second = await recovery({ canResume: true }).reconcileOnBoot();
+
+    expect(second).toEqual([{ sessionId: id, action: "skipped", detail: "resume already offered" }]);
+    expect(recoveryEvents(id).filter((e) => e.action === "resume_offered")).toHaveLength(1);
+    expect(store.get(id)!.state).toBe("RUNNING");
+  });
+
+  it("honors a durable cancel intent ahead of resume/orphan — terminal CANCELLED with a checkpoint attempt", async () => {
+    const id = seedSession({ reqId: "erq_cancel", to: "RUNNING", providerSessionRef: "psr_1c" });
+    store.requestCancel(id); // plane/user cancel set before the crash
+
+    const out = await recovery({ canResume: true }).reconcileOnBoot();
+
+    expect(out).toEqual([{ sessionId: id, action: "cancelled" }]);
+    expect(store.get(id)!.state).toBe("CANCELLED");
+    expect(recoveryEvents(id).find((e) => e.action === "cancelled")?.detail).toBe("checkpoint committed");
+    const result = store.result(id)!;
+    expect(result.outcome).toBe("cancelled");
+    expect(result.cancellation).toMatchObject({ requestedBy: "plane" });
+    expect(result.checkpoint.attempted).toBe(true);
+    expect(recoveryEvents(id).map((e) => e.action)).toContain("cancelled");
+  });
+
+  it("recomputes usage for a crashed VERIFYING session from persisted usage.updated events (§9)", async () => {
+    const id = seedSession({ reqId: "erq_usage", to: "VERIFYING", providerSessionRef: "psr_1u" });
+    const ev = db.prepare("INSERT INTO events (run_id, seq, ts, type, summary, payload) VALUES (?, ?, ?, 'usage.updated', 'u', ?)");
+    ev.run(id, 10, "t", JSON.stringify({ inputTokens: 100, outputTokens: 20 }));
+    ev.run(id, 11, "t", JSON.stringify({ inputTokens: 50, outputTokens: 5 }));
+
+    await recovery({ canResume: true, accounting: "delta" }).reconcileOnBoot();
+
+    expect(store.result(id)!.usage).toMatchObject({ inputTokens: 150, outputTokens: 25, accounting: "delta" });
+  });
 });
 
 describe("HarnessRecovery — guard-directive replay (§9)", () => {
@@ -267,7 +310,7 @@ describe("HarnessRecovery — guard-directive replay (§9)", () => {
     const rec = () => recovery({ canResume: true, checkpoints, maxDirectiveAttempts: 3 });
 
     expect((await rec().reconcileOnBoot())[0]!.action).toBe("resume_offered"); // attempt 1, swallowed
-    expect((await rec().reconcileOnBoot())[0]!.action).toBe("resume_offered"); // attempt 2, swallowed
+    expect((await rec().reconcileOnBoot())[0]!.action).toBe("skipped"); // attempt 2, swallowed; resume already offered
     const out = await rec().reconcileOnBoot(); // attempt 3 -> permanent
 
     expect(out[0]!.action).toBe("orphaned");
@@ -299,6 +342,18 @@ describe("HarnessRecovery — delivery_unknown approval settlement (§4)", () =>
     expect(new ApprovalService(db).get(id, "prq_1")!.state).toBe("delivered");
     expect(store.get(id)!.state).toBe("RUNNING");
     expect(recoveryEvents(id).map((e) => e.action)).toContain("approval_ack_confirmed");
+  });
+
+  it("also settles a crash that left the row in `answered` (never reached delivering)", async () => {
+    const id = seedSession({ reqId: "erq_answered", to: "AWAITING_APPROVAL", providerSessionRef: "psr_7b" });
+    const ap = new ApprovalService(db);
+    ap.request(id, "prq_1", "apr_1");
+    ap.answer(id, "prq_1", "approved", "user"); // durable decision, crash before any send()
+
+    await recovery({ canResume: true, approvalAckLookup: true, ackResult: true }).reconcileOnBoot();
+
+    expect(new ApprovalService(db).get(id, "prq_1")!.state).toBe("delivered");
+    expect(store.get(id)!.state).toBe("RUNNING");
   });
 
   it("holds the approval when the ack lookup returns false — session stays AWAITING_APPROVAL", async () => {

@@ -23,6 +23,7 @@ import type {
   ExecutionResult,
   ExecutionSession,
 } from "@agent-plane/core";
+import { redactValue } from "@agent-plane/core";
 import type { SessionStore } from "./session-store.js";
 import type { ApprovalService } from "./approval-service.js";
 import type { RunnerCheckpoints } from "./session-runner.js";
@@ -52,6 +53,7 @@ export interface RecoveryDeps {
 export type RecoveryAction =
   | "resume_offered"
   | "orphaned"
+  | "cancelled"
   | "completed_from_verifying"
   | "already_terminal"
   | "skipped";
@@ -115,23 +117,52 @@ export class HarnessRecovery {
       let s = this.deps.store.get(sessionId)!;
       if (isTerminal(s.state)) return { sessionId, action: "already_terminal" };
 
-      // 2. Settle any delivery_unknown approvals before deciding the session.
+      // 1b. A durable cancel intent (a replayed `cancel` directive, or a
+      //     plane/user cancel set before the crash) is honored ahead of any
+      //     resume/orphan decision: §9's cancel order lands at a terminal CAS,
+      //     with a checkpoint ATTEMPT first (H-I4).
+      if (s.cancelRequested && s.state !== "VERIFYING") {
+        const checkpoint = await this.attemptCheckpoint(sessionId, s.executionRequestId);
+        this.finalize(sessionId, s, lease, "CANCELLED", {
+          cancellation: { requestedBy: "plane", at: this.now().toISOString() },
+          checkpoint,
+        });
+        this.deps.store.appendRecoveryEvent(
+          sessionId,
+          "cancelled",
+          checkpoint.committed ? "checkpoint committed" : "checkpoint not committed",
+        );
+        return { sessionId, action: "cancelled" };
+      }
+
+      // 2. Settle any answered-but-undelivered approvals before deciding the session.
       await this.settleDeliveryUnknown(sessionId, lease);
       s = this.deps.store.get(sessionId)!;
       if (isTerminal(s.state)) return { sessionId, action: "already_terminal" };
+      // The awaited steps above may have burned into the lease TTL — re-fence
+      // before the remaining writes so a concurrent sweep cannot take over.
+      this.deps.store.renewLease(sessionId, lease);
 
       // 3. Crashed mid-VERIFYING: execution had finished, so complete it — with
-      //    no verification (it was never durably recorded); §5.
+      //    no verification (it was never durably recorded); §5. Usage is
+      //    recomputed from persisted `usage.updated` events (§9 recovery table);
+      //    enforcement fidelity a dead process's tier probe cannot be re-derived,
+      //    so it is reported at the conservative floor, never assumed higher.
       if (s.state === "VERIFYING") {
-        this.finalize(sessionId, s, lease, "COMPLETED", undefined);
+        this.finalize(sessionId, s, lease, "COMPLETED", { usage: this.recomputeUsage(sessionId) });
         this.deps.store.appendRecoveryEvent(sessionId, "completed_from_verifying");
         return { sessionId, action: "completed_from_verifying" };
       }
 
       // 4. Probe-resumable → offer resume; the Control Plane issues origin:resume.
+      //    The offer is emitted ONCE — until the (deferred) orchestrator cutover
+      //    consumes it, later sweeps of the still-live session must not re-emit.
       const manifest = this.deps.registry.manifest(s0.executionRequestId ? assistantOf(this.deps.store, sessionId) : "");
       const resumable = !!manifest?.core.canResume && !!s.providerSessionRef;
       if (resumable) {
+        if (this.deps.store.hasRecoveryDecision(sessionId, "resume_offered")) {
+          return { sessionId, action: "skipped", detail: "resume already offered" };
+        }
         this.deps.store.appendRecoveryEvent(sessionId, "resume_offered", s.providerSessionRef);
         return { sessionId, action: "resume_offered", detail: s.providerSessionRef };
       }
@@ -194,29 +225,33 @@ export class HarnessRecovery {
   }
 
   /**
-   * Recovery of a `delivery_unknown` approval (§4). With a proven ack lookup:
-   * probe and settle. Otherwise HOLD — re-delivery needs a live provider handle
-   * that a crash did not preserve, so the session stays AWAITING_APPROVAL with
-   * the ambiguity surfaced (never silently "delivered").
+   * Recovery of an answered-but-undelivered approval (§4). A crash anywhere in
+   * `answered → delivering → delivered` leaves the decision durable but the
+   * delivery unconfirmed — every such row (`answered` / `delivering` /
+   * `delivery_unknown`) resumes the protocol here. With a proven ack lookup:
+   * probe and settle atomically (approval `delivered` + session `RUNNING` in one
+   * transaction). Otherwise HOLD — re-delivery needs a live provider handle a
+   * crash did not preserve, so the session stays AWAITING_APPROVAL with the
+   * ambiguity surfaced (never silently "delivered").
    */
   async settleDeliveryUnknown(sessionId: string, lease: string): Promise<void> {
-    const rows = this.deps.approvals.unsettled(sessionId).filter((r) => r.state === "delivery_unknown");
+    const undelivered = new Set(["answered", "delivering", "delivery_unknown"]);
+    const rows = this.deps.approvals.unsettled(sessionId).filter((r) => undelivered.has(r.state));
     if (rows.length === 0) return;
     const manifest = this.deps.registry.manifest(assistantOf(this.deps.store, sessionId));
     for (const r of rows) {
       if (manifest?.harness?.approvalAckLookup && this.deps.approvalAckLookup) {
         const acked = await this.deps.approvalAckLookup(sessionId, r.providerRequestId);
         if (acked) {
-          this.deps.approvals.markDelivered(sessionId, r.providerRequestId);
           const s = this.deps.store.get(sessionId)!;
           if (s.state === "AWAITING_APPROVAL") {
-            const next = this.deps.store.transition(sessionId, {
+            // One transaction: approval -> delivered AND session -> RUNNING.
+            this.deps.store.resumeFromApproval(sessionId, r.providerRequestId, {
               expectedVersion: s.version,
-              from: "AWAITING_APPROVAL",
-              to: "RUNNING",
               leaseToken: lease,
             });
-            void next;
+          } else {
+            this.deps.approvals.markDelivered(sessionId, r.providerRequestId);
           }
           this.deps.store.appendRecoveryEvent(sessionId, "approval_ack_confirmed", r.providerRequestId);
           continue;
@@ -225,7 +260,7 @@ export class HarnessRecovery {
       this.deps.store.appendRecoveryEvent(
         sessionId,
         "approval_delivery_held",
-        `${r.providerRequestId}: no ack lookup — held for operator/plane resolution`,
+        `${r.providerRequestId}: delivery unconfirmed, no ack lookup — held for operator/plane resolution`,
       );
     }
   }
@@ -266,25 +301,64 @@ export class HarnessRecovery {
     }
   }
 
+  /**
+   * Best-effort budget reconstruction from persisted `usage.updated` events
+   * (§9 recovery table: "Budget counters — recomputed from persisted
+   * usage.updated events"). `delta` sums; `cumulative` takes the last/max;
+   * `none` (or no manifest / no events) yields zeros.
+   */
+  private recomputeUsage(
+    sessionId: string,
+  ): { inputTokens: number; outputTokens: number; accounting: "delta" | "cumulative" | "none" } {
+    const accounting =
+      this.deps.registry.manifest(assistantOf(this.deps.store, sessionId))?.harness?.usageAccounting ?? "none";
+    if (accounting === "none") return { inputTokens: 0, outputTokens: 0, accounting };
+    let input = 0;
+    let output = 0;
+    for (const e of this.deps.store.usageEvents(sessionId)) {
+      const i = e.inputTokens ?? 0;
+      const o = e.outputTokens ?? 0;
+      if (accounting === "cumulative") {
+        input = Math.max(input, i);
+        output = Math.max(output, o);
+      } else {
+        input += i;
+        output += o;
+      }
+    }
+    return { inputTokens: input, outputTokens: output, accounting };
+  }
+
   private finalize(
     sessionId: string,
     session: ExecutionSession,
     lease: string,
-    to: "FAILED" | "COMPLETED",
-    parts: { failure?: ExecutionResult["failure"]; checkpoint?: ExecutionResult["checkpoint"] } | undefined,
+    to: "FAILED" | "COMPLETED" | "CANCELLED",
+    parts:
+      | {
+          failure?: ExecutionResult["failure"];
+          cancellation?: ExecutionResult["cancellation"];
+          checkpoint?: ExecutionResult["checkpoint"];
+          usage?: ExecutionResult["usage"];
+        }
+      | undefined,
   ): void {
     const checkpoint = parts?.checkpoint ?? { attempted: false, committed: false };
+    const outcome = to === "FAILED" ? "failed" : to === "CANCELLED" ? "cancelled" : "completed";
     const result: ExecutionResult = {
       schemaVersion: 1,
       sessionId: sessionId as ExecutionResult["sessionId"],
       terminalState: to,
-      outcome: to === "FAILED" ? "failed" : "completed",
+      outcome,
       failure: parts?.failure,
+      cancellation: parts?.cancellation,
       artifacts: checkpoint.checkpointId
         ? [{ kind: "checkpoint", ref: checkpoint.checkpointId, summary: checkpoint.committed ? "recovery checkpoint" : "recovery checkpoint (uncommitted)" }]
         : [],
-      usage: { inputTokens: 0, outputTokens: 0, accounting: "none" },
+      usage: parts?.usage ?? { inputTokens: 0, outputTokens: 0, accounting: "none" },
       checkpoint,
+      // A dead process's provider-isolation tier probe cannot be re-derived;
+      // report the conservative floor (H-I10: never assume a higher fidelity).
       enforcement: { tools: "none", budget: "none", isolation: "ambient" },
     };
     // Re-read version — appendRecoveryEvent does not bump it, but replay steps
@@ -318,8 +392,7 @@ function taskOf(store: SessionStore, sessionId: string): string {
     .get(sessionId)?.task_id ?? "";
 }
 
+/** Redact an exception message through the repo's full redaction pipeline before it is persisted. */
 function redact(err: unknown): string {
-  return (err instanceof Error ? err.message : String(err))
-    .replace(/\bsk-[A-Za-z0-9_-]{12,}\b/g, "[REDACTED]")
-    .slice(0, 500);
+  return redactValue(err instanceof Error ? err.message : String(err)).slice(0, 500);
 }

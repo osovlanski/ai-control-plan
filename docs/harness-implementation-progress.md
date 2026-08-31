@@ -38,10 +38,28 @@ Rules for the rest of the work:
 | `2eadecb` | Phase 6 follow-up | Codex: camelCase-normalise every nested payload; migration `007_harness_correlation.sql` (parent_task_id/group_id) + `SessionStore.recordRequest` persists `correlation`; `safeJson`; ORDER BY tie-breakers; real-`SessionRunner` e2e leak test; drop duplicated top-level `verification`/`enforcement`; web `SessionDetail` precise types. |
 | `54f17cd` | Phase 6 follow-up r2 | Codex: `GET /api/sessions?groupId=&parentTaskId=` + parent index + web `sessionsByGroup/Parent`; result served only if shape is `{outcome:string,...}` else null; **`SessionRunner.finalize()` now redacts `failure.message`+`failure.providerDetail`** (was an H-I13 leak from `error`-event summaries); TaskDetail clears session on taskId change; UI guards nested `result.enforcement`. Also lands Phase 7 scaffolding (all additive, unused there): manifest `approvalAckLookup`/`approvalIdempotentRedelivery`, `recovery.decision` event type + `RecoveryDecisionPayload`, `SessionStore.incrementDirectiveAttempt`/`markDirectiveFailed`/`appendRecoveryEvent`. |
 | `dbe156e` | Phase 7 (WIP) | `recovery.ts` — `HarnessRecovery` (boot reconcile v2, lease sweeper, directive replay, `delivery_unknown` settlement). Compiled only, no tests, unwired. |
-| _this_ | Phase 7 | `recovery.test.ts` (12) + `fault-injection.test.ts` (10, maps H-I3/4/8/12/14) + `server.test.ts` boot assertion (1). `Orchestrator.reconcileOnBoot()` is now `async`, runs `HarnessRecovery.reconcileOnBoot()` first and scopes the legacy blanket fail-all to `execution_request_id IS NULL` rows. `buildServer` builds the deps (`SessionStore`, `ApprovalService`, `CheckpointService` **is** structurally a `RunnerCheckpoints`, `Registry` **is** structurally the `{adapter,manifest}` facade) and owns a 60s `sweepExpiredLeases()` `setInterval` (`.unref()`, cleared on `app.close()`). `/api/sessions/:id` audit filter now includes `recovery.decision`. API 261 / core 37 / adapters 8 / web 3, lint clean. |
+| `430b6e8` | Phase 7 | `recovery.test.ts` + `fault-injection.test.ts` (maps H-I3/4/8/12/14) + `server.test.ts` boot assertion. `Orchestrator.reconcileOnBoot()` is now `async`, runs `HarnessRecovery.reconcileOnBoot()` first and scopes the legacy blanket fail-all to `execution_request_id IS NULL` rows. `buildServer` builds the deps (`SessionStore`, `ApprovalService`, `CheckpointService` **is** structurally a `RunnerCheckpoints`, `Registry` **is** structurally the `{adapter,manifest}` facade) and owns a 60s `sweepExpiredLeases()` `setInterval` (`.unref()`, cleared on `app.close()`). `/api/sessions/:id` audit filter now includes `recovery.decision`. |
+| _this_ | Phase 7 follow-up | Codex Phase 7 findings (see below). Atomic `SessionStore.resumeFromApproval` (approval→delivered + session→RUNNING in one tx); recovery now settles `answered`/`delivering`/`delivery_unknown` (not just `delivery_unknown`); a durable `cancelRequested` is honored ahead of resume/orphan → terminal `CANCELLED` + checkpoint attempt (`recomputeUsage` for the VERIFYING-completion result from persisted `usage.updated` events); `resume_offered` emitted once (`hasRecoveryDecision` guard) so periodic sweeps don't re-announce; `renewLease` after the awaited settle steps; directive-failure detail goes through core `redactValue` not a hand-rolled `sk-` regex. API 265 / core 37 / adapters 8 / web 3, lint clean. |
 
 Codex reviewed the diff of every phase and each follow-up; findings were folded
 into the follow-up commits. **All Codex findings through Phase 6 are resolved.**
+
+**Codex Phase 7 review — dispositions:**
+- *Fixed:* split approval settlement → one tx (`resumeFromApproval`); recovery
+  ignored `answered`/`delivering` rows → widened; replayed `cancel` didn't
+  terminate → durable cancel intent now → `CANCELLED`; `resume_offered` spammed
+  every sweep → emit-once guard; no lease renew across awaits → `renewLease`;
+  VERIFYING result fabricated zero usage → recomputed from events; hand-rolled
+  redaction → core `redactValue`.
+- *Kept as approved-design / deferred (not bugs):* checkpoint side effect before
+  the `applied` CAS (git commit can't co-commit with SQLite; a duplicate recovery
+  checkpoint is benign — this is the design's at-least-once replay, §4);
+  `appendRecoveryEvent` `MAX(seq)+1` without a lease CAS (single-process
+  architecture + `UNIQUE(run_id,seq)`; cross-process is the deferred remote
+  runner); recovery enforcement floor `none/none/ambient` (a dead process's
+  isolation-tier probe is genuinely not reconstructable — reporting the floor is
+  the honest H-I10 move, never assuming higher); "no real competing-connection
+  fault tests" (out of scope — FakeAdapter + in-repo SQLite, single process).
 
 ---
 
