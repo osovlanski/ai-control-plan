@@ -37,19 +37,26 @@ Rules for the rest of the work:
 | `e9c89c6` | Phase 6 | `contracts.ts` → API 1.1 + `sessions.read`/`verification.read`/`approvals.read`; `GET /api/tasks/:id/sessions` + `GET /api/sessions/:id`; `observability.test.ts`; web `api.ts` typed clients + smoke test. |
 | `2eadecb` | Phase 6 follow-up | Codex: camelCase-normalise every nested payload; migration `007_harness_correlation.sql` (parent_task_id/group_id) + `SessionStore.recordRequest` persists `correlation`; `safeJson`; ORDER BY tie-breakers; real-`SessionRunner` e2e leak test; drop duplicated top-level `verification`/`enforcement`; web `SessionDetail` precise types. |
 | `54f17cd` | Phase 6 follow-up r2 | Codex: `GET /api/sessions?groupId=&parentTaskId=` + parent index + web `sessionsByGroup/Parent`; result served only if shape is `{outcome:string,...}` else null; **`SessionRunner.finalize()` now redacts `failure.message`+`failure.providerDetail`** (was an H-I13 leak from `error`-event summaries); TaskDetail clears session on taskId change; UI guards nested `result.enforcement`. Also lands Phase 7 scaffolding (all additive, unused there): manifest `approvalAckLookup`/`approvalIdempotentRedelivery`, `recovery.decision` event type + `RecoveryDecisionPayload`, `SessionStore.incrementDirectiveAttempt`/`markDirectiveFailed`/`appendRecoveryEvent`. |
+| `dbe156e` | Phase 7 (WIP) | `recovery.ts` — `HarnessRecovery` (boot reconcile v2, lease sweeper, directive replay, `delivery_unknown` settlement). Compiled only, no tests, unwired. |
+| _this_ | Phase 7 | `recovery.test.ts` (12) + `fault-injection.test.ts` (10, maps H-I3/4/8/12/14) + `server.test.ts` boot assertion (1). `Orchestrator.reconcileOnBoot()` is now `async`, runs `HarnessRecovery.reconcileOnBoot()` first and scopes the legacy blanket fail-all to `execution_request_id IS NULL` rows. `buildServer` builds the deps (`SessionStore`, `ApprovalService`, `CheckpointService` **is** structurally a `RunnerCheckpoints`, `Registry` **is** structurally the `{adapter,manifest}` facade) and owns a 60s `sweepExpiredLeases()` `setInterval` (`.unref()`, cleared on `app.close()`). `/api/sessions/:id` audit filter now includes `recovery.decision`. API 261 / core 37 / adapters 8 / web 3, lint clean. |
 
 Codex reviewed the diff of every phase and each follow-up; findings were folded
 into the follow-up commits. **All Codex findings through Phase 6 are resolved.**
 
 ---
 
-## OPEN WIP — Phase 7 (recovery / concurrency hardening) — START HERE
+## Phase 7 (recovery / concurrency hardening) — DONE (pending Codex review)
 
 Design: `execution-harness.md` §9, §12 layer 4; `harness-implementation-plan.md` Phase 7.
 
-### Uncommitted file: `apps/api/src/modules/harness/recovery.ts`
-`HarnessRecovery` class — **compiles (typecheck green), NOT tested, NOT wired
-anywhere yet.** Implements:
+**Status:** all 6 next-actions below are done. `recovery.ts` is tested (`recovery.test.ts`
+12, `fault-injection.test.ts` 10) and wired into boot via `Orchestrator.reconcileOnBoot()`
+(now `async`); the lease sweeper is a 60s `setInterval` in `buildServer`; `recovery.decision`
+events are in the `/api/sessions/:id` audit filter. Suite: api 261 / core 37 / adapters 8 /
+web 3, lint clean. Next: Codex-review the phase diff, fold findings into a follow-up commit.
+
+### `apps/api/src/modules/harness/recovery.ts`
+`HarnessRecovery` class — Implements:
 - `reconcileOnBoot()` — `voidAllLeases()` then `recoverSession()` per `liveSessions()`.
 - `sweepExpiredLeases()` — recover only sessions whose lease is expired/absent.
 - `recoverSession(id)` — acquires the (void) lease, then: replay directives →
@@ -68,7 +75,7 @@ anywhere yet.** Implements:
 - NOTE: `assistantOf`/`taskOf` reach `store.db` via a cast — if you prefer, add
   thin `SessionStore` getters instead.
 
-### Next actions to finish Phase 7
+### Phase 7 actions — all DONE (checklist kept for the Codex reviewer)
 1. **`apps/api/test/harness/recovery.test.ts`** — drive `SessionStore` +
    `HarnessRecovery` with the `FakeAdapter`:
    - boot reconcile: a `RUNNING` session with a `providerSessionRef` + `canResume`

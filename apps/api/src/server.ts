@@ -10,6 +10,9 @@ import type { ResolvedConfig } from "./config.js";
 import { appliedMigrations, type Db } from "./db/index.js";
 import { CheckpointService } from "./modules/checkpoint.js";
 import { CooldownStore } from "./modules/cooldown.js";
+import { ApprovalService } from "./modules/harness/approval-service.js";
+import { HarnessRecovery } from "./modules/harness/recovery.js";
+import { SessionStore } from "./modules/harness/session-store.js";
 import { Orchestrator } from "./modules/orchestrator.js";
 import { Registry } from "./modules/registry.js";
 import { persistRoutingDecision, route, routingHistory, type RouteRequest } from "./modules/router.js";
@@ -50,9 +53,15 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   const cooldowns = new CooldownStore(db);
   const telemetry = new TelemetryService(db);
   const retention = new EventRetention(db);
+  const harnessRecovery = new HarnessRecovery({
+    store: new SessionStore(db),
+    approvals: new ApprovalService(db),
+    checkpoints, // CheckpointService is structurally a RunnerCheckpoints
+    registry, // Registry is structurally a { adapter, manifest } facade
+  });
   const orchestrator =
     deps.orchestrator ??
-    new Orchestrator(db, config, registry, tasks, bus, checkpoints, cooldowns);
+    new Orchestrator(db, config, registry, tasks, bus, checkpoints, cooldowns, undefined, harnessRecovery);
 
   const app = Fastify({ logger: true });
 
@@ -511,13 +520,14 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     }));
 
     // Typed audit events for the drill-down: guard decisions, verification
-    // results, checkpoint markers. Absence means "stage did not happen".
+    // results, checkpoint markers, recovery decisions (orphan vs resume, §9).
+    // Absence means "stage did not happen".
     const audit = (
       db
         .prepare(
           `SELECT seq, ts, type, phase, summary, payload FROM events
              WHERE run_id = ?
-               AND type IN ('guard.decision', 'verification.result', 'checkpoint.created')
+               AND type IN ('guard.decision', 'verification.result', 'checkpoint.created', 'recovery.decision')
              ORDER BY seq`,
         )
         .all(req.params.id) as Array<Record<string, unknown> & { payload: string | null }>
@@ -577,6 +587,15 @@ export function buildServer(deps: ServerDeps): BuiltServer {
       audit,
     };
   });
+
+  // Lease sweeper (execution-harness §9): a periodic tick hands any session whose
+  // fencing lease has expired to recovery. ponytail: fixed 60s = the lease TTL;
+  // make it config if a deployment ever needs a different cadence.
+  const leaseSweep = setInterval(() => {
+    void harnessRecovery.sweepExpiredLeases().catch((err) => app.log.error(err, "lease sweep failed"));
+  }, 60_000);
+  leaseSweep.unref();
+  app.addHook("onClose", async () => clearInterval(leaseSweep));
 
   return { app, registry, orchestrator, tasks, bus, checkpoints, cooldowns, telemetry };
 }

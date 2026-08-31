@@ -88,10 +88,21 @@ export class Orchestrator {
     private checkpoints: CheckpointService,
     private cooldowns: CooldownStore,
     private maxRuntimeMs = DEFAULT_MAX_RUNTIME_MS,
+    /**
+     * Execution-Harness boot reconcile (execution-harness §9). When present it
+     * decides every live Harness session's fate (resume-offer / orphan+checkpoint
+     * / complete-from-verifying) BEFORE the legacy blanket fail-all below, which
+     * is then scoped to legacy `runs` rows only.
+     */
+    private harnessRecovery?: { reconcileOnBoot(): Promise<unknown> },
   ) {}
 
   /** Crash recovery (arch §5): tasks left in-flight by a dead process are failed with a record. */
-  reconcileOnBoot(): number {
+  async reconcileOnBoot(): Promise<number> {
+    // Harness sessions are reconciled per-session (state machine + result row),
+    // never blanket-stomped — the legacy path below skips them.
+    await this.harnessRecovery?.reconcileOnBoot();
+
     let reconciled = 0;
     for (const row of this.tasks.runningTasks()) {
       try {
@@ -100,7 +111,9 @@ export class Orchestrator {
         continue;
       }
       this.db
-        .prepare("UPDATE runs SET state = 'ENDED_ERROR', ended_at = ? WHERE task_id = ? AND ended_at IS NULL")
+        .prepare(
+          "UPDATE runs SET state = 'ENDED_ERROR', ended_at = ? WHERE task_id = ? AND ended_at IS NULL AND execution_request_id IS NULL",
+        )
         .run(new Date().toISOString(), row.id);
       reconciled += 1;
     }

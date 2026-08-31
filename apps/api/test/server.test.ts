@@ -91,6 +91,62 @@ describe("api server", () => {
     expect(res.statusCode).toBe(403);
   });
 
+  it("reconciles a live Harness session on boot instead of blanket-failing it", async () => {
+    makeApp();
+    // A RUNNING task with two runs: one legacy, one a Harness execution session.
+    db.prepare(
+      "INSERT INTO tasks (id, goal, envelope, state, created_at, updated_at) VALUES ('AG-boot', 'g', ?, 'RUNNING', 't', 't')",
+    ).run(JSON.stringify({ status: { state: "RUNNING" } }));
+    db.prepare(
+      "UPDATE assistants SET manifest = ? WHERE id = 'personal-claude'",
+    ).run(
+      JSON.stringify({
+        assistantId: "personal-claude",
+        provider: "anthropic",
+        core: { models: [{ id: "m" }], canResume: true, canMcp: false, supportsMidRunInput: true, reportsUsage: true, reportsLimits: true, execution: { shell: true, filesystem: true, web: "no" }, auth: { state: "ok" } },
+        providerDetail: {},
+        evidence: { source: "runtime-probe", observedAt: "t" },
+      }),
+    );
+    db.prepare(
+      "INSERT INTO runs (id, task_id, assistant_id, state, started_at) VALUES ('legacy-run', 'AG-boot', 'personal-claude', 'ACTIVE', 't')",
+    ).run();
+    db.prepare(
+      `INSERT INTO execution_requests
+         (id, task_id, attempt, assistant_id, routing_decision_ref, request_fingerprint, fingerprint_algorithm,
+          prompt_source, rendered_prompt_digest, policy, verification, origin, canonical_projection, created_at)
+       VALUES ('erq-boot', 'AG-boot', 1, 'personal-claude', 'rd', 'fp', 'alg', 'fresh', 'd',
+               '{"budget":{"enforcement":"advisory"}}', '[]', '{"kind":"fresh"}', '{}', 't')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO runs
+         (id, task_id, assistant_id, state, session_state, version, execution_request_id, provider_session_ref,
+          provider_start_acked, cancel_requested, attempt, started_at)
+       VALUES ('harness-sess', 'AG-boot', 'personal-claude', 'ACTIVE', 'RUNNING', 3, 'erq-boot', 'psr_x', 1, 0, 1, 't')`,
+    ).run();
+
+    const reconciled = await built.orchestrator.reconcileOnBoot();
+
+    expect(reconciled).toBe(1); // the task itself
+    // Legacy run: blanket-failed as before.
+    expect((db.prepare("SELECT state FROM runs WHERE id = 'legacy-run'").get() as { state: string }).state).toBe(
+      "ENDED_ERROR",
+    );
+    // Harness session: resume-offered by HarnessRecovery, NOT stomped, no premature result row.
+    const sess = db.prepare("SELECT state, session_state FROM runs WHERE id = 'harness-sess'").get() as {
+      state: string;
+      session_state: string;
+    };
+    expect(sess.session_state).toBe("RUNNING");
+    expect(sess.state).toBe("ACTIVE");
+    expect(db.prepare("SELECT COUNT(*) AS n FROM execution_results WHERE session_id = 'harness-sess'").get()).toEqual({
+      n: 0,
+    });
+    expect(
+      db.prepare("SELECT COUNT(*) AS n FROM events WHERE run_id = 'harness-sess' AND type = 'recovery.decision'").get(),
+    ).toEqual({ n: 2 }); // lease_taken_over + resume_offered
+  });
+
   it("creates a task and serves it with envelope and empty runs", async () => {
     const { app } = makeApp();
     const created = await app.inject({
