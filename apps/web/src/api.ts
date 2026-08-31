@@ -174,7 +174,41 @@ export const api = {
       body: JSON.stringify({ winnerRunId, reason }),
     }),
   scores: () => req<AssistantScore[]>("/api/scores"),
+  sessions: (taskId: string) => req<SessionSummary[]>(`/api/tasks/${taskId}/sessions`),
+  session: (id: string) => req<SessionDetail>(`/api/sessions/${id}`),
 };
+
+/** One row of the Execution Harness session list for a task (§11 drill-down). */
+export interface SessionSummary {
+  sessionId: string;
+  executionRequestId: string;
+  assistantId: string;
+  /** Primary session vocabulary (§5). */
+  sessionState: string;
+  /** Legacy `runs.state`, still served during the dual-field window. */
+  state: string;
+  attempt: number;
+  providerStartAcked: boolean;
+  cancelRequested: boolean;
+  settlementOwner: string | null;
+  startedAt: string | null;
+  endedAt: string | null;
+}
+
+export interface SessionDetail extends SessionSummary {
+  taskId: string;
+  version: number;
+  providerSessionRef: string | null;
+  lease: { expiresAt: string | null } | null;
+  request: Record<string, unknown> | null;
+  result: Record<string, unknown> | null;
+  verification: { passed: boolean; checks: unknown[] } | null;
+  enforcement: { tools: string; budget: string; isolation: string } | null;
+  checkpoints: Array<{ id: string; reason: string; git_ref: string | null; at: string }>;
+  handoffEnvelopes: Array<{ id: string; state: string; checkpoint_id: string }>;
+  approvals: Array<{ id: string; provider_request_id: string; state: string; decision: string | null }>;
+  audit: Array<{ seq: number; ts: string; type: string; summary: string; payload: unknown }>;
+}
 
 export interface Competitor {
   runId: string;

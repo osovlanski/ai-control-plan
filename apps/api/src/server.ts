@@ -386,6 +386,121 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     return renderProgressMd(tasks.envelope(req.params.id), lastRun?.assistant_id);
   });
 
+  // ---- Execution Harness durable reads (§11) — additive, read-only ----------
+  // Every state distinction in §11 is renderable from these durable rows alone;
+  // nothing is inferred from SSE. `sessionState` is primary (§5); the legacy
+  // `state` vocabulary is still served during the dual-field window.
+
+  app.get<{ Params: { id: string } }>("/api/tasks/:id/sessions", (req, reply) => {
+    if (!tasks.get(req.params.id)) return reply.status(404).send({ error: "not found" });
+    const rows = db
+      .prepare(
+        `SELECT id, execution_request_id, assistant_id, session_state, state, attempt,
+                provider_start_acked, cancel_requested, settlement_owner, started_at, ended_at
+           FROM runs
+          WHERE task_id = ? AND execution_request_id IS NOT NULL
+          ORDER BY started_at`,
+      )
+      .all(req.params.id) as Array<Record<string, unknown>>;
+    return rows.map(sessionSummary);
+  });
+
+  app.get<{ Params: { id: string } }>("/api/sessions/:id", (req, reply) => {
+    const run = db
+      .prepare(
+        `SELECT id, task_id, execution_request_id, assistant_id, session_state, state, version,
+                provider_session_ref, provider_start_acked, cancel_requested, settlement_owner,
+                attempt, lease_token, lease_expires_at, started_at, ended_at
+           FROM runs WHERE id = ?`,
+      )
+      .get(req.params.id) as Record<string, unknown> | undefined;
+    if (!run || run.execution_request_id == null) return reply.status(404).send({ error: "not found" });
+
+    const requestRow = db
+      .prepare(
+        `SELECT id, attempt, assistant_id, model, routing_decision_ref, request_fingerprint,
+                fingerprint_algorithm, prompt_source, prompt_source_ref, origin_envelope_id,
+                superseded, policy, verification, origin, created_at
+           FROM execution_requests WHERE id = ?`,
+      )
+      .get(run.execution_request_id) as Record<string, unknown> | undefined;
+
+    const resultRow = db
+      .prepare("SELECT result FROM execution_results WHERE session_id = ?")
+      .get(req.params.id) as { result: string } | undefined;
+    const result = resultRow ? (JSON.parse(resultRow.result) as Record<string, unknown>) : null;
+
+    const checkpoints = db
+      .prepare(
+        "SELECT id, reason, git_ref, diff_stat, at FROM checkpoints WHERE session_id = ? ORDER BY at",
+      )
+      .all(req.params.id);
+
+    const handoffEnvelopes = db
+      .prepare(
+        `SELECT id, state, checkpoint_id, claimed_by_request_id, claimed_at, start_attempted_at,
+                from_assistant_id, reason, created_at, updated_at
+           FROM handoff_envelopes WHERE source_session_id = ? ORDER BY created_at`,
+      )
+      .all(req.params.id);
+
+    const approvals = db
+      .prepare(
+        `SELECT id, provider_request_id, state, decision, answered_by, answered_at, delivered_at,
+                delivery_note, created_at, updated_at
+           FROM approvals WHERE session_id = ? ORDER BY created_at`,
+      )
+      .all(req.params.id);
+
+    // Typed audit events for the drill-down: guard decisions, verification
+    // results, checkpoint markers. Absence means "stage did not happen".
+    const audit = (
+      db
+        .prepare(
+          `SELECT seq, ts, type, phase, summary, payload FROM events
+             WHERE run_id = ?
+               AND type IN ('guard.decision', 'verification.result', 'checkpoint.created')
+             ORDER BY seq`,
+        )
+        .all(req.params.id) as Array<Record<string, unknown> & { payload: string | null }>
+    ).map((e) => ({ ...e, payload: e.payload ? (JSON.parse(e.payload) as unknown) : null }));
+
+    return {
+      sessionId: run.id,
+      taskId: run.task_id,
+      executionRequestId: run.execution_request_id,
+      assistantId: run.assistant_id,
+      attempt: run.attempt,
+      sessionState: run.session_state, // primary (§5)
+      state: run.state, // legacy vocabulary, still served (dual-field window)
+      version: run.version,
+      providerSessionRef: run.provider_session_ref,
+      providerStartAcked: run.provider_start_acked === 1,
+      cancelRequested: run.cancel_requested === 1,
+      settlementOwner: run.settlement_owner,
+      lease: run.lease_token ? { expiresAt: run.lease_expires_at } : null,
+      startedAt: run.started_at,
+      endedAt: run.ended_at,
+      request: requestRow
+        ? {
+            ...requestRow,
+            superseded: requestRow.superseded === 1,
+            model: requestRow.model ? (JSON.parse(requestRow.model as string) as unknown) : null,
+            policy: JSON.parse(requestRow.policy as string) as unknown,
+            verification: JSON.parse(requestRow.verification as string) as unknown,
+            origin: JSON.parse(requestRow.origin as string) as unknown,
+          }
+        : null,
+      result,
+      verification: result?.verification ?? null,
+      enforcement: result?.enforcement ?? null,
+      checkpoints,
+      handoffEnvelopes,
+      approvals,
+      audit,
+    };
+  });
+
   return { app, registry, orchestrator, tasks, bus, checkpoints, cooldowns, telemetry };
 }
 
@@ -405,6 +520,23 @@ function send(reply: FastifyReply, payload: unknown): void {
 
 function message(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/** One row of `GET /api/tasks/:id/sessions`. */
+function sessionSummary(r: Record<string, unknown>): Record<string, unknown> {
+  return {
+    sessionId: r.id,
+    executionRequestId: r.execution_request_id,
+    assistantId: r.assistant_id,
+    sessionState: r.session_state,
+    state: r.state,
+    attempt: r.attempt,
+    providerStartAcked: r.provider_start_acked === 1,
+    cancelRequested: r.cancel_requested === 1,
+    settlementOwner: r.settlement_owner,
+    startedAt: r.started_at,
+    endedAt: r.ended_at,
+  };
 }
 
 /** Overall scores as the base, kind-specific ones overriding where present. */

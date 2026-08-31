@@ -34,10 +34,18 @@ describe("api server", () => {
     const res = await app.inject({ method: "GET", url: "/api/meta" });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toMatchObject({
-      apiVersion: "1.0",
+      apiVersion: "1.1",
       eventVersion: "1.0",
       workspace: "personal",
-      capabilities: ["tasks.read", "events.read", "events.stream", "routing.read"],
+      capabilities: [
+        "tasks.read",
+        "events.read",
+        "events.stream",
+        "routing.read",
+        "sessions.read",
+        "verification.read",
+        "approvals.read",
+      ],
     });
   });
 
