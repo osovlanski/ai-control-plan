@@ -71,15 +71,17 @@ into the follow-up commits. **All Codex findings through Phase 6 are resolved.**
 
 ---
 
-## Phase 7 (recovery / concurrency hardening) — DONE (pending Codex review)
+## Phase 7 (recovery / concurrency hardening) — DONE, Codex-clean
 
 Design: `execution-harness.md` §9, §12 layer 4; `harness-implementation-plan.md` Phase 7.
 
-**Status:** all 6 next-actions below are done. `recovery.ts` is tested (`recovery.test.ts`
-12, `fault-injection.test.ts` 10) and wired into boot via `Orchestrator.reconcileOnBoot()`
-(now `async`); the lease sweeper is a 60s `setInterval` in `buildServer`; `recovery.decision`
-events are in the `/api/sessions/:id` audit filter. Suite: api 261 / core 37 / adapters 8 /
-web 3, lint clean. Next: Codex-review the phase diff, fold findings into a follow-up commit.
+**Status:** complete. `recovery.ts` is tested (`recovery.test.ts` + `fault-injection.test.ts`,
+the latter maps H-I3/4/8/12/14) and wired into boot via `Orchestrator.reconcileOnBoot()` (now
+`async`); the lease sweeper is a 60s `setInterval` in `buildServer`; `recovery.decision` events
+are in the `/api/sessions/:id` audit filter. Two Codex follow-up rounds folded in (`a9a2364`,
+`1f9a8be`); the third Codex pass returned **no findings**. Suite: api 266 / core 37 /
+adapters 8 / web 3, lint clean. **Next phase is the orchestrator/control-plane cutover
+(standing deferral #1) — a separate focused pass. Do NOT build Phase 8 (remote runner).**
 
 ### `apps/api/src/modules/harness/recovery.ts`
 `HarnessRecovery` class — Implements:
