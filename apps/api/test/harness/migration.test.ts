@@ -30,7 +30,7 @@ function migrateLegacy(database: Database.Database): void {
   const legacyDir = join(dir, "legacy-migrations");
   cpSync(MIGRATIONS, legacyDir, { recursive: true });
   for (const f of readdirSync(legacyDir)) {
-    if (/^005_/.test(f)) rmSync(join(legacyDir, f));
+    if (/^\d+_/.test(f) && Number(f.slice(0, 3)) >= 5) rmSync(join(legacyDir, f));
   }
   migrate(database, legacyDir);
 }
@@ -125,6 +125,41 @@ describe("005_harness on a legacy DB", () => {
     expect(() =>
       insertReq.run("ok2", "fp6", "handoff", '{"kind":"handoff","envelopeId":"env-1"}', "env-1"),
     ).not.toThrow();
+  });
+
+  it("006 upgrades an already-applied 005 handoff_envelopes to the start_ambiguous protocol", () => {
+    // Apply through 005 only.
+    const upTo005 = join(dir, "upto-005");
+    cpSync(MIGRATIONS, upTo005, { recursive: true });
+    for (const f of readdirSync(upTo005)) {
+      if (/^\d+_/.test(f) && Number(f.slice(0, 3)) >= 6) rmSync(join(upTo005, f));
+    }
+    migrate(db, upTo005);
+    const cols005 = (
+      db.prepare("PRAGMA table_info(handoff_envelopes)").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    expect(cols005).not.toContain("start_attempted_at");
+
+    // Now the real dir carries 006 forward.
+    expect(migrate(db, MIGRATIONS)).toContain("006_harness_handoff.sql");
+    const cols006 = (
+      db.prepare("PRAGMA table_info(handoff_envelopes)").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    expect(cols006).toEqual(expect.arrayContaining(["claimed_at", "start_attempted_at"]));
+
+    // The new state is accepted; an old-vocabulary value that never existed is not.
+    const insertEnv = db.prepare(
+      `INSERT INTO checkpoints (id, task_id, run_id, envelope_snapshot, reason, at)
+         VALUES ('ck', 'AG-1', 'r-active', '{}', 'handoff', 't')`,
+    );
+    insertEnv.run();
+    const env = db.prepare(
+      `INSERT INTO handoff_envelopes
+         (id, task_id, checkpoint_id, envelope, state, from_assistant_id, reason, created_at, updated_at)
+       VALUES (?, 'AG-1', 'ck', '{}', ?, 'a1', 'r', 't', 't')`,
+    );
+    expect(() => env.run("e1", "start_ambiguous")).not.toThrow();
+    expect(() => env.run("e2", "bogus")).toThrow();
   });
 
   it("enforces one live successor per handoff envelope", () => {

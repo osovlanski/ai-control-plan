@@ -157,16 +157,43 @@ export class HandoffService {
   ): void {
     const at = this.now().toISOString();
     const tx = this.db.transaction(() => {
+      const env = this.db
+        .prepare("SELECT task_id FROM handoff_envelopes WHERE id = ?")
+        .get(envelopeId) as { task_id: string } | undefined;
+      if (!env) throw new HandoffClaimError(envelopeId, "no such envelope");
+
       successor.insertRequest(this.db);
+
+      // Do not trust the callback — verify the row it claims to have written (§7):
+      // id, origin envelope and task must all match, else roll back.
+      const req = this.db
+        .prepare("SELECT id, task_id, origin_envelope_id FROM execution_requests WHERE id = ?")
+        .get(successor.requestId) as
+        | { id: string; task_id: string; origin_envelope_id: string | null }
+        | undefined;
+      if (
+        !req ||
+        req.id !== successor.requestId ||
+        req.origin_envelope_id !== envelopeId ||
+        req.task_id !== env.task_id
+      ) {
+        throw new HandoffClaimError(
+          envelopeId,
+          "successor request row does not match the envelope (id/task/origin mismatch)",
+        );
+      }
+
+      // `released` is claimable too — it just records that a prior attempt failed.
       const info = this.db
         .prepare(
           `UPDATE handoff_envelopes
-             SET state = 'claimed', claimed_by_request_id = ?, claimed_at = ?, updated_at = ?
-           WHERE id = ? AND state = 'ready'`,
+             SET state = 'claimed', claimed_by_request_id = ?, claimed_at = ?,
+                 start_attempted_at = NULL, updated_at = ?
+           WHERE id = ? AND state IN ('ready', 'released')`,
         )
         .run(successor.requestId, at, at, envelopeId);
       if (info.changes !== 1) {
-        throw new HandoffClaimError(envelopeId, "not in state 'ready' — already claimed or consumed");
+        throw new HandoffClaimError(envelopeId, "not claimable — not in state 'ready' or 'released'");
       }
     });
     try {
@@ -206,9 +233,11 @@ export class HandoffService {
   }
 
   /**
-   * Pre-start failure: mark the failed request `superseded` and return the
-   * envelope to `ready`, in one transaction. Legal ONLY from `claimed` — once
-   * `start_ambiguous`, only {@link settleAmbiguous} may act (§7).
+   * Pre-start failure: mark the failed request `superseded` and move the envelope
+   * to `released`, in one transaction. Legal ONLY from `claimed` — once
+   * `start_ambiguous`, only {@link settleAmbiguous} may act (§7). `released` (not
+   * straight back to `ready`) keeps the "this envelope had a failed attempt"
+   * signal; {@link claim} accepts it as a source state.
    */
   release(envelopeId: string, failedRequestId: string): void {
     const at = this.now().toISOString();
@@ -216,7 +245,7 @@ export class HandoffService {
       const info = this.db
         .prepare(
           `UPDATE handoff_envelopes
-             SET state = 'ready', claimed_by_request_id = NULL, claimed_at = NULL, updated_at = ?
+             SET state = 'released', claimed_by_request_id = NULL, claimed_at = NULL, updated_at = ?
            WHERE id = ? AND state = 'claimed' AND claimed_by_request_id = ?`,
         )
         .run(at, envelopeId, failedRequestId);
@@ -236,22 +265,30 @@ export class HandoffService {
   settleAmbiguous(envelopeId: string, outcome: { executionEstablished: boolean }, requestId: string): void {
     const at = this.now().toISOString();
     const tx = this.db.transaction(() => {
+      // Both CAS branches require the caller to own the claim
+      // (`claimed_by_request_id = ?`) — a stale recovery pass for a superseded
+      // request cannot settle a claim that has since moved on.
       if (outcome.executionEstablished) {
         const info = this.db
           .prepare(
-            "UPDATE handoff_envelopes SET state = 'consumed', updated_at = ? WHERE id = ? AND state = 'start_ambiguous'",
+            `UPDATE handoff_envelopes SET state = 'consumed', updated_at = ?
+             WHERE id = ? AND state = 'start_ambiguous' AND claimed_by_request_id = ?`,
           )
-          .run(at, envelopeId);
-        if (info.changes !== 1) throw new HandoffClaimError(envelopeId, "not in state 'start_ambiguous'");
+          .run(at, envelopeId, requestId);
+        if (info.changes !== 1) {
+          throw new HandoffClaimError(envelopeId, "not in 'start_ambiguous' for this request");
+        }
       } else {
         const info = this.db
           .prepare(
             `UPDATE handoff_envelopes
-               SET state = 'ready', claimed_by_request_id = NULL, updated_at = ?
-             WHERE id = ? AND state = 'start_ambiguous'`,
+               SET state = 'released', claimed_by_request_id = NULL, updated_at = ?
+             WHERE id = ? AND state = 'start_ambiguous' AND claimed_by_request_id = ?`,
           )
-          .run(at, envelopeId);
-        if (info.changes !== 1) throw new HandoffClaimError(envelopeId, "not in state 'start_ambiguous'");
+          .run(at, envelopeId, requestId);
+        if (info.changes !== 1) {
+          throw new HandoffClaimError(envelopeId, "not in 'start_ambiguous' for this request");
+        }
         this.db.prepare("UPDATE execution_requests SET superseded = 1 WHERE id = ?").run(requestId);
       }
     });
@@ -265,16 +302,49 @@ export class HandoffService {
    */
   expireClaim(envelopeId: string, ttlMs: number): boolean {
     const cutoff = new Date(this.now().getTime() - ttlMs).toISOString();
-    const row = this.get(envelopeId);
-    if (!row || row.state !== "claimed") return false;
-    const claimedAt = (
-      this.db.prepare("SELECT claimed_at FROM handoff_envelopes WHERE id = ?").get(envelopeId) as {
-        claimed_at: string | null;
-      }
-    ).claimed_at;
-    if (!claimedAt || claimedAt > cutoff) return false;
-    this.release(envelopeId, row.claimedByRequestId!);
-    return true;
+    let released = false;
+    const tx = this.db.transaction(() => {
+      // Staleness check + release fold into one transaction — no read-then-CAS gap.
+      const row = this.db
+        .prepare("SELECT state, claimed_by_request_id, claimed_at FROM handoff_envelopes WHERE id = ?")
+        .get(envelopeId) as
+        | { state: string; claimed_by_request_id: string | null; claimed_at: string | null }
+        | undefined;
+      if (!row || row.state !== "claimed" || !row.claimed_at || row.claimed_at > cutoff) return;
+      const at = this.now().toISOString();
+      const info = this.db
+        .prepare(
+          `UPDATE handoff_envelopes
+             SET state = 'released', claimed_by_request_id = NULL, claimed_at = NULL, updated_at = ?
+           WHERE id = ? AND state = 'claimed' AND claimed_by_request_id = ?`,
+        )
+        .run(at, envelopeId, row.claimed_by_request_id);
+      if (info.changes !== 1) return;
+      this.db
+        .prepare("UPDATE execution_requests SET superseded = 1 WHERE id = ?")
+        .run(row.claimed_by_request_id);
+      released = true;
+    });
+    tx();
+    return released;
+  }
+
+  /** Envelopes assembled by a given source session (§8 reroute lookup for the plane). */
+  bySourceSession(sessionId: string): HandoffEnvelopeRow[] {
+    return (
+      this.db
+        .prepare("SELECT * FROM handoff_envelopes WHERE source_session_id = ? ORDER BY created_at")
+        .all(sessionId) as RawRow[]
+    ).map(toRow);
+  }
+
+  /** Envelopes anchored to a given checkpoint (§8 reroute lookup for the plane). */
+  byCheckpoint(checkpointId: string): HandoffEnvelopeRow[] {
+    return (
+      this.db
+        .prepare("SELECT * FROM handoff_envelopes WHERE checkpoint_id = ? ORDER BY created_at")
+        .all(checkpointId) as RawRow[]
+    ).map(toRow);
   }
 }
 

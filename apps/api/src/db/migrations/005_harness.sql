@@ -131,19 +131,14 @@ CREATE TABLE handoff_envelopes (
   task_id                TEXT NOT NULL REFERENCES tasks(id),
   checkpoint_id          TEXT NOT NULL REFERENCES checkpoints(id),
   envelope               TEXT NOT NULL,   -- JSON HandoffEnvelope
-  -- ready → claimed → consumed ; claimed → released → ready (pre-start failure);
-  -- claimed → start_ambiguous (adapter.start attempted) — no automatic expiry
-  -- release from there, only recovery may settle it (§7).
-  state                  TEXT NOT NULL DEFAULT 'ready',
+  state                  TEXT NOT NULL DEFAULT 'ready',   -- ready|claimed|consumed|released
   claimed_by_request_id  TEXT REFERENCES execution_requests(id),
-  claimed_at             TEXT,
-  start_attempted_at     TEXT,
   from_assistant_id      TEXT NOT NULL,
   reason                 TEXT NOT NULL,
   source_session_id      TEXT REFERENCES runs(id),
   created_at             TEXT NOT NULL,
   updated_at             TEXT NOT NULL,
-  CHECK (state IN ('ready','claimed','start_ambiguous','consumed','released'))
+  CHECK (state IN ('ready','claimed','consumed','released'))
 );
 CREATE INDEX idx_handoff_envelopes_task ON handoff_envelopes(task_id);
 

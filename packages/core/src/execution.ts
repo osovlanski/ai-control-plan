@@ -292,7 +292,11 @@ export interface HandoffEnvelope {
 export interface HandoffRequest {
   sessionId: ExecutionSessionId;
   taskId: TaskId;
-  envelopeId: string;
+  /**
+   * Absent when no checkpoint committed and thus no envelope was assembled: the
+   * plane parks the task rather than route a successor against a fabricated id.
+   */
+  envelopeId?: string;
   reason: string;
 }
 

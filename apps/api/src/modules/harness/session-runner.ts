@@ -414,8 +414,8 @@ class RunContext {
     }
     const detail =
       plan.yieldKind === "reroute"
-        ? this.buildReroute(checkpoint.checkpointId, envelopeId)
-        : this.buildHandoff(checkpoint.checkpointId, envelopeId);
+        ? this.buildReroute(checkpoint.checkpointId)
+        : this.buildHandoff(envelopeId);
     return this.finalize(from, "YIELDED", {
       yield: { kind: plan.yieldKind, detail },
       checkpoint,
@@ -898,7 +898,12 @@ class RunContext {
     return { tools, budget, isolation };
   }
 
-  private buildReroute(checkpointId?: string, _envelopeId?: string): RerouteRequest {
+  /**
+   * §8 RerouteRequest carries a `checkpointId`, never an envelope id — the plane
+   * locates the reroute envelope with `HandoffService.byCheckpoint` /
+   * `bySourceSession`. `suggestion` is a typed `never` (H-I1).
+   */
+  private buildReroute(checkpointId?: string): RerouteRequest {
     return {
       sessionId: this.sessionId as RerouteRequest["sessionId"],
       taskId: this.request.taskId,
@@ -908,11 +913,16 @@ class RunContext {
     };
   }
 
-  private buildHandoff(checkpointId?: string, envelopeId?: string): HandoffRequest {
+  /**
+   * `envelopeId` is omitted when no checkpoint committed and thus no envelope was
+   * assembled — the plane parks the task instead of chasing a fabricated id
+   * (Phase 4 Codex finding). It is optional in the core contract.
+   */
+  private buildHandoff(envelopeId?: string): HandoffRequest {
     return {
       sessionId: this.sessionId as HandoffRequest["sessionId"],
       taskId: this.request.taskId,
-      envelopeId: envelopeId ?? checkpointId ?? "pending",
+      ...(envelopeId ? { envelopeId } : {}),
       reason: this.rerouteReason ?? "session yielded",
     };
   }

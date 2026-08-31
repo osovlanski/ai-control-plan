@@ -131,11 +131,12 @@ describe("claim protocol", () => {
     expect(db.prepare("SELECT COUNT(*) c FROM execution_requests WHERE id = 's2'").get()).toMatchObject({ c: 0 });
   });
 
-  it("release returns the envelope to ready, supersedes the failed request, and a corrected successor can claim", () => {
+  it("release moves the envelope to 'released', supersedes the failed request, and a corrected successor can claim", () => {
     const id = makeReady();
     handoff.claim(id, { requestId: "s1", insertRequest: insertSuccessorReq("s1", id) });
     handoff.release(id, "s1");
-    expect(handoff.get(id)!.state).toBe("ready");
+    expect(handoff.get(id)!.state).toBe("released"); // keeps the "had a failed attempt" signal
+    expect(handoff.get(id)!.claimedByRequestId).toBeNull();
     expect(db.prepare("SELECT superseded FROM execution_requests WHERE id = 's1'").get()).toMatchObject({
       superseded: 1,
     });
@@ -144,11 +145,30 @@ describe("claim protocol", () => {
     expect(handoff.get(id)!.state).toBe("claimed");
   });
 
+  it("rejects a successor request row that does not match the envelope (id/task/origin)", () => {
+    const id = makeReady();
+    // insertRequest writes a row whose origin_envelope_id points at a different envelope.
+    expect(() =>
+      handoff.claim(id, { requestId: "s1", insertRequest: insertSuccessorReq("s1", "some-other-envelope") }),
+    ).toThrow(HandoffClaimError);
+    expect(handoff.get(id)!.state).toBe("ready"); // CAS never ran
+    expect(db.prepare("SELECT COUNT(*) c FROM execution_requests WHERE id = 's1'").get()).toMatchObject({ c: 0 });
+  });
+
   it("markConsumed moves claimed → consumed", () => {
     const id = makeReady();
     handoff.claim(id, { requestId: "s1", insertRequest: insertSuccessorReq("s1", id) });
     handoff.markConsumed(id);
     expect(handoff.get(id)!.state).toBe("consumed");
+  });
+});
+
+describe("plane lookup (reroute, §8)", () => {
+  it("finds an assembled envelope by source session and by checkpoint", () => {
+    const id = makeReady();
+    expect(handoff.bySourceSession("es_src").map((r) => r.id)).toEqual([id]);
+    expect(handoff.byCheckpoint(CHECKPOINT_ID).map((r) => r.id)).toEqual([id]);
+    expect(handoff.bySourceSession("nope")).toEqual([]);
   });
 });
 
@@ -162,9 +182,9 @@ describe("start_ambiguous", () => {
     clock = new Date(clock.getTime() + 10 * 60_000);
     expect(handoff.expireClaim(id, 60_000)).toBe(false); // no automatic release from start_ambiguous
 
-    // recovery establishes non-execution → release + supersede
+    // recovery establishes non-execution → released + supersede
     handoff.settleAmbiguous(id, { executionEstablished: false }, "s1");
-    expect(handoff.get(id)!.state).toBe("ready");
+    expect(handoff.get(id)!.state).toBe("released");
     expect(db.prepare("SELECT superseded FROM execution_requests WHERE id = 's1'").get()).toMatchObject({
       superseded: 1,
     });
@@ -177,6 +197,19 @@ describe("start_ambiguous", () => {
     handoff.settleAmbiguous(id, { executionEstablished: true }, "s1");
     expect(handoff.get(id)!.state).toBe("consumed");
   });
+
+  it("refuses to settle for a request that does not own the claim", () => {
+    const id = makeReady();
+    handoff.claim(id, { requestId: "s1", insertRequest: insertSuccessorReq("s1", id) });
+    handoff.enterStartAmbiguous(id);
+    expect(() => handoff.settleAmbiguous(id, { executionEstablished: true }, "s-stale")).toThrow(
+      HandoffClaimError,
+    );
+    expect(() => handoff.settleAmbiguous(id, { executionEstablished: false }, "s-stale")).toThrow(
+      HandoffClaimError,
+    );
+    expect(handoff.get(id)!.state).toBe("start_ambiguous");
+  });
 });
 
 describe("expireClaim (pre-start only)", () => {
@@ -187,9 +220,12 @@ describe("expireClaim (pre-start only)", () => {
     expect(handoff.expireClaim(id, 60_000)).toBe(false); // fresh
     clock = new Date(clock.getTime() + 61_000);
     expect(handoff.expireClaim(id, 60_000)).toBe(true);
-    expect(handoff.get(id)!.state).toBe("ready");
+    expect(handoff.get(id)!.state).toBe("released");
     expect(db.prepare("SELECT superseded FROM execution_requests WHERE id = 's1'").get()).toMatchObject({
       superseded: 1,
     });
+    // a re-claim from 'released' is still allowed
+    handoff.claim(id, { requestId: "s2", insertRequest: insertSuccessorReq("s2", id) });
+    expect(handoff.get(id)!.state).toBe("claimed");
   });
 });
