@@ -19,10 +19,18 @@ describe("web API client", () => {
     const detail = {
       sessionId: "es_1",
       taskId: "AG-1",
-      sessionState: "COMPLETED",
-      state: "ENDED_OK",
-      verification: { passed: false, checks: [] },
-      enforcement: { tools: "audit", budget: "advisory", isolation: "partial" },
+      sessionState: "COMPLETED", // primary vocabulary
+      state: "ENDED_OK", // legacy, still served
+      correlation: { parentTaskId: "AG-0", groupId: "g1" },
+      request: { promptSource: "fresh", requestFingerprint: "fp", superseded: false },
+      result: {
+        outcome: "completed",
+        verification: { passed: false, checks: [] },
+        enforcement: { tools: "audit", budget: "advisory", isolation: "partial" },
+      },
+      checkpoints: [{ id: "ck", reason: "completion", gitRef: null, diffStat: null, at: "t" }],
+      handoffEnvelopes: [],
+      approvals: [],
       audit: [{ seq: 2, ts: "t", type: "guard.decision", summary: "budget", payload: {} }],
     };
     const fetchMock = vi.fn().mockImplementation(
@@ -31,11 +39,13 @@ describe("web API client", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(api.session("es_1")).resolves.toMatchObject({
-      sessionState: "COMPLETED",
-      state: "ENDED_OK",
-      enforcement: { isolation: "partial" },
-    });
+    const got = await api.session("es_1");
+    expect(got.sessionState).toBe("COMPLETED");
+    expect(got.state).toBe("ENDED_OK"); // dual-field window
+    expect(got.correlation).toEqual({ parentTaskId: "AG-0", groupId: "g1" });
+    expect(got.result?.enforcement.isolation).toBe("partial");
+    expect(got.result?.verification?.passed).toBe(false);
+    expect(got.audit[0]!.type).toBe("guard.decision");
     expect(fetchMock).toHaveBeenCalledWith("/api/sessions/es_1", expect.any(Object));
 
     await api.sessions("AG-1");

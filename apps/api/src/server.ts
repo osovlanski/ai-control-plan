@@ -399,7 +399,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
                 provider_start_acked, cancel_requested, settlement_owner, started_at, ended_at
            FROM runs
           WHERE task_id = ? AND execution_request_id IS NOT NULL
-          ORDER BY started_at`,
+          ORDER BY started_at, id`,
       )
       .all(req.params.id) as Array<Record<string, unknown>>;
     return rows.map(sessionSummary);
@@ -420,7 +420,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
       .prepare(
         `SELECT id, attempt, assistant_id, model, routing_decision_ref, request_fingerprint,
                 fingerprint_algorithm, prompt_source, prompt_source_ref, origin_envelope_id,
-                superseded, policy, verification, origin, created_at
+                superseded, policy, verification, origin, parent_task_id, group_id, created_at
            FROM execution_requests WHERE id = ?`,
       )
       .get(run.execution_request_id) as Record<string, unknown> | undefined;
@@ -428,29 +428,57 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     const resultRow = db
       .prepare("SELECT result FROM execution_results WHERE session_id = ?")
       .get(req.params.id) as { result: string } | undefined;
-    const result = resultRow ? (JSON.parse(resultRow.result) as Record<string, unknown>) : null;
+    const result = resultRow ? (safeJson(resultRow.result) as Record<string, unknown> | null) : null;
 
-    const checkpoints = db
-      .prepare(
-        "SELECT id, reason, git_ref, diff_stat, at FROM checkpoints WHERE session_id = ? ORDER BY at",
-      )
-      .all(req.params.id);
+    const checkpoints = (
+      db
+        .prepare(
+          "SELECT id, reason, git_ref, diff_stat, at FROM checkpoints WHERE session_id = ? ORDER BY at, id",
+        )
+        .all(req.params.id) as Array<Record<string, unknown>>
+    ).map((c) => ({ id: c.id, reason: c.reason, gitRef: c.git_ref, diffStat: c.diff_stat, at: c.at }));
 
-    const handoffEnvelopes = db
-      .prepare(
-        `SELECT id, state, checkpoint_id, claimed_by_request_id, claimed_at, start_attempted_at,
-                from_assistant_id, reason, created_at, updated_at
-           FROM handoff_envelopes WHERE source_session_id = ? ORDER BY created_at`,
-      )
-      .all(req.params.id);
+    const handoffEnvelopes = (
+      db
+        .prepare(
+          `SELECT id, state, checkpoint_id, claimed_by_request_id, claimed_at, start_attempted_at,
+                  from_assistant_id, reason, created_at, updated_at
+             FROM handoff_envelopes WHERE source_session_id = ? ORDER BY created_at, id`,
+        )
+        .all(req.params.id) as Array<Record<string, unknown>>
+    ).map((e) => ({
+      id: e.id,
+      state: e.state,
+      checkpointId: e.checkpoint_id,
+      claimedByRequestId: e.claimed_by_request_id,
+      claimedAt: e.claimed_at,
+      startAttemptedAt: e.start_attempted_at,
+      fromAssistantId: e.from_assistant_id,
+      reason: e.reason,
+      createdAt: e.created_at,
+      updatedAt: e.updated_at,
+    }));
 
-    const approvals = db
-      .prepare(
-        `SELECT id, provider_request_id, state, decision, answered_by, answered_at, delivered_at,
-                delivery_note, created_at, updated_at
-           FROM approvals WHERE session_id = ? ORDER BY created_at`,
-      )
-      .all(req.params.id);
+    const approvals = (
+      db
+        .prepare(
+          `SELECT id, provider_request_id, state, decision, answered_by, answered_at, delivered_at,
+                  delivery_note, created_at, updated_at
+             FROM approvals WHERE session_id = ? ORDER BY created_at, id`,
+        )
+        .all(req.params.id) as Array<Record<string, unknown>>
+    ).map((a) => ({
+      id: a.id,
+      providerRequestId: a.provider_request_id,
+      state: a.state,
+      decision: a.decision,
+      answeredBy: a.answered_by,
+      answeredAt: a.answered_at,
+      deliveredAt: a.delivered_at,
+      deliveryNote: a.delivery_note,
+      createdAt: a.created_at,
+      updatedAt: a.updated_at,
+    }));
 
     // Typed audit events for the drill-down: guard decisions, verification
     // results, checkpoint markers. Absence means "stage did not happen".
@@ -463,7 +491,14 @@ export function buildServer(deps: ServerDeps): BuiltServer {
              ORDER BY seq`,
         )
         .all(req.params.id) as Array<Record<string, unknown> & { payload: string | null }>
-    ).map((e) => ({ ...e, payload: e.payload ? (JSON.parse(e.payload) as unknown) : null }));
+    ).map((e) => ({
+      seq: e.seq,
+      ts: e.ts,
+      type: e.type,
+      phase: e.phase,
+      summary: e.summary,
+      payload: e.payload ? safeJson(e.payload) : null,
+    }));
 
     return {
       sessionId: run.id,
@@ -481,19 +516,31 @@ export function buildServer(deps: ServerDeps): BuiltServer {
       lease: run.lease_token ? { expiresAt: run.lease_expires_at } : null,
       startedAt: run.started_at,
       endedAt: run.ended_at,
+      // Opaque observability join keys (§2) — carried for navigation, never read by logic.
+      correlation: requestRow
+        ? { parentTaskId: requestRow.parent_task_id ?? null, groupId: requestRow.group_id ?? null }
+        : null,
       request: requestRow
         ? {
-            ...requestRow,
+            id: requestRow.id,
+            attempt: requestRow.attempt,
+            assistantId: requestRow.assistant_id,
+            model: requestRow.model ? safeJson(requestRow.model as string) : null,
+            routingDecisionRef: requestRow.routing_decision_ref,
+            requestFingerprint: requestRow.request_fingerprint,
+            fingerprintAlgorithm: requestRow.fingerprint_algorithm,
+            promptSource: requestRow.prompt_source,
+            promptSourceRef: requestRow.prompt_source_ref,
+            originEnvelopeId: requestRow.origin_envelope_id,
             superseded: requestRow.superseded === 1,
-            model: requestRow.model ? (JSON.parse(requestRow.model as string) as unknown) : null,
-            policy: JSON.parse(requestRow.policy as string) as unknown,
-            verification: JSON.parse(requestRow.verification as string) as unknown,
-            origin: JSON.parse(requestRow.origin as string) as unknown,
+            policy: safeJson(requestRow.policy as string),
+            verification: safeJson(requestRow.verification as string),
+            origin: safeJson(requestRow.origin as string),
+            createdAt: requestRow.created_at,
           }
         : null,
+      // verification + enforcement live inside `result` — not duplicated here.
       result,
-      verification: result?.verification ?? null,
-      enforcement: result?.enforcement ?? null,
       checkpoints,
       handoffEnvelopes,
       approvals,
@@ -520,6 +567,15 @@ function send(reply: FastifyReply, payload: unknown): void {
 
 function message(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/** Parse a durable JSON column; a corrupt one yields null rather than a 500. */
+function safeJson(value: string): unknown {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
 }
 
 /** One row of `GET /api/tasks/:id/sessions`. */

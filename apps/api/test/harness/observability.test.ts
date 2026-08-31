@@ -9,9 +9,15 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import type { AssistantId, CapabilityManifest, ExecutionRequest, TaskId } from "@agent-plane/core";
+import { FakeAdapter } from "@agent-plane/adapters";
 import { loadConfig } from "../../src/config.js";
 import { openDb, type Db } from "../../src/db/index.js";
 import { buildServer, type BuiltServer } from "../../src/server.js";
+import { ApprovalService } from "../../src/modules/harness/approval-service.js";
+import { EventRecorder } from "../../src/modules/harness/event-recorder.js";
+import { SessionRunner } from "../../src/modules/harness/session-runner.js";
+import { SessionStore } from "../../src/modules/harness/session-store.js";
 
 let home: string;
 let db: Db;
@@ -35,10 +41,10 @@ beforeEach(() => {
     `INSERT INTO execution_requests
        (id, task_id, attempt, assistant_id, model, routing_decision_ref, request_fingerprint,
         fingerprint_algorithm, prompt_source, prompt_source_ref, rendered_prompt_digest, policy,
-        verification, origin, canonical_projection, created_at)
+        verification, origin, canonical_projection, parent_task_id, group_id, created_at)
      VALUES (?, ?, 2, 'a1', '{"id":"m1"}', 'rd_9', 'fp_9', 'alg', 'fresh', NULL, 'd',
              '{"budget":{"enforcement":"advisory"}}', '[{"name":"unit","kind":"tests","required":true}]',
-             '{"kind":"fresh"}', '{}', 't')`,
+             '{"kind":"fresh"}', '{}', 'AG-parent', 'grp-7', 't')`,
   ).run(REQ, TASK);
   db.prepare(
     `INSERT INTO runs
@@ -138,10 +144,12 @@ describe("GET /api/sessions/:id", () => {
       cancelRequested: false,
     });
 
+    expect(body.correlation).toEqual({ parentTaskId: "AG-parent", groupId: "grp-7" });
+
     expect(body.request).toMatchObject({
-      routing_decision_ref: "rd_9",
-      request_fingerprint: "fp_9",
-      prompt_source: "fresh",
+      routingDecisionRef: "rd_9",
+      requestFingerprint: "fp_9",
+      promptSource: "fresh",
       superseded: false,
       model: { id: "m1" },
       policy: { budget: { enforcement: "advisory" } },
@@ -149,14 +157,16 @@ describe("GET /api/sessions/:id", () => {
     });
 
     expect(body.result.outcome).toBe("completed");
-    expect(body.verification).toMatchObject({ passed: false });
-    expect(body.enforcement).toEqual({ tools: "audit", budget: "advisory", isolation: "partial" });
+    // verification + enforcement live inside `result`, not duplicated top-level.
+    expect(body).not.toHaveProperty("verification");
+    expect(body.result.verification).toMatchObject({ passed: false });
+    expect(body.result.enforcement).toEqual({ tools: "audit", budget: "advisory", isolation: "partial" });
 
     expect(body.checkpoints).toEqual([
-      { id: "ck_1", reason: "completion", git_ref: "deadbeef", diff_stat: null, at: "t8" },
+      { id: "ck_1", reason: "completion", gitRef: "deadbeef", diffStat: null, at: "t8" },
     ]);
-    expect(body.handoffEnvelopes[0]).toMatchObject({ id: "env_1", state: "ready", checkpoint_id: "ck_1" });
-    expect(body.approvals[0]).toMatchObject({ provider_request_id: "prq_1", state: "delivered", decision: "approved" });
+    expect(body.handoffEnvelopes[0]).toMatchObject({ id: "env_1", state: "ready", checkpointId: "ck_1" });
+    expect(body.approvals[0]).toMatchObject({ providerRequestId: "prq_1", state: "delivered", decision: "approved" });
 
     // Only the typed audit event types, parsed, in seq order.
     expect(body.audit.map((e: { type: string }) => e.type)).toEqual([
@@ -173,5 +183,104 @@ describe("GET /api/sessions/:id", () => {
       "INSERT INTO runs (id, task_id, assistant_id, state, started_at) VALUES ('legacy_1', ?, 'a1', 'ACTIVE', 't')",
     ).run(TASK);
     expect((await built.app.inject({ method: "GET", url: "/api/sessions/legacy_1" })).statusCode).toBe(404);
+  });
+
+  it("does not corrupt the whole drill-down when one durable JSON column is malformed", async () => {
+    db.prepare("UPDATE execution_requests SET policy = '{bad json' WHERE id = ?").run(REQ);
+    const res = await built.app.inject({ method: "GET", url: `/api/sessions/${SESSION}` });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.request.policy).toBeNull(); // the bad column degrades to null...
+    expect(body.result.outcome).toBe("completed"); // ...the rest of the read survives
+  });
+});
+
+describe("drill-down over a REAL SessionRunner execution (shape + leak check)", () => {
+  const MANIFEST: CapabilityManifest = {
+    assistantId: "a1" as AssistantId,
+    provider: "fake",
+    core: {
+      models: [{ id: "fake-1" }],
+      canResume: true,
+      canMcp: false,
+      supportsMidRunInput: true,
+      reportsUsage: true,
+      reportsLimits: true,
+      execution: { shell: true, filesystem: true, web: "no" },
+      auth: { state: "ok" },
+    },
+    harness: { usageAccounting: "delta", toolGating: "none", approvalRelay: true, processIsolation: "none" },
+    providerDetail: {},
+    evidence: { source: "runtime-probe", observedAt: "t" },
+  };
+  const CANARY = "canary-must-not-appear-xyz";
+  // Built at runtime so it is not a literal in the source (pre-write secret scan).
+  const PLANTED = ["sk", "LIVEKEYshouldberedacted01"].join("-");
+
+  it("serializes real rows and leaks neither the secret value nor credential tokens", async () => {
+    const store = new SessionStore(db);
+    const fake = new FakeAdapter("a1" as AssistantId, {
+      ok: true,
+      events: [
+        { type: "message", summary: `planning ${PLANTED}`, payload: { text: "x" } },
+        { type: "usage.updated", summary: "usage", payload: { inputTokens: 950, outputTokens: 10 } },
+        { type: "message", summary: "done", payload: { text: "done" } },
+      ],
+    });
+    const runner = new SessionRunner({
+      store,
+      recorder: new EventRecorder(db),
+      approvals: new ApprovalService(db),
+      checkpoints: { create: async () => ({ id: `ckpt_${Math.random().toString(36).slice(2)}`, gitRef: null }) },
+      registry: { adapter: () => fake, manifest: () => MANIFEST },
+      approvalPollMs: 5,
+      secretResolver: () => CANARY,
+    });
+
+    const request: ExecutionRequest = {
+      schemaVersion: 1,
+      executionRequestId: "erq_real_1",
+      taskId: TASK as TaskId,
+      attempt: 1,
+      assistantId: "a1" as AssistantId,
+      routingDecisionRef: "rd_real",
+      correlation: { parentTaskId: "AG-parent" as TaskId, groupId: "grp-real" },
+      runSpec: {
+        taskId: TASK as TaskId,
+        prompt: "do it",
+        workdir: home,
+        permissionPolicy: { mode: "auto-approve" },
+        env: { redactionRules: [], maxRuntimeMs: 60_000 },
+      },
+      policy: {
+        budget: { enforcement: "advisory", maxTokens: 1000 },
+        timeout: { hardMs: 60_000 },
+        approval: { mode: "auto-approve" },
+        tools: { mode: "audit" },
+        checkpoint: { onSoftLimit: true },
+        isolation: { required: "ambient" },
+      },
+      context: { secretRefs: ["PRIMARY_REF"] },
+      verification: [],
+      origin: { kind: "fresh" },
+    };
+    const result = await runner.run(request);
+    expect(result.outcome).toBe("completed");
+
+    const sid = store.forRequest("erq_real_1")!.sessionId as string;
+    const res = await built.app.inject({ method: "GET", url: `/api/sessions/${sid}` });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+
+    // Real shape holds against real rows.
+    expect(body.sessionState).toBe("COMPLETED");
+    expect(body.correlation).toEqual({ parentTaskId: "AG-parent", groupId: "grp-real" });
+    expect(body.request.requestFingerprint).toEqual(expect.any(String));
+    expect(body.audit.map((e: { type: string }) => e.type)).toContain("guard.decision");
+
+    // No secret value and no credential-shaped token anywhere in the drill-down.
+    const raw = res.payload;
+    expect(raw).not.toContain(CANARY);
+    expect(raw).not.toMatch(/sk-[A-Za-z0-9]{6,}/);
   });
 });

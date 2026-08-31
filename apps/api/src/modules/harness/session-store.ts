@@ -156,8 +156,8 @@ export class SessionStore {
              (id, task_id, attempt, assistant_id, model, composition_revision_id, routing_decision_ref,
               request_fingerprint, fingerprint_algorithm, prompt_source, prompt_source_ref, template_version,
               rendered_prompt_digest, policy, verification, origin, origin_envelope_id, superseded,
-              canonical_projection, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+              canonical_projection, parent_task_id, group_id, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)`,
         )
         .run(
           request.executionRequestId,
@@ -178,6 +178,9 @@ export class SessionStore {
           JSON.stringify(request.origin),
           originEnvelopeId,
           JSON.stringify(projection),
+          // Opaque observability join keys (§2) — not in the fingerprint.
+          request.correlation?.parentTaskId ?? null,
+          request.correlation?.groupId ?? null,
           this.iso(),
         );
     } catch (err) {

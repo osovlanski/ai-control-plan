@@ -195,18 +195,46 @@ export interface SessionSummary {
   endedAt: string | null;
 }
 
+export interface SessionResult {
+  outcome: "completed" | "failed" | "cancelled" | "timed_out" | "yielded";
+  terminalState: string;
+  failure?: { kind: string; retryable: boolean; message: string };
+  verification?: { passed: boolean; checks: Array<{ name: string; passed: boolean; required: boolean; summary: string }> };
+  enforcement: { tools: string; budget: string; isolation: string };
+  usage: { inputTokens?: number; outputTokens?: number; accounting: string };
+  checkpoint: { attempted: boolean; committed: boolean; checkpointId?: string; gitRef?: string };
+}
+
+export interface SessionRequestView {
+  id: string;
+  attempt: number;
+  assistantId: string;
+  model: { id: string } | null;
+  routingDecisionRef: string;
+  requestFingerprint: string;
+  fingerprintAlgorithm: string;
+  promptSource: "fresh" | "handoff" | "resume";
+  promptSourceRef: string | null;
+  originEnvelopeId: string | null;
+  superseded: boolean;
+  policy: Record<string, unknown> | null;
+  verification: unknown;
+  origin: { kind: string; envelopeId?: string; sessionId?: string; checkpointId?: string } | null;
+  createdAt: string;
+}
+
 export interface SessionDetail extends SessionSummary {
   taskId: string;
   version: number;
   providerSessionRef: string | null;
   lease: { expiresAt: string | null } | null;
-  request: Record<string, unknown> | null;
-  result: Record<string, unknown> | null;
-  verification: { passed: boolean; checks: unknown[] } | null;
-  enforcement: { tools: string; budget: string; isolation: string } | null;
-  checkpoints: Array<{ id: string; reason: string; git_ref: string | null; at: string }>;
-  handoffEnvelopes: Array<{ id: string; state: string; checkpoint_id: string }>;
-  approvals: Array<{ id: string; provider_request_id: string; state: string; decision: string | null }>;
+  correlation: { parentTaskId: string | null; groupId: string | null } | null;
+  request: SessionRequestView | null;
+  /** verification + enforcement live inside `result`, not duplicated. */
+  result: SessionResult | null;
+  checkpoints: Array<{ id: string; reason: string; gitRef: string | null; diffStat: string | null; at: string }>;
+  handoffEnvelopes: Array<{ id: string; state: string; checkpointId: string; reason: string }>;
+  approvals: Array<{ id: string; providerRequestId: string; state: string; decision: string | null }>;
   audit: Array<{ seq: number; ts: string; type: string; summary: string; payload: unknown }>;
 }
 

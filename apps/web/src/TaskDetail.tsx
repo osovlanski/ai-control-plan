@@ -1,8 +1,16 @@
 import { useEffect, useRef, useState } from "react";
-import { api, type Comparison, type RoutingExplanation, type TaskDetail as Detail, type TaskEvent } from "./api.js";
+import {
+  api,
+  type Comparison,
+  type RoutingExplanation,
+  type SessionDetail,
+  type SessionSummary,
+  type TaskDetail as Detail,
+  type TaskEvent,
+} from "./api.js";
 import { Button, Card, StateBadge, tokens } from "./ui.jsx";
 
-type Tab = "activity" | "usage" | "routing" | "progress" | "handoff" | "compare";
+type Tab = "activity" | "usage" | "routing" | "progress" | "handoff" | "compare" | "sessions";
 
 interface PendingApproval {
   requestId: string;
@@ -29,6 +37,8 @@ export function TaskDetail({ taskId, onBack }: { taskId: string; onBack: () => v
     Array<{ id: string; reason: string; at: string; gitRef: string | null }>
   >([]);
   const [comparison, setComparison] = useState<Comparison | null>(null);
+  const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  const [session, setSession] = useState<SessionDetail | null>(null);
   const [busy, setBusy] = useState(false);
   const [tab, setTab] = useState<Tab>("activity");
   const timelineRef = useRef<HTMLDivElement>(null);
@@ -42,6 +52,12 @@ export function TaskDetail({ taskId, onBack }: { taskId: string; onBack: () => v
     void api.handoffs(taskId).then(setHandoffs);
     void api.checkpoints(taskId).then(setCheckpoints);
     void api.comparison(taskId).then(setComparison).catch(() => setComparison(null));
+    void api.sessions(taskId).then(setSessions).catch(() => setSessions([]));
+  };
+
+  const openSession = (id: string) => {
+    setSession(null);
+    void api.session(id).then(setSession).catch(() => setSession(null));
   };
 
   useEffect(() => {
@@ -173,7 +189,7 @@ export function TaskDetail({ taskId, onBack }: { taskId: string; onBack: () => v
       )}
 
       <div style={{ display: "flex", gap: "0.4rem", marginBottom: "0.9rem" }}>
-        {(["activity", "usage", "routing", "progress", "handoff", "compare"] as Tab[]).map((t) => (
+        {(["activity", "usage", "routing", "progress", "handoff", "compare", "sessions"] as Tab[]).map((t) => (
           <Button key={t} variant={tab === t ? "primary" : "secondary"} onClick={() => setTab(t)}>
             {t[0]!.toUpperCase() + t.slice(1)}
           </Button>
@@ -395,6 +411,75 @@ export function TaskDetail({ taskId, onBack }: { taskId: string; onBack: () => v
                 View the handoff package the next assistant would receive →
               </a>
             </p>
+          )}
+        </Card>
+      )}
+
+      {tab === "sessions" && (
+        <Card>
+          <h3 style={{ marginTop: 0, fontSize: "0.95rem" }}>Execution Harness sessions</h3>
+          {sessions.length === 0 && (
+            <p style={{ color: tokens.muted, fontSize: "0.85rem" }}>
+              No Harness sessions recorded for this task yet.
+            </p>
+          )}
+          {sessions.map((s) => (
+            <div key={s.sessionId} style={{ fontSize: "0.86rem", marginBottom: "0.4rem" }}>
+              <button
+                onClick={() => openSession(s.sessionId)}
+                style={{
+                  fontFamily: tokens.mono,
+                  fontSize: "0.78rem",
+                  background: "none",
+                  border: "none",
+                  color: tokens.accent,
+                  cursor: "pointer",
+                  padding: 0,
+                }}
+              >
+                {s.sessionId}
+              </button>{" "}
+              <strong>{s.sessionState}</strong>
+              <span style={{ color: tokens.muted }}> ({s.state}) · attempt {s.attempt}</span>
+              {s.cancelRequested && <span style={{ color: tokens.warn }}> · cancel requested</span>}
+            </div>
+          ))}
+
+          {session && (
+            <div style={{ marginTop: "1rem", borderTop: `1px solid ${tokens.muted}33`, paddingTop: "0.8rem" }}>
+              <h4 style={{ fontSize: "0.88rem", margin: "0 0 0.4rem" }}>
+                {session.sessionId} — {session.sessionState}
+                <span style={{ color: tokens.muted, fontWeight: 400 }}> / legacy {session.state}</span>
+              </h4>
+              {session.correlation?.parentTaskId && (
+                <p style={{ fontSize: "0.82rem", margin: "0 0 0.4rem", color: tokens.muted }}>
+                  parent {session.correlation.parentTaskId}
+                  {session.correlation.groupId && ` · group ${session.correlation.groupId}`}
+                </p>
+              )}
+              {session.result && (
+                <p style={{ fontSize: "0.84rem", margin: "0 0 0.4rem" }}>
+                  outcome <strong>{session.result.outcome}</strong>
+                  {" · "}enforcement: tools {session.result.enforcement.tools}, budget{" "}
+                  {session.result.enforcement.budget}, isolation {session.result.enforcement.isolation}
+                  {session.result.verification && (
+                    <>
+                      {" · "}verification{" "}
+                      <strong>{session.result.verification.passed ? "passed" : "failed"}</strong>
+                    </>
+                  )}
+                </p>
+              )}
+              {session.audit.length > 0 && (
+                <ul style={{ margin: "0.3rem 0 0", paddingLeft: "1.1rem", fontSize: "0.82rem" }}>
+                  {session.audit.map((e) => (
+                    <li key={e.seq}>
+                      <span style={{ fontFamily: tokens.mono, color: tokens.muted }}>{e.type}</span> {e.summary}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
           )}
         </Card>
       )}
