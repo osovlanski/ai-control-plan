@@ -76,6 +76,10 @@ describe("workspace config", () => {
     expect(written).toContain("execution.harnessSingleMode");
   });
 
+  it("defaults execution.harnessSingleMode OFF in a non-personal workspace too", () => {
+    expect(loadConfig(env({ AGENT_PLANE_WORKSPACE: "work" })).execution?.harnessSingleMode).toBe(false);
+  });
+
   it("parses execution.harnessSingleMode: true from the file", () => {
     const dir = join(home, "personal");
     mkdirSync(dir, { recursive: true });
@@ -97,10 +101,25 @@ describe("workspace config", () => {
     expect(loadConfig(env({ AGENT_PLANE_HARNESS_SINGLE_MODE: "0" })).execution?.harnessSingleMode).toBe(false);
   });
 
+  it("env AGENT_PLANE_HARNESS_SINGLE_MODE=true/false (word spellings) also override", () => {
+    expect(loadConfig(env({ AGENT_PLANE_HARNESS_SINGLE_MODE: "true" })).execution?.harnessSingleMode).toBe(true);
+    const dir = join(home, "personal");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "config.yaml"), "execution:\n  harnessSingleMode: true\n");
+    expect(loadConfig(env({ AGENT_PLANE_HARNESS_SINGLE_MODE: "false" })).execution?.harnessSingleMode).toBe(false);
+  });
+
   it("rejects a non-boolean execution.harnessSingleMode", () => {
     const dir = join(home, "personal");
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, "config.yaml"), "execution:\n  harnessSingleMode: yep\n");
     expect(() => loadConfig(env())).toThrow(/execution\.harnessSingleMode/);
+  });
+
+  it("rejects a non-mapping execution section", () => {
+    const dir = join(home, "personal");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "config.yaml"), "execution: nope\n");
+    expect(() => loadConfig(env())).toThrow(/execution must be a mapping/);
   });
 });

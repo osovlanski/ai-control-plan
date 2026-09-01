@@ -132,6 +132,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ResolvedConfig
     throw new Error(`${configPath} must be a YAML mapping`);
   }
   const file = (raw ?? {}) as Partial<WorkspaceConfig>;
+  if (file.execution !== undefined && (typeof file.execution !== "object" || Array.isArray(file.execution))) {
+    throw new Error(`${configPath} execution must be a mapping`);
+  }
 
   const config: WorkspaceConfig = {
     workspace: file.workspace ?? workspace,
