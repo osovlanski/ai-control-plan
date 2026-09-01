@@ -306,6 +306,8 @@ export function evaluationResult(checks: VerificationCheckResult[]): EvaluationR
 
 export interface VerificationDecision {
   checkId: string;
+  /** Canonical trusted-registry identity; optional only for legacy plan readers. */
+  capabilityIdentity?: string;
   selected: boolean;
   required: boolean;
   signals: string[];
@@ -318,6 +320,8 @@ export interface VerificationPlan {
   /** Selected checks only. Every entry has a stable id used by decisions/results. */
   checks: Array<VerificationSpec & { checkId: string }>;
   decisions: VerificationDecision[];
+  /** Required kinds for which the trusted capability registry had no provider. */
+  unmetRequirements?: VerificationKind[];
 }
 
 /** Read projection only; canonical state remains EvaluationResult + ExecutionArtifact. */
