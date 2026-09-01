@@ -19,6 +19,7 @@ import { snapshotQuota } from "./modules/harness/quota-snapshot.js";
 import { HarnessRecovery } from "./modules/harness/recovery.js";
 import { SessionRunner } from "./modules/harness/session-runner.js";
 import { SessionStore } from "./modules/harness/session-store.js";
+import { effectiveStateSql, effectiveUsageJoin, effectiveUsageSql } from "./modules/harness/state-vocab.js";
 import { Orchestrator } from "./modules/orchestrator.js";
 import { Registry } from "./modules/registry.js";
 import { persistRoutingDecision, route, routingHistory, type RouteRequest } from "./modules/router.js";
@@ -279,7 +280,15 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     if (!row) return reply.status(404).send({ error: "not found" });
     const runs = db
       .prepare(
-        "SELECT id, assistant_id, provider_session_ref, state, usage, started_at, ended_at FROM runs WHERE task_id = ? ORDER BY started_at",
+        // Effective state + usage derived at read time (execution-harness.md §5,
+        // PLAN.md 8e) — session_state authoritative for harness rows, usage
+        // falls back to the terminal execution_results row. See state-vocab.ts.
+        `SELECT r.id, r.assistant_id, r.provider_session_ref,
+           ${effectiveStateSql("r")} AS state,
+           ${effectiveUsageSql("r")} AS usage,
+           r.started_at, r.ended_at
+         FROM runs r ${effectiveUsageJoin("r")}
+         WHERE r.task_id = ? ORDER BY r.started_at`,
       )
       .all(req.params.id) as Array<Record<string, unknown> & { usage: string | null }>;
     return {

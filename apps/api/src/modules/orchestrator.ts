@@ -34,6 +34,7 @@ import type { CheckpointReason, CheckpointService } from "./checkpoint.js";
 import type { HarnessBridge } from "./harness/control-plane-bridge.js";
 import { deriveEnvelopeUpdate } from "./harness/envelope-derivation.js";
 import { quotaOf, snapshotQuota } from "./harness/quota-snapshot.js";
+import { effectiveStateSql, effectiveUsageJoin, effectiveUsageSql } from "./harness/state-vocab.js";
 import type { CooldownStore } from "./cooldown.js";
 import type { Registry } from "./registry.js";
 import { persistRoutingDecision, route, type RouteRequest } from "./router.js";
@@ -1077,15 +1078,14 @@ export class Orchestrator {
     if (!row) throw new Error(`Unknown task ${taskId}`);
     const runs = this.db
       .prepare(
-        // Effective state derived at read time (PLAN.md 8e) — unified vocab
-        // regardless of legacy vs harness row.
-        `SELECT id, assistant_id,
-           CASE WHEN execution_request_id IS NULL
-             THEN CASE state WHEN 'ACTIVE' THEN 'RUNNING' WHEN 'ENDED_OK' THEN 'COMPLETED'
-                             WHEN 'ENDED_ERROR' THEN 'FAILED' ELSE state END
-             ELSE session_state END AS state,
-           usage, started_at, ended_at, worktree_path, branch, outcome
-         FROM runs WHERE task_id = ? ORDER BY started_at`,
+        // Effective state + usage derived at read time (PLAN.md 8e) — unified
+        // vocab regardless of legacy vs harness row; see state-vocab.ts.
+        `SELECT r.id, r.assistant_id,
+           ${effectiveStateSql("r")} AS state,
+           ${effectiveUsageSql("r")} AS usage,
+           r.started_at, r.ended_at, r.worktree_path, r.branch, r.outcome
+         FROM runs r ${effectiveUsageJoin("r")}
+         WHERE r.task_id = ? ORDER BY r.started_at`,
       )
       .all(taskId) as Array<{
       id: string;

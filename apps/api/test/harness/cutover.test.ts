@@ -125,6 +125,15 @@ describe("flag-ON cutover — happy path", () => {
     const env = built.tasks.envelope(taskId);
     expect(env.artifacts.changedFiles).toContain("src/example.ts");
     expect(env.artifacts.testResults.length).toBeGreaterThan(0);
+
+    // GET /api/tasks/:id serves the derived effective state + result usage for
+    // the harness row, not the legacy shadow `state` / NULL `runs.usage`.
+    const detail = await built.app.inject({ method: "GET", url: `/api/tasks/${taskId}` });
+    const detailRun = (detail.json() as { runs: Array<{ id: string; state: string; usage: unknown }> }).runs.find(
+      (r) => r.id === runId,
+    )!;
+    expect(detailRun.state).toBe("COMPLETED");
+    expect(detailRun.usage).toMatchObject({ accounting: expect.any(String) });
   });
 });
 
