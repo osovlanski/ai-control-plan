@@ -42,6 +42,11 @@ Rules for the rest of the work:
 | `a9a2364` | Phase 7 follow-up | Codex Phase 7 findings (see below). Atomic `SessionStore.resumeFromApproval` (approval→delivered + session→RUNNING in one tx); recovery now settles `answered`/`delivering`/`delivery_unknown` (not just `delivery_unknown`); a durable `cancelRequested` is honored ahead of resume/orphan → terminal `CANCELLED` + checkpoint attempt (`recomputeUsage` for the VERIFYING-completion result from persisted `usage.updated` events); `resume_offered` emitted once (`hasRecoveryDecision` guard) so periodic sweeps don't re-announce; `renewLease` after the awaited settle steps; directive-failure detail goes through core `redactValue` not a hand-rolled `sk-` regex. API 265 / core 37 / adapters 8 / web 3, lint clean. |
 
 | _this_ | Phase 7 follow-up r2 | Codex follow-up review: `recoverSession` now wraps the decision in `decide()` and catches `SessionCasConflictError` → a fence lost mid-recovery (TTL burned through an await, or a settlement race) ends that session's recovery cleanly (`skipped`, `recovery_aborted` event) instead of throwing out of the batch; `renewLease` return is checked and aborts on failure; `approval_delivery_held` now distinguishes "provider reports no acknowledgement" from "no ack lookup available"; added the `answered`-row negative-ack hold test. API 266 / core 37 / adapters 8 / web 3, lint clean. |
+| `8a` | Phase 8a | Config flag `execution.harnessSingleMode` (additive, default OFF, env-overridable `AGENT_PLANE_HARNESS_SINGLE_MODE`). Nothing reads it yet. `+ follow-up`: `validate()` rejects a non-mapping `execution`; env word-spellings + non-personal-workspace default covered. |
+| `8b` | Phase 8b | `deriveEnvelopeUpdate` extracted from `Orchestrator.applyEvent` (envelope-shaping cases only; `mergeTail` moves with it) — legacy path observably unchanged. `EventRecorder.afterInsertInTx` optional ctor hook, runs in the batch tx after the per-call `inTransaction` and before the session CAS; must not write `runs`. `+ follow-up`: hook-written-row rollback coverage. |
+| `8c` | Phase 8c | `SessionRunner.start()` runner-owned `{sessionId, done}` handle (`run()` = `start().done`); `control-plane-bridge.ts` (`buildExecutionRequest` pure, `origin` always `{kind:"fresh"}` this pass; `HarnessBridge`). `Orchestrator` gains an optional `harnessBridge`; flag-ON branches on `harnessRouting`/`harnessOwns`: `startTask`, `isActive`, `shutdown`, `createCheckpoint`, `cancelTask`, `respondApproval`, manual `handoff` (`harnessHandoff`), `reconcileOnBoot` (3-step: HarnessRecovery → in-flight sweep over RUNNING/ROUTING/HANDING_OFF → legacy blanket-fail skipping harness-owned). `settleFromResult` full result→plane decision table; `null` parks `WAITING_INPUT` (never fabricates). `failover(run)` → `failoverTask(taskId, assistantId, trigger, reason, fromId, resetsAt?)` shared by both paths. `persistRoutingDecision` returns its row id; threaded via `StartOptions.routingDecisionRef`. `buildServer` one composition root + flag-ON-⇒-bridge assertion. Flag OFF ⇒ 4 safety-net files byte-unedited & green. `+ follow-up`: Codex 8c review (detached-rejection sink, `deps.orchestrator` owns wiring, `computeRoute` id threading, `harnessHandoff` drain-timeout park, shared shutdown deadline). |
+| `8d` | Phase 8d | Flag-ON parity in `buildServer`: `EventRecorder.publish` reproduces the legacy per-event `{kind:"event"}` SSE frame verbatim + a deduped `{kind:"state"}` on a derived phase change; `afterInsertInTx` derives the task envelope + writes quota snapshots transactionally with the event insert (shared `harness/quota-snapshot.ts`). `apps/api/test/harness/{cutover,characterization-harness}.test.ts` — real `SessionRunner` via `buildServer` + `FakeAdapter`, flag ON: happy path, approvals, cancel, `[FAKE:LIMIT]`→failover→COMPLETED, `[FAKE:FAIL]`+no-failover, boot-strand recovery, HANDING_OFF/ROUTING park, reject-with-no-result park. |
+| `8e` | Phase 8e | `runs.state` vocabulary authority (deferral #2) as **read-time derivation, no dual-write**: `CASE WHEN execution_request_id IS NULL THEN map(state) ELSE session_state END` in `telemetry.scores()` (+ `LEFT JOIN execution_results` / `COALESCE(r.usage, json_extract(er.result,'$.usage'))` for harness usage) and `Orchestrator.comparison()`; web `TaskDetail` comment noting the vocab source. `008_state_vocab_authority.sql` — non-load-bearing consistency backfill (5 known values, no `ELSE`, no unique index). `migration.test.ts` +3 (drift re-align, harness rows untouched, unknown state left as-is); `telemetry-harness.test.ts` (COMPLETED harness session → successRate + tokens). |
 
 Codex reviewed the diff of every phase and each follow-up; findings were folded
 into the follow-up commits. **All Codex findings through Phase 6 are resolved.**
@@ -166,19 +171,23 @@ adapters 8 / web 3, lint clean. **Next phase is the orchestrator/control-plane c
 
 ---
 
-## Standing deferrals (whole project, unchanged)
+## Standing deferrals (whole project)
 
-1. **Orchestrator / Control-Plane cutover is NOT done.**
-   `apps/api/src/modules/orchestrator.ts` still drives adapters directly for real
-   runs. The Harness modules are additive, exercised only by
-   `apps/api/test/harness/*` and `apps/api/test/harness/observability.test.ts`.
-   Routing single-mode execution through `SessionRunner` (keeping
-   failover/retry/parallel/verdict in the renamed control-plane orchestrator,
-   behind a config flag for one release) is the largest remaining risk and is a
-   separate focused pass AFTER Phase 7.
-2. **Destructive `runs.state` vocabulary rewrite** — deferred to that cutover. The
-   dual-field window is open: `session_state` is populated alongside legacy
-   `state`; `/api/sessions/*` serves `sessionState` primary + `state` legacy.
+1. ~~**Orchestrator / Control-Plane cutover is NOT done.**~~ **RESOLVED (Phase 8a–8e).**
+   Single-mode task execution routes through `SessionRunner` behind
+   `config.execution.harnessSingleMode` (default **OFF** this release; a later
+   commit flips it). Failover / retry / parallel-compare / verdict / task-machine
+   logic stays in `Orchestrator` (still named `Orchestrator` — see the rename
+   deferral below). Cross-provider handoff flag-ON is a fresh-prompt start
+   (`origin:{kind:"fresh"}`), exact legacy parity. Flag OFF ⇒ the legacy
+   adapter-driving path, and `apps/api/test/{characterization,orchestrator,failover,parallel}.test.ts`
+   are byte-unedited and green.
+2. ~~**Destructive `runs.state` vocabulary rewrite.**~~ **RESOLVED (Phase 8e) as
+   read-time derivation, no dual-write.** `runs.state` is authoritative for legacy
+   rows (`execution_request_id IS NULL`), `session_state` for harness rows;
+   `telemetry.scores()` / `Orchestrator.comparison()` `CASE` on
+   `execution_request_id IS NULL`. `008_state_vocab_authority.sql` is a
+   non-load-bearing consistency backfill. The legacy write path is unchanged.
 3. **Bounded *cost* caps** (`budget.maxCostUsd` with `enforcement:"bounded"`) —
    Prepare rejects them `policy_unenforceable` (no pricing table). Token caps work.
 4. **Real-adapter conformance** (CI-with-creds) unlocking real
@@ -187,6 +196,35 @@ adapters 8 / web 3, lint clean. **Next phase is the orchestrator/control-plane c
    adapter probe" §3 allows; a standalone `VerificationRunner` extraction and a
    real adapter `provision()/verify()` are NOT built (the progress steps said keep
    verification inline in `session-runner.ts`).
+5. **Cosmetic `Orchestrator` → `ControlPlane` rename** — deferred out of the
+   Phase 8 cutover (kept the class named `Orchestrator` this pass to hold the diff
+   down). A separate no-logic commit.
+6. **Provider-`resume()` under flag-ON** (same-assistant continuation via
+   `resumableRef`) — out of scope for the cutover. The flag-ON path always
+   `adapter.start`s a fresh session; only reachable via a manual same-assistant
+   re-start, which `routeFor` avoids.
+7. **Harness handoff-envelope claim protocol (post-cutover).** The Phase 8 cutover
+   routes flag-ON handoff/failover as a fresh-prompt start with
+   `origin:{kind:"fresh"}`. The landed-but-still-test-only `handoff_envelopes`
+   claim machinery (`claim({requestId,insertRequest})`, `enterStartAmbiguous`,
+   `markConsumed`, `release`) is deliberately **not** wired. This deferral
+   **supersedes** the old Phase 7 note ("don't force it before the cutover") —
+   the cutover has landed; this is now its own scoped phase, which must:
+   1. co-commit `enterStartAmbiguous` with `PREPARED→STARTING` in `SessionStore`;
+   2. build the successor `ExecutionRequest` once and insert it via
+      `handoff.claim(envelopeId, {requestId, insertRequest})` in the claim's own tx;
+   3. co-commit `markConsumed` with the successor's first-event ack;
+   4. `release` the envelope on pre-start failure; `enterStartAmbiguous` on an
+      ambiguous start;
+   5. recover `claimed` / `start_ambiguous` envelopes in
+      `HarnessRecovery.reconcileOnBoot`;
+   6. switch the flag-ON handoff/failover path from `origin:{kind:"fresh"}` to
+      `origin:{kind:"handoff", envelopeId}` and render the successor prompt from
+      the committed envelope.
+   **Acceptance criteria:** `uq_live_successor` enforces one live successor per
+   origin envelope; a crash between claim and first-event leaves a recoverable
+   `start_ambiguous` row and never a double-start; the four safety-net test files
+   stay green; a new test drives claim → consume → recover.
 
 ---
 

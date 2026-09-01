@@ -1077,7 +1077,14 @@ export class Orchestrator {
     if (!row) throw new Error(`Unknown task ${taskId}`);
     const runs = this.db
       .prepare(
-        `SELECT id, assistant_id, state, usage, started_at, ended_at, worktree_path, branch, outcome
+        // Effective state derived at read time (PLAN.md 8e) — unified vocab
+        // regardless of legacy vs harness row.
+        `SELECT id, assistant_id,
+           CASE WHEN execution_request_id IS NULL
+             THEN CASE state WHEN 'ACTIVE' THEN 'RUNNING' WHEN 'ENDED_OK' THEN 'COMPLETED'
+                             WHEN 'ENDED_ERROR' THEN 'FAILED' ELSE state END
+             ELSE session_state END AS state,
+           usage, started_at, ended_at, worktree_path, branch, outcome
          FROM runs WHERE task_id = ? ORDER BY started_at`,
       )
       .all(taskId) as Array<{

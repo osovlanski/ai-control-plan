@@ -197,6 +197,78 @@ describe("005_harness on a legacy DB", () => {
     expect(() => env.run("env-bogus", "telepathy")).toThrow();
   });
 
+  describe("008_state_vocab_authority backfill", () => {
+    /** Apply migrations up to (not including) 008. */
+    function migrateUpTo008(database: Database.Database): void {
+      const upTo = join(dir, "upto-008");
+      cpSync(MIGRATIONS, upTo, { recursive: true });
+      for (const f of readdirSync(upTo)) {
+        if (/^\d+_/.test(f) && Number(f.slice(0, 3)) >= 8) rmSync(join(upTo, f));
+      }
+      migrate(database, upTo);
+    }
+
+    it("re-aligns a drifted legacy session_state with the §5 forward map", () => {
+      migrateUpTo008(db);
+      // Drift the backfilled legacy session_state values.
+      db.prepare("UPDATE runs SET session_state = 'STARTING' WHERE execution_request_id IS NULL").run();
+
+      expect(migrate(db, MIGRATIONS)).toContain("008_state_vocab_authority.sql");
+
+      const map = Object.fromEntries(
+        (
+          db.prepare("SELECT id, session_state FROM runs WHERE execution_request_id IS NULL").all() as Array<{
+            id: string;
+            session_state: string;
+          }>
+        ).map((r) => [r.id, r.session_state]),
+      );
+      expect(map).toEqual({
+        "r-starting": "STARTING",
+        "r-active": "RUNNING",
+        "r-ok": "COMPLETED",
+        "r-err": "FAILED",
+        "r-cancelled": "CANCELLED",
+      });
+      // Legacy `state` column untouched.
+      expect((db.prepare("SELECT state FROM runs WHERE id = 'r-ok'").get() as { state: string }).state).toBe("ENDED_OK");
+    });
+
+    it("does not touch harness rows (execution_request_id IS NOT NULL)", () => {
+      migrateUpTo008(db);
+      db.prepare(
+        `INSERT INTO execution_requests
+           (id, task_id, attempt, assistant_id, routing_decision_ref, request_fingerprint,
+            fingerprint_algorithm, prompt_source, rendered_prompt_digest, policy, verification,
+            origin, canonical_projection, created_at)
+         VALUES ('erq-h', 'AG-1', 1, 'a1', 'rd', 'fp', 'alg', 'fresh', 'd', '{}', '[]',
+                 '{"kind":"fresh"}', '{}', 't')`,
+      ).run();
+      db.prepare(
+        `INSERT INTO runs (id, task_id, assistant_id, state, session_state, execution_request_id, started_at)
+         VALUES ('es-h', 'AG-1', 'a1', 'ACTIVE', 'AWAITING_APPROVAL', 'erq-h', 't')`,
+      ).run();
+
+      migrate(db, MIGRATIONS);
+      expect(
+        (db.prepare("SELECT session_state FROM runs WHERE id = 'es-h'").get() as { session_state: string })
+          .session_state,
+      ).toBe("AWAITING_APPROVAL"); // not stomped by the state='ACTIVE' → 'RUNNING' map
+    });
+
+    it("leaves an unknown legacy state value unchanged (surfaces, not masked)", () => {
+      migrateUpTo008(db);
+      db.prepare("UPDATE runs SET state = 'WEIRD', session_state = 'WEIRD' WHERE id = 'r-active'").run();
+
+      migrate(db, MIGRATIONS);
+      const row = db.prepare("SELECT state, session_state FROM runs WHERE id = 'r-active'").get() as {
+        state: string;
+        session_state: string;
+      };
+      expect(row).toEqual({ state: "WEIRD", session_state: "WEIRD" });
+    });
+  });
+
   it("enforces one live successor per handoff envelope", () => {
     migrate(db, MIGRATIONS);
     const insertReq = db.prepare(

@@ -32,8 +32,21 @@ export class TelemetryService {
     const since = new Date(Date.now() - this.windowDays * 86_400_000).toISOString();
     const rows = this.db
       .prepare(
-        `SELECT r.id, r.assistant_id, r.state, r.usage, r.started_at, r.ended_at, t.goal
-         FROM runs r JOIN tasks t ON t.id = r.task_id
+        // Effective state derived at read time (execution-harness.md §5,
+        // PLAN.md 8e): session_state is authoritative for harness rows,
+        // runs.state (legacy-vocab-mapped) for legacy rows. No dual-write.
+        // Harness rows never populate runs.usage, so fall back to the terminal
+        // execution_results usage for them.
+        `SELECT r.id, r.assistant_id,
+           CASE WHEN r.execution_request_id IS NULL
+             THEN CASE r.state WHEN 'ACTIVE' THEN 'RUNNING' WHEN 'ENDED_OK' THEN 'COMPLETED'
+                               WHEN 'ENDED_ERROR' THEN 'FAILED' ELSE r.state END
+             ELSE r.session_state END AS state,
+           COALESCE(r.usage, json_extract(er.result, '$.usage')) AS usage,
+           r.started_at, r.ended_at, t.goal
+         FROM runs r
+         JOIN tasks t ON t.id = r.task_id
+         LEFT JOIN execution_results er ON er.session_id = r.id
          WHERE r.started_at >= ? AND r.ended_at IS NOT NULL`,
       )
       .all(since) as Array<{
@@ -63,7 +76,7 @@ export class TelemetryService {
         byAssistant.set(row.assistant_id, score);
       }
       score.runs += 1;
-      if (row.state === "ENDED_OK") score.successRate += 1;
+      if (row.state === "COMPLETED") score.successRate += 1;
       else score.errors += 1;
       const duration = Date.parse(row.ended_at) - Date.parse(row.started_at);
       if (Number.isFinite(duration) && duration >= 0) score.durations.push(duration);

@@ -232,6 +232,9 @@ export function TaskDetail({ taskId, onBack }: { taskId: string; onBack: () => v
       {tab === "usage" && (
         <Card>
           <h3 style={{ marginTop: 0, fontSize: "0.95rem" }}>Runs</h3>
+          {/* r.state is the legacy `runs.state` vocab (ACTIVE/ENDED_OK/…), still
+              dual-written for harness rows; the unified vocab comes from
+              comparison()/telemetry read-time derivation (execution-harness §5). */}
           {detail.runs.map((r) => (
             <div key={r.id} style={{ fontSize: "0.88rem", marginBottom: "0.6rem" }}>
               <strong>{r.assistant_id}</strong> · {r.state} · started{" "}
