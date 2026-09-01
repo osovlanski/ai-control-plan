@@ -104,16 +104,27 @@ export class HarnessBridge {
    */
   start(
     input: BridgeStartInput,
-    onSettled: (result: ExecutionResult | null, sessionId: string) => void,
+    onSettled: (result: ExecutionResult | null, sessionId: string) => void | Promise<void>,
   ): { runId: string } {
     const request = buildExecutionRequest(input);
     const { sessionId, done } = this.runner.start(request);
-    done
-      .then((result) => onSettled(result, sessionId))
-      .catch((err) => {
+    const settle = async (): Promise<void> => {
+      let result: ExecutionResult | null;
+      try {
+        result = await done;
+      } catch (err) {
+        // Rejected before a result was persisted (lease race, pre-finalize
+        // throw). Reload the durable row; null ⇒ the plane parks the task for
+        // boot recovery. Nothing is fabricated.
         this.onError(err);
-        onSettled(this.store.result(sessionId) ?? null, sessionId);
-      });
+        result = this.store.result(sessionId) ?? null;
+      }
+      await onSettled(result, sessionId);
+    };
+    // Detached — a single non-throwing final sink so no branch (a rejected
+    // settle callback: checkpoint / failover / routing throw) becomes an
+    // unobserved rejection.
+    void settle().catch((err) => this.onError(err));
     return { runId: sessionId };
   }
 

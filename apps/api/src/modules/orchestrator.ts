@@ -33,6 +33,7 @@ import { renderTaskPrompt } from "../render/prompt.js";
 import type { CheckpointReason, CheckpointService } from "./checkpoint.js";
 import type { HarnessBridge } from "./harness/control-plane-bridge.js";
 import { deriveEnvelopeUpdate } from "./harness/envelope-derivation.js";
+import { quotaOf, snapshotQuota } from "./harness/quota-snapshot.js";
 import type { CooldownStore } from "./cooldown.js";
 import type { Registry } from "./registry.js";
 import { persistRoutingDecision, route, type RouteRequest } from "./router.js";
@@ -292,7 +293,7 @@ export class Orchestrator {
           maxRuntimeMs: this.maxRuntimeMs,
           routingDecisionRef,
         },
-        (result, sid) => void this.settleFromResult(taskId, assistantId, sid, result),
+        (result, sid) => this.settleFromResult(taskId, assistantId, sid, result),
       );
       return { runId };
     }
@@ -435,17 +436,17 @@ export class Orchestrator {
       }
       case "usage.updated": {
         this.db.prepare("UPDATE runs SET usage = ? WHERE id = ?").run(JSON.stringify(event.payload ?? {}), run.runId);
-        this.snapshotQuota(run.assistantId, event);
+        snapshotQuota(this.db, run.assistantId, event);
         await this.checkSoftThreshold(run, event);
         break;
       }
       case "limit.approaching": {
-        this.snapshotQuota(run.assistantId, event);
+        snapshotQuota(this.db, run.assistantId, event);
         await this.checkSoftThreshold(run, event, true);
         break;
       }
       case "limit.hit": {
-        this.snapshotQuota(run.assistantId, event);
+        snapshotQuota(this.db, run.assistantId, event);
         run.limit = { reason: event.summary, resetsAt: firstResetsAt(event) };
         break;
       }
@@ -479,16 +480,6 @@ export class Orchestrator {
     );
   }
 
-  private snapshotQuota(assistantId: string, event: NormalizedEvent): void {
-    const quota = quotaOf(event);
-    if (!quota) return;
-    const insert = this.db.prepare(
-      "INSERT INTO quota_snapshots (assistant_id, window, used_percent, resets_at, source, observed_at) VALUES (?, ?, ?, ?, 'runtime-probe', ?)",
-    );
-    for (const q of quota) {
-      insert.run(assistantId, q.window, q.usedPercent, q.resetsAt ?? null, event.ts);
-    }
-  }
 
   /** Decides what happens after a run's stream drains: finish, or fail over. */
   private async settleRun(run: ActiveRun, ok: boolean): Promise<void> {
@@ -699,13 +690,15 @@ export class Orchestrator {
     }
   }
 
-  private async waitUntilSessionTerminal(sessionId: string, timeoutMs = 10_000): Promise<void> {
+  /** Poll until the session is terminal (or gone). Returns false on timeout. */
+  private async waitUntilSessionTerminal(sessionId: string, timeoutMs = 10_000): Promise<boolean> {
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
       const state = this.harnessBridge?.sessionState(sessionId) as ExecutionSessionState | undefined;
-      if (!state || isSessionTerminal(state)) return;
+      if (!state || isSessionTerminal(state)) return true;
       await new Promise((r) => setTimeout(r, 10));
     }
+    return false;
   }
 
   /** Manual handoff: checkpoint, then move the task to another assistant. */
@@ -779,7 +772,20 @@ export class Orchestrator {
     if (sid) {
       this.harnessBridge!.markPlaneOwnsTerminal(sid);
       this.harnessBridge!.requestCancel(sid);
-      await this.waitUntilSessionTerminal(sid);
+      const settled = await this.waitUntilSessionTerminal(sid);
+      if (!settled) {
+        // Drain stalled. Park the task and bail — planeOwnsTerminal stays SET so
+        // the source session's eventual settlement no-ops the task (never
+        // stranded in HANDING_OFF, Codex 8c review).
+        try {
+          const envelope = this.tasks.transition(taskId, "WAITING_INPUT");
+          this.publishState(taskId, envelope);
+        } catch {
+          /* already moved on */
+        }
+        this.notice(taskId, "warn", `Handoff aborted — session ${sid} did not settle in time; task parked.`);
+        throw new Error(`harness session ${sid} did not settle for handoff`);
+      }
     }
 
     // Session-scoped checkpoint on the captured harness sid — the target's
@@ -937,13 +943,14 @@ export class Orchestrator {
         // Best effort — a stuck adapter must not block shutdown.
       }
     }
-    const start = Date.now();
-    while (this.active.size > 0 && Date.now() - start < timeoutMs) {
+    const deadline = Date.now() + timeoutMs;
+    while (this.active.size > 0 && Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, 10));
     }
 
     // Flag-ON: durable-cancel every live Harness session of this process and
-    // wait for them to drain (bounded by timeoutMs) (PLAN.md 8c.3, R1 #10).
+    // wait for them to drain — SAME deadline as the legacy drain above
+    // (PLAN.md 8c.3, R1 #10).
     if (this.harnessBridge) {
       const liveHarness = () =>
         this.db
@@ -952,8 +959,7 @@ export class Orchestrator {
           )
           .all() as Array<{ id: string }>;
       for (const { id } of liveHarness()) this.harnessBridge.requestCancel(id);
-      const t0 = Date.now();
-      while (liveHarness().length > 0 && Date.now() - t0 < timeoutMs) {
+      while (liveHarness().length > 0 && Date.now() < deadline) {
         await new Promise((r) => setTimeout(r, 10));
       }
     }
@@ -1197,15 +1203,6 @@ export class Orchestrator {
       await new Promise((r) => setTimeout(r, 10));
     }
   }
-}
-
-function quotaOf(
-  event: NormalizedEvent,
-): Array<{ window: string; usedPercent: number; resetsAt?: string }> | undefined {
-  const quota = (
-    event.payload as { quota?: Array<{ window: string; usedPercent: number; resetsAt?: string }> } | undefined
-  )?.quota;
-  return quota && quota.length > 0 ? quota : undefined;
 }
 
 function firstResetsAt(event: NormalizedEvent): string | undefined {

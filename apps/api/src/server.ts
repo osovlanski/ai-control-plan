@@ -13,7 +13,9 @@ import { CheckpointService } from "./modules/checkpoint.js";
 import { CooldownStore } from "./modules/cooldown.js";
 import { ApprovalService } from "./modules/harness/approval-service.js";
 import { HarnessBridge } from "./modules/harness/control-plane-bridge.js";
+import { deriveEnvelopeUpdate } from "./modules/harness/envelope-derivation.js";
 import { EventRecorder } from "./modules/harness/event-recorder.js";
+import { snapshotQuota } from "./modules/harness/quota-snapshot.js";
 import { HarnessRecovery } from "./modules/harness/recovery.js";
 import { SessionRunner } from "./modules/harness/session-runner.js";
 import { SessionStore } from "./modules/harness/session-store.js";
@@ -70,9 +72,62 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     registry, // Registry is structurally a { adapter, manifest } facade
   });
 
+  // When a test injects its own orchestrator it owns the harness wiring; the
+  // internal bridge is built (and asserted) only for the real composition root.
   let harnessBridge: HarnessBridge | undefined;
-  if (config.execution?.harnessSingleMode) {
-    const recorder = new EventRecorder(db, DEFAULT_REDACTION_RULES);
+  if (config.execution?.harnessSingleMode && !deps.orchestrator) {
+    // --- flag-ON parity plumbing (PLAN.md 8d) ---
+    const sessionTaskCache = new Map<string, string>();
+    const taskOfSession = (sid: string): string | undefined => {
+      let t = sessionTaskCache.get(sid);
+      if (!t) {
+        t = (db.prepare("SELECT task_id FROM runs WHERE id = ?").get(sid) as { task_id?: string } | undefined)?.task_id;
+        if (t) sessionTaskCache.set(sid, t); // a session's task is immutable — no invalidation
+      }
+      return t;
+    };
+    const assistantOfSession = (sid: string): string | undefined =>
+      (db.prepare("SELECT assistant_id FROM runs WHERE id = ?").get(sid) as { assistant_id?: string } | undefined)
+        ?.assistant_id;
+    const lastPublishedPhase = new Map<string, string | undefined>();
+
+    const recorder = new EventRecorder(
+      db,
+      DEFAULT_REDACTION_RULES,
+      // publish (post-commit, best-effort): reproduce the legacy per-event SSE
+      // frame verbatim, plus a deduped {kind:"state"} on a derived phase change.
+      (sessionId, durableEvents) => {
+        const taskId = taskOfSession(sessionId);
+        if (!taskId) return;
+        for (const { seq, event } of durableEvents) {
+          bus.publish(taskId, { kind: "event", event: { ...event, seq } });
+        }
+        const status = tasks.envelope(taskId).status;
+        if (status.phase !== lastPublishedPhase.get(taskId)) {
+          lastPublishedPhase.set(taskId, status.phase);
+          bus.publish(taskId, {
+            kind: "state",
+            state: { state: status.state, phase: status.phase, assistantId: assistantOfSession(sessionId) },
+          });
+        }
+      },
+      undefined, // now
+      undefined, // onPublishError
+      // afterInsertInTx (transactional): task-envelope derivation + quota
+      // snapshots, atomic with the event insert. Never writes `runs`.
+      (sessionId, committed, txDb) => {
+        const taskId = taskOfSession(sessionId);
+        if (!taskId) return;
+        const assistantId = assistantOfSession(sessionId) ?? "";
+        const envelope = tasks.envelope(taskId);
+        let changed = false;
+        for (const { event } of committed) {
+          if (deriveEnvelopeUpdate(envelope, event)) changed = true;
+          snapshotQuota(txDb, assistantId, event);
+        }
+        if (changed) tasks.saveEnvelope(envelope);
+      },
+    );
     const runner = new SessionRunner({
       store: sessionStore,
       recorder,
@@ -91,7 +146,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
       onError: (err) => app.log.error(err),
     });
   }
-  if (config.execution?.harnessSingleMode && !harnessBridge) {
+  if (config.execution?.harnessSingleMode && !deps.orchestrator && !harnessBridge) {
     throw new Error("harnessSingleMode ON but the execution-harness bridge is not wired");
   }
 
@@ -137,8 +192,8 @@ export function buildServer(deps: ServerDeps): BuiltServer {
         manifest: a.manifestParsed,
       })),
     );
-    persistRoutingDecision(db, taskId, explanation);
-    return explanation;
+    const routingDecisionId = persistRoutingDecision(db, taskId, explanation);
+    return { explanation, routingDecisionId };
   };
 
   app.get("/api/meta", () => ({
@@ -233,9 +288,9 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   app.post<{ Params: { id: string }; Body: { assistantId?: AssistantId } }>(
     "/api/tasks/:id/route",
     (req, reply) => {
-      const explanation = computeRoute(req.params.id, req.body?.assistantId);
-      if (!explanation) return reply.status(404).send({ error: "not found" });
-      return explanation;
+      const routed = computeRoute(req.params.id, req.body?.assistantId);
+      if (!routed) return reply.status(404).send({ error: "not found" });
+      return routed.explanation;
     },
   );
 
@@ -248,14 +303,18 @@ export function buildServer(deps: ServerDeps): BuiltServer {
       if (row.state !== "CREATED") {
         return reply.status(409).send({ error: `Task is ${row.state}; only CREATED tasks can start` });
       }
-      const explanation = computeRoute(taskId, req.body?.assistantId);
-      if (!explanation?.chosen) {
-        return reply.status(422).send({ error: "No eligible assistant", explanation });
+      const routed = computeRoute(taskId, req.body?.assistantId);
+      const chosen = routed?.explanation.chosen;
+      if (!routed || !chosen) {
+        return reply.status(422).send({ error: "No eligible assistant", explanation: routed?.explanation });
       }
+      const { explanation, routingDecisionId } = routed;
       try {
         tasks.transition(taskId, "ROUTING");
-        const { runId } = await orchestrator.startTask(taskId, explanation.chosen);
-        return { runId, assistantId: explanation.chosen, explanation };
+        const { runId } = await orchestrator.startTask(taskId, chosen, {
+          routingDecisionRef: String(routingDecisionId),
+        });
+        return { runId, assistantId: chosen, explanation };
       } catch (err) {
         // Worktree/adapter startup failure: park the task as FAILED with the reason.
         const current = tasks.get(taskId);
