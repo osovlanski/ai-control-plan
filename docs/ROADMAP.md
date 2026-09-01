@@ -10,6 +10,8 @@
 
 - Publish/version a read-only task/event/approval contract for Cockpit.
 - Add frontend workflow tests and end-to-end adapter contract tests.
+  See `docs/agentic-os-eval-plan.md` for the staged eval program (conformance,
+  E2E scenarios, recovery chaos, rollout canary) gating the `harnessSingleMode` flip.
 - Add structured correlation IDs, latency/error metrics, and cost-budget alerts.
 
 ## Later

@@ -195,7 +195,8 @@ adapters 8 / web 3, lint clean. **Next phase is the orchestrator/control-plane c
    declarations for Claude/Codex — the `verifyIsolation` dep is the "equivalent
    adapter probe" §3 allows; a standalone `VerificationRunner` extraction and a
    real adapter `provision()/verify()` are NOT built (the progress steps said keep
-   verification inline in `session-runner.ts`).
+   verification inline in `session-runner.ts`). Staged eval program for this and
+   deferrals #6/#7: `docs/agentic-os-eval-plan.md`.
 5. **Cosmetic `Orchestrator` → `ControlPlane` rename** — deferred out of the
    Phase 8 cutover (kept the class named `Orchestrator` this pass to hold the diff
    down). A separate no-logic commit.
