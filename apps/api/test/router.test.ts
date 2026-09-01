@@ -115,6 +115,31 @@ describe("router", () => {
     expect(result.chosen).toBe("codex");
     expect(result.candidates.find((c) => c.assistantId === "claude")!.filterFailures[0]).toMatch(/cooldown/);
   });
+
+  it("returns no-eligible-candidate when every candidate is in cooldown", () => {
+    const result = route(
+      baseReq({ cooldowns: new Map([["claude", "rate limited"], ["codex", "failed twice"]]) }),
+      [candidate("claude", manifest({})), candidate("codex", manifest({}))],
+    );
+    expect(result.chosen).toBeUndefined();
+    expect(result.ruleFired).toBe("no-eligible-candidate");
+  });
+
+  it("auto follows config (candidate) order and breaks ties on quota headroom", () => {
+    const byOrder = route(baseReq({ profile: "auto" }), [
+      candidate("claude", manifest({})),
+      candidate("codex", manifest({})),
+      candidate("ox", manifest({})),
+    ]);
+    expect(byOrder.chosen).toBe("claude");
+    expect(byOrder.ruleFired).toMatch(/config preference order/);
+
+    const byHeadroom = route(baseReq({ profile: "auto" }), [
+      candidate("claude", manifest({ usedPercent: 90 })),
+      candidate("codex", manifest({ usedPercent: 10 })),
+    ]);
+    expect(byHeadroom.chosen).toBe("codex");
+  });
 });
 
 describe("telemetry-fed profiles", () => {

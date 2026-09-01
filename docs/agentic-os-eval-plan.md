@@ -87,31 +87,45 @@ any flag flip.
 
 ### 3. Routing accuracy
 
-**Gap.** `routeFor` picks an assistant; nothing measures whether it picks well.
+**Gap.** `route()` (`apps/api/src/modules/router.ts`) is a pure function and
+`apps/api/test/router.test.ts` already exercises every profile deterministically —
+that IS an offline routing eval. What is missing is a labelled corpus and an
+accuracy number tracked over time, plus the loop back from real outcomes.
 
 **Plan.**
-- `eval/routing/cases.jsonl` — labelled goals with an expected assistant (or
-  expected "harness vs legacy" branch).
-- A cheap offline eval (no model call — just `routeFor` + config) that reports a
-  confusion matrix and overall accuracy. Runs on every PR (fast, deterministic).
+- Extend `router.test.ts` with the remaining hand-written cases (done in the
+  first pass: `auto` config-order + quota tie-break, all-candidates-in-cooldown →
+  `no-eligible-candidate`).
+- `eval/routing/cases.jsonl` — labelled `RouteRequest` + candidate fixtures with
+  an expected `chosen`. A small runner feeds each through `route()` and reports a
+  confusion matrix + overall accuracy. Per-PR, no model call. This is the only
+  net-new file area 3 needs.
 - Feed real outcomes back: extend `telemetry.scores()` consumption so a dashboard
   can compare "routed to X" against X's actual success rate over a window.
 
 ### 4. Recovery chaos
 
-**Gap.** `HarnessRecovery.reconcileOnBoot` is unit-tested with hand-built rows,
-not with a process actually killed mid-write.
+**Gap — smaller than first assessed.** `apps/api/test/harness/recovery.test.ts`
+and `fault-injection.test.ts` already simulate a crash (drop the fencing lease,
+construct a fresh `HarnessRecovery` against the same DB) and assert
+`reconcileOnBoot` converges — across `STARTING`, `RUNNING`, `VERIFYING`,
+`AWAITING_APPROVAL`, cancel-intent, guard-directive replay, and the
+`delivery_unknown` approval paths, with "exactly one `execution_results` row"
+(H-I3) checked throughout. The harness runs **in-process**, so there is no
+subprocess to `process.kill` — abandon-the-lease is the established and correct
+crash model.
 
 **Plan.**
-- `eval/chaos/*.ts` — for each session state (`PREPARED`, `STARTING`, `RUNNING`,
-  `AWAITING_APPROVAL`, `YIELDED`, `HANDING_OFF`): start a run with `FakeAdapter`,
-  `process.kill` the runner at that state, reboot `buildServer`, assert the row
-  and its task converge to a legal terminal-or-resumable state and no double
-  `execution_results` row appears.
-- Fakes only, so this runs on every PR — it is fast and needs no credentials.
-- Also assert the four byte-frozen safety-net files
-  (`characterization`, `orchestrator`, `failover`, `parallel`) stay green with
-  the flag ON in this harness — they already do; keep it enforced here.
+- Fill the crash-origin gaps in `recovery.test.ts` (done in the first pass:
+  `PREPARED` — crashed after Prepare, before any lease; `STARTING` with and
+  without an acked provider handle → orphan vs. start-ambiguous resume).
+- Remaining: a `PAUSED`/`RESUMING` crash-origin case if the plane ever drives
+  those under flag-ON (today it does not — low priority, note only).
+- Keep the four byte-frozen safety-net files
+  (`characterization`, `orchestrator`, `failover`, `parallel`) green with the
+  flag ON — `apps/api/test/harness/` already enforces this; no new file.
+
+No `eval/chaos/` tree — these are additions to existing suites, per-PR, fakes only.
 
 ### 5. Rollout canary
 
@@ -142,18 +156,19 @@ documented rollback.
 
 ## Sequencing
 
-| Step | Area | Blocks flag flip? | CI cost |
-| --- | --- | --- | --- |
-| 1 | 4 — recovery chaos (fakes) | yes | per-PR, cheap |
-| 2 | 3 — routing offline eval | no | per-PR, cheap |
-| 3 | 1 — adapter conformance | yes | nightly, creds |
-| 4 | 2 — E2E scenarios | yes | nightly, creds |
-| 5 | 6 — scorecard | no | nightly |
-| 6 | 5 — rollout runbook + canary | yes (the flip itself) | staging |
+| Step | Area | Status | Blocks flag flip? | CI cost |
+| --- | --- | --- | --- | --- |
+| 1 | 4 — recovery crash-origin gaps (fakes) | first pass landed | yes | per-PR, cheap |
+| 2 | 3 — router hand-written cases (fakes) | first pass landed | no | per-PR, cheap |
+| 3 | 3 — labelled routing corpus + accuracy | todo | no | per-PR, cheap |
+| 4 | 1 — adapter conformance | todo | yes | nightly, creds |
+| 5 | 2 — E2E scenarios | todo | yes | nightly, creds |
+| 6 | 6 — scorecard | todo | no | nightly |
+| 7 | 5 — rollout runbook + canary | todo | yes (the flip itself) | staging |
 
-Steps 1–2 are cheap and unblock nothing external — do them first regardless of
-the flip timeline. Steps 3–4 need the CI-with-creds workflow that deferral #4
-already anticipates. Step 6 is the gate on production.
+Steps 1–3 are cheap and unblock nothing external — do them regardless of the flip
+timeline. Steps 4–5 need the CI-with-creds workflow that deferral #4 already
+anticipates. Step 7 is the gate on production.
 
 ## Non-goals / explicitly deferred
 
