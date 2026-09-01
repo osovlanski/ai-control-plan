@@ -73,11 +73,13 @@ function request(reqId: string): ExecutionRequest {
 /** Create a session and walk it into a live state, then drop the lease (crash). */
 function seedSession(opts: {
   reqId: string;
-  to: "STARTING" | "RUNNING" | "VERIFYING" | "AWAITING_APPROVAL";
+  to: "PREPARED" | "STARTING" | "RUNNING" | "VERIFYING" | "AWAITING_APPROVAL";
   providerSessionRef?: string;
 }): string {
   store.recordRequest(request(opts.reqId));
   const id = store.createSession(opts.reqId).sessionId as string;
+  // Crash right after Prepare committed the row, before a lease was ever taken.
+  if (opts.to === "PREPARED") return id;
   const t = store.acquireLease(id)!;
   store.transition(id, { expectedVersion: 0, from: "PREPARED", to: "STARTING", leaseToken: t });
   if (opts.to !== "STARTING") {
@@ -392,6 +394,51 @@ describe("HarnessRecovery — delivery_unknown approval settlement (§4)", () =>
     expect(new ApprovalService(db).get(id, "prq_1")!.state).toBe("delivery_unknown");
     expect(store.get(id)!.state).toBe("AWAITING_APPROVAL");
     expect(recoveryEvents(id).map((e) => e.action)).toContain("approval_delivery_held");
+  });
+});
+
+describe("HarnessRecovery.reconcileOnBoot — crash before RUNNING (§9)", () => {
+  it("orphan-fails a session that crashed at PREPARED, with exactly one result row", async () => {
+    const id = seedSession({ reqId: "erq_prep", to: "PREPARED" });
+    expect(store.get(id)!.state).toBe("PREPARED");
+
+    const out = await recovery({ canResume: true }).reconcileOnBoot();
+
+    expect(out).toEqual([{ sessionId: id, action: "orphaned" }]);
+    expect(store.get(id)!.state).toBe("FAILED");
+    expect(resultRows(id)).toBe(1);
+    expect(store.result(id)!.failure).toMatchObject({ kind: "orphaned" });
+    expect(store.result(id)!.checkpoint.attempted).toBe(true);
+    expect(recoveryEvents(id).map((e) => e.action)).toContain("orphaned");
+  });
+
+  it("orphan-fails a STARTING session that never acked a provider handle", async () => {
+    const id = seedSession({ reqId: "erq_start_nohandle", to: "STARTING" });
+
+    const out = await recovery({ canResume: true }).reconcileOnBoot();
+
+    expect(out[0]!.action).toBe("orphaned");
+    expect(store.get(id)!.state).toBe("FAILED");
+    expect(resultRows(id)).toBe(1);
+  });
+
+  it("offers resume for a STARTING session that acked a handle before crashing (start-ambiguous → resume)", async () => {
+    const id = seedSession({ reqId: "erq_start_handle", to: "STARTING", providerSessionRef: "psr_sa" });
+
+    const out = await recovery({ canResume: true }).reconcileOnBoot();
+
+    expect(out).toEqual([{ sessionId: id, action: "resume_offered", detail: "psr_sa" }]);
+    expect(store.get(id)!.state).toBe("STARTING"); // not terminalised — the plane issues origin:resume
+    expect(resultRows(id)).toBe(0);
+  });
+
+  it("orphan-fails a STARTING session with an acked handle when the manifest cannot resume", async () => {
+    const id = seedSession({ reqId: "erq_start_nocr", to: "STARTING", providerSessionRef: "psr_sb" });
+
+    const out = await recovery({ canResume: false }).reconcileOnBoot();
+
+    expect(out[0]!.action).toBe("orphaned");
+    expect(store.get(id)!.state).toBe("FAILED");
   });
 });
 

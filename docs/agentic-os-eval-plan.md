@@ -1,7 +1,21 @@
 # Agentic OS — evaluation & test plan (post-cutover)
 
-Status: proposal. Written after the Execution Harness cutover (Phases 0–8, PR #4)
-landed on `main` with `config.execution.harnessSingleMode` **OFF** in production.
+Written after the Execution Harness cutover (Phases 0–8, PR #4) landed on `main`
+with `config.execution.harnessSingleMode` **OFF** in production.
+
+**Status per area:**
+
+| Area | State |
+| --- | --- |
+| 3 — routing offline eval | **done** — `router.test.ts` cases + `routing-eval.corpus.json` + `routing-eval.test.ts` (labelled corpus, accuracy gate) |
+| 4 — recovery crash-origin coverage | **done** — `recovery.test.ts` PREPARED/STARTING crash-origin cases |
+| 1 — real-adapter conformance | **proposal / future** — needs a CI-with-creds workflow (standing deferral #4) |
+| 2 — end-to-end scenario evals | **proposal / future** — needs CI-with-creds + fixture repos |
+| 5 — rollout canary | **proposal / future** — needs a staging workspace and a real flip decision |
+| 6 — scorecard artifact | **proposal / future** — wraps areas 1+2, blocked with them |
+
+The "done" areas are the cheap, per-PR, fakes-only slices. The rest is scoped
+below but not built — pick each up as its own effort when its blocker clears.
 
 ## Why this exists
 
@@ -38,7 +52,7 @@ Out of scope: building the remote runner; multi-tenant concerns; anything the
 
 ## The six areas
 
-### 1. Real-adapter conformance (credential-gated)
+### 1. Real-adapter conformance (credential-gated) — proposal / future
 
 **Gap.** The Claude and Codex adapters declare `toolGating`, `processIsolation`,
 `usageReporting`, `approvalAckLookup` capabilities that are only ever checked
@@ -62,7 +76,7 @@ against `FakeAdapter`'s scripted markers. Standing deferral #4.
 **Cost control.** One session per adapter per run, smallest model, a trivial
 one-file goal. Nightly, not per-commit.
 
-### 2. End-to-end scenario evals (golden outcomes)
+### 2. End-to-end scenario evals (golden outcomes) — proposal / future
 
 **Gap.** No test takes `POST /api/tasks` → routed → session runs → verified diff,
 with a real model, and scores the result.
@@ -85,35 +99,49 @@ with a real model, and scores the result.
 **Exit criterion.** ≥ N/6 scenarios green for two consecutive nightlies before
 any flag flip.
 
-### 3. Routing accuracy
+### 3. Routing accuracy — done (per-PR slice)
 
-**Gap.** `routeFor` picks an assistant; nothing measures whether it picks well.
+`route()` (`apps/api/src/modules/router.ts`) is pure, so the eval is offline and
+deterministic.
 
-**Plan.**
-- `eval/routing/cases.jsonl` — labelled goals with an expected assistant (or
-  expected "harness vs legacy" branch).
-- A cheap offline eval (no model call — just `routeFor` + config) that reports a
-  confusion matrix and overall accuracy. Runs on every PR (fast, deterministic).
-- Feed real outcomes back: extend `telemetry.scores()` consumption so a dashboard
-  can compare "routed to X" against X's actual success rate over a window.
+**Landed:**
+- `apps/api/test/router.test.ts` — hand-written cases for every profile, plus
+  `auto` config-order + quota tie-break and all-candidates-in-cooldown →
+  `no-eligible-candidate`.
+- `apps/api/test/routing-eval.corpus.json` — a labelled corpus (data, not code:
+  add a case by appending an entry). Each entry is a compact `RouteRequest` +
+  candidate spec with an expected `chosen` / `ruleFired` / `tieBreaker`.
+- `apps/api/test/routing-eval.test.ts` — feeds the corpus through `route()`,
+  prints a per-case pass/fail table, and gates corpus accuracy at 1.0. Runs in
+  the normal `pnpm test` (per-PR, no model call).
 
-### 4. Recovery chaos
+**Future:** feed real outcomes back — extend `telemetry.scores()` consumption so
+a dashboard can compare "routed to X" against X's actual success rate over a
+window, and let the corpus carry real anonymised goals rather than only
+hand-built `RouteRequest` fixtures.
 
-**Gap.** `HarnessRecovery.reconcileOnBoot` is unit-tested with hand-built rows,
-not with a process actually killed mid-write.
+### 4. Recovery crash-origin coverage — done (per-PR slice)
 
-**Plan.**
-- `eval/chaos/*.ts` — for each session state (`PREPARED`, `STARTING`, `RUNNING`,
-  `AWAITING_APPROVAL`, `YIELDED`, `HANDING_OFF`): start a run with `FakeAdapter`,
-  `process.kill` the runner at that state, reboot `buildServer`, assert the row
-  and its task converge to a legal terminal-or-resumable state and no double
-  `execution_results` row appears.
-- Fakes only, so this runs on every PR — it is fast and needs no credentials.
-- Also assert the four byte-frozen safety-net files
-  (`characterization`, `orchestrator`, `failover`, `parallel`) stay green with
-  the flag ON in this harness — they already do; keep it enforced here.
+**Gap was smaller than first assessed.** `apps/api/test/harness/recovery.test.ts`
+and `fault-injection.test.ts` already simulate a crash (drop the fencing lease,
+construct a fresh `HarnessRecovery` against the same DB) and assert
+`reconcileOnBoot` converges — across `STARTING`, `RUNNING`, `VERIFYING`,
+`AWAITING_APPROVAL`, cancel-intent, guard-directive replay, and the
+`delivery_unknown` approval paths, with "exactly one `execution_results` row"
+(H-I3) checked throughout. The harness runs **in-process**, so there is no
+subprocess to `process.kill` — abandon-the-lease is the established and correct
+crash model.
 
-### 5. Rollout canary
+**Landed:** the crash-origin gaps in `recovery.test.ts` — `PREPARED` (crashed
+after Prepare, before any lease) and `STARTING` with and without an acked provider
+handle (orphan vs. start-ambiguous resume).
+
+**Future:** a `PAUSED` / `RESUMING` crash-origin case, only once the plane drives
+those states under flag-ON (today it does not).
+
+No `eval/chaos/` tree — these are additions to existing suites, per-PR, fakes only.
+
+### 5. Rollout canary — proposal / future
 
 **Gap.** `harnessSingleMode` goes from OFF to ON with no staged step and no
 documented rollback.
@@ -128,32 +156,35 @@ documented rollback.
    change is required to roll back (deferral #2 is read-time derivation, deferral
    #1 leaves the legacy path intact) — state this explicitly in the runbook.
 
-### 6. Scorecard artifact
+### 6. Scorecard artifact — proposal / future
 
-**Gap.** Eval output would be scattered across CI logs.
+**Gap.** Eval output (once areas 1 and 2 exist) would be scattered across CI logs.
 
 **Plan.**
-- `pnpm eval` script: runs areas 2–4, writes `eval/out/scorecard.json` +
+- `pnpm eval` script: runs areas 1+2, writes `eval/out/scorecard.json` +
   a rendered `scorecard.md`.
 - Nightly workflow uploads it as a build artifact and (optional) commits the
   `.md` to a `docs/eval-history/` directory so trend is visible in git.
+- Blocked with areas 1+2 — nothing to score until the credentialled evals run.
 
 ---
 
 ## Sequencing
 
-| Step | Area | Blocks flag flip? | CI cost |
-| --- | --- | --- | --- |
-| 1 | 4 — recovery chaos (fakes) | yes | per-PR, cheap |
-| 2 | 3 — routing offline eval | no | per-PR, cheap |
-| 3 | 1 — adapter conformance | yes | nightly, creds |
-| 4 | 2 — E2E scenarios | yes | nightly, creds |
-| 5 | 6 — scorecard | no | nightly |
-| 6 | 5 — rollout runbook + canary | yes (the flip itself) | staging |
+| Step | Area | Status | Blocks flag flip? | CI cost |
+| --- | --- | --- | --- | --- |
+| 1 | 4 — recovery crash-origin gaps (fakes) | **done** | yes | per-PR, cheap |
+| 2 | 3 — router hand-written cases (fakes) | **done** | no | per-PR, cheap |
+| 3 | 3 — labelled routing corpus + accuracy | **done** | no | per-PR, cheap |
+| 4 | 1 — adapter conformance | proposal / future | yes | nightly, creds |
+| 5 | 2 — E2E scenarios | proposal / future | yes | nightly, creds |
+| 6 | 6 — scorecard | proposal / future | no | nightly |
+| 7 | 5 — rollout runbook + canary | proposal / future | yes (the flip itself) | staging |
 
-Steps 1–2 are cheap and unblock nothing external — do them first regardless of
-the flip timeline. Steps 3–4 need the CI-with-creds workflow that deferral #4
-already anticipates. Step 6 is the gate on production.
+Steps 1–3 (cheap, per-PR, fakes only) are done. Steps 4–5 need the CI-with-creds
+workflow that deferral #4 already anticipates; step 6 wraps them; step 7 is the
+gate on production. None of 4–7 is built — each is scoped above as its own
+follow-up effort.
 
 ## Non-goals / explicitly deferred
 
