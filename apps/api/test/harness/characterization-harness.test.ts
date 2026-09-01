@@ -78,19 +78,20 @@ describe("characterization (flag ON)", () => {
     expect(sessionRows(taskId)).toEqual([{ assistant_id: A, session_state: "COMPLETED" }]);
   });
 
-  it("denied approval → FAILED, no failover (single session)", async () => {
+  it("denied approval → FAILED, no failover (single session on A)", async () => {
     const { taskId, frames } = await run("sign off [FAKE:APPROVAL]");
     await built.orchestrator.respondApproval(taskId, await awaitApprovalId(frames), false);
     expect(await built.orchestrator.waitForSettled(taskId)).toBe("FAILED");
-    expect(sessionRows(taskId)).toHaveLength(1);
+    expect(sessionRows(taskId)).toEqual([{ assistant_id: A, session_state: "FAILED" }]);
   });
 
-  it("hard limit → failover → COMPLETED, handoffs.trigger='quota', second session on B", async () => {
+  it("hard limit → failover → COMPLETED, handoffs.trigger='quota', exactly two sessions A then B", async () => {
     const { taskId } = await run("big one [FAKE:LIMIT]");
     expect(await built.orchestrator.waitForSettled(taskId)).toBe("COMPLETED");
     const rows = sessionRows(taskId);
-    expect(rows.length).toBeGreaterThanOrEqual(2);
-    expect(rows.map((r) => r.assistant_id)).toContain(B);
+    expect(rows.map((r) => r.assistant_id)).toEqual([A, B]);
+    expect(rows[0]!.session_state).toBe("YIELDED");
+    expect(rows[1]!.session_state).toBe("COMPLETED");
     expect(db.prepare("SELECT trigger FROM handoffs WHERE task_id = ?").get(taskId)).toMatchObject({
       trigger: "quota",
     });

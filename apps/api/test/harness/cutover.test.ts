@@ -93,12 +93,33 @@ describe("flag-ON cutover — happy path", () => {
     };
     expect(ref.provider_session_ref).toBeTruthy();
 
-    // SSE {kind:"event"} frames with the exact legacy shape + monotonic seq
+    // SSE {kind:"event"} frames: contiguous strictly-increasing seq starting at
+    // 1, and each frame matches the persisted durable event verbatim.
     const eventFrames = frames.filter((f) => f.kind === "event");
-    expect(eventFrames.length).toBeGreaterThan(0);
     const seqs = eventFrames.map((f) => f.event!.seq);
-    expect(seqs).toEqual([...seqs].sort((a, b) => a - b));
-    expect(eventFrames.every((f) => typeof f.event!.type === "string" && f.event!.runId === runId)).toBe(true);
+    expect(seqs).toEqual(seqs.map((_, i) => i + 1));
+    const durable = db
+      .prepare("SELECT seq, type, summary FROM events WHERE run_id = ? ORDER BY seq")
+      .all(runId) as Array<{ seq: number; type: string; summary: string }>;
+    expect(eventFrames.map((f) => ({ seq: f.event!.seq, type: f.event!.type, summary: f.event!.summary }))).toEqual(
+      durable,
+    );
+    expect(eventFrames.every((f) => f.event!.runId === runId)).toBe(true);
+    // no {kind:"event"} frame carries a key outside the NormalizedEvent shape
+    const allowed = new Set(["runId", "ts", "type", "phase", "summary", "payload", "raw", "seq"]);
+    expect(eventFrames.every((f) => Object.keys(f.event!).every((k) => allowed.has(k)))).toBe(true);
+
+    // {kind:"state"} frames — emitted, every one carries a string `state`, and
+    // the running assistant is carried on at least one. (Exact frame count /
+    // ordering is not contracted: the recorder's deduped phase frames interleave
+    // with the orchestrator's own publishState frames.)
+    const stateFrames = frames.filter((f) => f.kind === "state");
+    expect(stateFrames.length).toBeGreaterThan(0);
+    expect(stateFrames.every((f) => typeof f.state!.state === "string")).toBe(true);
+    expect(stateFrames.some((f) => f.state!.assistantId === A)).toBe(true);
+
+    // flag-ON never writes runs.usage (Codex R2 #5) — usage rides on the result
+    expect((db.prepare("SELECT usage FROM runs WHERE id = ?").get(runId) as { usage: string | null }).usage).toBeNull();
 
     // envelope enrichment landed transactionally
     const env = built.tasks.envelope(taskId);
@@ -141,7 +162,11 @@ describe("flag-ON cutover — cancel", () => {
     await built.orchestrator.cancelTask(taskId);
     expect(await built.orchestrator.waitForSettled(taskId)).toBe("CANCELLED");
     const r = db.prepare("SELECT session_state FROM runs WHERE id = ?").get(runId) as { session_state: string };
-    expect(["CANCELLED", "FAILED"]).toContain(r.session_state); // terminal, not left live
+    expect(r.session_state).toBe("CANCELLED");
+    // the runner attempted a cancel checkpoint on the session
+    expect(
+      db.prepare("SELECT COUNT(*) c FROM checkpoints WHERE session_id = ? AND reason = 'cancel'").get(runId),
+    ).toMatchObject({ c: 1 });
   });
 });
 
@@ -156,6 +181,11 @@ describe("flag-ON cutover — failover", () => {
     expect(handoff.trigger).toBe("quota");
     // fresh-prompt start this pass — no handoff_envelopes row
     expect(db.prepare("SELECT COUNT(*) c FROM handoff_envelopes WHERE task_id = ?").get(taskId)).toMatchObject({ c: 0 });
+    // the limit.hit event carried a quota payload → a quota_snapshot landed
+    // transactionally (afterInsertInTx), gated to the quota event types
+    expect(
+      (db.prepare("SELECT COUNT(*) c FROM quota_snapshots WHERE assistant_id = ?").get(A) as { c: number }).c,
+    ).toBeGreaterThan(0);
   });
 
   it("[FAKE:FAIL] with failover.auto:false ends the task FAILED with one session", async () => {
@@ -188,8 +218,15 @@ describe("flag-ON cutover — boot recovery", () => {
     built.tasks.transition("AG-legacy", "RUNNING");
 
     await built.orchestrator.reconcileOnBoot();
-    expect(built.tasks.get("AG-strand")!.state).toBe("COMPLETED");
+    expect(built.tasks.get("AG-strand")!.state).toBe("COMPLETED"); // from the durable result
     expect(built.tasks.get("AG-legacy")!.state).toBe("FAILED");
+    // the legacy sweep closed its live runs row; the harness session row is untouched
+    const legacyRun = db.prepare("SELECT state, ended_at FROM runs WHERE id = 'lr_1'").get() as {
+      state: string;
+      ended_at: string | null;
+    };
+    expect(legacyRun.state).toBe("ENDED_ERROR");
+    expect(legacyRun.ended_at).not.toBeNull();
   });
 
   it("parks a harness-owned HANDING_OFF / ROUTING task with no result in WAITING_INPUT", async () => {
@@ -208,9 +245,17 @@ describe("flag-ON cutover — boot recovery", () => {
         built.tasks.transition(taskId, "HANDING_OFF");
       }
     }
+    const notices: Record<string, string[]> = { "AG-ho": [], "AG-ro": [] };
+    for (const id of ["AG-ho", "AG-ro"]) {
+      built.bus.subscribe(id, (p) => {
+        if (p.kind === "notice") notices[id]!.push(p.notice!.text);
+      });
+    }
     await built.orchestrator.reconcileOnBoot();
     expect(built.tasks.get("AG-ho")!.state).toBe("WAITING_INPUT");
     expect(built.tasks.get("AG-ro")!.state).toBe("WAITING_INPUT");
+    expect(notices["AG-ho"]!.some((t) => /manual restart required/.test(t))).toBe(true);
+    expect(notices["AG-ro"]!.some((t) => /manual restart required/.test(t))).toBe(true);
   });
 
   it("parks the task WAITING_INPUT when SessionRunner.start rejects with no result", async () => {
@@ -226,12 +271,24 @@ describe("flag-ON cutover — boot recovery", () => {
        VALUES (?, ?, 'fake-a', 'ACTIVE', 'RUNNING', 1, ?, 0, 0, 1, 't0', 't1')`,
     ).run("es_reject", env.taskId, erq);
 
+    const notices: string[] = [];
+    built.bus.subscribe(env.taskId, (p) => {
+      if (p.kind === "notice") notices.push(p.notice!.text);
+    });
     await built.orchestrator.startTask(env.taskId, A);
     await pollFor(() => (built.tasks.get(env.taskId)!.state === "WAITING_INPUT" ? true : undefined));
-    const notice = db
-      .prepare("SELECT COUNT(*) c FROM runs WHERE id = 'es_reject' AND session_state = 'RUNNING'")
-      .get() as { c: number };
-    expect(notice.c).toBe(1); // session row untouched — left for HarnessRecovery
+    // session row untouched (left for HarnessRecovery), no result fabricated, a
+    // recovery-required notice went out.
+    expect(
+      (db.prepare("SELECT session_state, ended_at FROM runs WHERE id = 'es_reject'").get() as {
+        session_state: string;
+        ended_at: string;
+      }),
+    ).toEqual({ session_state: "RUNNING", ended_at: "t1" });
+    expect(db.prepare("SELECT COUNT(*) c FROM execution_results WHERE session_id = 'es_reject'").get()).toMatchObject({
+      c: 0,
+    });
+    expect(notices.some((t) => /recovery required/.test(t))).toBe(true);
   });
 });
 

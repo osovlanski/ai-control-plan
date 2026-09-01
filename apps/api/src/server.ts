@@ -29,6 +29,9 @@ import { EventRetention } from "./modules/retention.js";
 import { renderHandoffMd } from "./render/handoff.js";
 import { renderProgressMd } from "./render/progress.js";
 
+/** Legacy `applyEvent` snapshots quota on exactly these event types. */
+const QUOTA_EVENT_TYPES = new Set(["usage.updated", "limit.approaching", "limit.hit"]);
+
 export interface ServerDeps {
   config: ResolvedConfig;
   db: Db;
@@ -123,7 +126,9 @@ export function buildServer(deps: ServerDeps): BuiltServer {
         let changed = false;
         for (const { event } of committed) {
           if (deriveEnvelopeUpdate(envelope, event)) changed = true;
-          snapshotQuota(txDb, assistantId, event);
+          // Same event-type gate as the legacy applyEvent switch — a quota
+          // snapshot only on usage.updated / limit.approaching / limit.hit.
+          if (QUOTA_EVENT_TYPES.has(event.type)) snapshotQuota(txDb, assistantId, event);
         }
         if (changed) tasks.saveEnvelope(envelope);
       },
