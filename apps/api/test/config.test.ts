@@ -68,4 +68,39 @@ describe("workspace config", () => {
     writeFileSync(join(dir, "config.yaml"), "api:\n  host: 0.0.0.0\n  port: 4176\n");
     expect(() => loadConfig(env())).toThrow(/api\.host must be a loopback address/);
   });
+
+  it("defaults execution.harnessSingleMode OFF and documents it", () => {
+    const config = loadConfig(env());
+    expect(config.execution?.harnessSingleMode).toBe(false);
+    const written = readFileSync(join(home, "personal", "config.yaml"), "utf8");
+    expect(written).toContain("execution.harnessSingleMode");
+  });
+
+  it("parses execution.harnessSingleMode: true from the file", () => {
+    const dir = join(home, "personal");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "config.yaml"), "execution:\n  harnessSingleMode: true\n");
+    expect(loadConfig(env()).execution?.harnessSingleMode).toBe(true);
+  });
+
+  it("env AGENT_PLANE_HARNESS_SINGLE_MODE=1 overrides file false", () => {
+    const dir = join(home, "personal");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "config.yaml"), "execution:\n  harnessSingleMode: false\n");
+    expect(loadConfig(env({ AGENT_PLANE_HARNESS_SINGLE_MODE: "1" })).execution?.harnessSingleMode).toBe(true);
+  });
+
+  it("env AGENT_PLANE_HARNESS_SINGLE_MODE=0 overrides file true", () => {
+    const dir = join(home, "personal");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "config.yaml"), "execution:\n  harnessSingleMode: true\n");
+    expect(loadConfig(env({ AGENT_PLANE_HARNESS_SINGLE_MODE: "0" })).execution?.harnessSingleMode).toBe(false);
+  });
+
+  it("rejects a non-boolean execution.harnessSingleMode", () => {
+    const dir = join(home, "personal");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "config.yaml"), "execution:\n  harnessSingleMode: yep\n");
+    expect(() => loadConfig(env())).toThrow(/execution\.harnessSingleMode/);
+  });
 });

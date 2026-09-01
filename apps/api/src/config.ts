@@ -48,6 +48,14 @@ export interface WorkspaceConfig {
     /** Local hour (0-23) for the daily capability sync. */
     dailyHour: number;
   };
+  /** Execution-Harness cutover switches (execution-harness.md §5/§10). */
+  execution?: {
+    /**
+     * Route single-mode task execution through `SessionRunner` instead of the
+     * Orchestrator driving adapters directly. Default off this release.
+     */
+    harnessSingleMode?: boolean;
+  };
 }
 
 export interface ResolvedConfig extends WorkspaceConfig {
@@ -70,6 +78,7 @@ const PERSONAL_DEFAULTS: Omit<WorkspaceConfig, "workspace"> = {
     triggers: ["quota", "rate_limit", "provider_unavailable"],
   },
   sync: { dailyHour: 7 },
+  execution: { harnessSingleMode: false },
 };
 
 /**
@@ -132,7 +141,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ResolvedConfig
     policy: { ...defaults.policy, ...file.policy },
     failover: { ...defaults.failover, ...file.failover },
     sync: { ...defaults.sync, ...file.sync },
+    execution: { ...defaults.execution, ...file.execution },
   };
+
+  const envSingleMode = env.AGENT_PLANE_HARNESS_SINGLE_MODE;
+  if (envSingleMode === "1" || envSingleMode === "true") {
+    config.execution = { ...config.execution, harnessSingleMode: true };
+  } else if (envSingleMode === "0" || envSingleMode === "false") {
+    config.execution = { ...config.execution, harnessSingleMode: false };
+  }
 
   validate(config, configPath);
 
@@ -166,6 +183,11 @@ function validate(config: WorkspaceConfig, path: string): void {
       problems.push(`assistants.${id} must have a provider`);
     }
   }
+  if (typeof config.execution?.harnessSingleMode !== "boolean") {
+    problems.push(
+      `execution.harnessSingleMode must be a boolean, got ${JSON.stringify(config.execution?.harnessSingleMode)}`,
+    );
+  }
   if (problems.length > 0) {
     throw new Error(`Invalid config at ${path}:\n  - ${problems.join("\n  - ")}`);
   }
@@ -173,11 +195,15 @@ function validate(config: WorkspaceConfig, path: string): void {
 
 function renderDefaultConfig(workspace: string): string {
   const doc = { workspace, ...defaultsFor(workspace) };
+  const yaml = stringify(doc).replace(
+    /^execution:/m,
+    "# execution.harnessSingleMode: route single-mode runs through the Execution Harness. Default off.\nexecution:",
+  );
   return [
     `# Agent Control Plane — workspace "${workspace}"`,
     "# This instance IS the workspace: its DB, policy, and repo allowlist live here.",
     "# Provider credentials are never stored here — each provider's own CLI/SDK auth is used in place.",
     "",
-    stringify(doc),
+    yaml,
   ].join("\n");
 }
