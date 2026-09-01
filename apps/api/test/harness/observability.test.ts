@@ -9,7 +9,15 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { AssistantId, CapabilityManifest, ExecutionRequest, TaskId } from "@agent-plane/core";
+import type {
+  AssistantId,
+  CapabilityManifest,
+  ExecutionRequest,
+  RepositoryId,
+  TaskId,
+  WorkspaceId,
+  WorktreeId,
+} from "@agent-plane/core";
 import { FakeAdapter } from "@agent-plane/adapters";
 import { loadConfig } from "../../src/config.js";
 import { openDb, type Db } from "../../src/db/index.js";
@@ -116,6 +124,7 @@ describe("GET /api/tasks/:id/sessions", () => {
         cancelRequested: false,
         settlementOwner: null,
         correlation: { parentTaskId: "AG-parent", groupId: "grp-7" },
+        target: null,
         startedAt: "t0",
         endedAt: "t9",
       },
@@ -238,6 +247,9 @@ describe("drill-down over a REAL SessionRunner execution (shape + leak check)", 
   const PLANTED = ["sk", "LIVEKEYshouldberedacted01"].join("-");
 
   it("serializes real rows and leaks neither the secret value nor credential tokens", async () => {
+    db.prepare("INSERT INTO workspace_identities (singleton, id, created_at) VALUES (1, 'ws_obs', 't')").run();
+    db.prepare("INSERT INTO repository_identities (id, workspace_id, canonical_git_dir, created_at) VALUES ('repo_obs', 'ws_obs', '/git/obs', 't')").run();
+    db.prepare("INSERT INTO worktree_identities (id, repository_id, canonical_toplevel, created_at) VALUES ('wt_obs', 'repo_obs', '/wt/obs', 't')").run();
     const store = new SessionStore(db);
     const fake = new FakeAdapter("a1" as AssistantId, {
       ok: true,
@@ -280,7 +292,15 @@ describe("drill-down over a REAL SessionRunner execution (shape + leak check)", 
         checkpoint: { onSoftLimit: true },
         isolation: { required: "ambient" },
       },
-      context: { secretRefs: ["PRIMARY_REF"] },
+      context: {
+        target: {
+          kind: "worktree",
+          workspaceId: "ws_obs" as WorkspaceId,
+          repositoryId: "repo_obs" as RepositoryId,
+          worktreeId: "wt_obs" as WorktreeId,
+        },
+        secretRefs: ["PRIMARY_REF"],
+      },
       verification: [],
       origin: { kind: "fresh" },
     };
@@ -295,8 +315,18 @@ describe("drill-down over a REAL SessionRunner execution (shape + leak check)", 
     // Real shape holds against real rows.
     expect(body.sessionState).toBe("COMPLETED");
     expect(body.correlation).toEqual({ parentTaskId: "AG-parent", groupId: "grp-real" });
+    expect(body.request.target).toEqual({
+      kind: "worktree",
+      workspaceId: "ws_obs",
+      repositoryId: "repo_obs",
+      worktreeId: "wt_obs",
+    });
     expect(body.request.requestFingerprint).toEqual(expect.any(String));
     expect(body.audit.map((e: { type: string }) => e.type)).toContain("guard.decision");
+    const list = await built.app.inject({ method: "GET", url: `/api/tasks/${TASK}/sessions` });
+    expect(list.json().find((session: { sessionId: string }) => session.sessionId === sid).target).toEqual(
+      body.request.target,
+    );
 
     // No secret value and no credential-shaped token anywhere in the drill-down.
     const raw = res.payload;

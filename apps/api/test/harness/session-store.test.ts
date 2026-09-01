@@ -13,8 +13,11 @@ import {
   type ExecutionRequest,
   type ExecutionResult,
   type ProviderSessionRef,
+  type RepositoryId,
   type TaskId,
   type TerminalSessionState,
+  type WorkspaceId,
+  type WorktreeId,
 } from "@agent-plane/core";
 import { openDb, type Db } from "../../src/db/index.js";
 import {
@@ -106,6 +109,85 @@ describe("recordRequest — dedupe vs conflict", () => {
     expect(() =>
       store.recordRequest(request({ policy: { ...request().policy, timeout: { hardMs: 9999 } } })),
     ).toThrow(RequestFingerprintConflictError);
+  });
+
+  it("persists a stable worktree target and rejects cross-repository identities", () => {
+    db.prepare("INSERT INTO workspace_identities (singleton, id, created_at) VALUES (1, 'ws_1', 't')").run();
+    db.prepare("INSERT INTO repository_identities (id, workspace_id, canonical_git_dir, created_at) VALUES ('repo_1', 'ws_1', '/git/one', 't')").run();
+    db.prepare("INSERT INTO repository_identities (id, workspace_id, canonical_git_dir, created_at) VALUES ('repo_2', 'ws_1', '/git/two', 't')").run();
+    db.prepare("INSERT INTO worktree_identities (id, repository_id, canonical_toplevel, created_at) VALUES ('wt_1', 'repo_1', '/wt/one', 't')").run();
+    const targeted = request({
+      context: {
+        target: {
+          kind: "worktree",
+          workspaceId: "ws_1" as WorkspaceId,
+          repositoryId: "repo_1" as RepositoryId,
+          worktreeId: "wt_1" as WorktreeId,
+        },
+      },
+    });
+    store.recordRequest(targeted);
+    expect(
+      db.prepare("SELECT target_kind, workspace_id, repository_id, worktree_id FROM execution_requests WHERE id = 'erq_1'").get(),
+    ).toEqual({ target_kind: "worktree", workspace_id: "ws_1", repository_id: "repo_1", worktree_id: "wt_1" });
+    expect(() =>
+      db.prepare("UPDATE execution_requests SET target_kind = 'repository', worktree_id = NULL WHERE id = 'erq_1'").run(),
+    ).toThrow("execution target is immutable");
+
+    store.recordRequest(request({
+      executionRequestId: "erq_repo_target",
+      context: {
+        target: {
+          kind: "repository",
+          workspaceId: "ws_1" as WorkspaceId,
+          repositoryId: "repo_1" as RepositoryId,
+        },
+      },
+    }));
+    expect(
+      db.prepare("SELECT target_kind, workspace_id, repository_id, worktree_id FROM execution_requests WHERE id = 'erq_repo_target'").get(),
+    ).toEqual({ target_kind: "repository", workspace_id: "ws_1", repository_id: "repo_1", worktree_id: null });
+
+    expect(() =>
+      store.recordRequest(request({
+        executionRequestId: "erq_bad_target",
+        context: {
+          target: {
+            kind: "worktree",
+            workspaceId: "ws_1" as WorkspaceId,
+            repositoryId: "repo_2" as RepositoryId,
+            worktreeId: "wt_1" as WorktreeId,
+          },
+        },
+      })),
+    ).toThrow("worktree target outside repository");
+  });
+
+  it("rejects every structurally invalid target shape at the database boundary", () => {
+    db.prepare("INSERT INTO workspace_identities (singleton, id, created_at) VALUES (1, 'ws_1', 't')").run();
+    db.prepare("INSERT INTO repository_identities (id, workspace_id, canonical_git_dir, created_at) VALUES ('repo_1', 'ws_1', '/git/one', 't')").run();
+    db.prepare("INSERT INTO worktree_identities (id, repository_id, canonical_toplevel, created_at) VALUES ('wt_1', 'repo_1', '/wt/one', 't')").run();
+    const insert = (id: string, kind: string | null, workspace: string | null, repository: string | null, worktree: string | null) =>
+      db.prepare(
+        `INSERT INTO execution_requests
+           (id, task_id, attempt, assistant_id, routing_decision_ref, request_fingerprint,
+            fingerprint_algorithm, prompt_source, rendered_prompt_digest, policy, verification,
+            origin, canonical_projection, target_kind, workspace_id, repository_id, worktree_id, created_at)
+         VALUES (?, 'AG-1', 1, 'a1', 'rd', 'fp', 'alg', 'fresh', 'd', '{}', '[]',
+                 '{"kind":"fresh"}', '{}', ?, ?, ?, ?, 't')`,
+      ).run(id, kind, workspace, repository, worktree);
+
+    expect(() => insert("missing-kind", null, "ws_1", "repo_1", null)).toThrow("target kind missing");
+    expect(() => insert("incomplete", "repository", null, "repo_1", null)).toThrow("target identity incomplete");
+    expect(() => insert("repo-with-wt", "repository", "ws_1", "repo_1", "wt_1")).toThrow(
+      "repository target cannot include worktree",
+    );
+    expect(() => insert("missing-wt", "worktree", "ws_1", "repo_1", null)).toThrow(
+      "worktree target identity incomplete",
+    );
+    expect(() => insert("wrong-workspace", "repository", "ws_missing", "repo_1", null)).toThrow(
+      "repository target outside workspace",
+    );
   });
 
   it("falls back to a dedupe compare when the insert loses a PK race", () => {
