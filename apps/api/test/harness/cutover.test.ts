@@ -1,0 +1,306 @@
+/**
+ * Phase 8d — flag-ON single-mode cutover end to end (PLAN.md 8c/8d).
+ *
+ * A real `SessionRunner` wired through `buildServer` with
+ * `execution.harnessSingleMode: true`, driven by the in-process `FakeAdapter` +
+ * in-repo SQLite. Asserts the Harness path reproduces the legacy task-level
+ * outcomes, the SSE frame shape, the transactional envelope/quota derivation,
+ * and the boot-recovery sweeps.
+ */
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import type { AssistantId } from "@agent-plane/core";
+import { loadConfig, type ResolvedConfig } from "../../src/config.js";
+import { openDb, type Db } from "../../src/db/index.js";
+import { buildServer, type BuiltServer } from "../../src/server.js";
+import type { TaskStreamPayload } from "../../src/modules/sse.js";
+
+let home: string;
+let db: Db;
+let config: ResolvedConfig;
+let built: BuiltServer;
+
+const A = "fake-a" as AssistantId;
+const B = "fake-b" as AssistantId;
+
+async function boot(extraConfig = ""): Promise<void> {
+  home = mkdtempSync(join(tmpdir(), "agent-plane-cutover-"));
+  mkdirSync(join(home, "personal"), { recursive: true });
+  writeFileSync(
+    join(home, "personal", "config.yaml"),
+    `assistants:\n  fake-a:\n    provider: fake\n  fake-b:\n    provider: fake\nexecution:\n  harnessSingleMode: true\n${extraConfig}`,
+  );
+  config = loadConfig({ AGENT_PLANE_HOME: home });
+  db = openDb(config.dbPath);
+  built = buildServer({ config, db });
+  built.registry.init();
+  await built.registry.syncAll();
+}
+
+beforeEach(() => boot());
+afterEach(async () => {
+  await built.orchestrator.shutdown();
+  await built.app.close();
+  db.close();
+  rmSync(home, { recursive: true, force: true });
+});
+
+const startTask = async (goal: string, assistant: AssistantId = A) => {
+  const env = built.tasks.create({ goal });
+  built.tasks.transition(env.taskId, "ROUTING");
+  const frames: TaskStreamPayload[] = [];
+  built.bus.subscribe(env.taskId, (p) => frames.push(p));
+  const { runId } = await built.orchestrator.startTask(env.taskId, assistant);
+  return { taskId: env.taskId, runId, frames };
+};
+
+const harnessRuns = (taskId: string) =>
+  db
+    .prepare(
+      "SELECT id, assistant_id, state, session_state, execution_request_id FROM runs WHERE task_id = ? ORDER BY started_at, rowid",
+    )
+    .all(taskId) as Array<{
+    id: string;
+    assistant_id: string;
+    state: string;
+    session_state: string | null;
+    execution_request_id: string | null;
+  }>;
+
+describe("flag-ON cutover — happy path", () => {
+  it("routes a task through SessionRunner to COMPLETED with one harness runs row", async () => {
+    const { taskId, runId, frames } = await startTask("do the thing");
+    expect(await built.orchestrator.waitForSettled(taskId)).toBe("COMPLETED");
+
+    const runs = harnessRuns(taskId);
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toMatchObject({ assistant_id: A, session_state: "COMPLETED", execution_request_id: `erq_${taskId}_1` });
+    expect(runs[0]!.id).toBe(runId);
+
+    // exactly one execution_results row, with a usage shape
+    const results = db
+      .prepare("SELECT result FROM execution_results WHERE session_id = ?")
+      .all(runId) as Array<{ result: string }>;
+    expect(results).toHaveLength(1);
+    const parsed = JSON.parse(results[0]!.result) as { usage?: { accounting?: string } };
+    expect(parsed.usage?.accounting).toBeTruthy();
+
+    // provider_session_ref persisted (runner ackHandle, §9)
+    const ref = db.prepare("SELECT provider_session_ref FROM runs WHERE id = ?").get(runId) as {
+      provider_session_ref: string | null;
+    };
+    expect(ref.provider_session_ref).toBeTruthy();
+
+    // SSE {kind:"event"} frames with the exact legacy shape + monotonic seq
+    const eventFrames = frames.filter((f) => f.kind === "event");
+    expect(eventFrames.length).toBeGreaterThan(0);
+    const seqs = eventFrames.map((f) => f.event!.seq);
+    expect(seqs).toEqual([...seqs].sort((a, b) => a - b));
+    expect(eventFrames.every((f) => typeof f.event!.type === "string" && f.event!.runId === runId)).toBe(true);
+
+    // envelope enrichment landed transactionally
+    const env = built.tasks.envelope(taskId);
+    expect(env.artifacts.changedFiles).toContain("src/example.ts");
+    expect(env.artifacts.testResults.length).toBeGreaterThan(0);
+  });
+});
+
+describe("flag-ON cutover — approvals", () => {
+  it("relays an approval and completes when approved", async () => {
+    const { taskId, frames } = await startTask("needs sign-off [FAKE:APPROVAL]");
+    // wait for the approval.requested SSE frame
+    const reqId = await pollFor(() => {
+      const f = frames.find((x) => x.kind === "event" && x.event!.type === "approval.requested");
+      return (f?.event!.payload as { requestId?: string } | undefined)?.requestId;
+    });
+    await built.orchestrator.respondApproval(taskId, reqId, true);
+    expect(await built.orchestrator.waitForSettled(taskId)).toBe("COMPLETED");
+  });
+
+  it("a denied approval fails the task with no failover", async () => {
+    const { taskId, frames } = await startTask("needs sign-off [FAKE:APPROVAL]");
+    const reqId = await pollFor(() => {
+      const f = frames.find((x) => x.kind === "event" && x.event!.type === "approval.requested");
+      return (f?.event!.payload as { requestId?: string } | undefined)?.requestId;
+    });
+    await built.orchestrator.respondApproval(taskId, reqId, false);
+    expect(await built.orchestrator.waitForSettled(taskId)).toBe("FAILED");
+    expect(harnessRuns(taskId)).toHaveLength(1); // no second session
+  });
+});
+
+describe("flag-ON cutover — cancel", () => {
+  it("cancelTask mid-approval ends the task CANCELLED and settle no-ops", async () => {
+    const { taskId, runId, frames } = await startTask("hold here [FAKE:APPROVAL]");
+    await pollFor(() => {
+      const f = frames.find((x) => x.kind === "event" && x.event!.type === "approval.requested");
+      return (f?.event!.payload as { requestId?: string } | undefined)?.requestId;
+    });
+    await built.orchestrator.cancelTask(taskId);
+    expect(await built.orchestrator.waitForSettled(taskId)).toBe("CANCELLED");
+    const r = db.prepare("SELECT session_state FROM runs WHERE id = ?").get(runId) as { session_state: string };
+    expect(["CANCELLED", "FAILED"]).toContain(r.session_state); // terminal, not left live
+  });
+});
+
+describe("flag-ON cutover — failover", () => {
+  it("[FAKE:LIMIT] fails over to a second session on assistant B and completes", async () => {
+    const { taskId } = await startTask("big job [FAKE:LIMIT]", A);
+    expect(await built.orchestrator.waitForSettled(taskId)).toBe("COMPLETED");
+    const runs = harnessRuns(taskId);
+    expect(runs.length).toBeGreaterThanOrEqual(2);
+    expect(runs.map((r) => r.assistant_id)).toContain(B);
+    const handoff = db.prepare("SELECT trigger FROM handoffs WHERE task_id = ?").get(taskId) as { trigger: string };
+    expect(handoff.trigger).toBe("quota");
+    // fresh-prompt start this pass — no handoff_envelopes row
+    expect(db.prepare("SELECT COUNT(*) c FROM handoff_envelopes WHERE task_id = ?").get(taskId)).toMatchObject({ c: 0 });
+  });
+
+  it("[FAKE:FAIL] with failover.auto:false ends the task FAILED with one session", async () => {
+    await built.orchestrator.shutdown();
+    await built.app.close();
+    db.close();
+    rmSync(home, { recursive: true, force: true });
+    await boot("failover:\n  auto: false\n");
+    const { taskId } = await startTask("doomed [FAKE:FAIL]", A);
+    expect(await built.orchestrator.waitForSettled(taskId)).toBe("FAILED");
+    expect(harnessRuns(taskId)).toHaveLength(1);
+  });
+});
+
+describe("flag-ON cutover — boot recovery", () => {
+  it("settles a boot-stranded harness task from its durable result, not blanket-FAILED", async () => {
+    // Seed a terminal harness session + result under a RUNNING task, plus a
+    // legacy in-flight run on a different task — reconcileOnBoot settles the
+    // first from the result and blanket-fails the second.
+    seedTask("AG-strand");
+    seedHarnessSession("AG-strand", "es_strand", "COMPLETED", true);
+    built.tasks.transition("AG-strand", "ROUTING");
+    built.tasks.transition("AG-strand", "RUNNING");
+
+    seedTask("AG-legacy");
+    db.prepare(
+      "INSERT INTO runs (id, task_id, assistant_id, state, started_at) VALUES ('lr_1','AG-legacy','fake-a','ACTIVE','t0')",
+    ).run();
+    built.tasks.transition("AG-legacy", "ROUTING");
+    built.tasks.transition("AG-legacy", "RUNNING");
+
+    await built.orchestrator.reconcileOnBoot();
+    expect(built.tasks.get("AG-strand")!.state).toBe("COMPLETED");
+    expect(built.tasks.get("AG-legacy")!.state).toBe("FAILED");
+  });
+
+  it("parks a harness-owned HANDING_OFF / ROUTING task with no result in WAITING_INPUT", async () => {
+    // Session already terminal (so HarnessRecovery leaves it), but no
+    // execution_results row → step 2 parks the task rather than blanket-fail.
+    for (const [taskId, state] of [
+      ["AG-ho", "HANDING_OFF"],
+      ["AG-ro", "ROUTING"],
+    ] as const) {
+      seedTask(taskId);
+      seedHarnessSession(taskId, `es_${taskId}`, "CANCELLED", false);
+      built.tasks.transition(taskId, "ROUTING");
+      if (state === "HANDING_OFF") {
+        built.tasks.transition(taskId, "RUNNING");
+        built.tasks.transition(taskId, "LIMIT_PAUSED");
+        built.tasks.transition(taskId, "HANDING_OFF");
+      }
+    }
+    await built.orchestrator.reconcileOnBoot();
+    expect(built.tasks.get("AG-ho")!.state).toBe("WAITING_INPUT");
+    expect(built.tasks.get("AG-ro")!.state).toBe("WAITING_INPUT");
+  });
+
+  it("parks the task WAITING_INPUT when SessionRunner.start rejects with no result", async () => {
+    // A non-PREPARED session already exists for the erqId startTask will compute
+    // (erq_<taskId>_1 — no execution_requests rows yet), with no
+    // execution_results row → runner.start rejects → settleFromResult(null).
+    const env = built.tasks.create({ goal: "will reject" });
+    built.tasks.transition(env.taskId, "ROUTING");
+    const erq = `erq_${env.taskId}_1`;
+    // ended_at set so the isActive() live-session guard does not block startTask.
+    db.prepare(
+      `INSERT INTO runs (id, task_id, assistant_id, state, session_state, version, execution_request_id, provider_start_acked, cancel_requested, attempt, started_at, ended_at)
+       VALUES (?, ?, 'fake-a', 'ACTIVE', 'RUNNING', 1, ?, 0, 0, 1, 't0', 't1')`,
+    ).run("es_reject", env.taskId, erq);
+
+    await built.orchestrator.startTask(env.taskId, A);
+    await pollFor(() => (built.tasks.get(env.taskId)!.state === "WAITING_INPUT" ? true : undefined));
+    const notice = db
+      .prepare("SELECT COUNT(*) c FROM runs WHERE id = 'es_reject' AND session_state = 'RUNNING'")
+      .get() as { c: number };
+    expect(notice.c).toBe(1); // session row untouched — left for HarnessRecovery
+  });
+});
+
+// --- helpers ---------------------------------------------------------------
+
+function seedTask(id: string): void {
+  db.prepare("INSERT INTO tasks (id, goal, envelope, created_at, updated_at) VALUES (?, 'g', ?, 't', 't')").run(
+    id,
+    JSON.stringify({
+      taskId: id,
+      goal: "g",
+      constraints: [],
+      status: { state: "CREATED" },
+      completed: [],
+      remaining: [],
+      decisions: [],
+      artifacts: { changedFiles: [], testResults: [] },
+    }),
+  );
+}
+
+function seedHarnessSession(
+  taskId: string,
+  sessionId: string,
+  sessionState: string,
+  withResult: boolean,
+): void {
+  const erq = `erq_${sessionId}`;
+  db.prepare(
+    `INSERT INTO execution_requests
+       (id, task_id, attempt, assistant_id, routing_decision_ref, request_fingerprint, fingerprint_algorithm,
+        prompt_source, rendered_prompt_digest, policy, verification, origin, canonical_projection, created_at)
+     VALUES (?, ?, 1, 'fake-a', 'rd', 'fp', 'alg', 'fresh', 'd',
+             '{"budget":{"enforcement":"advisory"}}', '[]', '{"kind":"fresh"}', '{}', 't')`,
+  ).run(erq, taskId);
+  const terminal = ["COMPLETED", "FAILED", "CANCELLED", "TIMED_OUT", "YIELDED"].includes(sessionState);
+  const runState = sessionState === "COMPLETED" ? "ENDED_OK" : terminal ? "ENDED_ERROR" : "ACTIVE";
+  const endedAt = terminal ? "t9" : null;
+  db.prepare(
+    `INSERT INTO runs (id, task_id, assistant_id, state, session_state, version, execution_request_id, provider_start_acked, cancel_requested, attempt, started_at, ended_at)
+     VALUES (?, ?, 'fake-a', ?, ?, 1, ?, 1, 0, 1, 't0', ?)`,
+  ).run(sessionId, taskId, runState, sessionState, erq, endedAt);
+  if (withResult) {
+    db.prepare(
+      "INSERT INTO execution_results (session_id, terminal_state, outcome, result, at) VALUES (?, ?, ?, ?, 't9')",
+    ).run(
+      sessionId,
+      sessionState,
+      "completed",
+      JSON.stringify({
+        schemaVersion: 1,
+        sessionId,
+        terminalState: sessionState,
+        outcome: "completed",
+        artifacts: [],
+        usage: { inputTokens: 5, outputTokens: 2, accounting: "delta" },
+        checkpoint: { attempted: false, committed: false },
+        enforcement: { tools: "audit", budget: "advisory", isolation: "ambient" },
+      }),
+    );
+  }
+}
+
+async function pollFor<T>(fn: () => T | undefined, timeoutMs = 5000): Promise<T> {
+  const start = Date.now();
+  for (;;) {
+    const v = fn();
+    if (v !== undefined) return v;
+    if (Date.now() - start > timeoutMs) throw new Error("pollFor timed out");
+    await new Promise((r) => setTimeout(r, 10));
+  }
+}
