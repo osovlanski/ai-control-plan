@@ -110,32 +110,55 @@ export class SessionRunner {
 
   /** Execute one request end to end. Always returns a persisted ExecutionResult (H-I3). */
   async run(request: ExecutionRequest): Promise<ExecutionResult> {
+    return this.start(request).done;
+  }
+
+  /**
+   * Synchronous setup, detached execution — the runner stays the ONLY writer of
+   * the session row (PLAN.md 8c.1). Returns the session id (available before any
+   * work runs) plus the `done` promise the caller awaits or wires a callback to.
+   * `run()` is `start().done`, so the idempotency / stored-result behavior below
+   * is shared by both entry points.
+   */
+  start(request: ExecutionRequest): { sessionId: string; done: Promise<ExecutionResult> } {
     const { store } = this.deps;
     store.recordRequest(request);
     const session = store.createSession(request.executionRequestId);
-    const sessionId = session.sessionId as string;
+    const sessionId = session.sessionId;
 
     // Idempotent resubmission of a finished request → its stored result (H-I8).
     if (session.state !== "PREPARED") {
       const existing = store.result(sessionId);
-      if (existing) return existing;
+      if (existing) return { sessionId, done: Promise.resolve(existing) };
       // A live session from a crashed process. Resuming its provider / unsettled
       // approvals is boot-reconcile work (Phase 7) — fail loudly rather than
       // re-run PREPARED→STARTING and corrupt it.
-      throw new Error(
-        `session ${sessionId} is ${session.state} with no result — restart recovery (Phase 7) is required`,
-      );
+      return {
+        sessionId,
+        done: Promise.reject(
+          new Error(
+            `session ${sessionId} is ${session.state} with no result — restart recovery (Phase 7) is required`,
+          ),
+        ),
+      };
     }
 
     const lease = store.acquireLease(sessionId);
-    if (!lease) throw new Error(`session ${sessionId} is already leased by another runner`);
-    const ctx = new RunContext(sessionId, request, lease, this);
-
-    try {
-      return await ctx.execute();
-    } finally {
-      store.releaseLease(sessionId, lease);
+    if (!lease) {
+      return {
+        sessionId,
+        done: Promise.reject(new Error(`session ${sessionId} is already leased by another runner`)),
+      };
     }
+    const ctx = new RunContext(sessionId, request, lease, this);
+    const done = (async () => {
+      try {
+        return await ctx.execute();
+      } finally {
+        store.releaseLease(sessionId, lease);
+      }
+    })();
+    return { sessionId, done };
   }
 
   // exposed to RunContext

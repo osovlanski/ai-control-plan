@@ -157,10 +157,12 @@ function latestQuota(
   return { usedPercent: worst.usedPercent, resetsAt: worst.resetsAt };
 }
 
-export function persistRoutingDecision(db: Db, taskId: string, explanation: RoutingExplanation): void {
-  db.prepare(
-    "INSERT INTO routing_decisions (task_id, chosen_assistant_id, explanation, at) VALUES (?, ?, ?, ?)",
-  ).run(taskId, explanation.chosen ?? null, JSON.stringify(explanation), new Date().toISOString());
+/** Returns the inserted `routing_decisions.id`, for a real routing→session audit join. */
+export function persistRoutingDecision(db: Db, taskId: string, explanation: RoutingExplanation): number {
+  const info = db
+    .prepare("INSERT INTO routing_decisions (task_id, chosen_assistant_id, explanation, at) VALUES (?, ?, ?, ?)")
+    .run(taskId, explanation.chosen ?? null, JSON.stringify(explanation), new Date().toISOString());
+  return Number(info.lastInsertRowid);
 }
 
 export function routingHistory(db: Db, taskId: string): unknown[] {

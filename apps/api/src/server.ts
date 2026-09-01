@@ -1,6 +1,7 @@
 import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
 import {
   CONTROL_PLANE_API_VERSION,
+  DEFAULT_REDACTION_RULES,
   NORMALIZED_EVENT_VERSION,
   OBSERVABILITY_CAPABILITIES,
   type AssistantId,
@@ -11,7 +12,10 @@ import { appliedMigrations, type Db } from "./db/index.js";
 import { CheckpointService } from "./modules/checkpoint.js";
 import { CooldownStore } from "./modules/cooldown.js";
 import { ApprovalService } from "./modules/harness/approval-service.js";
+import { HarnessBridge } from "./modules/harness/control-plane-bridge.js";
+import { EventRecorder } from "./modules/harness/event-recorder.js";
 import { HarnessRecovery } from "./modules/harness/recovery.js";
+import { SessionRunner } from "./modules/harness/session-runner.js";
 import { SessionStore } from "./modules/harness/session-store.js";
 import { Orchestrator } from "./modules/orchestrator.js";
 import { Registry } from "./modules/registry.js";
@@ -53,17 +57,58 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   const cooldowns = new CooldownStore(db);
   const telemetry = new TelemetryService(db);
   const retention = new EventRetention(db);
+  const app = Fastify({ logger: true });
+
+  // One SessionStore / ApprovalService shared by recovery + (flag-ON) the runner
+  // and bridge — the composition root (PLAN.md 8c.6).
+  const sessionStore = new SessionStore(db);
+  const approvals = new ApprovalService(db);
   const harnessRecovery = new HarnessRecovery({
-    store: new SessionStore(db),
-    approvals: new ApprovalService(db),
+    store: sessionStore,
+    approvals,
     checkpoints, // CheckpointService is structurally a RunnerCheckpoints
     registry, // Registry is structurally a { adapter, manifest } facade
   });
+
+  let harnessBridge: HarnessBridge | undefined;
+  if (config.execution?.harnessSingleMode) {
+    const recorder = new EventRecorder(db, DEFAULT_REDACTION_RULES);
+    const runner = new SessionRunner({
+      store: sessionStore,
+      recorder,
+      approvals,
+      checkpoints,
+      registry,
+      softThresholdPct: config.failover.softThresholdPct,
+      // No `handoff` dep — the envelope-yield path is out of scope this pass, so
+      // the runner never commits an envelope.
+    });
+    harnessBridge = new HarnessBridge({
+      runner,
+      store: sessionStore,
+      approvals,
+      db,
+      onError: (err) => app.log.error(err),
+    });
+  }
+  if (config.execution?.harnessSingleMode && !harnessBridge) {
+    throw new Error("harnessSingleMode ON but the execution-harness bridge is not wired");
+  }
+
   const orchestrator =
     deps.orchestrator ??
-    new Orchestrator(db, config, registry, tasks, bus, checkpoints, cooldowns, undefined, harnessRecovery);
-
-  const app = Fastify({ logger: true });
+    new Orchestrator(
+      db,
+      config,
+      registry,
+      tasks,
+      bus,
+      checkpoints,
+      cooldowns,
+      undefined,
+      harnessRecovery,
+      harnessBridge,
+    );
 
   const repoAllowed = (repoPath: string | null | undefined): boolean =>
     !repoPath || config.repoAllowlist.some((allowed) => repoPath === allowed || repoPath.startsWith(`${allowed}/`));
