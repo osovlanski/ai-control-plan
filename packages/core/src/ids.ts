@@ -6,6 +6,13 @@ export type AssistantId = string & { readonly __brand: "AssistantId" };
 export type CheckpointId = string & { readonly __brand: "CheckpointId" };
 export type HandoffId = string & { readonly __brand: "HandoffId" };
 
+/** Stable Control Plane identities. They are assigned by a registry, never inferred from paths. */
+export type WorkspaceId = string & { readonly __brand: "WorkspaceId" };
+export type RepositoryId = string & { readonly __brand: "RepositoryId" };
+export type WorktreeId = string & { readonly __brand: "WorktreeId" };
+/** Defined for the staged migration; schemaVersion 1 request fields remain strings for compatibility. */
+export type ExecutionRequestId = string & { readonly __brand: "ExecutionRequestId" };
+
 /**
  * Execution-harness session id. One session IS one `runs` row (§10); the brand
  * keeps it from being confused with the provider-side `ProviderSessionRef`.
