@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
-import { mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync, realpathSync } from "node:fs";
+import { isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
 
 const run = promisify(execFile);
@@ -8,6 +8,32 @@ const run = promisify(execFile);
 async function git(repo: string, args: string[]): Promise<string> {
   const { stdout } = await run("git", ["-C", repo, ...args], { maxBuffer: 10 * 1024 * 1024 });
   return stdout.trim();
+}
+
+export interface GitRepositoryIdentityObservation {
+  canonicalGitDir: string;
+  canonicalToplevel: string;
+  remotes: Array<{ name: string; url: string }>;
+}
+
+/** Local inspection only: no fetch, credential helper, or network operation. */
+export async function inspectGitRepositoryIdentity(repoPath: string): Promise<GitRepositoryIdentityObservation> {
+  const [commonDir, toplevel, remoteNames] = await Promise.all([
+    git(repoPath, ["rev-parse", "--path-format=absolute", "--git-common-dir"]),
+    git(repoPath, ["rev-parse", "--show-toplevel"]),
+    git(repoPath, ["remote"]),
+  ]);
+  const remotes: Array<{ name: string; url: string }> = [];
+  for (const name of remoteNames.split("\n").filter(Boolean).sort()) {
+    const url = await git(repoPath, ["config", "--get", `remote.${name}.url`]).catch(() => "");
+    if (url) remotes.push({ name, url });
+  }
+  const commonPath = isAbsolute(commonDir) ? commonDir : resolve(repoPath, commonDir);
+  return {
+    canonicalGitDir: realpathSync(commonPath),
+    canonicalToplevel: realpathSync(toplevel),
+    remotes,
+  };
 }
 
 export class DirtyWorktreeError extends Error {
