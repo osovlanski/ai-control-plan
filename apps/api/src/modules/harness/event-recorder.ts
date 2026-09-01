@@ -56,6 +56,15 @@ export class EventRecorder {
     private now: () => Date = () => new Date(),
     /** Post-commit delivery is best-effort; a throwing `publish` is routed here, not re-thrown. */
     private onPublishError?: (err: unknown) => void,
+    /**
+     * Wired once (flag-ON `buildServer`) — runs INSIDE the batch transaction,
+     * after the per-call `inTransaction` hook and before the session CAS, for
+     * EVERY batch. Used to derive the task envelope + quota snapshots
+     * transactionally with the event insert (PLAN.md 8b/8d). It must NOT write
+     * `runs` — that column belongs to the fenced session CAS alone. A throw here
+     * rolls the whole batch back.
+     */
+    private afterInsertInTx?: (sessionId: string, committed: DurableEvent[], db: Db) => void,
   ) {}
 
   /** Redact one event into its durable view. Exposed for the identifier-preservation test. */
@@ -99,6 +108,7 @@ export class EventRecorder {
       }
 
       input.inTransaction?.(durable);
+      this.afterInsertInTx?.(input.sessionId, durable, this.db);
 
       const info = this.db
         .prepare(

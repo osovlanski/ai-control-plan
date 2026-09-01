@@ -20,6 +20,7 @@ import {
 import { renderHandoffPrompt } from "../render/handoff.js";
 import { renderTaskPrompt } from "../render/prompt.js";
 import type { CheckpointReason, CheckpointService } from "./checkpoint.js";
+import { deriveEnvelopeUpdate } from "./harness/envelope-derivation.js";
 import type { CooldownStore } from "./cooldown.js";
 import type { Registry } from "./registry.js";
 import { persistRoutingDecision, route, type RouteRequest } from "./router.js";
@@ -296,39 +297,17 @@ export class Orchestrator {
   /** Envelope derivation from the event stream (review §3.6: agent reports enrich, events carry). */
   private async applyEvent(run: ActiveRun, event: NormalizedEvent): Promise<void> {
     const envelope = this.tasks.envelope(run.taskId);
-    let changed = false;
+    // Envelope-shaping cases (phase / file.changed / test.result / message) —
+    // shared with the flag-ON single-mode path (PLAN.md 8b).
+    const changed = deriveEnvelopeUpdate(envelope, event);
 
-    if (event.phase && envelope.status.phase !== event.phase) {
-      envelope.status.phase = event.phase;
-      changed = true;
-    }
+    // Run / adapter / DB side effects stay here for the legacy path.
     switch (event.type) {
       case "run.started": {
         const ref = (event.payload as { providerSessionRef?: string } | undefined)?.providerSessionRef;
         if (ref) {
           this.db.prepare("UPDATE runs SET provider_session_ref = ? WHERE id = ?").run(ref, run.runId);
         }
-        break;
-      }
-      case "file.changed": {
-        const payload = event.payload as { path?: string; ok?: boolean } | undefined;
-        const path = payload?.path;
-        // Adapters (Codex) report attempted-but-failed changes with ok:false;
-        // only a change that actually landed belongs in the envelope.
-        if (path && payload?.ok !== false && !envelope.artifacts.changedFiles.includes(path)) {
-          envelope.artifacts.changedFiles.push(path);
-          changed = true;
-        }
-        break;
-      }
-      case "test.result": {
-        const p = event.payload as { passed?: number; failed?: number } | undefined;
-        envelope.artifacts.testResults.push({
-          at: event.ts,
-          passed: p?.passed ?? 0,
-          failed: p?.failed ?? 0,
-        });
-        changed = true;
         break;
       }
       case "usage.updated": {
@@ -345,15 +324,6 @@ export class Orchestrator {
       case "limit.hit": {
         this.snapshotQuota(run.assistantId, event);
         run.limit = { reason: event.summary, resetsAt: firstResetsAt(event) };
-        break;
-      }
-      case "message": {
-        const text = (event.payload as { text?: string } | undefined)?.text;
-        if (text) {
-          envelope.nextAction = undefined;
-          envelope.completed = mergeTail(envelope.completed, event.summary);
-          changed = true;
-        }
         break;
       }
       default:
@@ -920,18 +890,6 @@ function describeWaits(explanation: { candidates: Array<{ assistantId: string; f
     .filter((c) => c.filterFailures.length > 0)
     .map((c) => `${c.assistantId}: ${c.filterFailures.join(", ")}`);
   return blocked.length > 0 ? `Blocked — ${blocked.join("; ")}.` : "";
-}
-
-/**
- * Rolling tail of activity summaries (envelope "completed" hints), de-duplicated
- * against the whole list rather than just the last entry: after a handoff the
- * next assistant narrates the same steps again, and a package that accumulates
- * those repeats gets worse with every hop.
- */
-function mergeTail(list: string[], entry: string, max = 20): string[] {
-  if (list.includes(entry)) return list;
-  const next = [...list, entry];
-  return next.length > max ? next.slice(next.length - max) : next;
 }
 
 function isTerminal(state: string): boolean {

@@ -204,6 +204,38 @@ describe("durable redaction view (H-I13)", () => {
     expect(onPublishError).toHaveBeenCalledOnce();
   });
 
+  it("runs the afterInsertInTx constructor hook inside the tx for every batch", () => {
+    const calls: Array<{ id: string; seqs: number[]; rowsVisible: number }> = [];
+    const rec = new EventRecorder(db, undefined, undefined, undefined, undefined, (id, committed, hookDb) => {
+      const rows = (hookDb.prepare("SELECT COUNT(*) c FROM events WHERE run_id = ?").get(id) as { c: number }).c;
+      calls.push({ id, seqs: committed.map((c) => c.seq), rowsVisible: rows });
+    });
+    rec.recordBatch({
+      sessionId,
+      expectedVersion: 0,
+      leaseToken: token,
+      events: [ev("message", "a"), ev("message", "b")],
+    });
+    rec.recordBatch({ sessionId, expectedVersion: 1, leaseToken: token, events: [ev("message", "c")] });
+    expect(calls).toEqual([
+      { id: sessionId, seqs: [1, 2], rowsVisible: 2 },
+      { id: sessionId, seqs: [3], rowsVisible: 3 },
+    ]);
+  });
+
+  it("rolls the whole batch back when afterInsertInTx throws", () => {
+    const publish = vi.fn();
+    const rec = new EventRecorder(db, undefined, publish, undefined, undefined, () => {
+      throw new Error("quota snapshot insert failed");
+    });
+    expect(() =>
+      rec.recordBatch({ sessionId, expectedVersion: 0, leaseToken: token, events: [ev("message", "x")] }),
+    ).toThrow("quota snapshot insert failed");
+    expect(eventCount()).toBe(0);
+    expect(sessionVersion()).toBe(0);
+    expect(publish).not.toHaveBeenCalled();
+  });
+
   it("freezes the events handed to the in-transaction hook", () => {
     const rec = new EventRecorder(db);
     let frozen = false;
