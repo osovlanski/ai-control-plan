@@ -223,17 +223,52 @@ describe("durable redaction view (H-I13)", () => {
     ]);
   });
 
-  it("rolls the whole batch back when afterInsertInTx throws", () => {
+  const quotaRowCount = () =>
+    (db.prepare("SELECT COUNT(*) c FROM quota_snapshots WHERE assistant_id = 'a1'").get() as { c: number }).c;
+
+  const writeQuotaRow = (hookDb: Db) =>
+    hookDb
+      .prepare(
+        "INSERT INTO quota_snapshots (assistant_id, window, used_percent, resets_at, source, observed_at) VALUES ('a1', '5h', 90, NULL, 'runtime-probe', 't')",
+      )
+      .run();
+
+  it("rolls a hook-written row back when afterInsertInTx then throws", () => {
     const publish = vi.fn();
-    const rec = new EventRecorder(db, undefined, publish, undefined, undefined, () => {
-      throw new Error("quota snapshot insert failed");
+    const rec = new EventRecorder(db, undefined, publish, undefined, undefined, (_id, _committed, hookDb) => {
+      writeQuotaRow(hookDb);
+      throw new Error("quota snapshot follow-up failed");
     });
     expect(() =>
       rec.recordBatch({ sessionId, expectedVersion: 0, leaseToken: token, events: [ev("message", "x")] }),
-    ).toThrow("quota snapshot insert failed");
+    ).toThrow("quota snapshot follow-up failed");
     expect(eventCount()).toBe(0);
+    expect(quotaRowCount()).toBe(0); // the hook's own write rolled back with the batch
     expect(sessionVersion()).toBe(0);
     expect(publish).not.toHaveBeenCalled();
+  });
+
+  it("rolls a hook-written row back when the session CAS fails after the hook ran", () => {
+    let hookRan = 0;
+    const rec = new EventRecorder(db, undefined, undefined, undefined, undefined, (_id, _committed, hookDb) => {
+      hookRan += 1;
+      writeQuotaRow(hookDb);
+    });
+    expect(() =>
+      rec.recordBatch({ sessionId, expectedVersion: 99, leaseToken: token, events: [ev("message", "x")] }),
+    ).toThrow(SessionCasConflictError);
+    expect(hookRan).toBe(1); // hook runs before the CAS
+    expect(eventCount()).toBe(0);
+    expect(quotaRowCount()).toBe(0); // rolled back by the CAS failure
+  });
+
+  it("commits a hook-written row atomically with the batch on success", () => {
+    const rec = new EventRecorder(db, undefined, undefined, undefined, undefined, (_id, _committed, hookDb) => {
+      writeQuotaRow(hookDb);
+    });
+    rec.recordBatch({ sessionId, expectedVersion: 0, leaseToken: token, events: [ev("message", "x")] });
+    expect(eventCount()).toBe(1);
+    expect(quotaRowCount()).toBe(1);
   });
 
   it("freezes the events handed to the in-transaction hook", () => {
