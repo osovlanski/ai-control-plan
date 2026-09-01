@@ -1,0 +1,162 @@
+{
+  "_doc": "Labelled routing corpus for the offline eval (docs/agentic-os-eval-plan.md area 3). Data, not code: add a case by appending an entry. Each runs through the pure route() and its `chosen` (and optional `ruleFired` regex) is asserted. candidate.manifest:null = sync has not run; manifest.quota = worst-window usedPercent; manifest.auth defaults ok; manifest.noFs drops the filesystem capability.",
+  "cases": [
+    {
+      "name": "auto: config order wins when nothing distinguishes candidates",
+      "profile": "auto",
+      "candidates": [{ "id": "claude" }, { "id": "codex" }, { "id": "ox" }],
+      "expect": { "chosen": "claude", "ruleFired": "config preference order" }
+    },
+    {
+      "name": "auto: quota headroom breaks the tie",
+      "profile": "auto",
+      "candidates": [
+        { "id": "claude", "manifest": { "quota": 90 } },
+        { "id": "codex", "manifest": { "quota": 10 } }
+      ],
+      "expect": { "chosen": "codex" }
+    },
+    {
+      "name": "hard filter: unauthenticated candidate is excluded",
+      "profile": "auto",
+      "candidates": [
+        { "id": "claude", "manifest": { "auth": "missing" } },
+        { "id": "codex" }
+      ],
+      "expect": { "chosen": "codex" }
+    },
+    {
+      "name": "hard filter: disabled candidate is excluded",
+      "profile": "auto",
+      "candidates": [
+        { "id": "claude", "enabled": false },
+        { "id": "codex" }
+      ],
+      "expect": { "chosen": "codex" }
+    },
+    {
+      "name": "hard filter: unsynced (no manifest) candidate is excluded",
+      "profile": "auto",
+      "candidates": [
+        { "id": "claude", "manifest": null },
+        { "id": "codex" }
+      ],
+      "expect": { "chosen": "codex" }
+    },
+    {
+      "name": "hard filter: exhausted quota is excluded",
+      "profile": "auto",
+      "candidates": [
+        { "id": "claude", "manifest": { "quota": 100 } },
+        { "id": "codex" }
+      ],
+      "expect": { "chosen": "codex" }
+    },
+    {
+      "name": "hard filter: needsRepo with no filesystem capability is excluded",
+      "profile": "auto",
+      "needsRepo": true,
+      "candidates": [
+        { "id": "claude", "manifest": { "noFs": true } },
+        { "id": "codex" }
+      ],
+      "expect": { "chosen": "codex" }
+    },
+    {
+      "name": "hard filter: needsRepo with a path outside the allowlist means no eligible candidate",
+      "profile": "auto",
+      "needsRepo": true,
+      "repoPathAllowed": false,
+      "candidates": [{ "id": "claude" }, { "id": "codex" }],
+      "expect": { "chosen": null, "ruleFired": "no-eligible-candidate" }
+    },
+    {
+      "name": "cooldown: a candidate in cooldown is skipped",
+      "profile": "auto",
+      "cooldowns": { "claude": "rate limited until 14:00" },
+      "candidates": [{ "id": "claude" }, { "id": "codex" }],
+      "expect": { "chosen": "codex" }
+    },
+    {
+      "name": "cooldown: every candidate in cooldown means no eligible candidate",
+      "profile": "auto",
+      "cooldowns": { "claude": "rate limited", "codex": "failed twice" },
+      "candidates": [{ "id": "claude" }, { "id": "codex" }],
+      "expect": { "chosen": null, "ruleFired": "no-eligible-candidate" }
+    },
+    {
+      "name": "override: a valid user override wins over the profile rule",
+      "profile": "auto",
+      "userOverride": "claude",
+      "candidates": [
+        { "id": "claude", "manifest": { "quota": 99 } },
+        { "id": "codex", "manifest": { "quota": 1 } }
+      ],
+      "expect": { "chosen": "claude", "ruleFired": "user-override" }
+    },
+    {
+      "name": "override: an override that fails hard filters is refused, nobody chosen",
+      "profile": "auto",
+      "userOverride": "claude",
+      "candidates": [
+        { "id": "claude", "manifest": { "auth": "missing" } },
+        { "id": "codex" }
+      ],
+      "expect": { "chosen": null, "ruleFired": "user-override", "tieBreaker": "failed hard filters" }
+    },
+    {
+      "name": "preserve-quota: most headroom first",
+      "profile": "preserve-quota",
+      "candidates": [
+        { "id": "claude", "manifest": { "quota": 80 } },
+        { "id": "codex", "manifest": { "quota": 20 } }
+      ],
+      "expect": { "chosen": "codex", "ruleFired": "preserve-quota" }
+    },
+    {
+      "name": "preserve-quota: unknown quota is treated as 50% (honest uncertainty)",
+      "profile": "preserve-quota",
+      "candidates": [
+        { "id": "claude", "manifest": { "quota": 80 } },
+        { "id": "codex", "manifest": { "reportsLimits": false } }
+      ],
+      "expect": { "chosen": "codex" }
+    },
+    {
+      "name": "fastest: picks the lowest measured median duration",
+      "profile": "fastest",
+      "candidates": [{ "id": "claude" }, { "id": "codex" }],
+      "scores": {
+        "claude": { "medianDurationMs": 90000 },
+        "codex": { "medianDurationMs": 30000 }
+      },
+      "expect": { "chosen": "codex", "ruleFired": "lowest median run time" }
+    },
+    {
+      "name": "fastest: no telemetry yet degrades to stable order and says so",
+      "profile": "fastest",
+      "candidates": [{ "id": "claude" }, { "id": "codex" }],
+      "expect": { "chosen": "claude", "ruleFired": "no latency telemetry yet" }
+    },
+    {
+      "name": "best-quality: reliability penalty sinks a high-failover candidate",
+      "profile": "best-quality",
+      "candidates": [{ "id": "claude" }, { "id": "codex" }],
+      "scores": {
+        "claude": { "successRate": 1, "testPassRate": 1, "failovers": 5, "runs": 5 },
+        "codex": { "successRate": 0.9, "testPassRate": 0.95, "failovers": 0, "runs": 5 }
+      },
+      "expect": { "chosen": "codex" }
+    },
+    {
+      "name": "lowest-tokens: ranks by measured median tokens",
+      "profile": "lowest-tokens",
+      "candidates": [{ "id": "claude" }, { "id": "codex" }],
+      "scores": {
+        "claude": { "medianTokens": 9000 },
+        "codex": { "medianTokens": 2000 }
+      },
+      "expect": { "chosen": "codex", "ruleFired": "2000" }
+    }
+  ]
+}
