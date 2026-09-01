@@ -21,7 +21,8 @@ import type {
   WorkspaceId,
   WorktreeId,
 } from "./ids.js";
-import type { UsagePayload, VerificationKind } from "./events.js";
+import { verificationPassed } from "./events.js";
+import type { UsagePayload, VerificationCheckResult, VerificationKind } from "./events.js";
 import type { ExecutionSessionState, TerminalSessionState } from "./session-state.js";
 
 // ---------------------------------------------------------------------------
@@ -252,11 +253,27 @@ export interface ExecutionFailure {
 }
 
 export interface ExecutionArtifact {
-  kind: "diff" | "file_list" | "test_report" | "checkpoint" | "rendered_output";
+  kind:
+    | "diff"
+    | "file_list"
+    | "test_report"
+    | "checkpoint"
+    | "rendered_output"
+    | "api_report"
+    | "browser_report"
+    | "screenshot"
+    | "console_log"
+    | "evaluation_report"
+    | "review_report"
+    | "trace_ref";
   /** checkpoint id, git ref, event range — never inline blobs. */
   ref: string;
   /** Size-capped like event summaries. */
   summary: string;
+  digest?: string;
+  mediaType?: string;
+  sizeBytes?: number;
+  retention?: "ephemeral" | "session" | "task" | "pinned";
 }
 
 // ---------------------------------------------------------------------------
@@ -264,10 +281,14 @@ export interface ExecutionArtifact {
 // ---------------------------------------------------------------------------
 
 export interface VerificationSpec {
+  /** Stable planner id; optional while schemaVersion 1 legacy requests remain readable. */
+  checkId?: string;
   name: string;
   kind: VerificationKind;
   /** Validated + executed by the WorkspaceAuthority (§3), NOT via adapter tools. */
   command?: string;
+  /** Provider selection is policy input and therefore fingerprinted. */
+  provider?: string;
   /** `required: false` checks report but never affect outcome. */
   required: boolean;
 }
@@ -275,14 +296,35 @@ export interface VerificationSpec {
 export interface EvaluationResult {
   /** All `required` checks passed. */
   passed: boolean;
-  checks: Array<{
-    name: string;
-    kind: VerificationKind;
-    passed: boolean;
-    required: boolean;
-    summary: string;
-    ref?: string;
-  }>;
+  checks: VerificationCheckResult[];
+}
+
+/** Preferred constructor for new results; legacy rows remain readable as-is. */
+export function evaluationResult(checks: VerificationCheckResult[]): EvaluationResult {
+  return { passed: verificationPassed(checks), checks };
+}
+
+export interface VerificationDecision {
+  checkId: string;
+  selected: boolean;
+  required: boolean;
+  signals: string[];
+  reason: string;
+}
+
+/** Persistable output of the future deterministic VerificationPlanner. */
+export interface VerificationPlan {
+  schemaVersion: 1;
+  /** Selected checks only. Every entry has a stable id used by decisions/results. */
+  checks: Array<VerificationSpec & { checkId: string }>;
+  decisions: VerificationDecision[];
+}
+
+/** Read projection only; canonical state remains EvaluationResult + ExecutionArtifact. */
+export interface EvidenceBundle {
+  sessionId: ExecutionSessionId;
+  verification?: EvaluationResult;
+  artifacts: ExecutionArtifact[];
 }
 
 // ---------------------------------------------------------------------------

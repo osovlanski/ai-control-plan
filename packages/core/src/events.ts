@@ -91,19 +91,43 @@ export type VerificationKind =
   | "lint"
   | "command"
   | "artifact_exists"
-  | "evaluator";
+  | "evaluator"
+  | "api"
+  | "browser"
+  | "review";
+
+export type VerificationCheckStatus = "passed" | "failed" | "skipped" | "blocked";
+
+/** Shared result shape for durable events and the terminal execution result. */
+interface VerificationCheckResultBase {
+  /** Stable planner id; absent on legacy results. */
+  checkId?: string;
+  name: string;
+  kind: VerificationKind;
+  required: boolean;
+  summary: string;
+  ref?: string;
+}
+
+/** TypeScript construction prevents contradictions; runtime wire validation follows in H5. */
+export type VerificationCheckResult = VerificationCheckResultBase &
+  (
+    | { status?: undefined; passed: boolean }
+    | { status: "passed"; passed: true }
+    | { status: Exclude<VerificationCheckStatus, "passed">; passed: false }
+  );
+
+/** Derive the aggregate; required skipped/blocked/failed checks never pass. */
+export function verificationPassed(checks: readonly VerificationCheckResult[]): boolean {
+  return checks.every((check) =>
+    !check.required ? true : check.status === undefined ? check.passed : check.status === "passed",
+  );
+}
 
 /** Payload for `verification.result` — the aggregate of one `VerificationSpec[]` run. */
 export interface VerificationResultPayload {
   passed: boolean;
-  checks: Array<{
-    name: string;
-    kind: VerificationKind;
-    passed: boolean;
-    required: boolean;
-    summary: string;
-    ref?: string;
-  }>;
+  checks: VerificationCheckResult[];
 }
 
 /**

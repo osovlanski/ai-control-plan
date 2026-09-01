@@ -104,6 +104,10 @@ describe("requestFingerprint", () => {
       ["policy.isolation.required", (r) => (r.policy.isolation.required = "full")],
       ["verification", (r) => (r.verification = [])],
       ["verification[].required", (r) => (r.verification = [{ name: "unit", kind: "tests", required: false }])],
+      ["verification[].checkId", (r) =>
+        (r.verification = [{ checkId: "check-unit", name: "unit", kind: "tests", required: true }])],
+      ["verification[].provider", (r) =>
+        (r.verification = [{ name: "unit", kind: "tests", provider: "native", required: true }])],
       ["origin", (r) => (r.origin = { kind: "handoff", envelopeId: "env_1" })],
       ["context.priorCheckpointId", (r) => (r.context = { priorCheckpointId: "ckpt_1" })],
       ["context.target", (r) =>
