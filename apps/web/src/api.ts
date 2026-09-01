@@ -174,7 +174,76 @@ export const api = {
       body: JSON.stringify({ winnerRunId, reason }),
     }),
   scores: () => req<AssistantScore[]>("/api/scores"),
+  sessions: (taskId: string) => req<SessionSummary[]>(`/api/tasks/${taskId}/sessions`),
+  session: (id: string) => req<SessionDetail>(`/api/sessions/${id}`),
+  sessionsByGroup: (groupId: string) =>
+    req<SessionSummary[]>(`/api/sessions?groupId=${encodeURIComponent(groupId)}`),
+  sessionsByParent: (parentTaskId: string) =>
+    req<SessionSummary[]>(`/api/sessions?parentTaskId=${encodeURIComponent(parentTaskId)}`),
 };
+
+/** One row of the Execution Harness session list for a task (§11 drill-down). */
+export interface SessionSummary {
+  sessionId: string;
+  executionRequestId: string;
+  assistantId: string;
+  /** Primary session vocabulary (§5). */
+  sessionState: string;
+  /** Legacy `runs.state`, still served during the dual-field window. */
+  state: string;
+  attempt: number;
+  providerStartAcked: boolean;
+  cancelRequested: boolean;
+  settlementOwner: string | null;
+  correlation: { parentTaskId: string | null; groupId: string | null };
+  startedAt: string | null;
+  endedAt: string | null;
+}
+
+export interface SessionResult {
+  outcome: "completed" | "failed" | "cancelled" | "timed_out" | "yielded";
+  terminalState: string;
+  failure?: { kind: string; retryable: boolean; message: string };
+  verification?: { passed: boolean; checks: Array<{ name: string; passed: boolean; required: boolean; summary: string }> };
+  /** Optional in the type because a corrupt durable row can be missing it. */
+  enforcement?: { tools: string; budget: string; isolation: string };
+  usage?: { inputTokens?: number; outputTokens?: number; accounting: string };
+  checkpoint?: { attempted: boolean; committed: boolean; checkpointId?: string; gitRef?: string };
+}
+
+export interface SessionRequestView {
+  id: string;
+  attempt: number;
+  assistantId: string;
+  model: { id: string } | null;
+  routingDecisionRef: string;
+  requestFingerprint: string;
+  fingerprintAlgorithm: string;
+  promptSource: "fresh" | "handoff" | "resume";
+  promptSourceRef: string | null;
+  originEnvelopeId: string | null;
+  superseded: boolean;
+  policy: Record<string, unknown> | null;
+  verification: unknown;
+  origin: { kind: string; envelopeId?: string; sessionId?: string; checkpointId?: string } | null;
+  createdAt: string;
+}
+
+export interface SessionDetail extends Omit<SessionSummary, "correlation"> {
+  taskId: string;
+  version: number;
+  providerSessionRef: string | null;
+  lease: { expiresAt: string | null } | null;
+  /** null when the request row is missing/corrupt. */
+  correlation: { parentTaskId: string | null; groupId: string | null } | null;
+  request: SessionRequestView | null;
+  /** verification + enforcement live inside `result`, not duplicated. */
+  result: SessionResult | null;
+  checkpoints: Array<{ id: string; reason: string; gitRef: string | null; diffStat: string | null; at: string }>;
+  handoffEnvelopes: Array<{ id: string; state: string; checkpointId: string; reason: string }>;
+  approvals: Array<{ id: string; providerRequestId: string; state: string; decision: string | null }>;
+  audit: Array<{ seq: number; ts: string; type: string; summary: string; payload: unknown }>;
+}
 
 export interface Competitor {
   runId: string;

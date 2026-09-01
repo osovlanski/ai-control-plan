@@ -41,6 +41,22 @@ export interface RunSpec {
     redactionRules: RedactionRule[];
     maxRuntimeMs: number;
   };
+  /**
+   * Execution-harness §6: the adapter installs this BEFORE any tool executes
+   * (Claude: permission rules / allowed tools; Codex: sandbox + approval config;
+   * fake: scripted gate). A manifest may declare `toolGating: "preventive"` only
+   * if the adapter consumes this field, proven by the conformance suite.
+   */
+  toolPolicy?: { allow?: string[]; deny?: string[]; mode: "preventive" | "audit" };
+  /** Passed to provider SDKs as an idempotency key where supported (§6, §9). */
+  runControl?: { executionRequestId: string };
+  /**
+   * Transient launch-env secrets resolved by the Harness SecretBroker (§3)
+   * immediately before start/resume. NEVER persisted, NEVER part of the request
+   * fingerprint — the adapter injects these into the provider launch environment
+   * and the Harness drops them right after.
+   */
+  secretEnv?: Record<string, string>;
 }
 
 export type PermissionPolicy =

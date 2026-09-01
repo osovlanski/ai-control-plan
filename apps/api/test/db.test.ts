@@ -39,6 +39,7 @@ describe("migrations", () => {
       .all()
       .map((r) => (r as { name: string }).name);
     expect(tables).toEqual([
+      "approvals",
       "assistants",
       "capability_changes",
       "capability_probes",
@@ -47,6 +48,10 @@ describe("migrations", () => {
       "cooldowns",
       "event_archives",
       "events",
+      "execution_requests",
+      "execution_results",
+      "guard_directives",
+      "handoff_envelopes",
       "handoffs",
       "quota_snapshots",
       "routing_decisions",

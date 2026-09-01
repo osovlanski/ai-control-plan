@@ -52,6 +52,37 @@ export interface CapabilityManifest {
     /** Best-effort pre-routing quota view; refreshed continuously from run events. */
     limits?: QuotaWindowState[];
   };
+  /**
+   * Execution-harness capability declarations (execution-harness §6). Optional:
+   * when absent the Harness assumes the least-capable defaults (accounting
+   * "none", `toolGating` "none", `processIsolation` "none", `approvalRelay`
+   * derived from `adapter.send`). A claim here is only honest once the adapter
+   * conformance suite (§12) proves the callable behavior behind it — until then
+   * Prepare rejects policies that would rely on it.
+   */
+  harness?: {
+    usageAccounting: "delta" | "cumulative" | "none";
+    /** Quantitative usage-reporting contract — required for bounded budget enforcement (§2). */
+    usageReporting?: {
+      cadence: "per-message" | { periodicMs: number };
+      maxUnreportedTokens: number;
+    };
+    toolGating: "preventive" | "none";
+    approvalRelay: boolean;
+    /**
+     * The provider exposes a queryable acknowledgement for a relayed approval, so
+     * a `delivery_unknown` recovery can probe and settle it deterministically (§4).
+     */
+    approvalAckLookup?: boolean;
+    /**
+     * The conformance suite has proven that re-sending the SAME
+     * `provider_request_id` answer is accepted-or-no-op for this adapter, so a
+     * `delivery_unknown` recovery may safely re-deliver (§4).
+     */
+    approvalIdempotentRedelivery?: boolean;
+    processIsolation: "os-sandbox" | "provider-sandbox" | "none";
+    provisioningContractVersion?: string;
+  };
   /** Provider-specific detail: skills/plugins (Claude), sandbox (Codex), rules (Cursor), deployed agents (Bedrock). */
   providerDetail: Record<string, unknown>;
   evidence: {

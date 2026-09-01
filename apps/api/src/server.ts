@@ -1,6 +1,7 @@
 import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
 import {
   CONTROL_PLANE_API_VERSION,
+  DEFAULT_REDACTION_RULES,
   NORMALIZED_EVENT_VERSION,
   OBSERVABILITY_CAPABILITIES,
   type AssistantId,
@@ -10,6 +11,15 @@ import type { ResolvedConfig } from "./config.js";
 import { appliedMigrations, type Db } from "./db/index.js";
 import { CheckpointService } from "./modules/checkpoint.js";
 import { CooldownStore } from "./modules/cooldown.js";
+import { ApprovalService } from "./modules/harness/approval-service.js";
+import { HarnessBridge } from "./modules/harness/control-plane-bridge.js";
+import { deriveEnvelopeUpdate } from "./modules/harness/envelope-derivation.js";
+import { EventRecorder } from "./modules/harness/event-recorder.js";
+import { snapshotQuota } from "./modules/harness/quota-snapshot.js";
+import { HarnessRecovery } from "./modules/harness/recovery.js";
+import { SessionRunner } from "./modules/harness/session-runner.js";
+import { SessionStore } from "./modules/harness/session-store.js";
+import { effectiveStateSql, effectiveUsageJoin, effectiveUsageSql } from "./modules/harness/state-vocab.js";
 import { Orchestrator } from "./modules/orchestrator.js";
 import { Registry } from "./modules/registry.js";
 import { persistRoutingDecision, route, routingHistory, type RouteRequest } from "./modules/router.js";
@@ -19,6 +29,9 @@ import { TelemetryService, classifyGoal } from "./modules/telemetry.js";
 import { EventRetention } from "./modules/retention.js";
 import { renderHandoffMd } from "./render/handoff.js";
 import { renderProgressMd } from "./render/progress.js";
+
+/** Legacy `applyEvent` snapshots quota on exactly these event types. */
+const QUOTA_EVENT_TYPES = new Set(["usage.updated", "limit.approaching", "limit.hit"]);
 
 export interface ServerDeps {
   config: ResolvedConfig;
@@ -50,11 +63,113 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   const cooldowns = new CooldownStore(db);
   const telemetry = new TelemetryService(db);
   const retention = new EventRetention(db);
+  const app = Fastify({ logger: true });
+
+  // One SessionStore / ApprovalService shared by recovery + (flag-ON) the runner
+  // and bridge — the composition root (PLAN.md 8c.6).
+  const sessionStore = new SessionStore(db);
+  const approvals = new ApprovalService(db);
+  const harnessRecovery = new HarnessRecovery({
+    store: sessionStore,
+    approvals,
+    checkpoints, // CheckpointService is structurally a RunnerCheckpoints
+    registry, // Registry is structurally a { adapter, manifest } facade
+  });
+
+  // When a test injects its own orchestrator it owns the harness wiring; the
+  // internal bridge is built (and asserted) only for the real composition root.
+  let harnessBridge: HarnessBridge | undefined;
+  if (config.execution?.harnessSingleMode && !deps.orchestrator) {
+    // --- flag-ON parity plumbing (PLAN.md 8d) ---
+    const sessionTaskCache = new Map<string, string>();
+    const taskOfSession = (sid: string): string | undefined => {
+      let t = sessionTaskCache.get(sid);
+      if (!t) {
+        t = (db.prepare("SELECT task_id FROM runs WHERE id = ?").get(sid) as { task_id?: string } | undefined)?.task_id;
+        if (t) sessionTaskCache.set(sid, t); // a session's task is immutable — no invalidation
+      }
+      return t;
+    };
+    const assistantOfSession = (sid: string): string | undefined =>
+      (db.prepare("SELECT assistant_id FROM runs WHERE id = ?").get(sid) as { assistant_id?: string } | undefined)
+        ?.assistant_id;
+    const lastPublishedPhase = new Map<string, string | undefined>();
+
+    const recorder = new EventRecorder(
+      db,
+      DEFAULT_REDACTION_RULES,
+      // publish (post-commit, best-effort): reproduce the legacy per-event SSE
+      // frame verbatim, plus a deduped {kind:"state"} on a derived phase change.
+      (sessionId, durableEvents) => {
+        const taskId = taskOfSession(sessionId);
+        if (!taskId) return;
+        for (const { seq, event } of durableEvents) {
+          bus.publish(taskId, { kind: "event", event: { ...event, seq } });
+        }
+        const status = tasks.envelope(taskId).status;
+        if (status.phase !== lastPublishedPhase.get(taskId)) {
+          lastPublishedPhase.set(taskId, status.phase);
+          bus.publish(taskId, {
+            kind: "state",
+            state: { state: status.state, phase: status.phase, assistantId: assistantOfSession(sessionId) },
+          });
+        }
+      },
+      undefined, // now
+      undefined, // onPublishError
+      // afterInsertInTx (transactional): task-envelope derivation + quota
+      // snapshots, atomic with the event insert. Never writes `runs`.
+      (sessionId, committed, txDb) => {
+        const taskId = taskOfSession(sessionId);
+        if (!taskId) return;
+        const assistantId = assistantOfSession(sessionId) ?? "";
+        const envelope = tasks.envelope(taskId);
+        let changed = false;
+        for (const { event } of committed) {
+          if (deriveEnvelopeUpdate(envelope, event)) changed = true;
+          // Same event-type gate as the legacy applyEvent switch — a quota
+          // snapshot only on usage.updated / limit.approaching / limit.hit.
+          if (QUOTA_EVENT_TYPES.has(event.type)) snapshotQuota(txDb, assistantId, event);
+        }
+        if (changed) tasks.saveEnvelope(envelope);
+      },
+    );
+    const runner = new SessionRunner({
+      store: sessionStore,
+      recorder,
+      approvals,
+      checkpoints,
+      registry,
+      softThresholdPct: config.failover.softThresholdPct,
+      // No `handoff` dep — the envelope-yield path is out of scope this pass, so
+      // the runner never commits an envelope.
+    });
+    harnessBridge = new HarnessBridge({
+      runner,
+      store: sessionStore,
+      approvals,
+      db,
+      onError: (err) => app.log.error(err),
+    });
+  }
+  if (config.execution?.harnessSingleMode && !deps.orchestrator && !harnessBridge) {
+    throw new Error("harnessSingleMode ON but the execution-harness bridge is not wired");
+  }
+
   const orchestrator =
     deps.orchestrator ??
-    new Orchestrator(db, config, registry, tasks, bus, checkpoints, cooldowns);
-
-  const app = Fastify({ logger: true });
+    new Orchestrator(
+      db,
+      config,
+      registry,
+      tasks,
+      bus,
+      checkpoints,
+      cooldowns,
+      undefined,
+      harnessRecovery,
+      harnessBridge,
+    );
 
   const repoAllowed = (repoPath: string | null | undefined): boolean =>
     !repoPath || config.repoAllowlist.some((allowed) => repoPath === allowed || repoPath.startsWith(`${allowed}/`));
@@ -83,8 +198,8 @@ export function buildServer(deps: ServerDeps): BuiltServer {
         manifest: a.manifestParsed,
       })),
     );
-    persistRoutingDecision(db, taskId, explanation);
-    return explanation;
+    const routingDecisionId = persistRoutingDecision(db, taskId, explanation);
+    return { explanation, routingDecisionId };
   };
 
   app.get("/api/meta", () => ({
@@ -165,7 +280,15 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     if (!row) return reply.status(404).send({ error: "not found" });
     const runs = db
       .prepare(
-        "SELECT id, assistant_id, provider_session_ref, state, usage, started_at, ended_at FROM runs WHERE task_id = ? ORDER BY started_at",
+        // Effective state + usage derived at read time (execution-harness.md §5,
+        // PLAN.md 8e) — session_state authoritative for harness rows, usage
+        // falls back to the terminal execution_results row. See state-vocab.ts.
+        `SELECT r.id, r.assistant_id, r.provider_session_ref,
+           ${effectiveStateSql("r")} AS state,
+           ${effectiveUsageSql("r")} AS usage,
+           r.started_at, r.ended_at
+         FROM runs r ${effectiveUsageJoin("r")}
+         WHERE r.task_id = ? ORDER BY r.started_at`,
       )
       .all(req.params.id) as Array<Record<string, unknown> & { usage: string | null }>;
     return {
@@ -179,9 +302,9 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   app.post<{ Params: { id: string }; Body: { assistantId?: AssistantId } }>(
     "/api/tasks/:id/route",
     (req, reply) => {
-      const explanation = computeRoute(req.params.id, req.body?.assistantId);
-      if (!explanation) return reply.status(404).send({ error: "not found" });
-      return explanation;
+      const routed = computeRoute(req.params.id, req.body?.assistantId);
+      if (!routed) return reply.status(404).send({ error: "not found" });
+      return routed.explanation;
     },
   );
 
@@ -194,14 +317,18 @@ export function buildServer(deps: ServerDeps): BuiltServer {
       if (row.state !== "CREATED") {
         return reply.status(409).send({ error: `Task is ${row.state}; only CREATED tasks can start` });
       }
-      const explanation = computeRoute(taskId, req.body?.assistantId);
-      if (!explanation?.chosen) {
-        return reply.status(422).send({ error: "No eligible assistant", explanation });
+      const routed = computeRoute(taskId, req.body?.assistantId);
+      const chosen = routed?.explanation.chosen;
+      if (!routed || !chosen) {
+        return reply.status(422).send({ error: "No eligible assistant", explanation: routed?.explanation });
       }
+      const { explanation, routingDecisionId } = routed;
       try {
         tasks.transition(taskId, "ROUTING");
-        const { runId } = await orchestrator.startTask(taskId, explanation.chosen);
-        return { runId, assistantId: explanation.chosen, explanation };
+        const { runId } = await orchestrator.startTask(taskId, chosen, {
+          routingDecisionRef: String(routingDecisionId),
+        });
+        return { runId, assistantId: chosen, explanation };
       } catch (err) {
         // Worktree/adapter startup failure: park the task as FAILED with the reason.
         const current = tasks.get(taskId);
@@ -386,6 +513,208 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     return renderProgressMd(tasks.envelope(req.params.id), lastRun?.assistant_id);
   });
 
+  // ---- Execution Harness durable reads (§11) — additive, read-only ----------
+  // Every state distinction in §11 is renderable from these durable rows alone;
+  // nothing is inferred from SSE. `sessionState` is primary (§5); the legacy
+  // `state` vocabulary is still served during the dual-field window.
+
+  app.get<{ Params: { id: string } }>("/api/tasks/:id/sessions", (req, reply) => {
+    if (!tasks.get(req.params.id)) return reply.status(404).send({ error: "not found" });
+    const rows = db
+      .prepare(
+        `SELECT r.id, r.execution_request_id, r.assistant_id, r.session_state, r.state, r.attempt,
+                r.provider_start_acked, r.cancel_requested, r.settlement_owner, r.started_at, r.ended_at,
+                er.parent_task_id, er.group_id
+           FROM runs r JOIN execution_requests er ON er.id = r.execution_request_id
+          WHERE r.task_id = ?
+          ORDER BY r.started_at, r.id`,
+      )
+      .all(req.params.id) as Array<Record<string, unknown>>;
+    return rows.map(sessionSummary);
+  });
+
+  // Correlated navigation (§11): sessions across a subtask GROUP or under a
+  // PARENT task — the fan-out the single-task list above cannot express.
+  app.get<{ Querystring: { groupId?: string; parentTaskId?: string } }>("/api/sessions", (req, reply) => {
+    const { groupId, parentTaskId } = req.query;
+    if (!groupId && !parentTaskId) {
+      return reply.status(400).send({ error: "provide groupId or parentTaskId" });
+    }
+    const where = groupId ? "er.group_id = ?" : "er.parent_task_id = ?";
+    const rows = db
+      .prepare(
+        `SELECT r.id, r.execution_request_id, r.assistant_id, r.session_state, r.state, r.attempt,
+                r.provider_start_acked, r.cancel_requested, r.settlement_owner, r.started_at, r.ended_at,
+                er.parent_task_id, er.group_id, r.task_id
+           FROM runs r JOIN execution_requests er ON er.id = r.execution_request_id
+          WHERE ${where}
+          ORDER BY r.started_at, r.id`,
+      )
+      .all((groupId ?? parentTaskId) as string) as Array<Record<string, unknown>>;
+    return rows.map((r) => ({ ...sessionSummary(r), taskId: r.task_id }));
+  });
+
+  app.get<{ Params: { id: string } }>("/api/sessions/:id", (req, reply) => {
+    const run = db
+      .prepare(
+        `SELECT id, task_id, execution_request_id, assistant_id, session_state, state, version,
+                provider_session_ref, provider_start_acked, cancel_requested, settlement_owner,
+                attempt, lease_token, lease_expires_at, started_at, ended_at
+           FROM runs WHERE id = ?`,
+      )
+      .get(req.params.id) as Record<string, unknown> | undefined;
+    if (!run || run.execution_request_id == null) return reply.status(404).send({ error: "not found" });
+
+    const requestRow = db
+      .prepare(
+        `SELECT id, attempt, assistant_id, model, routing_decision_ref, request_fingerprint,
+                fingerprint_algorithm, prompt_source, prompt_source_ref, origin_envelope_id,
+                superseded, policy, verification, origin, parent_task_id, group_id, created_at
+           FROM execution_requests WHERE id = ?`,
+      )
+      .get(run.execution_request_id) as Record<string, unknown> | undefined;
+
+    const resultRow = db
+      .prepare("SELECT result FROM execution_results WHERE session_id = ?")
+      .get(req.params.id) as { result: string } | undefined;
+    // A well-formed ExecutionResult is an object with a string `outcome` and an
+    // `enforcement` object; anything else (corrupt row) degrades to null so a
+    // client never dereferences `result.enforcement.tools` on garbage.
+    const parsed = resultRow ? safeJson(resultRow.result) : null;
+    const result =
+      parsed && typeof parsed === "object" && !Array.isArray(parsed) &&
+      typeof (parsed as Record<string, unknown>).outcome === "string"
+        ? (parsed as Record<string, unknown>)
+        : null;
+
+    const checkpoints = (
+      db
+        .prepare(
+          "SELECT id, reason, git_ref, diff_stat, at FROM checkpoints WHERE session_id = ? ORDER BY at, id",
+        )
+        .all(req.params.id) as Array<Record<string, unknown>>
+    ).map((c) => ({ id: c.id, reason: c.reason, gitRef: c.git_ref, diffStat: c.diff_stat, at: c.at }));
+
+    const handoffEnvelopes = (
+      db
+        .prepare(
+          `SELECT id, state, checkpoint_id, claimed_by_request_id, claimed_at, start_attempted_at,
+                  from_assistant_id, reason, created_at, updated_at
+             FROM handoff_envelopes WHERE source_session_id = ? ORDER BY created_at, id`,
+        )
+        .all(req.params.id) as Array<Record<string, unknown>>
+    ).map((e) => ({
+      id: e.id,
+      state: e.state,
+      checkpointId: e.checkpoint_id,
+      claimedByRequestId: e.claimed_by_request_id,
+      claimedAt: e.claimed_at,
+      startAttemptedAt: e.start_attempted_at,
+      fromAssistantId: e.from_assistant_id,
+      reason: e.reason,
+      createdAt: e.created_at,
+      updatedAt: e.updated_at,
+    }));
+
+    const approvals = (
+      db
+        .prepare(
+          `SELECT id, provider_request_id, state, decision, answered_by, answered_at, delivered_at,
+                  delivery_note, created_at, updated_at
+             FROM approvals WHERE session_id = ? ORDER BY created_at, id`,
+        )
+        .all(req.params.id) as Array<Record<string, unknown>>
+    ).map((a) => ({
+      id: a.id,
+      providerRequestId: a.provider_request_id,
+      state: a.state,
+      decision: a.decision,
+      answeredBy: a.answered_by,
+      answeredAt: a.answered_at,
+      deliveredAt: a.delivered_at,
+      deliveryNote: a.delivery_note,
+      createdAt: a.created_at,
+      updatedAt: a.updated_at,
+    }));
+
+    // Typed audit events for the drill-down: guard decisions, verification
+    // results, checkpoint markers, recovery decisions (orphan vs resume, §9).
+    // Absence means "stage did not happen".
+    const audit = (
+      db
+        .prepare(
+          `SELECT seq, ts, type, phase, summary, payload FROM events
+             WHERE run_id = ?
+               AND type IN ('guard.decision', 'verification.result', 'checkpoint.created', 'recovery.decision')
+             ORDER BY seq`,
+        )
+        .all(req.params.id) as Array<Record<string, unknown> & { payload: string | null }>
+    ).map((e) => ({
+      seq: e.seq,
+      ts: e.ts,
+      type: e.type,
+      phase: e.phase,
+      summary: e.summary,
+      payload: e.payload ? safeJson(e.payload) : null,
+    }));
+
+    return {
+      sessionId: run.id,
+      taskId: run.task_id,
+      executionRequestId: run.execution_request_id,
+      assistantId: run.assistant_id,
+      attempt: run.attempt,
+      sessionState: run.session_state, // primary (§5)
+      state: run.state, // legacy vocabulary, still served (dual-field window)
+      version: run.version,
+      providerSessionRef: run.provider_session_ref,
+      providerStartAcked: run.provider_start_acked === 1,
+      cancelRequested: run.cancel_requested === 1,
+      settlementOwner: run.settlement_owner,
+      lease: run.lease_token ? { expiresAt: run.lease_expires_at } : null,
+      startedAt: run.started_at,
+      endedAt: run.ended_at,
+      // Opaque observability join keys (§2) — carried for navigation, never read by logic.
+      correlation: requestRow
+        ? { parentTaskId: requestRow.parent_task_id ?? null, groupId: requestRow.group_id ?? null }
+        : null,
+      request: requestRow
+        ? {
+            id: requestRow.id,
+            attempt: requestRow.attempt,
+            assistantId: requestRow.assistant_id,
+            model: requestRow.model ? safeJson(requestRow.model as string) : null,
+            routingDecisionRef: requestRow.routing_decision_ref,
+            requestFingerprint: requestRow.request_fingerprint,
+            fingerprintAlgorithm: requestRow.fingerprint_algorithm,
+            promptSource: requestRow.prompt_source,
+            promptSourceRef: requestRow.prompt_source_ref,
+            originEnvelopeId: requestRow.origin_envelope_id,
+            superseded: requestRow.superseded === 1,
+            policy: safeJson(requestRow.policy as string),
+            verification: safeJson(requestRow.verification as string),
+            origin: safeJson(requestRow.origin as string),
+            createdAt: requestRow.created_at,
+          }
+        : null,
+      // verification + enforcement live inside `result` — not duplicated here.
+      result,
+      checkpoints,
+      handoffEnvelopes,
+      approvals,
+      audit,
+    };
+  });
+
+  // Lease sweeper (execution-harness §9): a periodic tick hands any session whose
+  // fencing lease has expired to recovery. ponytail: fixed 60s = the lease TTL;
+  // make it config if a deployment ever needs a different cadence.
+  const leaseSweep = setInterval(() => {
+    void harnessRecovery.sweepExpiredLeases().catch((err) => app.log.error(err, "lease sweep failed"));
+  }, 60_000);
+  leaseSweep.unref();
+  app.addHook("onClose", async () => clearInterval(leaseSweep));
+
   return { app, registry, orchestrator, tasks, bus, checkpoints, cooldowns, telemetry };
 }
 
@@ -405,6 +734,33 @@ function send(reply: FastifyReply, payload: unknown): void {
 
 function message(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/** Parse a durable JSON column; a corrupt one yields null rather than a 500. */
+function safeJson(value: string): unknown {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
+/** One row of the session-list endpoints. */
+function sessionSummary(r: Record<string, unknown>): Record<string, unknown> {
+  return {
+    sessionId: r.id,
+    executionRequestId: r.execution_request_id,
+    assistantId: r.assistant_id,
+    sessionState: r.session_state,
+    state: r.state,
+    attempt: r.attempt,
+    providerStartAcked: r.provider_start_acked === 1,
+    cancelRequested: r.cancel_requested === 1,
+    settlementOwner: r.settlement_owner,
+    correlation: { parentTaskId: r.parent_task_id ?? null, groupId: r.group_id ?? null },
+    startedAt: r.started_at,
+    endedAt: r.ended_at,
+  };
 }
 
 /** Overall scores as the base, kind-specific ones overriding where present. */

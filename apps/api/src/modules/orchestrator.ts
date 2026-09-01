@@ -2,12 +2,23 @@ import { join } from "node:path";
 import type {
   AgentAdapter,
   AssistantId,
+  ExecutionResult,
+  ExecutionSessionState,
   NormalizedEvent,
   ProviderSessionRef,
   RunHandle,
   TaskEnvelope,
+  TaskState,
 } from "@agent-plane/core";
-import { DEFAULT_REDACTION_RULES, isTaskState, isTerminal as isTerminalState, newHandoffId, redactEvent, redactText } from "@agent-plane/core";
+import {
+  DEFAULT_REDACTION_RULES,
+  isSessionTerminal,
+  isTaskState,
+  isTerminal as isTerminalState,
+  newHandoffId,
+  redactEvent,
+  redactText,
+} from "@agent-plane/core";
 import type { ResolvedConfig } from "../config.js";
 import type { Db } from "../db/index.js";
 import {
@@ -20,6 +31,10 @@ import {
 import { renderHandoffPrompt } from "../render/handoff.js";
 import { renderTaskPrompt } from "../render/prompt.js";
 import type { CheckpointReason, CheckpointService } from "./checkpoint.js";
+import type { HarnessBridge } from "./harness/control-plane-bridge.js";
+import { deriveEnvelopeUpdate } from "./harness/envelope-derivation.js";
+import { quotaOf, snapshotQuota } from "./harness/quota-snapshot.js";
+import { effectiveStateSql, effectiveUsageJoin, effectiveUsageSql } from "./harness/state-vocab.js";
 import type { CooldownStore } from "./cooldown.js";
 import type { Registry } from "./registry.js";
 import { persistRoutingDecision, route, type RouteRequest } from "./router.js";
@@ -63,6 +78,12 @@ export interface StartOptions {
   parallel?: boolean;
   /** The competitor's own worktree, when the task touches a repository. */
   worktree?: { worktreePath: string; branch: string; baseRef: string };
+  /**
+   * routing_decisions row id for THIS start (from `computeRoute` / failover /
+   * manual handoff). Flag-ON `startTask` threads it into the ExecutionRequest;
+   * absent ⇒ a fresh minimal decision is persisted (PLAN.md 8c.5).
+   */
+  routingDecisionRef?: string;
 }
 
 const DEFAULT_MAX_RUNTIME_MS = 30 * 60 * 1000;
@@ -88,19 +109,94 @@ export class Orchestrator {
     private checkpoints: CheckpointService,
     private cooldowns: CooldownStore,
     private maxRuntimeMs = DEFAULT_MAX_RUNTIME_MS,
+    /**
+     * Execution-Harness boot reconcile (execution-harness §9). When present it
+     * decides every live Harness session's fate (resume-offer / orphan+checkpoint
+     * / complete-from-verifying) BEFORE the legacy blanket fail-all below, which
+     * is then scoped to legacy `runs` rows only.
+     */
+    private harnessRecovery?: { reconcileOnBoot(): Promise<unknown> },
+    /**
+     * Flag-ON single-mode seam to `SessionRunner` (PLAN.md 8c). Injected by
+     * `buildServer` only when `config.execution.harnessSingleMode` is on; the
+     * legacy adapter-driving path is used whenever it is absent.
+     */
+    private harnessBridge?: HarnessBridge,
   ) {}
 
+  /** Flag-ON single-mode routing applies to this start (non-parallel, non-compare/race). */
+  private harnessRouting(taskId: string, options: StartOptions): boolean {
+    if (!this.config.execution?.harnessSingleMode || !this.harnessBridge) return false;
+    if (options.parallel) return false;
+    const mode = this.tasks.get(taskId)?.mode;
+    return mode !== "compare" && mode !== "race";
+  }
+
+  /**
+   * The newest `runs` row for the task is a Harness session — so every control
+   * op stays on the Harness branch through the post-terminal / pre-settle
+   * window (PLAN.md R1 #12).
+   */
+  private harnessOwns(taskId: string): boolean {
+    if (!this.harnessBridge) return false;
+    const row = this.db
+      .prepare("SELECT execution_request_id FROM runs WHERE task_id = ? ORDER BY started_at DESC, rowid DESC LIMIT 1")
+      .get(taskId) as { execution_request_id: string | null } | undefined;
+    return !!row && row.execution_request_id !== null;
+  }
+
   /** Crash recovery (arch §5): tasks left in-flight by a dead process are failed with a record. */
-  reconcileOnBoot(): number {
+  async reconcileOnBoot(): Promise<number> {
+    // Step 1 — per-session Harness recovery (§9): decides every live Harness
+    // session (resume-offer / orphan+checkpoint / complete-from-verifying),
+    // writing a terminal execution_results row for the settled cases.
+    await this.harnessRecovery?.reconcileOnBoot();
+
+    // Step 2 — Harness in-flight sweep, BEFORE the legacy blanket-fail
+    // (PLAN.md 8c.3, Codex R4/R5). Over every in-flight task state
+    // runningTasks() returns (RUNNING / ROUTING / HANDING_OFF):
+    if (this.harnessBridge) {
+      for (const row of this.tasks.runningTasks()) {
+        if (!this.harnessOwns(row.id)) continue;
+        const sid = this.harnessBridge.latestSessionId(row.id);
+        const assistantId = this.lastAssistant(row.id) ?? "";
+        const result = sid ? this.harnessBridge.result(sid) : undefined;
+        if (result) {
+          await this.settleFromResult(row.id, assistantId, sid!, result);
+        } else {
+          // Crashed mid-ROUTING/HANDING_OFF, or a resume_offered session this
+          // pass cannot act on — park, never leave in an in-flight state, never
+          // blanket-fail (same shape as settleFromResult(..., null)).
+          try {
+            const envelope = this.tasks.transition(row.id, "WAITING_INPUT");
+            this.publishState(row.id, envelope);
+            this.notice(
+              row.id,
+              "warn",
+              `execution harness task recovered at boot in ${row.state} with no terminal session result — manual restart required`,
+            );
+          } catch {
+            // already moved on by step 1 / a concurrent settle
+          }
+        }
+      }
+    }
+
+    // Step 3 — legacy blanket-fail, scoped to legacy-owned tasks at BOTH the
+    // task-transition level and the runs UPDATE (a Harness-owned task is handled
+    // by step 2 and is never stomped here).
     let reconciled = 0;
     for (const row of this.tasks.runningTasks()) {
+      if (this.harnessOwns(row.id)) continue;
       try {
         this.tasks.transition(row.id, "FAILED");
       } catch {
         continue;
       }
       this.db
-        .prepare("UPDATE runs SET state = 'ENDED_ERROR', ended_at = ? WHERE task_id = ? AND ended_at IS NULL")
+        .prepare(
+          "UPDATE runs SET state = 'ENDED_ERROR', ended_at = ? WHERE task_id = ? AND ended_at IS NULL AND execution_request_id IS NULL",
+        )
         .run(new Date().toISOString(), row.id);
       reconciled += 1;
     }
@@ -118,7 +214,7 @@ export class Orchestrator {
   }
 
   isActive(taskId: string): boolean {
-    return this.runsOfTask(taskId).length > 0;
+    return this.runsOfTask(taskId).length > 0 || this.harnessBridge?.liveSessionId(taskId) !== undefined;
   }
 
   async startTask(
@@ -159,6 +255,49 @@ export class Orchestrator {
       envelope = this.tasks.transition(taskId, "RUNNING");
     }
     this.publishState(taskId, envelope, assistantId);
+
+    // Flag-ON single mode: route execution through SessionRunner via the bridge.
+    // Skips the legacy runs INSERT / ActiveRun map / adapter.start / consume() —
+    // SessionStore owns the runs row for this session (PLAN.md 8c.3).
+    if (this.harnessRouting(taskId, options)) {
+      const attempt =
+        ((
+          this.db
+            .prepare("SELECT MAX(attempt) AS m FROM execution_requests WHERE task_id = ?")
+            .get(taskId) as { m: number | null }
+        ).m ?? 0) + 1;
+      const routingDecisionRef = String(
+        options.routingDecisionRef ??
+          persistRoutingDecision(this.db, taskId, {
+            candidates: [],
+            ruleFired: "harness-single-mode start (routing decision supplied by caller)",
+            chosen: assistantId,
+          }),
+      );
+      const taskRow = this.tasks.get(taskId)!;
+      const { runId } = this.harnessBridge!.start(
+        {
+          taskId,
+          assistantId,
+          attempt,
+          prompt,
+          workdir,
+          worktree: envelope.repository
+            ? {
+                repoPath: envelope.repository.path,
+                branch: taskRow.branch ?? envelope.repository.branch,
+                worktreePath: workdir,
+                baseRef: taskRow.base_ref ?? "HEAD",
+              }
+            : undefined,
+          approvalMode: this.config.policy.approvalMode,
+          maxRuntimeMs: this.maxRuntimeMs,
+          routingDecisionRef,
+        },
+        (result, sid) => this.settleFromResult(taskId, assistantId, sid, result),
+      );
+      return { runId };
+    }
 
     // Same-provider continuation resumes the provider session; cross-provider
     // handoff always starts fresh from the rendered package (arch §7).
@@ -283,12 +422,11 @@ export class Orchestrator {
   /** Envelope derivation from the event stream (review §3.6: agent reports enrich, events carry). */
   private async applyEvent(run: ActiveRun, event: NormalizedEvent): Promise<void> {
     const envelope = this.tasks.envelope(run.taskId);
-    let changed = false;
+    // Envelope-shaping cases (phase / file.changed / test.result / message) —
+    // shared with the flag-ON single-mode path (PLAN.md 8b).
+    const changed = deriveEnvelopeUpdate(envelope, event);
 
-    if (event.phase && envelope.status.phase !== event.phase) {
-      envelope.status.phase = event.phase;
-      changed = true;
-    }
+    // Run / adapter / DB side effects stay here for the legacy path.
     switch (event.type) {
       case "run.started": {
         const ref = (event.payload as { providerSessionRef?: string } | undefined)?.providerSessionRef;
@@ -297,50 +435,20 @@ export class Orchestrator {
         }
         break;
       }
-      case "file.changed": {
-        const payload = event.payload as { path?: string; ok?: boolean } | undefined;
-        const path = payload?.path;
-        // Adapters (Codex) report attempted-but-failed changes with ok:false;
-        // only a change that actually landed belongs in the envelope.
-        if (path && payload?.ok !== false && !envelope.artifacts.changedFiles.includes(path)) {
-          envelope.artifacts.changedFiles.push(path);
-          changed = true;
-        }
-        break;
-      }
-      case "test.result": {
-        const p = event.payload as { passed?: number; failed?: number } | undefined;
-        envelope.artifacts.testResults.push({
-          at: event.ts,
-          passed: p?.passed ?? 0,
-          failed: p?.failed ?? 0,
-        });
-        changed = true;
-        break;
-      }
       case "usage.updated": {
         this.db.prepare("UPDATE runs SET usage = ? WHERE id = ?").run(JSON.stringify(event.payload ?? {}), run.runId);
-        this.snapshotQuota(run.assistantId, event);
+        snapshotQuota(this.db, run.assistantId, event);
         await this.checkSoftThreshold(run, event);
         break;
       }
       case "limit.approaching": {
-        this.snapshotQuota(run.assistantId, event);
+        snapshotQuota(this.db, run.assistantId, event);
         await this.checkSoftThreshold(run, event, true);
         break;
       }
       case "limit.hit": {
-        this.snapshotQuota(run.assistantId, event);
+        snapshotQuota(this.db, run.assistantId, event);
         run.limit = { reason: event.summary, resetsAt: firstResetsAt(event) };
-        break;
-      }
-      case "message": {
-        const text = (event.payload as { text?: string } | undefined)?.text;
-        if (text) {
-          envelope.nextAction = undefined;
-          envelope.completed = mergeTail(envelope.completed, event.summary);
-          changed = true;
-        }
         break;
       }
       default:
@@ -373,16 +481,6 @@ export class Orchestrator {
     );
   }
 
-  private snapshotQuota(assistantId: string, event: NormalizedEvent): void {
-    const quota = quotaOf(event);
-    if (!quota) return;
-    const insert = this.db.prepare(
-      "INSERT INTO quota_snapshots (assistant_id, window, used_percent, resets_at, source, observed_at) VALUES (?, ?, ?, ?, 'runtime-probe', ?)",
-    );
-    for (const q of quota) {
-      insert.run(assistantId, q.window, q.usedPercent, q.resetsAt ?? null, event.ts);
-    }
-  }
 
   /** Decides what happens after a run's stream drains: finish, or fail over. */
   private async settleRun(run: ActiveRun, ok: boolean): Promise<void> {
@@ -407,7 +505,11 @@ export class Orchestrator {
       (!ok && !limited && run.sawError === true && this.triggerEnabled("provider_unavailable"));
 
     if (shouldFailover && this.config.failover.auto) {
-      await this.failover(run, limited ? "quota" : "failure");
+      const trigger = limited ? "quota" : "failure";
+      const reasonText = limited
+        ? (run.limit?.reason ?? `${run.assistantId} hit a usage limit`)
+        : `${run.assistantId} ended with an error`;
+      await this.failoverTask(run.taskId, run.assistantId, trigger, reasonText, run.runId, run.limit?.resetsAt);
       return;
     }
 
@@ -436,26 +538,28 @@ export class Orchestrator {
    * checkpoint → cooldown the source → re-route among what's left →
    * resume the task on the next best assistant, or park it (arch §8).
    */
-  private async failover(run: ActiveRun, trigger: "quota" | "failure"): Promise<void> {
-    const reasonText =
-      trigger === "quota"
-        ? (run.limit?.reason ?? `${run.assistantId} hit a usage limit`)
-        : `${run.assistantId} ended with an error`;
+  private async failoverTask(
+    taskId: string,
+    assistantId: string,
+    trigger: "quota" | "failure",
+    reasonText: string,
+    fromRunOrSessionId: string,
+    resetsAt?: string,
+  ): Promise<void> {
+    this.tasks.transition(taskId, "LIMIT_PAUSED");
+    this.publishState(taskId, this.tasks.envelope(taskId), assistantId);
 
-    this.tasks.transition(run.taskId, "LIMIT_PAUSED");
-    this.publishState(run.taskId, this.tasks.envelope(run.taskId), run.assistantId);
+    const checkpoint = await this.checkpoints.create(taskId, fromRunOrSessionId, "handoff");
+    this.cooldowns.penalize(assistantId, trigger === "quota" ? "limit" : "failure", reasonText, resetsAt);
 
-    const checkpoint = await this.checkpoints.create(run.taskId, run.runId, "handoff");
-    this.cooldowns.penalize(run.assistantId, trigger === "quota" ? "limit" : "failure", reasonText, run.limit?.resetsAt);
-
-    const explanation = this.routeFor(run.taskId, run.assistantId);
-    persistRoutingDecision(this.db, run.taskId, explanation);
+    const explanation = this.routeFor(taskId, assistantId);
+    const routingDecisionId = persistRoutingDecision(this.db, taskId, explanation);
 
     if (!explanation.chosen) {
-      const envelope = this.tasks.transition(run.taskId, "WAITING_INPUT");
-      this.publishState(run.taskId, envelope);
+      const envelope = this.tasks.transition(taskId, "WAITING_INPUT");
+      this.publishState(taskId, envelope);
       this.notice(
-        run.taskId,
+        taskId,
         "warn",
         `${reasonText}. No other assistant is eligible right now — work is checkpointed and waiting. ${describeWaits(explanation)}`,
       );
@@ -463,10 +567,10 @@ export class Orchestrator {
     }
 
     const target = explanation.chosen;
-    this.tasks.transition(run.taskId, "HANDING_OFF");
-    this.publishState(run.taskId, this.tasks.envelope(run.taskId), target);
+    this.tasks.transition(taskId, "HANDING_OFF");
+    this.publishState(taskId, this.tasks.envelope(taskId), target);
     this.notice(
-      run.taskId,
+      taskId,
       "warn",
       `${reasonText} — handing off to ${target}, continuing from the checkpoint.`,
     );
@@ -475,22 +579,127 @@ export class Orchestrator {
       .prepare(
         "INSERT INTO handoffs (id, task_id, from_run_id, to_run_id, checkpoint_id, trigger, at) VALUES (?, ?, ?, NULL, ?, ?, ?)",
       )
-      .run(newHandoffId(), run.taskId, run.runId, checkpoint.id, trigger, new Date().toISOString());
+      .run(newHandoffId(), taskId, fromRunOrSessionId, checkpoint.id, trigger, new Date().toISOString());
 
     try {
-      const { runId } = await this.startTask(run.taskId, target, {
+      const { runId } = await this.startTask(taskId, target, {
         trigger: "handoff",
         reason: reasonText,
-        fromAssistantId: run.assistantId,
+        fromAssistantId: assistantId,
+        routingDecisionRef: String(routingDecisionId),
       });
       this.db
         .prepare("UPDATE handoffs SET to_run_id = ? WHERE task_id = ? AND to_run_id IS NULL")
-        .run(runId, run.taskId);
+        .run(runId, taskId);
     } catch (err) {
-      const envelope = this.tasks.transition(run.taskId, "WAITING_INPUT");
-      this.publishState(run.taskId, envelope);
-      this.notice(run.taskId, "warn", `Handoff to ${target} failed to start: ${message(err)}`);
+      const envelope = this.tasks.transition(taskId, "WAITING_INPUT");
+      this.publishState(taskId, envelope);
+      this.notice(taskId, "warn", `Handoff to ${target} failed to start: ${message(err)}`);
     }
+  }
+
+  /**
+   * Settle a task from a terminal Harness `ExecutionResult` (or `null` when the
+   * runner promise rejected with no persisted result). Mirrors `settleRun` +
+   * the runner's `observe()` normalizations (PLAN.md 8c.4).
+   */
+  private async settleFromResult(
+    taskId: string,
+    assistantId: string,
+    sessionId: string,
+    result: ExecutionResult | null,
+  ): Promise<void> {
+    if (this.harnessBridge!.consumePlaneOwnsTerminal(sessionId)) return; // cancel / manual handoff owns it
+    const row = this.tasks.get(taskId);
+    if (!row || isTerminal(row.state)) return; // cancelled, or already settled
+    if (sessionId !== this.harnessBridge!.latestSessionId(taskId)) return; // stale / superseded
+
+    const tx = (to: TaskState, note?: string): void => {
+      try {
+        const envelope = this.tasks.transition(taskId, to);
+        this.publishState(taskId, envelope, assistantId);
+      } catch {
+        // legacy pattern: settling is best-effort, never raises here
+      }
+      if (note) this.notice(taskId, "warn", note);
+    };
+
+    if (result === null) {
+      tx("WAITING_INPUT", `execution harness error on session ${sessionId} — recovery required`);
+      return;
+    }
+
+    const detailReason = (result.yield?.detail as { reason?: string } | undefined)?.reason;
+
+    switch (result.outcome) {
+      case "completed": {
+        if (result.verification && !result.verification.passed) {
+          tx("WAITING_INPUT", "verification failed — awaiting your call");
+        } else {
+          tx("COMPLETED");
+        }
+        return;
+      }
+      case "yielded": {
+        const kind = result.yield?.kind;
+        if (kind === "limit") {
+          const reasonText = detailReason ?? `${assistantId} hit a usage limit`;
+          if (this.triggerEnabled("quota") && this.config.failover.auto) {
+            await this.failoverTask(taskId, assistantId, "quota", reasonText, sessionId);
+          } else {
+            this.cooldowns.penalize(assistantId, "limit", reasonText);
+            tx("WAITING_INPUT", `${assistantId} hit a limit; automatic failover is off.`);
+          }
+        } else if (kind === "reroute") {
+          const reasonText = detailReason ?? `${assistantId} reported the route is unsuitable`;
+          if (this.triggerEnabled("provider_unavailable") && this.config.failover.auto) {
+            await this.failoverTask(taskId, assistantId, "failure", reasonText, sessionId);
+          } else {
+            tx("WAITING_INPUT", `${reasonText}; automatic failover is off.`);
+          }
+        } else {
+          // handoff yield — no automatic Harness-side target (§8)
+          tx("WAITING_INPUT", `${assistantId} requested a handoff — waiting for your call.`);
+        }
+        return;
+      }
+      case "failed":
+      case "timed_out": {
+        const f = result.failure;
+        if (
+          f?.kind === "provider_fault" &&
+          f.retryable &&
+          this.triggerEnabled("provider_unavailable") &&
+          this.config.failover.auto
+        ) {
+          await this.failoverTask(
+            taskId,
+            assistantId,
+            "failure",
+            f.message || `${assistantId} ended with an error`,
+            sessionId,
+          );
+        } else {
+          tx("FAILED");
+        }
+        return;
+      }
+      case "cancelled": {
+        if (!isTerminal(this.tasks.get(taskId)?.state ?? "")) tx("CANCELLED");
+        return;
+      }
+    }
+  }
+
+  /** Poll until the session is terminal (or gone). Returns false on timeout. */
+  private async waitUntilSessionTerminal(sessionId: string, timeoutMs = 10_000): Promise<boolean> {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      const state = this.harnessBridge?.sessionState(sessionId) as ExecutionSessionState | undefined;
+      if (!state || isSessionTerminal(state)) return true;
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    return false;
   }
 
   /** Manual handoff: checkpoint, then move the task to another assistant. */
@@ -502,6 +711,8 @@ export class Orchestrator {
         `Task ${taskId} is ${row.state}. A finished task cannot be handed off — create a follow-up task instead.`,
       );
     }
+
+    if (this.harnessOwns(taskId)) return this.harnessHandoff(taskId, to);
 
     const current = this.soleRun(taskId);
     const fromAssistantId = current?.assistantId ?? this.lastAssistant(taskId);
@@ -549,6 +760,73 @@ export class Orchestrator {
     return { runId, assistantId: explanation.chosen };
   }
 
+  /**
+   * Manual handoff for a Harness-owned task (PLAN.md 8c.3): durable-cancel the
+   * source session under `planeOwnsTerminal` so its detached `settleFromResult`
+   * does NOT transition the task, then start a fresh Harness session on the
+   * target with a handoff-rendered prompt.
+   */
+  private async harnessHandoff(taskId: string, to?: AssistantId): Promise<{ runId: string; assistantId: string }> {
+    const sid = this.harnessBridge!.liveSessionId(taskId);
+    const fromAssistantId = this.lastAssistant(taskId);
+
+    if (sid) {
+      this.harnessBridge!.markPlaneOwnsTerminal(sid);
+      this.harnessBridge!.requestCancel(sid);
+      const settled = await this.waitUntilSessionTerminal(sid);
+      if (!settled) {
+        // Drain stalled. Park the task and bail — planeOwnsTerminal stays SET so
+        // the source session's eventual settlement no-ops the task (never
+        // stranded in HANDING_OFF, Codex 8c review).
+        try {
+          const envelope = this.tasks.transition(taskId, "WAITING_INPUT");
+          this.publishState(taskId, envelope);
+        } catch {
+          /* already moved on */
+        }
+        this.notice(taskId, "warn", `Handoff aborted — session ${sid} did not settle in time; task parked.`);
+        throw new Error(`harness session ${sid} did not settle for handoff`);
+      }
+    }
+
+    // Session-scoped checkpoint on the captured harness sid — the target's
+    // handoff-prompt render reads checkpoints.latest(taskId). (The runner's own
+    // cancel checkpoint would also serve; this labels one 'handoff' for parity.)
+    const checkpoint = await this.checkpoints.create(taskId, sid ?? null, "handoff");
+
+    const explanation = this.routeFor(taskId, fromAssistantId, to);
+    const routingDecisionId = persistRoutingDecision(this.db, taskId, explanation);
+    if (!explanation.chosen) {
+      throw new Error(`No eligible assistant for handoff. ${describeWaits(explanation)}`);
+    }
+
+    const state = this.tasks.get(taskId)!.state;
+    if (state === "RUNNING" || state === "WAITING_INPUT" || state === "LIMIT_PAUSED") {
+      if (state === "RUNNING") this.tasks.transition(taskId, "LIMIT_PAUSED");
+      this.tasks.transition(taskId, "HANDING_OFF");
+    } else if (state === "CREATED") {
+      this.tasks.transition(taskId, "ROUTING");
+    }
+
+    this.db
+      .prepare(
+        "INSERT INTO handoffs (id, task_id, from_run_id, to_run_id, checkpoint_id, trigger, at) VALUES (?, ?, ?, NULL, ?, 'manual', ?)",
+      )
+      .run(newHandoffId(), taskId, sid ?? null, checkpoint.id, new Date().toISOString());
+
+    this.notice(taskId, "info", `Manual handoff to ${explanation.chosen}.`);
+    const { runId } = await this.startTask(taskId, explanation.chosen, {
+      trigger: "handoff",
+      reason: "A manual handoff was requested by the user.",
+      fromAssistantId,
+      routingDecisionRef: String(routingDecisionId),
+    });
+    this.db
+      .prepare("UPDATE handoffs SET to_run_id = ? WHERE task_id = ? AND to_run_id IS NULL")
+      .run(runId, taskId);
+    return { runId, assistantId: explanation.chosen };
+  }
+
   /** Routing for a handoff: current cooldowns apply, plus the assistant we're leaving. */
   private routeFor(taskId: string, exclude?: string, override?: AssistantId) {
     const row = this.tasks.get(taskId)!;
@@ -588,7 +866,10 @@ export class Orchestrator {
   }
 
   async createCheckpoint(taskId: string, reason: CheckpointReason = "manual") {
-    return this.checkpoints.create(taskId, this.soleRun(taskId)?.runId ?? null, reason);
+    const sessionId = this.harnessOwns(taskId)
+      ? (this.harnessBridge!.latestSessionId(taskId) ?? null)
+      : (this.soleRun(taskId)?.runId ?? null);
+    return this.checkpoints.create(taskId, sessionId, reason);
   }
 
   /**
@@ -596,6 +877,15 @@ export class Orchestrator {
    * parallel comparison can have several assistants waiting at once.
    */
   async respondApproval(taskId: string, requestId: string, approved: boolean): Promise<void> {
+    if (this.harnessOwns(taskId)) {
+      const sid = this.harnessBridge!.liveSessionId(taskId);
+      if (!sid) throw new Error(`No live harness session for task ${taskId}`);
+      // ApprovalService.answer validates the (session, provider_request_id) row
+      // exists and is answerable — loud on a mismatch. The runner's
+      // AWAITING_APPROVAL poll delivers it via adapter.send.
+      this.harnessBridge!.answerApproval(sid, requestId, approved);
+      return;
+    }
     const runs = this.runsOfTask(taskId);
     if (runs.length === 0) throw new Error(`No active run for task ${taskId}`);
     for (const run of runs) {
@@ -611,6 +901,17 @@ export class Orchestrator {
   }
 
   async cancelTask(taskId: string): Promise<void> {
+    if (this.harnessOwns(taskId)) {
+      // Durable cancel intent FIRST, then the task transition. The runner
+      // observes the intent, settles the session terminal CANCELLED (+ a
+      // checkpoint attempt), and its settleFromResult callback finds the task
+      // already terminal and no-ops it (PLAN.md 8c.3, R1 #3).
+      const sid = this.harnessBridge!.latestSessionId(taskId);
+      if (sid) this.harnessBridge!.requestCancel(sid);
+      const envelope = this.tasks.transition(taskId, "CANCELLED");
+      this.publishState(taskId, envelope);
+      return;
+    }
     const runs = this.runsOfTask(taskId);
     const envelope = this.tasks.transition(taskId, "CANCELLED");
     this.publishState(taskId, envelope, runs[0]?.assistantId);
@@ -643,9 +944,25 @@ export class Orchestrator {
         // Best effort — a stuck adapter must not block shutdown.
       }
     }
-    const start = Date.now();
-    while (this.active.size > 0 && Date.now() - start < timeoutMs) {
+    const deadline = Date.now() + timeoutMs;
+    while (this.active.size > 0 && Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, 10));
+    }
+
+    // Flag-ON: durable-cancel every live Harness session of this process and
+    // wait for them to drain — SAME deadline as the legacy drain above
+    // (PLAN.md 8c.3, R1 #10).
+    if (this.harnessBridge) {
+      const liveHarness = () =>
+        this.db
+          .prepare(
+            "SELECT id FROM runs WHERE execution_request_id IS NOT NULL AND ended_at IS NULL",
+          )
+          .all() as Array<{ id: string }>;
+      for (const { id } of liveHarness()) this.harnessBridge.requestCancel(id);
+      while (liveHarness().length > 0 && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
     }
   }
 
@@ -761,8 +1078,14 @@ export class Orchestrator {
     if (!row) throw new Error(`Unknown task ${taskId}`);
     const runs = this.db
       .prepare(
-        `SELECT id, assistant_id, state, usage, started_at, ended_at, worktree_path, branch, outcome
-         FROM runs WHERE task_id = ? ORDER BY started_at`,
+        // Effective state + usage derived at read time (PLAN.md 8e) — unified
+        // vocab regardless of legacy vs harness row; see state-vocab.ts.
+        `SELECT r.id, r.assistant_id,
+           ${effectiveStateSql("r")} AS state,
+           ${effectiveUsageSql("r")} AS usage,
+           r.started_at, r.ended_at, r.worktree_path, r.branch, r.outcome
+         FROM runs r ${effectiveUsageJoin("r")}
+         WHERE r.task_id = ? ORDER BY r.started_at`,
       )
       .all(taskId) as Array<{
       id: string;
@@ -889,15 +1212,6 @@ export class Orchestrator {
   }
 }
 
-function quotaOf(
-  event: NormalizedEvent,
-): Array<{ window: string; usedPercent: number; resetsAt?: string }> | undefined {
-  const quota = (
-    event.payload as { quota?: Array<{ window: string; usedPercent: number; resetsAt?: string }> } | undefined
-  )?.quota;
-  return quota && quota.length > 0 ? quota : undefined;
-}
-
 function firstResetsAt(event: NormalizedEvent): string | undefined {
   return quotaOf(event)?.find((q) => q.resetsAt)?.resetsAt;
 }
@@ -907,18 +1221,6 @@ function describeWaits(explanation: { candidates: Array<{ assistantId: string; f
     .filter((c) => c.filterFailures.length > 0)
     .map((c) => `${c.assistantId}: ${c.filterFailures.join(", ")}`);
   return blocked.length > 0 ? `Blocked — ${blocked.join("; ")}.` : "";
-}
-
-/**
- * Rolling tail of activity summaries (envelope "completed" hints), de-duplicated
- * against the whole list rather than just the last entry: after a handoff the
- * next assistant narrates the same steps again, and a package that accumulates
- * those repeats gets worse with every hop.
- */
-function mergeTail(list: string[], entry: string, max = 20): string[] {
-  if (list.includes(entry)) return list;
-  const next = [...list, entry];
-  return next.length > max ? next.slice(next.length - max) : next;
 }
 
 function isTerminal(state: string): boolean {

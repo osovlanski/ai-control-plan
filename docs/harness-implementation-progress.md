@@ -1,0 +1,282 @@
+# Execution Harness — implementation progress & handoff
+
+**Worktree:** `~/workspace/personal/ai-control-plan-harness`
+**Branch:** `feat/execution-harness` (off `docs/agentic-os-contract-lifecycle`)
+**Design source of truth (read first):**
+`../ai-control-plan-agentic-os/docs/execution-harness.md` (rev 7) and
+`../ai-control-plan-agentic-os/docs/harness-implementation-plan.md`.
+Those two docs live in the SIBLING worktree, not this one. Also read `AGENTS.md`
+and `docs/DECISIONS.md` here. **Design is approved — implement it, do not redesign.**
+
+Run after every change, from the worktree root:
+`pnpm typecheck && pnpm test && pnpm lint` — keep them green.
+**Baseline at this checkpoint: core 37, api 238, adapters 8, web 3 — all green; lint clean.**
+
+Rules for the rest of the work:
+- Commit per phase. Codex-review each phase's diff (command at the bottom).
+- **Do NOT build Phase 8 (remote runner).** Contracts already carry the keys.
+- Test only through the `FakeAdapter` + in-repo SQLite. No live providers.
+
+---
+
+## Commits so far (each a reviewable slice, additive, whole suite green)
+
+| Commit | Slice | Summary |
+|---|---|---|
+| `4693550` | Phase 0 | contracts, session state machine, `requestFingerprint`, characterization. |
+| `fe77a4e` | Phase 1 | migration `005_harness.sql`, `SessionStore`. |
+| `ac7d838` | Phase 2 | `EventRecorder` (one-txn + two-view redaction), `WorkspaceAuthority`, session-scoped checkpoints. |
+| `1dd7b79` | Phase 3 | `guards.ts`, `approval-service.ts`, `session-runner.ts`. |
+| `ac3f685` | Phase 4 | `handoff.ts` — envelope derivation + claim protocol + reroute yield. |
+| `08cf29f` | Phase 5 (WIP) | `secret-broker.ts` + runner wiring + per-session `verifyIsolation` (no tests). |
+| `863d17d` | Phase 4 follow-up | Codex Phase 4 findings resolved (see below). |
+| `ee8114c` | Phase 4 follow-up r2 | claim-owner CAS on `enterStartAmbiguous`/`markConsumed`/`settleAmbiguous`; `claim()` cross-validates all handoff-identity fields; migration 006 row-copy test. |
+| `07f76c1` | Phase 5 | `runVerification` hardening (`artifact_exists`), `secret-broker.test.ts`, isolation-tier tests. |
+| `f0d35b9` | Phase 5 follow-up | Codex: probe moved post-`start()`, gets effective spec; secret broker leak fix + clear-on-failure; secretRefs-without-resolver → Prepare reject; `artifact_exists` via `WorkspaceAuthority.artifactExists`; `enforcement().isolation` reports ACHIEVED tier; Prepare rejects `partial` when only `ambient` achievable. |
+| `76714a8` | Phase 5 follow-up r3 | Codex: probe wrapped in try/catch; `artifactExists` uses `existsSync` after containment proof (fixes in-worktree-symlink false negative); throwing-probe + cancel/checkpoint-once tests. |
+| `e9c89c6` | Phase 6 | `contracts.ts` → API 1.1 + `sessions.read`/`verification.read`/`approvals.read`; `GET /api/tasks/:id/sessions` + `GET /api/sessions/:id`; `observability.test.ts`; web `api.ts` typed clients + smoke test. |
+| `2eadecb` | Phase 6 follow-up | Codex: camelCase-normalise every nested payload; migration `007_harness_correlation.sql` (parent_task_id/group_id) + `SessionStore.recordRequest` persists `correlation`; `safeJson`; ORDER BY tie-breakers; real-`SessionRunner` e2e leak test; drop duplicated top-level `verification`/`enforcement`; web `SessionDetail` precise types. |
+| `54f17cd` | Phase 6 follow-up r2 | Codex: `GET /api/sessions?groupId=&parentTaskId=` + parent index + web `sessionsByGroup/Parent`; result served only if shape is `{outcome:string,...}` else null; **`SessionRunner.finalize()` now redacts `failure.message`+`failure.providerDetail`** (was an H-I13 leak from `error`-event summaries); TaskDetail clears session on taskId change; UI guards nested `result.enforcement`. Also lands Phase 7 scaffolding (all additive, unused there): manifest `approvalAckLookup`/`approvalIdempotentRedelivery`, `recovery.decision` event type + `RecoveryDecisionPayload`, `SessionStore.incrementDirectiveAttempt`/`markDirectiveFailed`/`appendRecoveryEvent`. |
+| `dbe156e` | Phase 7 (WIP) | `recovery.ts` — `HarnessRecovery` (boot reconcile v2, lease sweeper, directive replay, `delivery_unknown` settlement). Compiled only, no tests, unwired. |
+| `430b6e8` | Phase 7 | `recovery.test.ts` + `fault-injection.test.ts` (maps H-I3/4/8/12/14) + `server.test.ts` boot assertion. `Orchestrator.reconcileOnBoot()` is now `async`, runs `HarnessRecovery.reconcileOnBoot()` first and scopes the legacy blanket fail-all to `execution_request_id IS NULL` rows. `buildServer` builds the deps (`SessionStore`, `ApprovalService`, `CheckpointService` **is** structurally a `RunnerCheckpoints`, `Registry` **is** structurally the `{adapter,manifest}` facade) and owns a 60s `sweepExpiredLeases()` `setInterval` (`.unref()`, cleared on `app.close()`). `/api/sessions/:id` audit filter now includes `recovery.decision`. |
+| `a9a2364` | Phase 7 follow-up | Codex Phase 7 findings (see below). Atomic `SessionStore.resumeFromApproval` (approval→delivered + session→RUNNING in one tx); recovery now settles `answered`/`delivering`/`delivery_unknown` (not just `delivery_unknown`); a durable `cancelRequested` is honored ahead of resume/orphan → terminal `CANCELLED` + checkpoint attempt (`recomputeUsage` for the VERIFYING-completion result from persisted `usage.updated` events); `resume_offered` emitted once (`hasRecoveryDecision` guard) so periodic sweeps don't re-announce; `renewLease` after the awaited settle steps; directive-failure detail goes through core `redactValue` not a hand-rolled `sk-` regex. API 265 / core 37 / adapters 8 / web 3, lint clean. |
+
+| _this_ | Phase 7 follow-up r2 | Codex follow-up review: `recoverSession` now wraps the decision in `decide()` and catches `SessionCasConflictError` → a fence lost mid-recovery (TTL burned through an await, or a settlement race) ends that session's recovery cleanly (`skipped`, `recovery_aborted` event) instead of throwing out of the batch; `renewLease` return is checked and aborts on failure; `approval_delivery_held` now distinguishes "provider reports no acknowledgement" from "no ack lookup available"; added the `answered`-row negative-ack hold test. API 266 / core 37 / adapters 8 / web 3, lint clean. |
+| `8a` | Phase 8a | Config flag `execution.harnessSingleMode` (additive, default OFF, env-overridable `AGENT_PLANE_HARNESS_SINGLE_MODE`). Nothing reads it yet. `+ follow-up`: `validate()` rejects a non-mapping `execution`; env word-spellings + non-personal-workspace default covered. |
+| `8b` | Phase 8b | `deriveEnvelopeUpdate` extracted from `Orchestrator.applyEvent` (envelope-shaping cases only; `mergeTail` moves with it) — legacy path observably unchanged. `EventRecorder.afterInsertInTx` optional ctor hook, runs in the batch tx after the per-call `inTransaction` and before the session CAS; must not write `runs`. `+ follow-up`: hook-written-row rollback coverage. |
+| `8c` | Phase 8c | `SessionRunner.start()` runner-owned `{sessionId, done}` handle (`run()` = `start().done`); `control-plane-bridge.ts` (`buildExecutionRequest` pure, `origin` always `{kind:"fresh"}` this pass; `HarnessBridge`). `Orchestrator` gains an optional `harnessBridge`; flag-ON branches on `harnessRouting`/`harnessOwns`: `startTask`, `isActive`, `shutdown`, `createCheckpoint`, `cancelTask`, `respondApproval`, manual `handoff` (`harnessHandoff`), `reconcileOnBoot` (3-step: HarnessRecovery → in-flight sweep over RUNNING/ROUTING/HANDING_OFF → legacy blanket-fail skipping harness-owned). `settleFromResult` full result→plane decision table; `null` parks `WAITING_INPUT` (never fabricates). `failover(run)` → `failoverTask(taskId, assistantId, trigger, reason, fromId, resetsAt?)` shared by both paths. `persistRoutingDecision` returns its row id; threaded via `StartOptions.routingDecisionRef`. `buildServer` one composition root + flag-ON-⇒-bridge assertion. Flag OFF ⇒ 4 safety-net files byte-unedited & green. `+ follow-up`: Codex 8c review (detached-rejection sink, `deps.orchestrator` owns wiring, `computeRoute` id threading, `harnessHandoff` drain-timeout park, shared shutdown deadline). |
+| `8d` | Phase 8d | Flag-ON parity in `buildServer`: `EventRecorder.publish` reproduces the legacy per-event `{kind:"event"}` SSE frame verbatim + a deduped `{kind:"state"}` on a derived phase change; `afterInsertInTx` derives the task envelope + writes quota snapshots transactionally with the event insert (shared `harness/quota-snapshot.ts`). `apps/api/test/harness/{cutover,characterization-harness}.test.ts` — real `SessionRunner` via `buildServer` + `FakeAdapter`, flag ON: happy path, approvals, cancel, `[FAKE:LIMIT]`→failover→COMPLETED, `[FAKE:FAIL]`+no-failover, boot-strand recovery, HANDING_OFF/ROUTING park, reject-with-no-result park. |
+| `8e` | Phase 8e | `runs.state` vocabulary authority (deferral #2) as **read-time derivation, no dual-write**: `CASE WHEN execution_request_id IS NULL THEN map(state) ELSE session_state END` in `telemetry.scores()` (+ `LEFT JOIN execution_results` / `COALESCE(r.usage, json_extract(er.result,'$.usage'))` for harness usage) and `Orchestrator.comparison()`; web `TaskDetail` comment noting the vocab source. `008_state_vocab_authority.sql` — non-load-bearing consistency backfill (5 known values, no `ELSE`, no unique index). `migration.test.ts` +3 (drift re-align, harness rows untouched, unknown state left as-is); `telemetry-harness.test.ts` (COMPLETED harness session → successRate + tokens). `+ follow-up`: Codex 8e review — the derivation was in `telemetry.scores()` and `comparison()` but not `GET /api/tasks/:id`, and `comparison()` had the state CASE without the usage fallback; extracted `harness/state-vocab.ts` (`effectiveStateSql`/`effectiveUsageSql`/`effectiveUsageJoin`), all three read paths go through it. |
+
+Codex reviewed the diff of every phase and each follow-up; findings were folded
+into the follow-up commits. **All Codex findings through Phase 6 are resolved.**
+
+**Codex Phase 7 review — dispositions:**
+- *Fixed:* split approval settlement → one tx (`resumeFromApproval`); recovery
+  ignored `answered`/`delivering` rows → widened; replayed `cancel` didn't
+  terminate → durable cancel intent now → `CANCELLED`; `resume_offered` spammed
+  every sweep → emit-once guard; no lease renew across awaits → `renewLease`;
+  VERIFYING result fabricated zero usage → recomputed from events; hand-rolled
+  redaction → core `redactValue`.
+- *Follow-up r2 (second Codex pass):* fenced-CAS-lost-mid-recovery now caught,
+  not thrown out of the batch; `renewLease` failure aborts; held-event reason
+  disambiguated.
+- *Kept as approved-design / deferred (not bugs):* `approvalIdempotentRedelivery`
+  re-send on recovery (needs a resumed provider session — §4 exit chosen by the
+  Control Plane, not recovery; recovery is ack-lookup-or-hold-and-surface);
+  checkpoint side effect before
+  the `applied` CAS (git commit can't co-commit with SQLite; a duplicate recovery
+  checkpoint is benign — this is the design's at-least-once replay, §4);
+  `appendRecoveryEvent` `MAX(seq)+1` without a lease CAS (single-process
+  architecture + `UNIQUE(run_id,seq)`; cross-process is the deferred remote
+  runner); recovery enforcement floor `none/none/ambient` (a dead process's
+  isolation-tier probe is genuinely not reconstructable — reporting the floor is
+  the honest H-I10 move, never assuming higher); "no real competing-connection
+  fault tests" (out of scope — FakeAdapter + in-repo SQLite, single process).
+
+---
+
+## Phase 7 (recovery / concurrency hardening) — DONE, Codex-clean
+
+Design: `execution-harness.md` §9, §12 layer 4; `harness-implementation-plan.md` Phase 7.
+
+**Status:** complete. `recovery.ts` is tested (`recovery.test.ts` + `fault-injection.test.ts`,
+the latter maps H-I3/4/8/12/14) and wired into boot via `Orchestrator.reconcileOnBoot()` (now
+`async`); the lease sweeper is a 60s `setInterval` in `buildServer`; `recovery.decision` events
+are in the `/api/sessions/:id` audit filter. Two Codex follow-up rounds folded in (`a9a2364`,
+`1f9a8be`); the third Codex pass returned **no findings**. Suite: api 266 / core 37 /
+adapters 8 / web 3, lint clean. **Next phase is the orchestrator/control-plane cutover
+(standing deferral #1) — a separate focused pass. Do NOT build Phase 8 (remote runner).**
+
+### `apps/api/src/modules/harness/recovery.ts`
+`HarnessRecovery` class — Implements:
+- `reconcileOnBoot()` — `voidAllLeases()` then `recoverSession()` per `liveSessions()`.
+- `sweepExpiredLeases()` — recover only sessions whose lease is expired/absent.
+- `recoverSession(id)` — acquires the (void) lease, then: replay directives →
+  settle `delivery_unknown` → if `VERIFYING` complete it (no verification, §5) →
+  if `manifest.core.canResume` + `providerSessionRef` return `resume_offered`
+  (plane issues the `origin:resume` request, H-I1) → else `FAILED(orphaned)` with
+  a checkpoint ATTEMPT (H-I4) and a result row in the terminal CAS (H-I3).
+- `replayDirectives()` — `pendingDirectives` → `applyDirective` idempotently, cap
+  `maxDirectiveAttempts` (default 3); permanent failure → orphan-fail + typed
+  audit event.
+- `settleDeliveryUnknown()` — `approvalAckLookup` probe when the manifest declares
+  it (→ `markDelivered` + `AWAITING_APPROVAL→RUNNING`), else HOLD + surface
+  (re-delivery needs a live handle a crash did not keep).
+- Every decision → `store.appendRecoveryEvent(id, action, detail)` = an
+  append-only `recovery.decision` event.
+- NOTE: `assistantOf`/`taskOf` reach `store.db` via a cast — if you prefer, add
+  thin `SessionStore` getters instead.
+
+### Phase 7 actions — all DONE (checklist kept for the Codex reviewer)
+1. **`apps/api/test/harness/recovery.test.ts`** — drive `SessionStore` +
+   `HarnessRecovery` with the `FakeAdapter`:
+   - boot reconcile: a `RUNNING` session with a `providerSessionRef` + `canResume`
+     manifest → `resume_offered`, lease released, no result row;
+   - `RUNNING` with no `providerSessionRef` / `canResume:false` → `FAILED(orphaned)`,
+     exactly one result row, checkpoint `attempted:true`;
+   - crashed `VERIFYING` → `COMPLETED`, `result.verification` undefined;
+   - `pendingDirectives` with a `checkpoint` directive → replayed once, marked
+     `applied`; a directive whose action always throws → after 3 attempts
+     `status='failed'` + session `FAILED(orphaned)` + `recovery.decision` event;
+   - `delivery_unknown` approval, manifest `approvalAckLookup:true`, `deps.approvalAckLookup`
+     returns true → `markDelivered` + session back to `RUNNING`; returns false or
+     no lookup → still `delivery_unknown`, session still `AWAITING_APPROVAL`,
+     `approval_delivery_held` event;
+   - `sweepExpiredLeases`: a session with `lease_expires_at` in the past is
+     recovered; one with a valid future lease is `skipped`.
+2. **`apps/api/test/harness/fault-injection.test.ts`** — the §12 layer-4 matrix.
+   Map each of **H-I3 / H-I4 / H-I8 / H-I12 / H-I14** to ≥1 passing test:
+   - crash between `STARTING` and ack → recovery probes/orphans, never
+     double-writes a worktree (H-I8);
+   - kill mid-`RUNNING` then `reconcileOnBoot` → resume-offer vs orphan+checkpoint
+     (H-I3/H-I4);
+   - lease expiry with a stale writer → the stale runner's next fenced CAS is
+     rejected (`SessionCasConflictError`) (H-I12);
+   - txn failure between event insert and CAS → no partial visibility (already
+     have `event-recorder.test.ts` coverage — extend/point at it);
+   - crash between committed event and unapplied guard directive → replay applies
+     exactly once (H-I14);
+   - crash between `answered` and `delivered` approval → `delivery_unknown`
+     settlement path above (H-I14);
+   - envelope claim crash / pre-start claim expiry / `start_ambiguous` probe
+     settle / sync `adapter.start()` failure — mostly already covered in
+     `handoff.test.ts`; add the missing ones and/or a fault-flavoured wrapper.
+3. **Wire `HarnessRecovery` into boot** additively:
+   `Orchestrator.reconcileOnBoot()` (`apps/api/src/modules/orchestrator.ts:94`)
+   currently blanket-fails every running task. Leave the legacy path for legacy
+   `runs` rows (no `execution_request_id`); for Harness sessions call
+   `new HarnessRecovery({...}).reconcileOnBoot()` instead. `buildServer` builds
+   the deps (`SessionStore`, `ApprovalService`, a `RunnerCheckpoints` shim over
+   `CheckpointService`, a `{adapter,manifest}` registry facade). Add a
+   `server.test.ts` / integration assertion that a seeded live Harness session is
+   reconciled on boot rather than blanket-failed.
+4. **Lease sweeper productionised** — a periodic `sweepExpiredLeases()` tick
+   (reuse the existing retention-job cadence in `apps/api/src/modules/retention.ts`
+   if it has one; otherwise a simple `setInterval` owned by `buildServer`, cleared
+   on `app.close()`). Keep it small.
+5. Optionally surface `recovery.decision` events in the Phase 6 audit filter
+   (`server.ts` `/api/sessions/:id` — the `type IN (...)` list) so Cockpit can
+   render orphan-vs-resume. Small, coherent, do it if cheap.
+6. Commit as Phase 7. Codex-review the diff. Fold findings into a follow-up
+   commit like the earlier phases.
+
+### Phase 7 deferrals that are OK to keep (documented, not accidental)
+- The atomic co-commit of `start_ambiguous` with the destination session's
+  durable start-intent CAS (§7 / old Phase 4 finding 7) is only reachable once
+  the runner drives the claim protocol — which is the **orchestrator cutover**,
+  still deferred (see below). Note it; don't force it.
+- `approvalIdempotentRedelivery` re-send on recovery needs a resumed provider
+  session; recovery only does ack-lookup-or-hold. That matches §4.
+
+---
+
+## Standing deferrals (whole project)
+
+1. ~~**Orchestrator / Control-Plane cutover is NOT done.**~~ **RESOLVED (Phase 8a–8e).**
+   Single-mode task execution routes through `SessionRunner` behind
+   `config.execution.harnessSingleMode` (default **OFF** this release; a later
+   commit flips it). Failover / retry / parallel-compare / verdict / task-machine
+   logic stays in `Orchestrator` (still named `Orchestrator` — see the rename
+   deferral below). Cross-provider handoff flag-ON is a fresh-prompt start
+   (`origin:{kind:"fresh"}`), exact legacy parity. Flag OFF ⇒ the legacy
+   adapter-driving path, and `apps/api/test/{characterization,orchestrator,failover,parallel}.test.ts`
+   are byte-unedited and green.
+2. ~~**Destructive `runs.state` vocabulary rewrite.**~~ **RESOLVED (Phase 8e) as
+   read-time derivation, no dual-write.** `runs.state` is authoritative for legacy
+   rows (`execution_request_id IS NULL`), `session_state` for harness rows;
+   `telemetry.scores()` / `Orchestrator.comparison()` `CASE` on
+   `execution_request_id IS NULL`. `008_state_vocab_authority.sql` is a
+   non-load-bearing consistency backfill. The legacy write path is unchanged.
+3. **Bounded *cost* caps** (`budget.maxCostUsd` with `enforcement:"bounded"`) —
+   Prepare rejects them `policy_unenforceable` (no pricing table). Token caps work.
+4. **Real-adapter conformance** (CI-with-creds) unlocking real
+   `toolGating`/`processIsolation`/`usageReporting`/`approvalAckLookup`
+   declarations for Claude/Codex — the `verifyIsolation` dep is the "equivalent
+   adapter probe" §3 allows; a standalone `VerificationRunner` extraction and a
+   real adapter `provision()/verify()` are NOT built (the progress steps said keep
+   verification inline in `session-runner.ts`).
+5. **Cosmetic `Orchestrator` → `ControlPlane` rename** — deferred out of the
+   Phase 8 cutover (kept the class named `Orchestrator` this pass to hold the diff
+   down). A separate no-logic commit.
+6. **Provider-`resume()` under flag-ON** (same-assistant continuation via
+   `resumableRef`) — out of scope for the cutover. The flag-ON path always
+   `adapter.start`s a fresh session; only reachable via a manual same-assistant
+   re-start, which `routeFor` avoids.
+7. **Harness handoff-envelope claim protocol (post-cutover).** The Phase 8 cutover
+   routes flag-ON handoff/failover as a fresh-prompt start with
+   `origin:{kind:"fresh"}`. The landed-but-still-test-only `handoff_envelopes`
+   claim machinery (`claim({requestId,insertRequest})`, `enterStartAmbiguous`,
+   `markConsumed`, `release`) is deliberately **not** wired. This deferral
+   **supersedes** the old Phase 7 note ("don't force it before the cutover") —
+   the cutover has landed; this is now its own scoped phase, which must:
+   1. co-commit `enterStartAmbiguous` with `PREPARED→STARTING` in `SessionStore`;
+   2. build the successor `ExecutionRequest` once and insert it via
+      `handoff.claim(envelopeId, {requestId, insertRequest})` in the claim's own tx;
+   3. co-commit `markConsumed` with the successor's first-event ack;
+   4. `release` the envelope on pre-start failure; `enterStartAmbiguous` on an
+      ambiguous start;
+   5. recover `claimed` / `start_ambiguous` envelopes in
+      `HarnessRecovery.reconcileOnBoot`;
+   6. switch the flag-ON handoff/failover path from `origin:{kind:"fresh"}` to
+      `origin:{kind:"handoff", envelopeId}` and render the successor prompt from
+      the committed envelope.
+   **Acceptance criteria:** `uq_live_successor` enforces one live successor per
+   origin envelope; a crash between claim and first-event leaves a recoverable
+   `start_ambiguous` row and never a double-start; the four safety-net test files
+   stay green; a new test drives claim → consume → recover.
+
+---
+
+## Gotchas learned this session (save yourself the debugging)
+
+- **Migrations are immutable once committed.** 005 was edited across phases → had
+  to revert its `handoff_envelopes` block and add `006_harness_handoff.sql` that
+  `RENAME`s + rebuilds the table (SQLite can't `ALTER` a `CHECK`). New migrations
+  auto-run under `migrate(db, MIGRATIONS)`. `migration.test.ts`'s `migrateLegacy`
+  strips files with numeric prefix `>= N`; keep that pattern.
+- **The pre-write secret-scan hook** blocks any file containing `const X = "..."`
+  where `X` matches `secret|token|api_key|...` and the value is 8+ chars, or a
+  literal `sk-…` token. In tests, build such tokens at runtime
+  (`["sk", "…"].join("-")`) and name canary consts `CANARY`, not `SECRET`.
+- **`redactMessage` (session-runner local)** only strips `sk-…`. `finalize()` now
+  uses core `redactValue` (full `DEFAULT_REDACTION_RULES`) for `failure.message`.
+  `observe()` copies `event.summary` verbatim into `embeddedFailure.message` for
+  the `auth_failed`/`quota_exhausted` paths — that's why the redaction in
+  `finalize()` matters.
+- **Codex review runs long (>2 min).** Launch it with `run_in_background: true`
+  writing to a file, then poll with an `until [ -s file ]; do sleep 5; done`
+  loop. A foreground `codex exec` gets SIGTERM at the 2-min bash timeout.
+- **`isolation` achievable tiers:** `full` only when the per-session probe
+  confirmed it; `partial` needs `this.d.authority` AND `context.worktree`; else
+  `ambient`. The test-default `request()` in `session-runner.test.ts` is
+  `isolation.required: "ambient"` (deps has no authority).
+- **`handoff_envelopes.state`** now: `ready → claimed → consumed`;
+  `claimed → released` (a failed pre-start attempt — `claim()` accepts
+  `state IN ('ready','released')`, a deliberate superset of §7's wording per the
+  prior review round); `claimed → start_ambiguous` (recovery-only exit).
+
+---
+
+## Handy commands
+
+```
+cd ~/workspace/personal/ai-control-plan-harness
+pnpm typecheck && pnpm test && pnpm lint
+
+# Codex review of a phase diff (background; poll the file):
+git show <sha> > /tmp/p.diff   # or: git diff <base>..<head> > /tmp/p.diff
+codex exec --sandbox read-only --skip-git-repo-check \
+  -c model_reasoning_effort=low -o /tmp/review.txt \
+  "Independent code review. Diff at /tmp/p.diff is Phase N of an Execution Harness.
+   Source of truth: ../ai-control-plan-agentic-os/docs/execution-harness.md rev 7
+   §<...> and .../harness-implementation-plan.md Phase N. Review for correctness,
+   architecture compliance, concurrency/lifecycle errors, provider/secret leakage,
+   missing tests, unnecessary complexity. Short bullet list, each
+   [blocker]/[major]/[minor]/[nit]. No praise, no summary."
+```
+
+Test harness pattern: fresh `openDb(tmpfile)`, seed `assistants` + `tasks` rows,
+drive `SessionStore` / `SessionRunner` / `HarnessRecovery` with the in-process
+`FakeAdapter`. See `apps/api/test/harness/observability.test.ts` for the
+real-`SessionRunner`-inside-a-server-test pattern.

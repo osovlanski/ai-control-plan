@@ -1,4 +1,5 @@
 import type { Db } from "../db/index.js";
+import { effectiveStateSql, effectiveUsageJoin, effectiveUsageSql } from "./harness/state-vocab.js";
 
 export interface AssistantScore {
   assistantId: string;
@@ -32,8 +33,15 @@ export class TelemetryService {
     const since = new Date(Date.now() - this.windowDays * 86_400_000).toISOString();
     const rows = this.db
       .prepare(
-        `SELECT r.id, r.assistant_id, r.state, r.usage, r.started_at, r.ended_at, t.goal
-         FROM runs r JOIN tasks t ON t.id = r.task_id
+        // Effective state + usage derived at read time (execution-harness.md §5,
+        // PLAN.md 8e) — see state-vocab.ts. No dual-write.
+        `SELECT r.id, r.assistant_id,
+           ${effectiveStateSql("r")} AS state,
+           ${effectiveUsageSql("r")} AS usage,
+           r.started_at, r.ended_at, t.goal
+         FROM runs r
+         JOIN tasks t ON t.id = r.task_id
+         ${effectiveUsageJoin("r")}
          WHERE r.started_at >= ? AND r.ended_at IS NOT NULL`,
       )
       .all(since) as Array<{
@@ -63,7 +71,7 @@ export class TelemetryService {
         byAssistant.set(row.assistant_id, score);
       }
       score.runs += 1;
-      if (row.state === "ENDED_OK") score.successRate += 1;
+      if (row.state === "COMPLETED") score.successRate += 1;
       else score.errors += 1;
       const duration = Date.parse(row.ended_at) - Date.parse(row.started_at);
       if (Number.isFinite(duration) && duration >= 0) score.durations.push(duration);

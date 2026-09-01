@@ -165,7 +165,7 @@ describe("orchestrator end-to-end (fake adapter)", () => {
     expect(tasks.get(envelope.taskId)!.state).toBe("CANCELLED");
   });
 
-  it("reconciles orphaned RUNNING tasks left by a crashed process", () => {
+  it("reconciles orphaned RUNNING tasks left by a crashed process", async () => {
     const envelope = tasks.create({ goal: "Orphan" });
     tasks.transition(envelope.taskId, "ROUTING");
     tasks.transition(envelope.taskId, "RUNNING");
@@ -174,7 +174,7 @@ describe("orchestrator end-to-end (fake adapter)", () => {
     ).run(envelope.taskId, FAKE_ID);
 
     const fresh = new Orchestrator(db, config, registry, tasks, bus, checkpoints, cooldowns);
-    expect(fresh.reconcileOnBoot()).toBe(1);
+    expect(await fresh.reconcileOnBoot()).toBe(1);
     expect(tasks.get(envelope.taskId)!.state).toBe("FAILED");
     expect(
       (db.prepare("SELECT state FROM runs WHERE id = 'orphan-run'").get() as { state: string }).state,
