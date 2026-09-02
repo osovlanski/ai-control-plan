@@ -32,7 +32,6 @@ import type {
   RunSpec,
   TerminalSessionState,
   UsagePayload,
-  VerificationSpec,
 } from "@agent-plane/core";
 import { newExecutionSessionId, outcomeOf, redactValue } from "@agent-plane/core";
 import type { SessionStore } from "./session-store.js";
@@ -49,6 +48,11 @@ import {
   type GuardDirective,
   type GuardSnapshot,
 } from "./guards.js";
+import {
+  DEFAULT_VERIFICATION_PROVIDERS,
+  type VerificationProviderRegistry,
+  type VerificationRunResult,
+} from "./verification-providers.js";
 
 export interface RunnerRegistry {
   adapter(id: string): AgentAdapter;
@@ -70,6 +74,8 @@ export interface RunnerDeps {
   checkpoints: RunnerCheckpoints;
   registry: RunnerRegistry;
   authority?: WorkspaceAuthority;
+  /** Defaults to native command/artifact providers; injectable for provider contract tests. */
+  verificationProviders?: VerificationProviderRegistry;
   /** When present, a YIELD assembles + commits a handoff envelope in the terminal tx (§7). */
   handoff?: HandoffService;
   softThresholdPct?: number;
@@ -510,7 +516,8 @@ class RunContext {
 
   private async verifyThenComplete(): Promise<ExecutionResult> {
     this.transition("RUNNING", "VERIFYING");
-    const verification = await this.runVerification(this.request.verification);
+    const verificationRun = await this.runVerification(this.request.verification);
+    const verification = verificationRun?.evaluation;
     if (verification) {
       this.recordEvents([
         {
@@ -525,7 +532,11 @@ class RunContext {
     const checkpoint = await this.attemptCheckpoint("completion");
     // outcome is "completed" even when verification.passed === false (H-I6):
     // the Control Plane, not the Harness, decides the task verdict.
-    return this.finalize("VERIFYING", "COMPLETED", { verification, checkpoint });
+    return this.finalize("VERIFYING", "COMPLETED", {
+      verification,
+      verificationArtifacts: verificationRun?.artifacts,
+      checkpoint,
+    });
   }
 
   // --- pipeline helpers -----------------------------------------------
@@ -837,48 +848,13 @@ class RunContext {
     }
   }
 
-  private async runVerification(specs: VerificationSpec[]): Promise<EvaluationResult | undefined> {
-    if (specs.length === 0) return undefined;
-    const authority = this.d.authority;
-    const worktree = this.request.context.worktree?.worktreePath;
-    const checks: EvaluationResult["checks"] = [];
-    for (const spec of specs) {
-      let passed = false;
-      let summary = "skipped (no workspace authority)";
-      if (authority && worktree && spec.command) {
-        if (spec.kind === "artifact_exists") {
-          // A path check, not a subprocess — still through the authority (H-I11):
-          // it rejects `..`, absolute and symlink escapes and does the stat.
-          try {
-            passed = authority.artifactExists(worktree, spec.command);
-            summary = `artifact ${spec.command} ${passed ? "exists" : "missing"}`;
-          } catch (err) {
-            summary = `artifact path rejected: ${redactMessage(err)}`;
-          }
-        } else {
-          const remaining = Math.max(
-            1000,
-            this.snapshot.startedAtMs + this.request.policy.timeout.hardMs - this.runner.clock(),
-          );
-          try {
-            const r = await authority.runCommand({
-              command: spec.command,
-              worktreePath: worktree,
-              timeoutMs: remaining,
-            });
-            passed = r.exitCode === 0 && !r.timedOut;
-            summary = `${spec.command} → exit ${r.exitCode}${r.timedOut ? " (timed out)" : ""}`;
-          } catch (err) {
-            summary = `command rejected: ${redactMessage(err)}`;
-          }
-        }
-      }
-      checks.push({ name: spec.name, kind: spec.kind, passed, required: spec.required, summary });
-    }
-    // `required: false` checks report but never move the needle (H-I6 stays a
-    // Control-Plane call; the Harness only says what passed).
-    const passed = checks.filter((c) => c.required).every((c) => c.passed);
-    return { passed, checks };
+  private async runVerification(specs: ExecutionRequest["verification"]): Promise<VerificationRunResult | undefined> {
+    return (this.d.verificationProviders ?? DEFAULT_VERIFICATION_PROVIDERS).run(specs, {
+      authority: this.d.authority,
+      worktreePath: this.request.context.worktree?.worktreePath,
+      remainingMs: () =>
+        Math.max(1000, this.snapshot.startedAtMs + this.request.policy.timeout.hardMs - this.runner.clock()),
+    });
   }
 
   // --- finalizers -----------------------------------------------------
@@ -898,6 +874,7 @@ class RunContext {
       failure?: ExecutionFailure;
       cancellation?: { requestedBy: "user" | "plane"; at: string };
       verification?: EvaluationResult;
+      verificationArtifacts?: ExecutionResult["artifacts"];
       yield?: ExecutionResult["yield"];
       checkpoint: ExecutionResult["checkpoint"];
       /** Runs inside the terminal transaction (handoff envelope insert, §7). */
@@ -947,8 +924,11 @@ class RunContext {
     return result;
   }
 
-  private artifacts(parts: { checkpoint: ExecutionResult["checkpoint"] }): ExecutionResult["artifacts"] {
-    const out: ExecutionResult["artifacts"] = [];
+  private artifacts(parts: {
+    checkpoint: ExecutionResult["checkpoint"];
+    verificationArtifacts?: ExecutionResult["artifacts"];
+  }): ExecutionResult["artifacts"] {
+    const out: ExecutionResult["artifacts"] = [...(parts.verificationArtifacts ?? [])];
     if (parts.checkpoint.checkpointId) {
       out.push({
         kind: "checkpoint",
