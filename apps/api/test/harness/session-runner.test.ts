@@ -5,7 +5,7 @@
  * duplicate-execution prevention, workspace rejection, successful-execution +
  * failed-verification (H-I6), and restart recovery of a finished session.
  */
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -29,6 +29,10 @@ import { HandoffService } from "../../src/modules/harness/handoff.js";
 import { SessionRunner, type RunnerDeps } from "../../src/modules/harness/session-runner.js";
 import { SessionStore } from "../../src/modules/harness/session-store.js";
 import { WorkspaceAuthority } from "../../src/modules/harness/workspace-authority.js";
+import {
+  VerificationProviderRegistry,
+  type VerificationProvider,
+} from "../../src/modules/harness/verification-providers.js";
 
 let dir: string;
 let db: Db;
@@ -671,13 +675,17 @@ describe("verification hardening (§2)", () => {
       request({
         context: { worktree: { repoPath: dir, branch: "b", worktreePath: dir, baseRef: "r" } },
         verification: [
-          { name: "present", kind: "artifact_exists", command: "built.txt", required: true },
+          { checkId: "artifact-present", name: "present", kind: "artifact_exists", command: "built.txt", required: true },
           { name: "absent", kind: "artifact_exists", command: "missing.txt", required: false },
           { name: "escape", kind: "artifact_exists", command: "../etc/passwd", required: false },
         ],
       }),
     );
-    expect(result.verification?.checks.find((c) => c.name === "present")).toMatchObject({ passed: true });
+    expect(result.verification?.checks.find((c) => c.name === "present")).toMatchObject({
+      checkId: "artifact-present",
+      passed: true,
+      status: "passed",
+    });
     expect(result.verification?.checks.find((c) => c.name === "absent")).toMatchObject({ passed: false });
     expect(result.verification?.checks.find((c) => c.name === "escape")!.summary).toContain("rejected");
     // Only the required check counts — the two required:false failures don't flip it.
@@ -698,6 +706,79 @@ describe("verification hardening (§2)", () => {
     );
     expect(result.verification?.checks.find((c) => c.name === "advisory")).toMatchObject({ passed: false, required: false });
     expect(result.verification?.passed).toBe(true);
+  });
+
+  it("blocks provider-only verification kinds instead of executing their command as shell", async () => {
+    const authority = new WorkspaceAuthority({ repoAllowlist: [dir], worktreeRoot: dir });
+    const runner = new SessionRunner(deps(countingFake(), { authority }));
+    const result = await runner.run(
+      request({
+        context: { worktree: { repoPath: dir, branch: "b", worktreePath: dir, baseRef: "r" } },
+        verification: [
+          {
+            checkId: "browser-ui",
+            name: "browser",
+            kind: "browser",
+            provider: "playwright",
+            command: "touch should-not-exist",
+            required: true,
+          },
+        ],
+      }),
+    );
+    expect(result.verification?.passed).toBe(false);
+    expect(result.verification?.checks[0]).toMatchObject({
+      checkId: "browser-ui",
+      passed: false,
+      status: "blocked",
+    });
+    expect(result.verification?.checks[0]?.summary).toContain("no verifier provider for browser");
+    expect(existsSync(join(dir, "should-not-exist"))).toBe(false);
+  });
+
+  it("honors an injected verifier registry without changing execution ownership", async () => {
+    const injected: VerificationProvider = {
+      id: "injected-browser",
+      supports: (spec) => spec.kind === "browser",
+      run: async () => ({
+        status: "passed",
+        summary: "injected browser verifier",
+        artifacts: [{ kind: "screenshot", ref: "artifact://ui-shot", summary: "verified UI" }],
+      }),
+    };
+    const verificationProviders = new VerificationProviderRegistry([injected]);
+    const runner = new SessionRunner(deps(countingFake(), { verificationProviders }));
+    const result = await runner.run(
+      request({ verification: [{ name: "ui", kind: "browser", provider: "playwright", required: true }] }),
+    );
+    expect(result.outcome).toBe("completed");
+    expect(result.verification).toMatchObject({
+      passed: true,
+      checks: [{ status: "passed", summary: "injected browser verifier" }],
+    });
+    expect(result.artifacts).toContainEqual({
+      kind: "screenshot",
+      ref: "artifact://ui-shot",
+      summary: "verified UI",
+    });
+  });
+
+  it("terminalizes with a blocked check when an injected verifier throws", async () => {
+    const verificationProviders = new VerificationProviderRegistry([{
+      id: "throwing-browser",
+      supports: () => true,
+      run: async () => { throw new Error("browser launch failed"); },
+    }]);
+    const runner = new SessionRunner(deps(countingFake(), { verificationProviders }));
+    const result = await runner.run(
+      request({ verification: [{ checkId: "ui-1", name: "ui", kind: "browser", required: true }] }),
+    );
+    expect(result.terminalState).toBe("COMPLETED");
+    expect(result.verification).toMatchObject({
+      passed: false,
+      checks: [{ checkId: "ui-1", required: true, status: "blocked" }],
+    });
+    expect(store.get(result.sessionId)?.state).toBe("COMPLETED");
   });
 });
 
