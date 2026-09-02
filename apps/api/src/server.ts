@@ -524,7 +524,8 @@ export function buildServer(deps: ServerDeps): BuiltServer {
       .prepare(
         `SELECT r.id, r.execution_request_id, r.assistant_id, r.session_state, r.state, r.attempt,
                 r.provider_start_acked, r.cancel_requested, r.settlement_owner, r.started_at, r.ended_at,
-                er.parent_task_id, er.group_id
+                er.parent_task_id, er.group_id, er.target_kind, er.workspace_id,
+                er.repository_id, er.worktree_id
            FROM runs r JOIN execution_requests er ON er.id = r.execution_request_id
           WHERE r.task_id = ?
           ORDER BY r.started_at, r.id`,
@@ -545,7 +546,8 @@ export function buildServer(deps: ServerDeps): BuiltServer {
       .prepare(
         `SELECT r.id, r.execution_request_id, r.assistant_id, r.session_state, r.state, r.attempt,
                 r.provider_start_acked, r.cancel_requested, r.settlement_owner, r.started_at, r.ended_at,
-                er.parent_task_id, er.group_id, r.task_id
+                er.parent_task_id, er.group_id, er.target_kind, er.workspace_id,
+                er.repository_id, er.worktree_id, r.task_id
            FROM runs r JOIN execution_requests er ON er.id = r.execution_request_id
           WHERE ${where}
           ORDER BY r.started_at, r.id`,
@@ -569,7 +571,8 @@ export function buildServer(deps: ServerDeps): BuiltServer {
       .prepare(
         `SELECT id, attempt, assistant_id, model, routing_decision_ref, request_fingerprint,
                 fingerprint_algorithm, prompt_source, prompt_source_ref, origin_envelope_id,
-                superseded, policy, verification, origin, parent_task_id, group_id, created_at
+                superseded, policy, verification, origin, parent_task_id, group_id,
+                target_kind, workspace_id, repository_id, worktree_id, created_at
            FROM execution_requests WHERE id = ?`,
       )
       .get(run.execution_request_id) as Record<string, unknown> | undefined;
@@ -694,6 +697,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
             policy: safeJson(requestRow.policy as string),
             verification: safeJson(requestRow.verification as string),
             origin: safeJson(requestRow.origin as string),
+            target: targetOf(requestRow),
             createdAt: requestRow.created_at,
           }
         : null,
@@ -758,9 +762,26 @@ function sessionSummary(r: Record<string, unknown>): Record<string, unknown> {
     cancelRequested: r.cancel_requested === 1,
     settlementOwner: r.settlement_owner,
     correlation: { parentTaskId: r.parent_task_id ?? null, groupId: r.group_id ?? null },
+    // Lists expose navigation identity directly; detail keeps it with request provenance.
+    target: targetOf(r),
     startedAt: r.started_at,
     endedAt: r.ended_at,
   };
+}
+
+function targetOf(row: Record<string, unknown>): Record<string, unknown> | null {
+  if (row.target_kind === "repository") {
+    return { kind: "repository", workspaceId: row.workspace_id, repositoryId: row.repository_id };
+  }
+  if (row.target_kind === "worktree") {
+    return {
+      kind: "worktree",
+      workspaceId: row.workspace_id,
+      repositoryId: row.repository_id,
+      worktreeId: row.worktree_id,
+    };
+  }
+  return null;
 }
 
 /** Overall scores as the base, kind-specific ones overriding where present. */
