@@ -59,6 +59,8 @@ export interface ExecutionRequest {
   context: ExecutionContext;
   /** May be empty. */
   verification: VerificationSpec[];
+  /** Optional explainable planner output; `verification` remains its executable checks. */
+  verificationPlan?: VerificationPlan;
   origin: ExecutionOrigin;
 }
 
