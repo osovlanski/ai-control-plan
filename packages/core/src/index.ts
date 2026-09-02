@@ -9,3 +9,4 @@ export * from "./redaction.js";
 export * from "./contracts.js";
 export * from "./execution.js";
 export * from "./fingerprint.js";
+export * from "./verification-planner.js";
