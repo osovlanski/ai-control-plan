@@ -54,11 +54,15 @@ describe("migrations", () => {
       "handoff_envelopes",
       "handoffs",
       "quota_snapshots",
+      "repository_identities",
+      "repository_identity_observations",
       "routing_decisions",
       "runs",
       "schema_migrations",
       "task_decisions",
       "tasks",
+      "workspace_identities",
+      "worktree_identities",
     ]);
   });
 

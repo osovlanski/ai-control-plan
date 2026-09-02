@@ -50,3 +50,15 @@ export function newHandoffId(): HandoffId {
 export function newExecutionSessionId(): ExecutionSessionId {
   return `es_${uuid()}` as ExecutionSessionId;
 }
+
+export function newWorkspaceId(): WorkspaceId {
+  return `ws_${uuid()}` as WorkspaceId;
+}
+
+export function newRepositoryId(): RepositoryId {
+  return `repo_${uuid()}` as RepositoryId;
+}
+
+export function newWorktreeId(): WorktreeId {
+  return `wt_${uuid()}` as WorktreeId;
+}

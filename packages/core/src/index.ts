@@ -10,3 +10,4 @@ export * from "./contracts.js";
 export * from "./execution.js";
 export * from "./fingerprint.js";
 export * from "./verification-planner.js";
+export * from "./repository-identity.js";
