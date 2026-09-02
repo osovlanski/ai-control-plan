@@ -7,6 +7,7 @@ import type { AssistantId, ExecutionResult, VerificationSpec } from "@agent-plan
 import { loadConfig } from "../src/config.js";
 import { openDb, type Db } from "../src/db/index.js";
 import { buildServer, type BuiltServer } from "../src/server.js";
+import { RepositoryIdentityRegistry } from "../src/repo/identity-registry.js";
 
 let home: string;
 let repo: string;
@@ -59,8 +60,22 @@ describe("project verification cutover", () => {
 
     expect(await built.orchestrator.waitForSettled(task.taskId)).toBe("COMPLETED");
     const request = db.prepare(
-      "SELECT verification, verification_plan FROM execution_requests WHERE task_id = ?",
-    ).get(task.taskId) as { verification: string; verification_plan: string };
+      `SELECT verification, verification_plan, target_kind, workspace_id, repository_id, worktree_id
+         FROM execution_requests WHERE task_id = ?`,
+    ).get(task.taskId) as {
+      verification: string;
+      verification_plan: string;
+      target_kind: string;
+      workspace_id: string;
+      repository_id: string;
+      worktree_id: string;
+    };
+    expect(request).toMatchObject({
+      target_kind: "worktree",
+      workspace_id: expect.stringMatching(/^ws_/),
+      repository_id: expect.stringMatching(/^repo_/),
+      worktree_id: expect.stringMatching(/^wt_/),
+    });
     expect(JSON.parse(request.verification) as VerificationSpec[]).toEqual([
       {
         checkId: "project:test",
@@ -84,5 +99,18 @@ describe("project verification cutover", () => {
       passed: true,
       checks: [{ checkId: "project:test", status: "passed", required: true }],
     });
+
+    const detail = await built.app.inject({ method: "GET", url: `/api/sessions/${runId}` });
+    expect(detail.statusCode).toBe(200);
+    expect(detail.json().request.target).toEqual({
+      kind: "worktree",
+      workspaceId: request.workspace_id,
+      repositoryId: request.repository_id,
+      worktreeId: request.worktree_id,
+    });
+
+    const sourceIdentity = await new RepositoryIdentityRegistry(db).resolve(repo);
+    expect(request.repository_id).toBe(sourceIdentity.repositoryId);
+    expect(request.worktree_id).not.toBe(sourceIdentity.worktreeId);
   });
 });

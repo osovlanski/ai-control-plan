@@ -30,6 +30,7 @@ import { TaskEventBus } from "./modules/sse.js";
 import { TaskStore } from "./modules/tasks.js";
 import { TelemetryService, classifyGoal } from "./modules/telemetry.js";
 import { EventRetention } from "./modules/retention.js";
+import { RepositoryIdentityRegistry } from "./repo/identity-registry.js";
 import { renderHandoffMd } from "./render/handoff.js";
 import { renderProgressMd } from "./render/progress.js";
 
@@ -66,6 +67,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   const cooldowns = new CooldownStore(db);
   const telemetry = new TelemetryService(db);
   const retention = new EventRetention(db);
+  const repositoryIdentities = new RepositoryIdentityRegistry(db);
   const app = Fastify({ logger: true });
 
   // One SessionStore / ApprovalService shared by recovery + (flag-ON) the runner
@@ -186,6 +188,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
       harnessRecovery,
       harnessBridge,
       projectVerification,
+      repositoryIdentities,
     );
 
   const repoAllowed = (repoPath: string | null | undefined): boolean =>

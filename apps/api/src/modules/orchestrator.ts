@@ -4,6 +4,7 @@ import type {
   AssistantId,
   ExecutionResult,
   ExecutionSessionState,
+  ExecutionTarget,
   NormalizedEvent,
   ProviderSessionRef,
   RunHandle,
@@ -21,6 +22,7 @@ import {
 } from "@agent-plane/core";
 import type { ResolvedConfig } from "../config.js";
 import type { Db } from "../db/index.js";
+import type { RepositoryIdentityRegistry } from "../repo/identity-registry.js";
 import {
   createAssistantWorktree,
   createTaskBranch,
@@ -125,6 +127,8 @@ export class Orchestrator {
     private harnessBridge?: HarnessBridge,
     /** Authority-backed project snapshot + pure planner adapter, injected by the composition root. */
     private projectVerification?: (worktreePath: string) => ProjectVerificationDiscovery,
+    /** Control Plane-owned stable identity resolver; only used for repository-backed Harness requests. */
+    private repositoryIdentities?: Pick<RepositoryIdentityRegistry, "resolve">,
   ) {}
 
   /** Flag-ON single-mode routing applies to this start (non-parallel, non-compare/race). */
@@ -254,6 +258,20 @@ export class Orchestrator {
         ? this.renderHandoffFor(taskId, envelope, options)
         : renderTaskPrompt(envelope);
 
+    let executionTarget: ExecutionTarget | undefined;
+    if (this.harnessRouting(taskId, options) && envelope.repository && this.repositoryIdentities) {
+      const identity = await this.repositoryIdentities.resolve(workdir);
+      executionTarget = {
+        kind: "worktree",
+        workspaceId: identity.workspaceId,
+        repositoryId: identity.repositoryId,
+        worktreeId: identity.worktreeId,
+      };
+      if (identity.remoteConflict) {
+        this.notice(taskId, "warn", "repository identity remote conflict observed; retained existing stable identity");
+      }
+    }
+
     if (this.tasks.get(taskId)!.state !== "RUNNING") {
       envelope = this.tasks.transition(taskId, "RUNNING");
     }
@@ -297,6 +315,7 @@ export class Orchestrator {
                 baseRef: taskRow.base_ref ?? "HEAD",
               }
             : undefined,
+          target: executionTarget,
           approvalMode: this.config.policy.approvalMode,
           maxRuntimeMs: this.maxRuntimeMs,
           routingDecisionRef,
