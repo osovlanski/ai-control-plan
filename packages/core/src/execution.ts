@@ -319,6 +319,15 @@ export interface VerificationDecision {
 /** Persistable output of the future deterministic VerificationPlanner. */
 export interface VerificationPlan {
   schemaVersion: 1;
+  /** Durable identity; absent only on legacy/in-memory plans. */
+  planRevisionId?: string;
+  /** Monotonic within one execution session; absent on legacy plans. */
+  revision?: number;
+  /** Previous immutable revision, when this plan was revised post-change. */
+  supersedesRevisionId?: string;
+  /** SHA-256 over the canonical plan revision with fingerprint fields omitted. */
+  planFingerprint?: string;
+  fingerprintAlgorithm?: "sha256-canonical-verification-plan-v1";
   /** Selected checks only. Every entry has a stable id used by decisions/results. */
   checks: Array<VerificationSpec & { checkId: string }>;
   decisions: VerificationDecision[];

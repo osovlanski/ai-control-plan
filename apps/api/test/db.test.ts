@@ -61,6 +61,8 @@ describe("migrations", () => {
       "schema_migrations",
       "task_decisions",
       "tasks",
+      "verification_plan_revisions",
+      "verification_runs",
       "workspace_identities",
       "worktree_identities",
     ]);
