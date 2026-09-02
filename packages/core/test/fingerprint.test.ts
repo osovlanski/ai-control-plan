@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import type { AssistantId, TaskId } from "../src/ids.js";
+import type {
+  AssistantId,
+  RepositoryId,
+  TaskId,
+  WorkspaceId,
+  WorktreeId,
+} from "../src/ids.js";
 import type { ExecutionRequest } from "../src/execution.js";
 import {
   FINGERPRINT_ALGORITHM,
@@ -100,6 +106,15 @@ describe("requestFingerprint", () => {
       ["verification[].required", (r) => (r.verification = [{ name: "unit", kind: "tests", required: false }])],
       ["origin", (r) => (r.origin = { kind: "handoff", envelopeId: "env_1" })],
       ["context.priorCheckpointId", (r) => (r.context = { priorCheckpointId: "ckpt_1" })],
+      ["context.target", (r) =>
+        (r.context = {
+          target: {
+            kind: "worktree",
+            workspaceId: "ws-1" as WorkspaceId,
+            repositoryId: "repo-1" as RepositoryId,
+            worktreeId: "wt-1" as WorktreeId,
+          },
+        })],
       ["context.worktree", (r) =>
         (r.context = {
           worktree: { repoPath: "/r", branch: "b", worktreePath: "/wt", baseRef: "ref" },
@@ -108,6 +123,45 @@ describe("requestFingerprint", () => {
     for (const [label, fn] of changed) {
       expect(mutate(fn), label).not.toBe(base);
     }
+  });
+
+  it("fingerprints each stable target identity independently", () => {
+    const request = baseRequest();
+    request.context.target = {
+      kind: "worktree",
+      workspaceId: "ws-1" as WorkspaceId,
+      repositoryId: "repo-1" as RepositoryId,
+      worktreeId: "wt-1" as WorktreeId,
+    };
+    const base = fp(request);
+
+    const mutateTarget = (field: "workspaceId" | "repositoryId" | "worktreeId", value: string) => {
+      const changed = structuredClone(request);
+      changed.context.target = { ...request.context.target!, [field]: value } as typeof request.context.target;
+      return fp(changed);
+    };
+
+    expect(mutateTarget("workspaceId", "ws-2")).not.toBe(base);
+    expect(mutateTarget("repositoryId", "repo-2")).not.toBe(base);
+    expect(mutateTarget("worktreeId", "wt-2")).not.toBe(base);
+  });
+
+  it("distinguishes repository targets from allocated worktree targets", () => {
+    const repository = baseRequest();
+    repository.context.target = {
+      kind: "repository",
+      workspaceId: "ws-1" as WorkspaceId,
+      repositoryId: "repo-1" as RepositoryId,
+    };
+    const worktree = baseRequest();
+    worktree.context.target = {
+      kind: "worktree",
+      workspaceId: "ws-1" as WorkspaceId,
+      repositoryId: "repo-1" as RepositoryId,
+      worktreeId: "wt-1" as WorktreeId,
+    };
+
+    expect(fp(repository)).not.toBe(fp(worktree));
   });
 
   it("changes when the prompt changes, via the prompt digest", () => {

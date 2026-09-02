@@ -12,7 +12,15 @@
 
 import type { RunSpec, PermissionPolicy } from "./adapter.js";
 import type { ModelRef } from "./capabilities.js";
-import type { AssistantId, ExecutionSessionId, ProviderSessionRef, TaskId } from "./ids.js";
+import type {
+  AssistantId,
+  ExecutionSessionId,
+  ProviderSessionRef,
+  RepositoryId,
+  TaskId,
+  WorkspaceId,
+  WorktreeId,
+} from "./ids.js";
 import type { UsagePayload, VerificationKind } from "./events.js";
 import type { ExecutionSessionState, TerminalSessionState } from "./session-state.js";
 
@@ -119,6 +127,13 @@ export interface ToolPolicy {
 }
 
 export interface ExecutionContext {
+  /**
+   * Stable execution target assigned by the Control Plane. Optional during the
+   * schemaVersion 1 compatibility window; paths below remain authoritative for
+   * placement until target registries are wired. Never derive these ids from a
+   * cwd, provider session reference, PLAN file, or observer record.
+   */
+  target?: ExecutionTarget;
   worktree?: { repoPath: string; branch: string; worktreePath: string; baseRef: string };
   /** Composed context bundle digests (Agentic OS era). */
   bundleRefs?: string[];
@@ -132,6 +147,22 @@ export interface ExecutionContext {
    */
   secretRefs?: string[];
 }
+
+export interface RepositoryRef {
+  kind: "repository";
+  workspaceId: WorkspaceId;
+  repositoryId: RepositoryId;
+}
+
+export interface WorktreeRef {
+  kind: "worktree";
+  workspaceId: WorkspaceId;
+  repositoryId: RepositoryId;
+  worktreeId: WorktreeId;
+}
+
+/** A request may target a repository before a concrete worktree has been allocated. */
+export type ExecutionTarget = RepositoryRef | WorktreeRef;
 
 // ---------------------------------------------------------------------------
 // ExecutionSession — durable record of one attempt to execute one request
