@@ -25,8 +25,10 @@ import {
   closeSync,
   constants as fsConstants,
   existsSync,
+  fstatSync,
   mkdirSync,
   openSync,
+  readSync,
   realpathSync,
   writeSync,
 } from "node:fs";
@@ -258,6 +260,61 @@ export class WorkspaceAuthority {
     return existsSync(target);
   }
 
+  /**
+   * Bounded metadata discovery read. The final component must be a regular
+   * file and is opened with O_NOFOLLOW; existing-prefix containment is checked
+   * before open. Provider-controlled symlinks and oversized manifests are
+   * rejected rather than followed or partially parsed.
+   */
+  readRegularFile(worktreePath: string, relative: string, maxBytes: number): string | undefined {
+    const target = this.discoveryPath(worktreePath, relative);
+    let fd: number;
+    try {
+      fd = openSync(target, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0) | fsConstants.O_NONBLOCK);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === "ENOENT") return undefined;
+      throw new WorkspaceError("discovery-open", `${relative}: ${(err as Error).message}`);
+    }
+    try {
+      const stat = fstatSync(fd);
+      if (!stat.isFile()) throw new WorkspaceError("discovery-type", `${relative} is not a regular file`);
+      if (stat.size > maxBytes) {
+        throw new WorkspaceError("discovery-size", `${relative} exceeds ${maxBytes} bytes`);
+      }
+      const buffer = Buffer.allocUnsafe(maxBytes + 1);
+      let offset = 0;
+      while (offset < buffer.byteLength) {
+        const read = readSync(fd, buffer, offset, buffer.byteLength - offset, null);
+        if (read === 0) break;
+        offset += read;
+      }
+      if (offset > maxBytes) throw new WorkspaceError("discovery-size", `${relative} exceeds ${maxBytes} bytes`);
+      return buffer.subarray(0, offset).toString("utf8");
+    } finally {
+      closeSync(fd);
+    }
+  }
+
+  /** Regular-file presence check with the same no-follow boundary. */
+  regularFileExists(worktreePath: string, relative: string): boolean {
+    const target = this.discoveryPath(worktreePath, relative);
+    let fd: number;
+    try {
+      fd = openSync(target, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0) | fsConstants.O_NONBLOCK);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === "ENOENT") return false;
+      throw new WorkspaceError("discovery-open", `${relative}: ${(err as Error).message}`);
+    }
+    try {
+      if (!fstatSync(fd).isFile()) throw new WorkspaceError("discovery-type", `${relative} is not a regular file`);
+      return true;
+    } finally {
+      closeSync(fd);
+    }
+  }
+
   /** The env a verification command sees — allowlist minus the dangerous-name blocklist. */
   reducedEnv(): Record<string, string> {
     const allow = new Set<string>([...DEFAULT_ENV_ALLOWLIST, ...(this.opts.envAllowlist ?? [])]);
@@ -282,6 +339,22 @@ export class WorkspaceAuthority {
       }
       return repoPath === allowed || contains(allowed, repoPath);
     });
+  }
+
+  private discoveryPath(worktreePath: string, relative: string): string {
+    const worktree = this.canonical(worktreePath, "discovery-worktree-realpath");
+    const root = this.canonical(this.opts.worktreeRoot, "worktree-root-realpath");
+    if (!contains(root, worktree) && worktree !== root) {
+      throw new WorkspaceError("discovery-worktree", `${worktree} is not under the worktree root`);
+    }
+    if (isAbsolute(relative)) throw new WorkspaceError("discovery-absolute", `${relative} must be relative`);
+    const target = resolve(worktree, relative);
+    if (!contains(worktree, target)) throw new WorkspaceError("discovery-escape", `${relative} escapes the worktree`);
+    const existingReal = this.deepestRealpath(target);
+    if (!contains(worktree, existingReal) && existingReal !== worktree) {
+      throw new WorkspaceError("discovery-symlink-escape", `${relative} resolves outside the worktree`);
+    }
+    return target;
   }
 
   private canonical(path: string, check: string): string {

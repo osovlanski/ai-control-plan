@@ -108,6 +108,12 @@ describe("requestFingerprint", () => {
         (r.verification = [{ checkId: "check-unit", name: "unit", kind: "tests", required: true }])],
       ["verification[].provider", (r) =>
         (r.verification = [{ name: "unit", kind: "tests", provider: "native", required: true }])],
+      ["verificationPlan", (r) =>
+        (r.verificationPlan = {
+          schemaVersion: 1,
+          checks: [{ checkId: "unit", name: "unit", kind: "tests", required: true }],
+          decisions: [{ checkId: "unit", selected: true, required: true, signals: ["explicit:tests"], reason: "explicit:tests" }],
+        })],
       ["origin", (r) => (r.origin = { kind: "handoff", envelopeId: "env_1" })],
       ["context.priorCheckpointId", (r) => (r.context = { priorCheckpointId: "ckpt_1" })],
       ["context.target", (r) =>

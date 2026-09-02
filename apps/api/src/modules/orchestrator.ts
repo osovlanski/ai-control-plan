@@ -40,6 +40,7 @@ import type { Registry } from "./registry.js";
 import { persistRoutingDecision, route, type RouteRequest } from "./router.js";
 import type { TaskEventBus } from "./sse.js";
 import type { TaskStore } from "./tasks.js";
+import type { ProjectVerificationDiscovery } from "./project-verification.js";
 
 interface ActiveRun {
   runId: string;
@@ -122,6 +123,8 @@ export class Orchestrator {
      * legacy adapter-driving path is used whenever it is absent.
      */
     private harnessBridge?: HarnessBridge,
+    /** Authority-backed project snapshot + pure planner adapter, injected by the composition root. */
+    private projectVerification?: (worktreePath: string) => ProjectVerificationDiscovery,
   ) {}
 
   /** Flag-ON single-mode routing applies to this start (non-parallel, non-compare/race). */
@@ -275,6 +278,10 @@ export class Orchestrator {
           }),
       );
       const taskRow = this.tasks.get(taskId)!;
+      const projectVerification = envelope.repository && this.projectVerification
+        ? this.projectVerification(workdir)
+        : { warnings: [] };
+      for (const warning of projectVerification.warnings) this.notice(taskId, "warn", warning);
       const { runId } = this.harnessBridge!.start(
         {
           taskId,
@@ -293,6 +300,8 @@ export class Orchestrator {
           approvalMode: this.config.policy.approvalMode,
           maxRuntimeMs: this.maxRuntimeMs,
           routingDecisionRef,
+          verification: projectVerification.plan?.checks ?? [],
+          verificationPlan: projectVerification.plan,
         },
         (result, sid) => this.settleFromResult(taskId, assistantId, sid, result),
       );

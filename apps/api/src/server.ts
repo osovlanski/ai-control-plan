@@ -1,4 +1,5 @@
 import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
+import { join } from "node:path";
 import {
   CONTROL_PLANE_API_VERSION,
   DEFAULT_REDACTION_RULES,
@@ -20,7 +21,9 @@ import { HarnessRecovery } from "./modules/harness/recovery.js";
 import { SessionRunner } from "./modules/harness/session-runner.js";
 import { SessionStore } from "./modules/harness/session-store.js";
 import { effectiveStateSql, effectiveUsageJoin, effectiveUsageSql } from "./modules/harness/state-vocab.js";
+import { WorkspaceAuthority } from "./modules/harness/workspace-authority.js";
 import { Orchestrator } from "./modules/orchestrator.js";
+import { planProjectVerification, snapshotProjectVerification } from "./modules/project-verification.js";
 import { Registry } from "./modules/registry.js";
 import { persistRoutingDecision, route, routingHistory, type RouteRequest } from "./modules/router.js";
 import { TaskEventBus } from "./modules/sse.js";
@@ -79,6 +82,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   // When a test injects its own orchestrator it owns the harness wiring; the
   // internal bridge is built (and asserted) only for the real composition root.
   let harnessBridge: HarnessBridge | undefined;
+  let projectVerification: ((worktreePath: string) => ReturnType<typeof planProjectVerification>) | undefined;
   if (config.execution?.harnessSingleMode && !deps.orchestrator) {
     // --- flag-ON parity plumbing (PLAN.md 8d) ---
     const sessionTaskCache = new Map<string, string>();
@@ -134,12 +138,24 @@ export function buildServer(deps: ServerDeps): BuiltServer {
         if (changed) tasks.saveEnvelope(envelope);
       },
     );
+    const authority = new WorkspaceAuthority({
+      repoAllowlist: config.repoAllowlist,
+      worktreeRoot: join(config.dir, "worktrees"),
+    });
+    projectVerification = (worktreePath) => {
+      try {
+        return planProjectVerification(snapshotProjectVerification(authority, worktreePath));
+      } catch {
+        return { warnings: ["project verification skipped: project metadata rejected by workspace authority"] };
+      }
+    };
     const runner = new SessionRunner({
       store: sessionStore,
       recorder,
       approvals,
       checkpoints,
       registry,
+      authority,
       softThresholdPct: config.failover.softThresholdPct,
       // No `handoff` dep — the envelope-yield path is out of scope this pass, so
       // the runner never commits an envelope.
@@ -169,6 +185,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
       undefined,
       harnessRecovery,
       harnessBridge,
+      projectVerification,
     );
 
   const repoAllowed = (repoPath: string | null | undefined): boolean =>

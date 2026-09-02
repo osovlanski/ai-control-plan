@@ -105,6 +105,7 @@ export function canonicalRequestProjection(
     runSpec: { ...runSpecRest, prompt: undefined, secretEnv: undefined, promptDigest },
     policy: request.policy,
     verification: request.verification,
+    ...(request.verificationPlan ? { verificationPlan: request.verificationPlan } : {}),
     origin: request.origin,
     context: request.context,
   };

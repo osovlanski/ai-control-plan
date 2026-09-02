@@ -8,7 +8,7 @@
  * hands it to `SessionRunner.start()`, and relays the detached result back to
  * `Orchestrator.settleFromResult`. It never writes `runs`.
  */
-import type { ExecutionRequest, ExecutionResult } from "@agent-plane/core";
+import type { ExecutionRequest, ExecutionResult, VerificationPlan, VerificationSpec } from "@agent-plane/core";
 import { DEFAULT_REDACTION_RULES } from "@agent-plane/core";
 import type { ApprovalMode } from "../../config.js";
 import type { Db } from "../../db/index.js";
@@ -27,6 +27,9 @@ export interface BridgeStartInput {
   approvalMode: ApprovalMode;
   maxRuntimeMs: number;
   routingDecisionRef: string;
+  /** Trusted Control Plane plan; absent during the compatibility window. */
+  verification?: VerificationSpec[];
+  verificationPlan?: VerificationPlan;
 }
 
 /**
@@ -60,7 +63,10 @@ export function buildExecutionRequest(input: BridgeStartInput): ExecutionRequest
       isolation: { required: "ambient" },
     },
     context: input.worktree ? { worktree: input.worktree } : {},
-    verification: [],
+    // A persisted Control Plane plan is canonical; callers cannot supply a
+    // different executable check list alongside it.
+    verification: input.verificationPlan?.checks ?? input.verification ?? [],
+    ...(input.verificationPlan ? { verificationPlan: input.verificationPlan } : {}),
     origin: { kind: "fresh" },
   };
 }
