@@ -56,6 +56,16 @@ describe("RepositoryIdentityRegistry", () => {
     expect(JSON.stringify({ stored, observations })).not.toMatch(/token|secret|auth=|example\.invalid|Private/);
   });
 
+  it("keeps identities stable when the registry is reconstructed after restart", async () => {
+    const repo = initRepo("restart", "https://host.invalid/Org/Repo.git");
+    const first = await new RepositoryIdentityRegistry(db).resolve(repo);
+    db.close();
+    db = openDb(join(root, "registry.db"));
+    const afterRestart = await new RepositoryIdentityRegistry(db).resolve(repo);
+
+    expect(afterRestart).toMatchObject(first);
+  });
+
   it("shares a repository id across linked worktrees but assigns distinct worktree ids", async () => {
     const repo = initRepo("repo", "git@example.invalid:Org/Repo.git");
     const linked = join(root, "linked");
