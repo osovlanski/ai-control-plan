@@ -9,3 +9,4 @@ coverage/
 .env
 .env.local
 .DS_Store
+graphify-out/
