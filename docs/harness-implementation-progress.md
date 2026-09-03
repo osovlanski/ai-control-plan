@@ -3,9 +3,9 @@
 **Worktree:** `~/workspace/personal/ai-control-plan-harness`
 **Branch:** `feat/execution-harness` (off `docs/agentic-os-contract-lifecycle`)
 **Design source of truth (read first):**
-`../ai-control-plan-agentic-os/docs/execution-harness.md` (rev 7) and
-`../ai-control-plan-agentic-os/docs/harness-implementation-plan.md`.
-Those two docs live in the SIBLING worktree, not this one. Also read `AGENTS.md`
+`docs/execution-harness.md` (rev 7) and `docs/harness-implementation-plan.md`.
+Both now live in this repository (they were untracked in a sibling worktree until
+the `docs/agentic-os-vnext` commit). Also read `AGENTS.md`
 and `docs/DECISIONS.md` here. **Design is approved — implement it, do not redesign.**
 
 Run after every change, from the worktree root:
@@ -270,7 +270,7 @@ git show <sha> > /tmp/p.diff   # or: git diff <base>..<head> > /tmp/p.diff
 codex exec --sandbox read-only --skip-git-repo-check \
   -c model_reasoning_effort=low -o /tmp/review.txt \
   "Independent code review. Diff at /tmp/p.diff is Phase N of an Execution Harness.
-   Source of truth: ../ai-control-plan-agentic-os/docs/execution-harness.md rev 7
+   Source of truth: docs/execution-harness.md rev 7
    §<...> and .../harness-implementation-plan.md Phase N. Review for correctness,
    architecture compliance, concurrency/lifecycle errors, provider/secret leakage,
    missing tests, unnecessary complexity. Short bullet list, each
