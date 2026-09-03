@@ -5,6 +5,7 @@ import {
   DEFAULT_REDACTION_RULES,
   NORMALIZED_EVENT_VERSION,
   OBSERVABILITY_CAPABILITIES,
+  redactValue,
   type AssistantId,
   type RoutingProfile,
 } from "@agent-plane/core";
@@ -76,11 +77,13 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   // and bridge — the composition root (PLAN.md 8c.6).
   const sessionStore = new SessionStore(db);
   const approvals = new ApprovalService(db);
+  const verificationStore = new VerificationStore(db);
   const harnessRecovery = new HarnessRecovery({
     store: sessionStore,
     approvals,
     checkpoints, // CheckpointService is structurally a RunnerCheckpoints
     registry, // Registry is structurally a { adapter, manifest } facade
+    verification: verificationStore,
   });
 
   // When a test injects its own orchestrator it owns the harness wiring; the
@@ -161,7 +164,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
       registry,
       authority,
       verificationCoordinator: new VerificationCoordinator(
-        new VerificationStore(db),
+        verificationStore,
         checkpoints,
         authority,
       ),
@@ -737,6 +740,53 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     };
   });
 
+  app.get<{ Params: { id: string } }>("/api/sessions/:id/verification", (req, reply) => {
+    const run = db.prepare(
+      "SELECT id, execution_request_id FROM runs WHERE id = ?",
+    ).get(req.params.id) as { id: string; execution_request_id: string | null } | undefined;
+    // Legacy orchestrator rows have no accepted ExecutionRequest and therefore
+    // are not Harness sessions, even if their ids happen to be known.
+    if (!run || run.execution_request_id === null) return reply.status(404).send({ error: "not found" });
+
+    const revisions = (db.prepare(
+      `SELECT id, session_id, execution_request_id, revision, supersedes_revision_id,
+              plan_fingerprint, plan, reason, created_at
+         FROM verification_plan_revisions
+        WHERE session_id = ? ORDER BY revision, id`,
+    ).all(req.params.id) as Array<Record<string, unknown> & { plan: string }>).map((revision) => ({
+      id: revision.id,
+      sessionId: revision.session_id,
+      executionRequestId: revision.execution_request_id,
+      revision: revision.revision,
+      supersedesRevisionId: revision.supersedes_revision_id,
+      planFingerprint: revision.plan_fingerprint,
+      plan: safeLifecycleJson(revision.plan),
+      reason: revision.reason,
+      createdAt: revision.created_at,
+    }));
+    const runs = (db.prepare(
+      `SELECT vr.id, vr.session_id, vr.execution_request_id, vr.plan_revision_id, vr.state,
+              vr.claimed_at, vr.evaluation, vr.artifacts, vr.interruption_reason,
+              vr.created_at, vr.updated_at
+         FROM verification_runs vr
+         JOIN verification_plan_revisions p ON p.id = vr.plan_revision_id
+        WHERE vr.session_id = ? ORDER BY p.revision, vr.created_at, vr.id`,
+    ).all(req.params.id) as Array<Record<string, unknown> & { evaluation: string | null; artifacts: string | null }>).map((verificationRun) => ({
+      id: verificationRun.id,
+      sessionId: verificationRun.session_id,
+      executionRequestId: verificationRun.execution_request_id,
+      planRevisionId: verificationRun.plan_revision_id,
+      state: verificationRun.state,
+      claimedAt: verificationRun.claimed_at,
+      evaluation: verificationRun.evaluation === null ? null : safeLifecycleJson(verificationRun.evaluation),
+      artifacts: verificationRun.artifacts === null ? [] : safeLifecycleJsonArray(verificationRun.artifacts),
+      interruptionReason: safeLifecycleText(verificationRun.interruption_reason),
+      createdAt: verificationRun.created_at,
+      updatedAt: verificationRun.updated_at,
+    }));
+    return { sessionId: req.params.id, revisions, runs };
+  });
+
   // Lease sweeper (execution-harness §9): a periodic tick hands any session whose
   // fencing lease has expired to recovery. ponytail: fixed 60s = the lease TTL;
   // make it config if a deployment ever needs a different cadence.
@@ -774,6 +824,28 @@ function safeJson(value: string): unknown {
   } catch {
     return null;
   }
+}
+
+function safeLifecycleJson(value: string): unknown {
+  return scrubLifecycleValue(redactValue(safeJson(value)));
+}
+
+function safeLifecycleJsonArray(value: string): unknown[] {
+  const parsed = safeLifecycleJson(value);
+  return Array.isArray(parsed) ? parsed : [];
+}
+
+/** Redact scalar lifecycle fields too; old rows may predate store sanitization. */
+function safeLifecycleText(value: unknown): string | null {
+  return typeof value === "string" ? redactValue(value).slice(0, 2_000) : null;
+}
+
+function scrubLifecycleValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(scrubLifecycleValue);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+    .filter(([key]) => !/(claim.?token|transcript|secret)/i.test(key))
+    .map(([key, nested]) => [key, scrubLifecycleValue(nested)]));
 }
 
 /** One row of the session-list endpoints. */

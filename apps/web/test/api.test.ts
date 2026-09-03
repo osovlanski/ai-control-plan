@@ -54,6 +54,8 @@ describe("web API client", () => {
     expect(fetchMock).toHaveBeenLastCalledWith("/api/tasks/AG-1/sessions", expect.any(Object));
     await api.sessionsByGroup("g1");
     expect(fetchMock).toHaveBeenLastCalledWith("/api/sessions?groupId=g1", expect.any(Object));
+    await api.verification("es_1");
+    expect(fetchMock).toHaveBeenLastCalledWith("/api/sessions/es_1/verification", expect.any(Object));
   });
 
   it("surfaces the API error message for failed workflows", async () => {
