@@ -33,6 +33,8 @@ import {
   VerificationProviderRegistry,
   type VerificationProvider,
 } from "../../src/modules/harness/verification-providers.js";
+import { VerificationStore } from "../../src/modules/harness/verification-store.js";
+import { VerificationCoordinator } from "../../src/modules/verification-coordinator.js";
 
 let dir: string;
 let db: Db;
@@ -779,6 +781,270 @@ describe("verification hardening (§2)", () => {
       checks: [{ checkId: "ui-1", required: true, status: "blocked" }],
     });
     expect(store.get(result.sessionId)?.state).toBe("COMPLETED");
+  });
+
+  it("runs the coordinator-bound checks and persists provider evidence", async () => {
+    const authority = new WorkspaceAuthority({ repoAllowlist: [dir], worktreeRoot: dir });
+    const verificationProviders = new VerificationProviderRegistry([{
+      id: "playwright",
+      supports: (spec) => spec.kind === "browser",
+      run: async () => ({
+        status: "passed",
+        summary: "browser flow passed",
+        artifacts: [{ kind: "screenshot", ref: "artifact://screen-1", summary: "checkout page" }],
+      }),
+    }]);
+    const verificationCoordinator = new VerificationCoordinator(
+      new VerificationStore(db),
+      { create: async () => ({ changedFiles: [] }) },
+      authority,
+    );
+    const runner = new SessionRunner(deps(countingFake(), {
+      authority,
+      verificationProviders,
+      verificationCoordinator,
+    }));
+    const result = await runner.run(request({
+      context: { worktree: { repoPath: dir, worktreePath: dir, branch: "task/test", baseRef: "HEAD" } },
+      verification: [{ checkId: "ui-1", name: "ui", kind: "browser", provider: "playwright", required: true }],
+    }));
+    expect(result.verification).toMatchObject({ passed: true, checks: [{ checkId: "ui-1" }] });
+    expect(result.artifacts).toContainEqual(expect.objectContaining({ kind: "screenshot", ref: "artifact://screen-1" }));
+    const row = db.prepare("SELECT state, artifacts FROM verification_runs WHERE session_id = ?")
+      .get(result.sessionId) as { state: string; artifacts: string };
+    expect(row.state).toBe("completed");
+    expect(JSON.parse(row.artifacts)).toContainEqual(expect.objectContaining({ ref: "artifact://screen-1" }));
+  });
+
+  it("terminalizes with required blocked evidence when coordination fails", async () => {
+    const runner = new SessionRunner(deps(countingFake(), {
+      verificationCoordinator: {
+        prepare: async () => { throw new Error("planner unavailable sk-secret-value"); },
+        claim: () => { throw new Error("unreachable"); },
+        complete: () => { throw new Error("unreachable"); },
+        interrupt: () => { throw new Error("unreachable"); },
+      },
+    }));
+    const result = await runner.run(request());
+    expect(result.terminalState).toBe("COMPLETED");
+    expect(result.verification).toMatchObject({
+      passed: false,
+      checks: [{ checkId: "preflight:coordinator", required: true, status: "blocked" }],
+    });
+    expect(JSON.stringify(result)).not.toContain("sk-secret-value");
+  });
+
+  it.each(["claim", "complete"] as const)("does not strand VERIFYING when coordinator %s throws", async (stage) => {
+    const runner = new SessionRunner(deps(countingFake(), {
+      verificationCoordinator: {
+        prepare: async (sessionId, accepted) => ({
+          sessionId,
+          executionRequestId: accepted.executionRequestId,
+          planRevisionId: "vpr_test",
+          verificationRunId: "vr_test",
+          checks: [],
+        }),
+        claim: () => { if (stage === "claim") throw new Error("claim sk-secret-value"); },
+        complete: () => { throw new Error("complete sk-secret-value"); },
+        interrupt: () => { throw new Error("interrupt unavailable"); },
+      },
+    }));
+    const result = await runner.run(request());
+    expect(result.terminalState).toBe("COMPLETED");
+    expect(store.get(result.sessionId)?.state).toBe("COMPLETED");
+    expect(result.verification).toMatchObject({
+      passed: false,
+      checks: [{ checkId: "preflight:lifecycle", status: "blocked", required: true }],
+    });
+    expect(JSON.stringify(result)).not.toContain("sk-secret-value");
+  });
+
+  it("does not let coordinator preparation outlive the session hard deadline", async () => {
+    let aborted = false;
+    const runner = new SessionRunner(deps(countingFake(), {
+      verificationCoordinator: {
+        prepare: async (_sessionId, _accepted, signal) => new Promise((_resolve) => {
+          signal?.addEventListener("abort", () => { aborted = true; });
+        }),
+        claim: () => { throw new Error("unreachable"); },
+        complete: () => { throw new Error("unreachable"); },
+        interrupt: () => { throw new Error("unreachable"); },
+      },
+    }));
+    const result = await runner.run(request({
+      policy: { ...request().policy, timeout: { hardMs: 100 } },
+    }));
+    expect(result.terminalState).toBe("TIMED_OUT");
+    expect(result.verification).toMatchObject({
+      passed: false,
+      checks: [{ checkId: "verification:deadline", status: "blocked" }],
+    });
+    expect(aborted).toBe(true);
+  });
+
+  it("honors durable cancellation while coordinator preparation is pending", async () => {
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const runner = new SessionRunner(deps(countingFake(), {
+      verificationCoordinator: {
+        prepare: async () => { entered(); return new Promise(() => {}); },
+        claim: () => { throw new Error("unreachable"); },
+        complete: () => { throw new Error("unreachable"); },
+        interrupt: () => { throw new Error("unreachable"); },
+      },
+    }));
+    const active = runner.start(request());
+    await started;
+    store.requestCancel(active.sessionId);
+    const result = await active.done;
+    expect(result.terminalState).toBe("CANCELLED");
+    expect(result.verification).toMatchObject({
+      passed: false,
+      checks: [{ checkId: "verification:cancelled", status: "blocked" }],
+    });
+  });
+
+  it("times out while the completion checkpoint is pending", async () => {
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const runner = new SessionRunner(deps(countingFake(), {
+      checkpoints: {
+        create: async () => { entered(); return new Promise(() => {}); },
+      },
+    }));
+    const active = runner.start(request({
+      policy: { ...request().policy, timeout: { hardMs: 100 } },
+    }));
+    await started;
+    const result = await active.done;
+    expect(result.terminalState).toBe("TIMED_OUT");
+    expect(result.checkpoint).toMatchObject({ attempted: true, committed: false });
+  });
+
+  it("honors durable cancellation while the completion checkpoint is pending", async () => {
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const runner = new SessionRunner(deps(countingFake(), {
+      checkpoints: {
+        create: async () => { entered(); return new Promise(() => {}); },
+      },
+    }));
+    const active = runner.start(request());
+    await started;
+    store.requestCancel(active.sessionId);
+    const result = await active.done;
+    expect(result.terminalState).toBe("CANCELLED");
+    expect(result.checkpoint).toMatchObject({ attempted: true, committed: false });
+  });
+
+  it("preserves completed canonical evidence when checkpoint settlement is cancelled", async () => {
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const authority = new WorkspaceAuthority({ repoAllowlist: [dir], worktreeRoot: dir });
+    const verificationStore = new VerificationStore(db);
+    const verificationCoordinator = new VerificationCoordinator(
+      verificationStore, { create: async () => ({ changedFiles: [] }) }, authority,
+    );
+    const verificationProviders = new VerificationProviderRegistry([{
+      id: "proof",
+      supports: () => true,
+      run: async () => ({
+        status: "passed",
+        summary: "verified",
+        artifacts: [{ kind: "review_report", ref: "artifact://proof", summary: "proof" }],
+      }),
+    }]);
+    const runner = new SessionRunner(deps(countingFake(), {
+      authority,
+      verificationCoordinator,
+      verificationProviders,
+      checkpoints: { create: async () => { entered(); return new Promise(() => {}); } },
+    }));
+    const active = runner.start(request({
+      verification: [{ checkId: "proof", name: "proof", kind: "review", required: true }],
+    }));
+    await started;
+    store.requestCancel(active.sessionId);
+    const result = await active.done;
+    const stored = db.prepare("SELECT id FROM verification_runs WHERE session_id = ?")
+      .get(active.sessionId) as { id: string };
+    const canonical = verificationStore.getRun(stored.id)!;
+    expect(result.terminalState).toBe("CANCELLED");
+    expect(canonical.state).toBe("completed");
+    expect(result.verification).toEqual(canonical.evaluation);
+    expect(result.artifacts).toEqual(canonical.artifacts);
+  });
+
+  it("interrupts a durable hung verifier at the hard deadline", async () => {
+    let aborted = false;
+    const authority = new WorkspaceAuthority({ repoAllowlist: [dir], worktreeRoot: dir });
+    const verificationProviders = new VerificationProviderRegistry([{
+      id: "hung",
+      supports: () => true,
+      run: (_spec, context) => new Promise((_resolve) => {
+        context.signal?.addEventListener("abort", () => { aborted = true; });
+      }),
+    }]);
+    const verificationCoordinator = new VerificationCoordinator(
+      new VerificationStore(db), { create: async () => ({ changedFiles: [] }) }, authority,
+    );
+    const runner = new SessionRunner(deps(countingFake(), {
+      authority, verificationProviders, verificationCoordinator,
+    }));
+    const result = await runner.run(request({
+      policy: { ...request().policy, timeout: { hardMs: 100 } },
+      verification: [{ checkId: "hung", name: "hung", kind: "review", required: true }],
+    }));
+    expect(result.terminalState).toBe("TIMED_OUT");
+    expect(result.verification).toMatchObject({ passed: false, checks: [{ status: "blocked" }] });
+    expect(aborted).toBe(true);
+    const lifecycle = db.prepare("SELECT state, interruption_reason FROM verification_runs WHERE session_id = ?")
+      .get(result.sessionId) as { state: string; interruption_reason: string };
+    expect(lifecycle).toMatchObject({ state: "interrupted", interruption_reason: "deadline" });
+  });
+
+  it("interrupts a durable hung verifier on cancellation", async () => {
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const authority = new WorkspaceAuthority({ repoAllowlist: [dir], worktreeRoot: dir });
+    const verificationProviders = new VerificationProviderRegistry([{
+      id: "hung",
+      supports: () => true,
+      run: async () => { entered(); return new Promise(() => {}); },
+    }]);
+    const verificationCoordinator = new VerificationCoordinator(
+      new VerificationStore(db), { create: async () => ({ changedFiles: [] }) }, authority,
+    );
+    const runner = new SessionRunner(deps(countingFake(), {
+      authority, verificationProviders, verificationCoordinator,
+    }));
+    const active = runner.start(request({
+      verification: [{ checkId: "hung", name: "hung", kind: "review", required: true }],
+    }));
+    await started;
+    store.requestCancel(active.sessionId);
+    const result = await active.done;
+    expect(result.terminalState).toBe("CANCELLED");
+    expect(result.verification).toMatchObject({ passed: false, checks: [{ checkId: "verification:cancelled" }] });
+    expect(db.prepare("SELECT state FROM verification_runs WHERE session_id = ?").get(result.sessionId))
+      .toMatchObject({ state: "interrupted" });
+  });
+
+  it("executes an immutable snapshot when the caller mutates its request after start", async () => {
+    const seen: string[] = [];
+    const providers = new VerificationProviderRegistry([{
+      id: "capture",
+      supports: () => true,
+      run: async (spec) => { seen.push(spec.name); return { status: "passed", summary: "ok" }; },
+    }]);
+    const mutable = request({
+      verification: [{ checkId: "stable", name: "accepted", kind: "review", required: true }],
+    });
+    const active = new SessionRunner(deps(countingFake(), { verificationProviders: providers })).start(mutable);
+    mutable.verification[0]!.name = "mutated";
+    mutable.verification.push({ checkId: "extra", name: "extra", kind: "review", required: true });
+    await active.done;
+    expect(seen).toEqual(["accepted"]);
   });
 });
 

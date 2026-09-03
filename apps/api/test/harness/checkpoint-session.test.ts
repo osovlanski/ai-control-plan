@@ -61,18 +61,26 @@ describe("session-scoped checkpoint", () => {
     insertRun.run("run-a", taskId, "asst-a", a.path, a.branch);
     insertRun.run("run-b", taskId, "asst-b", b.path, b.branch);
 
-    // Competitor B changes its own tree only.
+    // Parallel competitors change disjoint files.
+    writeFileSync(join(a.path, "a-change.ts"), "export const a = 1;\n");
     writeFileSync(join(b.path, "b-change.ts"), "export const b = 1;\n");
 
-    const ckpt = await checkpoints.create(taskId, "run-b", "handoff");
+    const ckpt = await checkpoints.create(taskId, "run-b", "handoff", {
+      worktreePath: b.path,
+      baseRef,
+    });
     expect(ckpt.gitRef).toBeTruthy();
+    expect(ckpt.changedFiles).toEqual(["b-change.ts"]);
 
     // The checkpoint commit landed in B's worktree, carrying b-change.ts...
     const bLog = git(b.path, "log", "-1", "--name-only", "--pretty=format:%s").toString();
     expect(bLog).toContain("b-change.ts");
-    // ...and A's worktree is untouched (still at the base commit).
-    const aHead = git(a.path, "rev-parse", "HEAD").toString().trim();
-    expect(aHead).toBe(baseRef);
+    // ...and A's independent change remains absent from B's change set.
+    const aCkpt = await checkpoints.create(taskId, "run-a", "pre_verification", {
+      worktreePath: a.path,
+      baseRef,
+    });
+    expect(aCkpt.changedFiles).toEqual(["a-change.ts"]);
 
     const row = db.prepare("SELECT session_id, git_ref FROM checkpoints WHERE id = ?").get(ckpt.id) as {
       session_id: string;

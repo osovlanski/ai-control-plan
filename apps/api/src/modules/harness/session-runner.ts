@@ -33,7 +33,7 @@ import type {
   TerminalSessionState,
   UsagePayload,
 } from "@agent-plane/core";
-import { newExecutionSessionId, outcomeOf, redactValue } from "@agent-plane/core";
+import { evaluationResult, newExecutionSessionId, outcomeOf, redactValue } from "@agent-plane/core";
 import type { SessionStore } from "./session-store.js";
 import type { EventRecorder } from "./event-recorder.js";
 import type { ApprovalService } from "./approval-service.js";
@@ -53,6 +53,11 @@ import {
   type VerificationProviderRegistry,
   type VerificationRunResult,
 } from "./verification-providers.js";
+import {
+  preflightEvaluation,
+  type PreparedVerification,
+  type VerificationCoordinatorPort,
+} from "../verification-coordinator.js";
 
 export interface RunnerRegistry {
   adapter(id: string): AgentAdapter;
@@ -63,7 +68,7 @@ export interface RunnerCheckpoints {
   create(
     taskId: string,
     sessionId: string,
-    reason: "limit" | "handoff" | "cancel" | "completion" | "periodic" | "manual",
+    reason: "limit" | "handoff" | "cancel" | "completion" | "periodic" | "manual" | "pre_verification",
   ): Promise<{ id: string; gitRef: string | null }>;
 }
 
@@ -76,6 +81,8 @@ export interface RunnerDeps {
   authority?: WorkspaceAuthority;
   /** Defaults to native command/artifact providers; injectable for provider contract tests. */
   verificationProviders?: VerificationProviderRegistry;
+  /** Flag-on Control Plane seam for durable post-change verification planning. */
+  verificationCoordinator?: VerificationCoordinatorPort;
   /** When present, a YIELD assembles + commits a handoff envelope in the terminal tx (§7). */
   handoff?: HandoffService;
   softThresholdPct?: number;
@@ -128,8 +135,11 @@ export class SessionRunner {
    */
   start(request: ExecutionRequest): { sessionId: string; done: Promise<ExecutionResult> } {
     const { store } = this.deps;
-    store.recordRequest(request);
-    const session = store.createSession(request.executionRequestId);
+    // Snapshot before any detached/asynchronous work. The accepted request is
+    // immutable even if its caller later mutates the original object graph.
+    const acceptedRequest = deepFreeze(structuredClone(request));
+    store.recordRequest(acceptedRequest);
+    const session = store.createSession(acceptedRequest.executionRequestId);
     const sessionId = session.sessionId;
 
     // Idempotent resubmission of a finished request → its stored result (H-I8).
@@ -156,7 +166,7 @@ export class SessionRunner {
         done: Promise.reject(new Error(`session ${sessionId} is already leased by another runner`)),
       };
     }
-    const ctx = new RunContext(sessionId, request, lease, this);
+    const ctx = new RunContext(sessionId, acceptedRequest, lease, this);
     const done = (async () => {
       try {
         return await ctx.execute();
@@ -515,8 +525,83 @@ class RunContext {
   }
 
   private async verifyThenComplete(): Promise<ExecutionResult> {
-    this.transition("RUNNING", "VERIFYING");
-    const verificationRun = await this.runVerification(this.request.verification);
+    let prepared: PreparedVerification | undefined;
+    let specs = this.request.verification;
+    if (this.d.verificationCoordinator) {
+      try {
+        const supervised = await this.supervise((signal) =>
+          this.d.verificationCoordinator!.prepare(this.sessionId, this.request, signal));
+        if (supervised.kind !== "result") {
+          return this.completeInterruptedVerification(supervised.kind, "RUNNING");
+        }
+        prepared = supervised.result;
+        this.validatePrepared(prepared);
+        specs = prepared.checks;
+      } catch (error) {
+        const check = {
+          checkId: "preflight:coordinator",
+          name: "verification coordination",
+          kind: "review" as const,
+          required: true,
+          status: "blocked" as const,
+          passed: false as const,
+          summary: `verification coordination blocked: ${redactMessage(error)}`,
+        };
+        const interrupted = this.enterVerifying();
+        if (interrupted) return this.completeInterruptedVerification(interrupted, this.d.store.get(this.sessionId)!.state as "RUNNING" | "VERIFYING");
+        return this.completeVerification({ evaluation: preflightEvaluation(check), artifacts: [] });
+      }
+    }
+    const interrupted = this.enterVerifying();
+    if (interrupted) return this.completeInterruptedVerification(interrupted, this.d.store.get(this.sessionId)!.state as "RUNNING" | "VERIFYING");
+    let verificationRun: VerificationRunResult | undefined;
+    if (prepared) {
+      const claimToken = `${this.runner.owner}:${this.sessionId}`;
+      let claimed = false;
+      try {
+        this.d.verificationCoordinator!.claim(prepared, claimToken);
+        claimed = true;
+        if (prepared.preflightFailure) {
+          verificationRun = { evaluation: preflightEvaluation(prepared.preflightFailure), artifacts: [] };
+        } else {
+          const supervised = await this.superviseVerification(specs);
+          if (supervised.kind !== "result") {
+            this.interruptVerification(prepared, claimToken, supervised.kind);
+            return this.completeInterruptedVerification(supervised.kind, "VERIFYING");
+          }
+          verificationRun = supervised.result;
+        }
+        verificationRun ??= { evaluation: evaluationResult([]), artifacts: [] };
+        const stored = this.d.verificationCoordinator!.complete(
+          prepared,
+          claimToken,
+          verificationRun.evaluation,
+          verificationRun.artifacts,
+        );
+        verificationRun = { evaluation: stored.evaluation!, artifacts: stored.artifacts };
+      } catch (error) {
+        if (claimed) this.interruptVerification(prepared, claimToken, "verification lifecycle failure");
+        verificationRun = { evaluation: preflightEvaluation({
+          checkId: "preflight:lifecycle",
+          name: "verification lifecycle",
+          kind: "review",
+          required: true,
+          status: "blocked",
+          passed: false,
+          summary: `verification lifecycle blocked: ${redactMessage(error)}`,
+        }), artifacts: [] };
+      }
+    } else {
+      const supervised = await this.superviseVerification(specs);
+      if (supervised.kind !== "result") {
+        return this.completeInterruptedVerification(supervised.kind, "VERIFYING");
+      }
+      verificationRun = supervised.result;
+    }
+    return this.completeVerification(verificationRun);
+  }
+
+  private async completeVerification(verificationRun: VerificationRunResult | undefined): Promise<ExecutionResult> {
     const verification = verificationRun?.evaluation;
     if (verification) {
       this.recordEvents([
@@ -529,13 +614,143 @@ class RunContext {
         },
       ]);
     }
-    const checkpoint = await this.attemptCheckpoint("completion");
+    const checkpointResult = await this.supervise(() => this.attemptCheckpoint("completion"));
+    if (checkpointResult.kind !== "result") {
+      return this.completeInterruptedVerification(checkpointResult.kind, "VERIFYING", {
+        attempted: true,
+        committed: false,
+      }, verificationRun);
+    }
+    const interrupted = this.currentVerificationInterruption();
+    if (interrupted) {
+      return this.completeInterruptedVerification(interrupted, "VERIFYING", checkpointResult.result, verificationRun);
+    }
+    const checkpoint = checkpointResult.result;
     // outcome is "completed" even when verification.passed === false (H-I6):
     // the Control Plane, not the Harness, decides the task verdict.
     return this.finalize("VERIFYING", "COMPLETED", {
       verification,
       verificationArtifacts: verificationRun?.artifacts,
       checkpoint,
+    });
+  }
+
+  private async completeInterruptedVerification(
+    kind: "cancelled" | "deadline",
+    from: "RUNNING" | "VERIFYING",
+    checkpoint: ExecutionResult["checkpoint"] = { attempted: false, committed: false },
+    completedVerification?: VerificationRunResult,
+  ): Promise<ExecutionResult> {
+    const verificationRun = completedVerification ?? interruptedVerification(kind);
+    // requestCancel is deliberately an out-of-band durable write and bumps the
+    // session version so the active owner wakes up. Rebase before recording the
+    // terminal verification evidence under our still-live lease.
+    this.version = this.d.store.get(this.sessionId)!.version;
+    // A completed coordinator run has already emitted and durably stored its
+    // canonical evidence. Preserve it when only settlement/checkpointing is
+    // interrupted; do not replace it with contradictory synthetic evidence.
+    if (!completedVerification) {
+      this.recordEvents([{
+        runId: this.sessionId as never,
+        ts: this.iso(),
+        type: "verification.result",
+        summary: kind === "deadline" ? "verification timed out" : "verification cancelled",
+        payload: { passed: false, checks: verificationRun.evaluation.checks },
+      }]);
+    }
+    this.version = this.d.store.get(this.sessionId)!.version;
+    return this.finalize(from, kind === "deadline" ? "TIMED_OUT" : "CANCELLED", {
+      ...(kind === "deadline"
+        ? { failure: { kind: "timeout" as const, retryable: true, message: "session hard deadline reached during verification" } }
+        : { cancellation: { requestedBy: "plane" as const, at: this.iso() } }),
+      verification: verificationRun.evaluation,
+      verificationArtifacts: verificationRun.artifacts,
+      checkpoint,
+    });
+  }
+
+  private currentVerificationInterruption(): "cancelled" | "deadline" | undefined {
+    const live = this.d.store.get(this.sessionId)!;
+    this.version = live.version;
+    if (live.cancelRequested) return "cancelled";
+    if (this.runner.clock() >= this.snapshot.startedAtMs + this.request.policy.timeout.hardMs) return "deadline";
+    return undefined;
+  }
+
+  private enterVerifying(): "cancelled" | "deadline" | undefined {
+    const before = this.currentVerificationInterruption();
+    if (before) return before;
+    try {
+      this.transition("RUNNING", "VERIFYING");
+    } catch (error) {
+      // A durable cancel can win the tiny window between the read above and
+      // the transition CAS. Treat that wakeup as arbitration, not failure.
+      const raced = this.currentVerificationInterruption();
+      if (raced) return raced;
+      throw error;
+    }
+    return this.currentVerificationInterruption();
+  }
+
+  private validatePrepared(prepared: PreparedVerification): void {
+    if (prepared.sessionId !== this.sessionId ||
+        prepared.executionRequestId !== this.request.executionRequestId ||
+        !prepared.planRevisionId || !prepared.verificationRunId ||
+        prepared.checks.some((check) => !check.checkId)) {
+      throw new Error("verification coordinator returned a mismatched session/request/revision binding");
+    }
+  }
+
+  private interruptVerification(prepared: PreparedVerification, claimToken: string, reason: string): void {
+    try { this.d.verificationCoordinator!.interrupt(prepared, claimToken, reason); }
+    catch { /* best effort: terminal H-I3 result must still be written */ }
+  }
+
+  private async superviseVerification(specs: ExecutionRequest["verification"]): Promise<
+    | { kind: "result"; result: VerificationRunResult | undefined }
+    | { kind: "cancelled" }
+    | { kind: "deadline" }
+  > {
+    return this.supervise((signal) => this.runVerification(specs, signal));
+  }
+
+  private async supervise<T>(operation: (signal: AbortSignal) => Promise<T>): Promise<
+    | { kind: "result"; result: T }
+    | { kind: "cancelled" }
+    | { kind: "deadline" }
+  > {
+    const controller = new AbortController();
+    const remaining = this.snapshot.startedAtMs + this.request.policy.timeout.hardMs - this.runner.clock();
+    if (remaining <= 0) return { kind: "deadline" };
+    const run = operation(controller.signal)
+      .then((result) => ({ kind: "result" as const, result }));
+    // Consume a provider that ignores AbortSignal and settles after the race.
+    void run.catch(() => {});
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const finish = (result: { kind: "result"; result: T } | { kind: "cancelled" } | { kind: "deadline" }): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(deadline);
+        clearInterval(cancelPoll);
+        if (result.kind !== "result") controller.abort(result.kind);
+        resolve(result);
+      };
+      const deadline = setTimeout(() => finish({ kind: "deadline" }), remaining);
+      const cancelPoll = setInterval(() => {
+        if (this.d.store.get(this.sessionId)?.cancelRequested) finish({ kind: "cancelled" });
+      }, this.runner.pollMs);
+      void run.then(finish, (error) => {
+        // Provider registry normally contains provider errors; infrastructure
+        // failures are converted by the lifecycle catch above.
+        if (!settled) {
+          clearTimeout(deadline);
+          clearInterval(cancelPoll);
+          settled = true;
+          controller.abort("failed");
+          reject(error);
+        }
+      });
     });
   }
 
@@ -848,12 +1063,16 @@ class RunContext {
     }
   }
 
-  private async runVerification(specs: ExecutionRequest["verification"]): Promise<VerificationRunResult | undefined> {
+  private async runVerification(
+    specs: ExecutionRequest["verification"],
+    signal?: AbortSignal,
+  ): Promise<VerificationRunResult | undefined> {
     return (this.d.verificationProviders ?? DEFAULT_VERIFICATION_PROVIDERS).run(specs, {
       authority: this.d.authority,
       worktreePath: this.request.context.worktree?.worktreePath,
+      signal,
       remainingMs: () =>
-        Math.max(1000, this.snapshot.startedAtMs + this.request.policy.timeout.hardMs - this.runner.clock()),
+        Math.max(0, this.snapshot.startedAtMs + this.request.policy.timeout.hardMs - this.runner.clock()),
     });
   }
 
@@ -1047,4 +1266,30 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
     resolve = r;
   });
   return { promise, resolve };
+}
+
+function deepFreeze<T>(value: T): T {
+  if (value && typeof value === "object" && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const child of Object.values(value as Record<string, unknown>)) deepFreeze(child);
+  }
+  return value;
+}
+
+function interruptedVerification(kind: "cancelled" | "deadline"): VerificationRunResult {
+  const deadline = kind === "deadline";
+  return {
+    evaluation: evaluationResult([{
+      checkId: `verification:${kind}`,
+      name: "verification supervision",
+      kind: "review",
+      required: true,
+      status: "blocked",
+      passed: false,
+      summary: deadline
+        ? "verification interrupted at the session hard deadline"
+        : "verification interrupted by a durable cancellation request",
+    }]),
+    artifacts: [],
+  };
 }

@@ -12,6 +12,7 @@ import type { WorkspaceAuthority } from "./workspace-authority.js";
 export interface VerificationProviderContext {
   authority?: WorkspaceAuthority;
   worktreePath?: string;
+  signal?: AbortSignal;
   remainingMs(): number;
 }
 
@@ -143,6 +144,10 @@ export class VerificationProviderRegistry {
     const artifacts: ExecutionArtifact[] = [];
     for (const spec of specs) {
       try {
+        if (context.signal?.aborted) {
+          checks.push(checkResult(spec, outcome("blocked", "verification interrupted")));
+          continue;
+        }
         const provider = this.providers.find((candidate) => candidate.supports(spec));
         const providerOutcome = provider
           ? await provider.run(spec, context)
