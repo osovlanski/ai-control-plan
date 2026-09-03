@@ -22,7 +22,9 @@ import { SessionRunner } from "./modules/harness/session-runner.js";
 import { SessionStore } from "./modules/harness/session-store.js";
 import { effectiveStateSql, effectiveUsageJoin, effectiveUsageSql } from "./modules/harness/state-vocab.js";
 import { WorkspaceAuthority } from "./modules/harness/workspace-authority.js";
+import { VerificationStore } from "./modules/harness/verification-store.js";
 import { Orchestrator } from "./modules/orchestrator.js";
+import { VerificationCoordinator } from "./modules/verification-coordinator.js";
 import { planProjectVerification, snapshotProjectVerification } from "./modules/project-verification.js";
 import { Registry } from "./modules/registry.js";
 import { persistRoutingDecision, route, routingHistory, type RouteRequest } from "./modules/router.js";
@@ -158,6 +160,11 @@ export function buildServer(deps: ServerDeps): BuiltServer {
       checkpoints,
       registry,
       authority,
+      verificationCoordinator: new VerificationCoordinator(
+        new VerificationStore(db),
+        checkpoints,
+        authority,
+      ),
       softThresholdPct: config.failover.softThresholdPct,
       // No `handoff` dep — the envelope-yield path is out of scope this pass, so
       // the runner never commits an envelope.

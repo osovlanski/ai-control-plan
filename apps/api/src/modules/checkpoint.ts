@@ -4,7 +4,7 @@ import type { Db } from "../db/index.js";
 import { commitCheckpoint, worktreeChangedFiles, worktreeDiffStat } from "../repo/git.js";
 import type { TaskStore } from "./tasks.js";
 
-export type CheckpointReason = "limit" | "handoff" | "cancel" | "completion" | "periodic" | "manual";
+export type CheckpointReason = "limit" | "handoff" | "cancel" | "completion" | "periodic" | "manual" | "pre_verification";
 
 export interface Checkpoint {
   id: string;
@@ -28,7 +28,12 @@ export class CheckpointService {
     private tasks: TaskStore,
   ) {}
 
-  async create(taskId: string, runId: string | null, reason: CheckpointReason): Promise<Checkpoint> {
+  async create(
+    taskId: string,
+    runId: string | null,
+    reason: CheckpointReason,
+    sessionTarget?: { worktreePath: string; baseRef: string },
+  ): Promise<Checkpoint & { changedFiles: string[] }> {
     const row = this.tasks.get(taskId);
     if (!row) throw new Error(`Unknown task ${taskId}`);
     const envelope = this.tasks.envelope(taskId);
@@ -51,10 +56,20 @@ export class CheckpointService {
         throw new Error(`Run ${runId} belongs to task ${runRow.task_id}, not ${taskId}`);
       }
       sessionWorktree = runRow.worktree_path;
+      // Older/current Harness session rows do not yet project the accepted
+      // target into runs.worktree_path. A stored value is useful as a
+      // consistency check, but NULL must not contradict the immutable request.
+      if (sessionTarget && sessionWorktree !== null && sessionWorktree !== sessionTarget.worktreePath) {
+        throw new Error(`Run ${runId} worktree does not match its accepted execution target`);
+      }
     }
-    const worktreePath = sessionWorktree ?? row.worktree_path;
+    const worktreePath = sessionTarget?.worktreePath ?? sessionWorktree ?? row.worktree_path;
+    const baseRef = sessionTarget?.baseRef ?? row.base_ref;
+    // This return-only projection is intentionally not read from the task
+    // envelope: parallel sessions may have accumulated sibling paths there.
+    let changedFiles: string[] = [];
 
-    if (worktreePath && row.base_ref) {
+    if (worktreePath && baseRef) {
       try {
         gitRef = await commitCheckpoint(worktreePath, `checkpoint(${taskId}): ${reason}`);
       } catch {
@@ -67,10 +82,11 @@ export class CheckpointService {
       // unavailable even though the checkpoint commit itself succeeded.
       if (gitRef) {
         try {
-          diffStat = await worktreeDiffStat(worktreePath, row.base_ref);
+          diffStat = await worktreeDiffStat(worktreePath, baseRef);
           // Reconcile the envelope's file list with what git actually shows —
           // the agent may have touched files it never announced in an event.
-          const changed = await worktreeChangedFiles(worktreePath, row.base_ref);
+          const changed = await worktreeChangedFiles(worktreePath, baseRef);
+          changedFiles = changed;
           if (changed.length > 0) {
             envelope.artifacts.changedFiles = Array.from(
               new Set([...envelope.artifacts.changedFiles, ...changed]),
@@ -96,7 +112,7 @@ export class CheckpointService {
       )
       .run(id, taskId, runId, runId, JSON.stringify(envelope), gitRef, diffStat, activitySummary, reason, at);
 
-    return { id, taskId, runId, envelope, gitRef, diffStat, activitySummary, at };
+    return { id, taskId, runId, envelope, gitRef, diffStat, activitySummary, changedFiles, at };
   }
 
   latest(taskId: string): Checkpoint | undefined {

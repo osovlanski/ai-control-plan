@@ -45,19 +45,15 @@ describe("execution-session state machine", () => {
     expect(canSessionTransition("AWAITING_APPROVAL", "YIELDED")).toBe(true);
   });
 
-  it("allows cancellation from every non-terminal state except VERIFYING", () => {
-    // VERIFYING has exactly one exit — COMPLETED (§5). A cancel during the short
-    // verify stage is honored by the finalizer via the durable cancelRequested
-    // flag, not by a state diversion.
+  it("allows cancellation from every non-terminal state", () => {
     for (const state of EXECUTION_SESSION_STATES.filter((s) => !isSessionTerminal(s))) {
-      const expected = state !== "VERIFYING";
-      expect(canSessionTransition(state, "CANCELLED"), `${state} -> CANCELLED`).toBe(expected);
+      expect(canSessionTransition(state, "CANCELLED"), `${state} -> CANCELLED`).toBe(true);
     }
   });
 
-  it("gives VERIFYING exactly one exit: COMPLETED", () => {
+  it("lets VERIFYING complete or preserve cancellation/deadline truth", () => {
     const exits = EXECUTION_SESSION_STATES.filter((to) => canSessionTransition("VERIFYING", to));
-    expect(exits).toEqual(["COMPLETED"]);
+    expect(exits).toEqual(["COMPLETED", "CANCELLED", "TIMED_OUT"]);
   });
 
   it("treats every terminal state as a dead end", () => {

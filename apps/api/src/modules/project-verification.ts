@@ -1,4 +1,8 @@
-import { planVerification, type VerificationPlan } from "@agent-plane/core";
+import {
+  planVerification,
+  type VerificationCapability,
+  type VerificationPlan,
+} from "@agent-plane/core";
 import type { WorkspaceAuthority } from "./harness/workspace-authority.js";
 
 const SCRIPT_KINDS = ["test", "typecheck", "lint"] as const;
@@ -14,6 +18,7 @@ const LOCKFILES: ReadonlyArray<readonly [string, PackageManager]> = [
 /** Bounded, authority-produced input to the pure planner adapter. */
 export interface ProjectVerificationSnapshot { packageJson?: string; lockfiles: string[] }
 export interface ProjectVerificationDiscovery { plan?: VerificationPlan; warnings: string[] }
+export interface ProjectVerificationCapabilities { capabilities: VerificationCapability[]; warnings: string[] }
 
 /** All filesystem access stays behind the Harness's existing authority. */
 export function snapshotProjectVerification(authority: WorkspaceAuthority, worktreePath: string): ProjectVerificationSnapshot {
@@ -39,25 +44,25 @@ function packageManagerOf(declared: unknown, lockfiles: readonly string[]): { ma
 }
 
 /** Pure conversion from a bounded project snapshot to the core planner. */
-export function planProjectVerification(snapshot: ProjectVerificationSnapshot): ProjectVerificationDiscovery {
-  if (snapshot.packageJson === undefined) return { warnings: [] };
+export function discoverProjectVerificationCapabilities(snapshot: ProjectVerificationSnapshot): ProjectVerificationCapabilities {
+  if (snapshot.packageJson === undefined) return { capabilities: [], warnings: [] };
   let manifest: unknown;
   try { manifest = JSON.parse(snapshot.packageJson); }
-  catch { return { warnings: ["project verification skipped: malformed package.json"] }; }
+  catch { return { capabilities: [], warnings: ["project verification skipped: malformed package.json"] }; }
   if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) {
-    return { warnings: ["project verification skipped: package.json must contain an object"] };
+    return { capabilities: [], warnings: ["project verification skipped: package.json must contain an object"] };
   }
   const record = manifest as Record<string, unknown>;
   const scripts = record.scripts;
-  if (!scripts || typeof scripts !== "object" || Array.isArray(scripts)) return { warnings: [] };
+  if (!scripts || typeof scripts !== "object" || Array.isArray(scripts)) return { capabilities: [], warnings: [] };
   const scriptRecord = scripts as Record<string, unknown>;
   const discovered = SCRIPT_KINDS.filter(
     (name) => Object.prototype.hasOwnProperty.call(scriptRecord, name) && typeof scriptRecord[name] === "string",
   );
-  if (discovered.length === 0) return { warnings: [] };
+  if (discovered.length === 0) return { capabilities: [], warnings: [] };
 
   const resolved = packageManagerOf(record.packageManager, snapshot.lockfiles);
-  if (!resolved.manager) return { warnings: resolved.warning ? [resolved.warning] : [] };
+  if (!resolved.manager) return { capabilities: [], warnings: resolved.warning ? [resolved.warning] : [] };
   const capabilities = discovered.map((name) => ({
     checkId: `project:${name}`,
     name: `project ${name}`,
@@ -66,12 +71,21 @@ export function planProjectVerification(snapshot: ProjectVerificationSnapshot): 
     command: `${resolved.manager} run ${name}`,
     required: true,
   }));
+  return { capabilities, warnings: [] };
+}
+
+export function planProjectVerification(
+  snapshot: ProjectVerificationSnapshot,
+  changedFiles: string[] = [],
+): ProjectVerificationDiscovery {
+  const discovery = discoverProjectVerificationCapabilities(snapshot);
+  if (discovery.capabilities.length === 0) return { warnings: discovery.warnings };
   return {
     plan: planVerification({
-      changedFiles: [],
-      explicitRequiredKinds: capabilities.map(({ kind }) => kind),
-      capabilities,
+      changedFiles,
+      explicitRequiredKinds: discovery.capabilities.map(({ kind }) => kind),
+      capabilities: discovery.capabilities,
     }),
-    warnings: [],
+    warnings: discovery.warnings,
   };
 }

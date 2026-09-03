@@ -47,7 +47,8 @@ export type TerminalSessionState = (typeof SESSION_TERMINAL_STATES)[number];
  * ride on `ExecutionResult.verification` and the task verdict is the Control
  * Plane's (H-I6). A cancel or hard timeout that arrives during the (short,
  * budget-bounded) verify stage is honored by the finalizer via the durable
- * `cancelRequested` flag, not by diverting the state machine.
+ * `cancelRequested` flag and the absolute deadline, using explicit terminal
+ * edges so the durable session outcome remains truthful.
  */
 const SESSION_TRANSITIONS: Record<ExecutionSessionState, readonly ExecutionSessionState[]> = {
   // Prepare persisted the row; Context/authority failures fail it before any adapter call.
@@ -60,7 +61,7 @@ const SESSION_TRANSITIONS: Record<ExecutionSessionState, readonly ExecutionSessi
   // Explicit user/plane hold.
   PAUSED: ["RESUMING", "FAILED", "CANCELLED"],
   RESUMING: ["RUNNING", "FAILED", "CANCELLED", "TIMED_OUT"],
-  VERIFYING: ["COMPLETED"],
+  VERIFYING: ["COMPLETED", "CANCELLED", "TIMED_OUT"],
   COMPLETED: [],
   FAILED: [],
   CANCELLED: [],
@@ -101,6 +102,8 @@ export const SESSION_TRANSITION_TRIGGERS: Record<string, string> = {
   "RESUMING->CANCELLED": "cancel_during_resume",
   "RESUMING->TIMED_OUT": "hard_timeout_during_resume",
   "VERIFYING->COMPLETED": "verification_stage_done",
+  "VERIFYING->CANCELLED": "cancel_during_verification",
+  "VERIFYING->TIMED_OUT": "hard_timeout_during_verification",
 };
 
 export function isExecutionSessionState(value: string): value is ExecutionSessionState {
