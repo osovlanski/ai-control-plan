@@ -176,11 +176,40 @@ export const api = {
   scores: () => req<AssistantScore[]>("/api/scores"),
   sessions: (taskId: string) => req<SessionSummary[]>(`/api/tasks/${taskId}/sessions`),
   session: (id: string) => req<SessionDetail>(`/api/sessions/${id}`),
+  verification: (id: string) => req<SessionVerification>(`/api/sessions/${id}/verification`),
   sessionsByGroup: (groupId: string) =>
     req<SessionSummary[]>(`/api/sessions?groupId=${encodeURIComponent(groupId)}`),
   sessionsByParent: (parentTaskId: string) =>
     req<SessionSummary[]>(`/api/sessions?parentTaskId=${encodeURIComponent(parentTaskId)}`),
 };
+
+export interface SessionVerification {
+  sessionId: string;
+  revisions: Array<{
+    id: string;
+    sessionId: string;
+    executionRequestId: string;
+    revision: number;
+    supersedesRevisionId: string | null;
+    planFingerprint: string;
+    plan: unknown | null;
+    reason: "initial" | "post_change" | "recovery";
+    createdAt: string;
+  }>;
+  runs: Array<{
+    id: string;
+    sessionId: string;
+    executionRequestId: string;
+    planRevisionId: string;
+    state: "ready" | "claimed" | "completed" | "interrupted";
+    claimedAt: string | null;
+    evaluation: unknown | null;
+    artifacts: unknown;
+    interruptionReason: string | null;
+    createdAt: string;
+    updatedAt: string;
+  }>;
+}
 
 /** One row of the Execution Harness session list for a task (§11 drill-down). */
 export interface SessionSummary {

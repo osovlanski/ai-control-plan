@@ -21,7 +21,8 @@ import { openDb, type Db } from "../../src/db/index.js";
 import { ApprovalService } from "../../src/modules/harness/approval-service.js";
 import { SessionStore } from "../../src/modules/harness/session-store.js";
 import type { RunnerCheckpoints } from "../../src/modules/harness/session-runner.js";
-import { HarnessRecovery } from "../../src/modules/harness/recovery.js";
+import { HarnessRecovery, type RecoveryDeps } from "../../src/modules/harness/recovery.js";
+import { VerificationStore } from "../../src/modules/harness/verification-store.js";
 
 let dir: string;
 let db: Db;
@@ -41,7 +42,7 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-function request(reqId: string): ExecutionRequest {
+function request(reqId: string, verification: ExecutionRequest["verification"] = []): ExecutionRequest {
   return {
     schemaVersion: 1,
     executionRequestId: reqId,
@@ -65,7 +66,7 @@ function request(reqId: string): ExecutionRequest {
       isolation: { required: "ambient" },
     },
     context: {},
-    verification: [],
+    verification,
     origin: { kind: "fresh" },
   };
 }
@@ -75,8 +76,9 @@ function seedSession(opts: {
   reqId: string;
   to: "PREPARED" | "STARTING" | "RUNNING" | "VERIFYING" | "AWAITING_APPROVAL";
   providerSessionRef?: string;
+  verification?: ExecutionRequest["verification"];
 }): string {
-  store.recordRequest(request(opts.reqId));
+  store.recordRequest(request(opts.reqId, opts.verification));
   const id = store.createSession(opts.reqId).sessionId as string;
   // Crash right after Prepare committed the row, before a lease was ever taken.
   if (opts.to === "PREPARED") return id;
@@ -102,6 +104,33 @@ function seedSession(opts: {
   }
   store.releaseLease(id, t);
   return id;
+}
+
+function seedVerification(
+  sessionId: string,
+  reqId: string,
+  state: "ready" | "claimed" | "completed" | "interrupted",
+): VerificationStore {
+  const verification = new VerificationStore(db, () => new Date("2026-01-02T00:00:00.000Z"));
+  const plan = {
+    schemaVersion: 1 as const,
+    planRevisionId: `vpr_${reqId}`,
+    revision: 1,
+    checks: [{ checkId: "unit", name: "unit", kind: "tests" as const, command: "pnpm test", required: true }],
+    decisions: [{ checkId: "unit", selected: true, required: true, signals: ["requested"], reason: "requested" }],
+  };
+  verification.insertRevision({ sessionId, executionRequestId: reqId, plan, reason: "initial" });
+  const binding = { runId: `vr_${reqId}`, sessionId, executionRequestId: reqId, planRevisionId: plan.planRevisionId };
+  verification.prepareRun(binding);
+  if (state !== "ready") verification.claim({ ...binding, claimToken: "runner-secret-token" });
+  if (state === "completed") verification.complete({
+    ...binding,
+    claimToken: "runner-secret-token",
+    evaluation: { passed: true, checks: [{ checkId: "unit", name: "unit", kind: "tests", required: true, status: "passed", passed: true, summary: "ok" }] },
+    artifacts: [{ kind: "test_report", ref: "artifact://unit", summary: "unit report" }],
+  });
+  if (state === "interrupted") verification.interrupt({ ...binding, claimToken: "runner-secret-token", reason: "runner stopped" });
+  return verification;
 }
 
 function manifest(opts: {
@@ -142,8 +171,19 @@ function recovery(opts: {
   checkpoints?: RunnerCheckpoints;
   maxDirectiveAttempts?: number;
 } = {}): HarnessRecovery {
+  return new HarnessRecovery({ ...recoveryDeps(opts), verification: new VerificationStore(db) });
+}
+
+function recoveryDeps(opts: {
+  canResume?: boolean;
+  approvalAckLookup?: boolean;
+  ackResult?: boolean;
+  accounting?: "delta" | "cumulative" | "none";
+  checkpoints?: RunnerCheckpoints;
+  maxDirectiveAttempts?: number;
+} = {}): Omit<RecoveryDeps, "verification"> {
   const m = manifest(opts);
-  return new HarnessRecovery({
+  return {
     store,
     approvals: new ApprovalService(db),
     checkpoints: opts.checkpoints ?? { create: async () => ({ id: "ck_ok", gitRef: "ref1" }) },
@@ -153,7 +193,7 @@ function recovery(opts: {
     },
     ...(opts.approvalAckLookup ? { approvalAckLookup: () => opts.ackResult ?? false } : {}),
     ...(opts.maxDirectiveAttempts ? { maxDirectiveAttempts: opts.maxDirectiveAttempts } : {}),
-  });
+  };
 }
 
 function recoveryEvents(sessionId: string): Array<{ action: string; detail?: string }> {
@@ -226,6 +266,90 @@ describe("HarnessRecovery.reconcileOnBoot", () => {
     expect(resultRows(id)).toBe(1);
     expect(store.result(id)!.verification).toBeUndefined();
     expect(recoveryEvents(id).map((e) => e.action)).toContain("completed_from_verifying");
+  });
+
+  it("reuses completed durable evidence and artifacts exactly after restart", async () => {
+    const specs = [{ checkId: "unit", name: "unit", kind: "tests" as const, command: "pnpm test", required: true }];
+    const id = seedSession({ reqId: "erq_evidence", to: "VERIFYING", verification: specs });
+    const verification = seedVerification(id, "erq_evidence", "completed");
+
+    await new HarnessRecovery({ ...(recoveryDeps({ canResume: true })), verification }).reconcileOnBoot();
+
+    expect(store.result(id)).toMatchObject({
+      verification: { passed: true, checks: [{ checkId: "unit", status: "passed" }] },
+      artifacts: [{ kind: "test_report", ref: "artifact://unit", summary: "unit report" }],
+    });
+  });
+
+  for (const lifecycle of ["ready", "claimed", "interrupted"] as const) {
+    it(`settles ${lifecycle} verification as explicit blocked evidence without rerunning`, async () => {
+      const specs = [{ checkId: "unit", name: "unit", kind: "tests" as const, command: "pnpm test", required: true }];
+      const reqId = `erq_${lifecycle}`;
+      const id = seedSession({ reqId, to: "VERIFYING", verification: specs });
+      const verification = seedVerification(id, reqId, lifecycle);
+
+      await new HarnessRecovery({ ...recoveryDeps({ canResume: true }), verification }).reconcileOnBoot();
+
+      expect(store.result(id)!.verification).toMatchObject({ passed: false, checks: [{ checkId: "unit", status: "blocked", required: true }] });
+      expect(verification.latestRunForSession(id)!.state).toBe("interrupted");
+    });
+  }
+
+  it("moves RUNNING with a prepared verification run into VERIFYING recovery instead of provider resume", async () => {
+    const specs = [{ checkId: "unit", name: "unit", kind: "tests" as const, required: true }];
+    const id = seedSession({ reqId: "erq_prepared", to: "RUNNING", providerSessionRef: "psr_resume", verification: specs });
+    const verification = seedVerification(id, "erq_prepared", "ready");
+
+    const out = await new HarnessRecovery({ ...recoveryDeps({ canResume: true }), verification }).reconcileOnBoot();
+
+    expect(out[0]!.action).toBe("completed_from_verifying");
+    expect(store.get(id)!.state).toBe("COMPLETED");
+    expect(recoveryEvents(id).map((e) => e.action)).toContain("verification_recovered");
+  });
+
+  it("honors cancellation while VERIFYING and does not fabricate a pass", async () => {
+    const specs = [{ checkId: "unit", name: "unit", kind: "tests" as const, required: true }];
+    const id = seedSession({ reqId: "erq_verify_cancel", to: "VERIFYING", verification: specs });
+    const verification = seedVerification(id, "erq_verify_cancel", "claimed");
+    store.requestCancel(id);
+
+    await new HarnessRecovery({ ...recoveryDeps(), verification }).reconcileOnBoot();
+
+    expect(store.result(id)).toMatchObject({ terminalState: "CANCELLED", verification: { passed: false } });
+    expect(verification.latestRunForSession(id)!.state).toBe("interrupted");
+  });
+
+  it("terminalizes an unfinished verification as TIMED_OUT when the durable hard deadline elapsed", async () => {
+    const specs = [{ checkId: "unit", name: "unit", kind: "tests" as const, required: true }];
+    const id = seedSession({ reqId: "erq_verify_timeout", to: "VERIFYING", verification: specs });
+    const verification = seedVerification(id, "erq_verify_timeout", "ready");
+
+    const out = await new HarnessRecovery({
+      ...recoveryDeps(), verification, now: () => new Date("2099-01-01T00:00:00.000Z"),
+    }).reconcileOnBoot();
+
+    expect(out[0]!.action).toBe("timed_out");
+    expect(store.result(id)).toMatchObject({ terminalState: "TIMED_OUT", outcome: "timed_out", verification: { passed: false } });
+  });
+
+  it("uses the verification-store CAS winner when a stale runner completes during recovery", async () => {
+    const specs = [{ checkId: "unit", name: "unit", kind: "tests" as const, required: true }];
+    const id = seedSession({ reqId: "erq_verify_race", to: "VERIFYING", verification: specs });
+    const verification = seedVerification(id, "erq_verify_race", "claimed");
+    const originalInterrupt = verification.interrupt.bind(verification);
+    let raced = false;
+    verification.interrupt = ((input: Parameters<VerificationStore["interrupt"]>[0]) => {
+      if (!raced) {
+        raced = true;
+        verification.complete({ ...input, evaluation: { passed: true, checks: [{ checkId: "unit", name: "unit", kind: "tests", required: true, status: "passed", passed: true, summary: "runner won" }] }, artifacts: [] });
+      }
+      return originalInterrupt(input);
+    }) as VerificationStore["interrupt"];
+
+    await new HarnessRecovery({ ...recoveryDeps(), verification }).reconcileOnBoot();
+
+    expect(store.result(id)!.verification).toMatchObject({ passed: true, checks: [{ summary: "runner won" }] });
+    expect(verification.latestRunForSession(id)!.state).toBe("completed");
   });
 
   it("leaves already-terminal sessions untouched", async () => {

@@ -5,8 +5,8 @@
  * All of this is single-process crash recovery: on boot no SessionRunner is
  * alive, so every live session's lease is conservatively void and each live
  * session is decided one of:
- *   - COMPLETED  — it crashed mid-VERIFYING (execution had finished; verification
- *                  was not durably recorded), so it completes with no verification;
+ *   - COMPLETED  — it crashed mid-VERIFYING; durable verification evidence is
+ *                  reused, while ambiguous work is explicitly blocked, never rerun;
  *   - resume_offered — the provider session is probe-resumable (manifest
  *                  `canResume` + a `providerSessionRef`); the Control Plane, not
  *                  the Harness, turns that into an `origin: resume` request (H-I1);
@@ -20,13 +20,18 @@
 import type {
   AgentAdapter,
   CapabilityManifest,
+  EvaluationResult,
+  ExecutionArtifact,
   ExecutionResult,
   ExecutionSession,
+  VerificationSpec,
 } from "@agent-plane/core";
-import { redactValue } from "@agent-plane/core";
+import { evaluationResult, redactValue } from "@agent-plane/core";
+import { randomUUID } from "node:crypto";
 import { SessionCasConflictError, type SessionStore } from "./session-store.js";
 import type { ApprovalService } from "./approval-service.js";
 import type { RunnerCheckpoints } from "./session-runner.js";
+import { VerificationStoreConflictError, type StoredVerificationRun, type VerificationStore } from "./verification-store.js";
 
 export interface RecoveryRegistry {
   adapter(id: string): AgentAdapter;
@@ -38,6 +43,7 @@ export interface RecoveryDeps {
   approvals: ApprovalService;
   checkpoints: RunnerCheckpoints;
   registry: RecoveryRegistry;
+  verification?: VerificationStore;
   now?: () => Date;
   ownerId?: string;
   /** Cap on guard-directive replay attempts before the session is orphan-failed (§9). */
@@ -54,6 +60,7 @@ export type RecoveryAction =
   | "resume_offered"
   | "orphaned"
   | "cancelled"
+  | "timed_out"
   | "completed_from_verifying"
   | "already_terminal"
   | "skipped";
@@ -121,6 +128,10 @@ export class HarnessRecovery {
         this.deps.store.appendRecoveryEvent(sessionId, "recovery_aborted", redact(err));
         return { sessionId, action: "skipped", detail: "lost the fencing lease mid-recovery" };
       }
+      if (err instanceof VerificationStoreConflictError) {
+        this.deps.store.appendRecoveryEvent(sessionId, "verification_recovery_raced", redact(err));
+        return { sessionId, action: "skipped", detail: "verification lifecycle changed during recovery" };
+      }
       throw err;
     } finally {
       this.deps.store.releaseLease(sessionId, lease);
@@ -143,11 +154,14 @@ export class HarnessRecovery {
       //     plane/user cancel set before the crash) is honored ahead of any
       //     resume/orphan decision: §9's cancel order lands at a terminal CAS,
       //     with a checkpoint ATTEMPT first (H-I4).
-      if (s.cancelRequested && s.state !== "VERIFYING") {
+      if (s.cancelRequested) {
+        const recovered = this.recoverVerification(sessionId, s.executionRequestId, "cancelled during recovery");
         const checkpoint = await this.attemptCheckpoint(sessionId, s.executionRequestId);
         this.finalize(sessionId, s, lease, "CANCELLED", {
           cancellation: { requestedBy: "plane", at: this.now().toISOString() },
           checkpoint,
+          verification: recovered?.evaluation,
+          artifacts: recovered?.artifacts,
         });
         this.deps.store.appendRecoveryEvent(
           sessionId,
@@ -168,15 +182,42 @@ export class HarnessRecovery {
         return { sessionId, action: "skipped", detail: "lost the fencing lease mid-recovery" };
       }
 
-      // 3. Crashed mid-VERIFYING: execution had finished, so complete it — with
-      //    no verification (it was never durably recorded); §5. Usage is
+
+      // A durable verification run means provider execution already finished,
+      // even if the crash preceded RUNNING -> VERIFYING. Never resume/replay the
+      // provider in that ambiguous state.
+      const durableRun = this.deps.verification?.latestRunForSession(sessionId);
+      if (durableRun && s.state === "RUNNING") {
+        s = this.deps.store.transition(sessionId, {
+          expectedVersion: s.version,
+          from: "RUNNING",
+          to: "VERIFYING",
+          leaseToken: lease,
+        });
+        this.deps.store.appendRecoveryEvent(sessionId, "verification_recovered", "prepared run bypassed provider resume");
+      }
+
+      // 3. Crashed mid-VERIFYING: execution had finished, so reconcile its
+      //    durable verification lifecycle without rerunning checks. Usage is
       //    recomputed from persisted `usage.updated` events (§9 recovery table);
       //    enforcement fidelity a dead process's tier probe cannot be re-derived,
       //    so it is reported at the conservative floor, never assumed higher.
       if (s.state === "VERIFYING") {
-        this.finalize(sessionId, s, lease, "COMPLETED", { usage: this.recomputeUsage(sessionId) });
-        this.deps.store.appendRecoveryEvent(sessionId, "completed_from_verifying");
-        return { sessionId, action: "completed_from_verifying" };
+        const recovered = this.recoverVerification(sessionId, s.executionRequestId, "runner interrupted during verification");
+        const request = requestVerification(this.deps.store, s.executionRequestId);
+        const deadline = request.startedAt && request.hardMs !== undefined
+          ? new Date(request.startedAt).getTime() + request.hardMs
+          : undefined;
+        const settledRun = this.deps.verification?.latestRunForSession(sessionId);
+        const timedOut = settledRun?.state !== "completed" && deadline !== undefined && this.now().getTime() >= deadline;
+        this.finalize(sessionId, s, lease, timedOut ? "TIMED_OUT" : "COMPLETED", {
+          usage: this.recomputeUsage(sessionId),
+          ...(timedOut ? { failure: { kind: "timeout" as const, retryable: true, message: "verification hard deadline elapsed during recovery" } } : {}),
+          verification: recovered?.evaluation ?? (request.specs.length > 0 ? blockedEvaluation(request.specs, "verification lifecycle missing after restart") : undefined),
+          artifacts: recovered?.artifacts,
+        });
+        this.deps.store.appendRecoveryEvent(sessionId, timedOut ? "timed_out" : "completed_from_verifying");
+        return { sessionId, action: timedOut ? "timed_out" : "completed_from_verifying" };
       }
 
       // 4. Probe-resumable → offer resume; the Control Plane issues origin:resume.
@@ -357,22 +398,69 @@ export class HarnessRecovery {
     return { inputTokens: input, outputTokens: output, accounting };
   }
 
+  /**
+   * Reconcile one durable lifecycle without ever rerunning an ambiguous check.
+   * Verification-store CAS is the fence against a stale runner: either its
+   * completion wins, or recovery's interruption wins, and the loser re-reads.
+   */
+  private recoverVerification(
+    sessionId: string,
+    executionRequestId: string,
+    reason: string,
+  ): { evaluation?: EvaluationResult; artifacts: ExecutionArtifact[] } | undefined {
+    const verification = this.deps.verification;
+    if (!verification) return undefined;
+    let run = verification.latestRunForSession(sessionId);
+    if (!run) return undefined;
+    if (run.executionRequestId !== executionRequestId) throw new Error("verification run/request binding mismatch during recovery");
+    const revision = verification.getRevision(run.planRevisionId);
+    if (!revision) throw new Error("verification run has no durable plan revision");
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      if (run.state === "completed") return { evaluation: run.evaluation, artifacts: run.artifacts };
+      if (run.state === "interrupted") {
+        return { evaluation: blockedEvaluation(revision.plan.checks, run.interruptionReason ?? reason), artifacts: [] };
+      }
+      try {
+        if (run.state === "ready") {
+          const claimToken = `recovery_${randomUUID()}`;
+          run = verification.claim({ ...binding(run), claimToken }).run;
+        }
+        if (run.state === "claimed") {
+          verification.interrupt({ ...binding(run), claimToken: run.claimToken!, reason });
+          run = verification.getRun(run.id)!;
+        }
+      } catch (error) {
+        if (!(error instanceof VerificationStoreConflictError)) throw error;
+        // A concurrent runner transition won. Re-read and consume that winner.
+        run = verification.getRun(run.id)!;
+      }
+    }
+    if (run.state === "completed") return { evaluation: run.evaluation, artifacts: run.artifacts };
+    if (run.state === "interrupted") return { evaluation: blockedEvaluation(revision.plan.checks, run.interruptionReason ?? reason), artifacts: [] };
+    throw new VerificationStoreConflictError(`verification run ${run.id} remained ${run.state} during recovery`);
+  }
+
   private finalize(
     sessionId: string,
     session: ExecutionSession,
     lease: string,
-    to: "FAILED" | "COMPLETED" | "CANCELLED",
+    to: "FAILED" | "COMPLETED" | "CANCELLED" | "TIMED_OUT",
     parts:
       | {
           failure?: ExecutionResult["failure"];
           cancellation?: ExecutionResult["cancellation"];
           checkpoint?: ExecutionResult["checkpoint"];
           usage?: ExecutionResult["usage"];
+          verification?: EvaluationResult;
+          artifacts?: ExecutionArtifact[];
         }
       | undefined,
   ): void {
     const checkpoint = parts?.checkpoint ?? { attempted: false, committed: false };
-    const outcome = to === "FAILED" ? "failed" : to === "CANCELLED" ? "cancelled" : "completed";
+    const outcome = to === "FAILED" ? "failed" : to === "CANCELLED" ? "cancelled" : to === "TIMED_OUT" ? "timed_out" : "completed";
+    const checkpointArtifacts: ExecutionArtifact[] = checkpoint.checkpointId
+      ? [{ kind: "checkpoint", ref: checkpoint.checkpointId, summary: checkpoint.committed ? "recovery checkpoint" : "recovery checkpoint (uncommitted)" }]
+      : [];
     const result: ExecutionResult = {
       schemaVersion: 1,
       sessionId: sessionId as ExecutionResult["sessionId"],
@@ -380,9 +468,8 @@ export class HarnessRecovery {
       outcome,
       failure: parts?.failure,
       cancellation: parts?.cancellation,
-      artifacts: checkpoint.checkpointId
-        ? [{ kind: "checkpoint", ref: checkpoint.checkpointId, summary: checkpoint.committed ? "recovery checkpoint" : "recovery checkpoint (uncommitted)" }]
-        : [],
+      ...(parts?.verification ? { verification: parts.verification } : {}),
+      artifacts: [...(parts?.artifacts ?? []), ...checkpointArtifacts],
       usage: parts?.usage ?? { inputTokens: 0, outputTokens: 0, accounting: "none" },
       checkpoint,
       // A dead process's provider-isolation tier probe cannot be re-derived;
@@ -402,6 +489,70 @@ export class HarnessRecovery {
     });
     void session;
   }
+}
+
+function binding(run: StoredVerificationRun): {
+  runId: string;
+  sessionId: string;
+  executionRequestId: string;
+  planRevisionId: string;
+} {
+  return {
+    runId: run.id,
+    sessionId: run.sessionId,
+    executionRequestId: run.executionRequestId,
+    planRevisionId: run.planRevisionId,
+  };
+}
+
+function blockedEvaluation(
+  checks: readonly (VerificationSpec & { checkId?: string })[],
+  reason: string,
+): EvaluationResult {
+  const summary = redactValue(reason).slice(0, 500);
+  return evaluationResult(checks.map((check) => ({
+    ...(check.checkId ? { checkId: check.checkId } : {}),
+    name: check.name,
+    kind: check.kind,
+    required: check.required,
+    status: "blocked" as const,
+    passed: false,
+    summary,
+  })));
+}
+
+function requestVerification(
+  store: SessionStore,
+  executionRequestId: string,
+): { specs: VerificationSpec[]; hardMs?: number; startedAt?: string } {
+  const row = (store as unknown as {
+    db: { prepare(sql: string): { get(id: string): { verification: string; policy: string; started_at: string | null } | undefined } };
+  }).db.prepare(
+    `SELECT er.verification, er.policy, r.started_at
+       FROM execution_requests er JOIN runs r ON r.execution_request_id = er.id
+      WHERE er.id = ?`,
+  ).get(executionRequestId);
+  if (!row) return { specs: [] };
+  const specs = safeObjectJson(row.verification);
+  const policy = safeObjectJson(row.policy);
+  const hardMs = !Array.isArray(policy) && policy && typeof policy === "object"
+    ? (policy as { timeout?: { hardMs?: unknown } }).timeout?.hardMs
+    : undefined;
+  return {
+    specs: Array.isArray(specs) ? specs.filter(isVerificationSpec) : [],
+    ...(typeof hardMs === "number" && Number.isFinite(hardMs) && hardMs >= 0 ? { hardMs } : {}),
+    ...(row.started_at ? { startedAt: row.started_at } : {}),
+  };
+}
+
+function safeObjectJson(value: string): unknown {
+  try { return JSON.parse(value); } catch { return undefined; }
+}
+
+function isVerificationSpec(value: unknown): value is VerificationSpec {
+  if (!value || typeof value !== "object") return false;
+  const v = value as Record<string, unknown>;
+  return typeof v.name === "string" && typeof v.kind === "string" && typeof v.required === "boolean";
 }
 
 function isTerminal(state: ExecutionSession["state"]): boolean {

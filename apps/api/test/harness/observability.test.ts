@@ -26,6 +26,7 @@ import { ApprovalService } from "../../src/modules/harness/approval-service.js";
 import { EventRecorder } from "../../src/modules/harness/event-recorder.js";
 import { SessionRunner } from "../../src/modules/harness/session-runner.js";
 import { SessionStore } from "../../src/modules/harness/session-store.js";
+import { VerificationStore } from "../../src/modules/harness/verification-store.js";
 
 let home: string;
 let db: Db;
@@ -221,6 +222,70 @@ describe("GET /api/sessions/:id", () => {
     const res = await built.app.inject({ method: "GET", url: `/api/sessions/${SESSION}` });
     expect(res.statusCode).toBe(200);
     expect(res.json().result).toBeNull(); // not `[]` — a client won't read result.enforcement.tools off it
+  });
+});
+
+describe("GET /api/sessions/:id/verification", () => {
+  it("returns ordered durable lifecycle bindings and evidence without claim tokens", async () => {
+    const verification = new VerificationStore(db);
+    const first = {
+      schemaVersion: 1 as const, planRevisionId: "vpr_obs_1", revision: 1,
+      checks: [{ checkId: "unit", name: "unit", kind: "tests" as const, required: true }],
+      decisions: [{ checkId: "unit", selected: true, required: true, signals: ["requested"], reason: "requested" }],
+    };
+    verification.insertRevision({ sessionId: SESSION, executionRequestId: REQ, plan: first, reason: "initial" });
+    const second = { ...first, planRevisionId: "vpr_obs_2", revision: 2, supersedesRevisionId: first.planRevisionId,
+      checks: [{ checkId: "lint", name: "lint", kind: "lint" as const, required: true }],
+      decisions: [{ checkId: "lint", selected: true, required: true, signals: ["changed"], reason: "changed" }],
+      debug: { claimToken: "nested-claim-canary", transcript: "nested-transcript-canary" } };
+    verification.insertRevision({ sessionId: SESSION, executionRequestId: REQ, plan: second, reason: "post_change" });
+    const binding = { runId: "vr_obs", sessionId: SESSION, executionRequestId: REQ, planRevisionId: second.planRevisionId };
+    verification.prepareRun(binding);
+    verification.claim({ ...binding, claimToken: "claim-canary-never-serve" });
+    verification.complete({ ...binding, claimToken: "claim-canary-never-serve",
+      evaluation: { passed: true, checks: [{ checkId: "lint", name: "lint", kind: "lint", required: true, status: "passed", passed: true, summary: "ok" }] },
+      artifacts: [{ kind: "test_report", ref: "artifact://lint", summary: "lint output" }] });
+
+    const res = await built.app.inject({ method: "GET", url: `/api/sessions/${SESSION}/verification` });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.sessionId).toBe(SESSION);
+    expect(body.revisions.map((r: { id: string }) => r.id)).toEqual(["vpr_obs_1", "vpr_obs_2"]);
+    expect(body.runs[0]).toMatchObject({ executionRequestId: REQ, planRevisionId: "vpr_obs_2", state: "completed", evaluation: { passed: true } });
+    expect(body.runs[0].artifacts).toEqual([{ kind: "test_report", ref: "artifact://lint", summary: "lint output" }]);
+    expect(res.payload).not.toContain("claim-canary-never-serve");
+    expect(res.payload).not.toContain("nested-claim-canary");
+    expect(res.payload).not.toContain("nested-transcript-canary");
+    expect(res.payload).not.toContain("claimToken");
+  });
+
+  it("returns an empty lifecycle for a Harness session and 404 for unknown or legacy sessions", async () => {
+    expect((await built.app.inject({ method: "GET", url: `/api/sessions/${SESSION}/verification` })).json()).toEqual({
+      sessionId: SESSION, revisions: [], runs: [],
+    });
+    expect((await built.app.inject({ method: "GET", url: "/api/sessions/missing/verification" })).statusCode).toBe(404);
+    db.prepare(
+      `INSERT INTO runs (id, task_id, assistant_id, state, started_at) VALUES ('legacy_verify', ?, 'a1', 'RUNNING', 't')`,
+    ).run(TASK);
+    expect((await built.app.inject({ method: "GET", url: "/api/sessions/legacy_verify/verification" })).statusCode).toBe(404);
+  });
+
+  it("degrades a malformed lifecycle JSON field without failing the whole read", async () => {
+    const verification = new VerificationStore(db);
+    const plan = { schemaVersion: 1 as const, planRevisionId: "vpr_bad", revision: 1,
+      checks: [{ checkId: "unit", name: "unit", kind: "tests" as const, required: true }],
+      decisions: [{ checkId: "unit", selected: true, required: true, signals: [], reason: "requested" }] };
+    verification.insertRevision({ sessionId: SESSION, executionRequestId: REQ, plan, reason: "initial" });
+    const binding = { runId: "vr_bad", sessionId: SESSION, executionRequestId: REQ, planRevisionId: plan.planRevisionId };
+    verification.prepareRun(binding); verification.claim({ ...binding, claimToken: "owner" });
+    verification.complete({ ...binding, claimToken: "owner", evaluation: { passed: true, checks: [] }, artifacts: [] });
+    db.pragma("ignore_check_constraints = ON");
+    db.prepare("UPDATE verification_runs SET evaluation = '{bad' WHERE id = 'vr_bad'").run();
+    db.pragma("ignore_check_constraints = OFF");
+
+    const res = await built.app.inject({ method: "GET", url: `/api/sessions/${SESSION}/verification` });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().runs[0]).toMatchObject({ id: "vr_bad", evaluation: null, artifacts: [] });
   });
 });
 

@@ -172,6 +172,16 @@ export class VerificationStore {
     return row ? toRevision(row) : undefined;
   }
 
+  /** Deterministic read projection used by recovery and the read-only API. */
+  revisionsForSession(sessionId: string): StoredVerificationRevision[] {
+    return (this.db.prepare(
+      `SELECT id, session_id, execution_request_id, revision, supersedes_revision_id,
+              plan_fingerprint, plan, reason, created_at
+         FROM verification_plan_revisions
+        WHERE session_id = ? ORDER BY revision, id`,
+    ).all(sessionId) as RevisionRow[]).map(toRevision);
+  }
+
   prepareRun(input: { runId: string; sessionId: string; executionRequestId: string; planRevisionId: string }): { run: StoredVerificationRun; deduped: boolean } {
     const existing = this.getRun(input.runId);
     if (existing) {
@@ -218,6 +228,23 @@ export class VerificationStore {
   getRun(id: string): StoredVerificationRun | undefined {
     const row = this.db.prepare("SELECT * FROM verification_runs WHERE id = ?").get(id) as VerificationRunRow | undefined;
     return row ? toRun(row) : undefined;
+  }
+
+  /** Runs follow plan revision order, then stable creation/id tie-breakers. */
+  runsForSession(sessionId: string): StoredVerificationRun[] {
+    return (this.db.prepare(
+      `SELECT vr.id, vr.session_id, vr.execution_request_id, vr.plan_revision_id,
+              vr.state, vr.claim_token, vr.claimed_at, vr.evaluation, vr.artifacts,
+              vr.interruption_reason, vr.created_at, vr.updated_at
+         FROM verification_runs vr
+         JOIN verification_plan_revisions p ON p.id = vr.plan_revision_id
+        WHERE vr.session_id = ?
+        ORDER BY p.revision, vr.created_at, vr.id`,
+    ).all(sessionId) as VerificationRunRow[]).map(toRun);
+  }
+
+  latestRunForSession(sessionId: string): StoredVerificationRun | undefined {
+    return this.runsForSession(sessionId).at(-1);
   }
 
   private settle(input: { runId: string; sessionId: string; executionRequestId: string; planRevisionId: string; claimToken: string; evaluation?: EvaluationResult; artifacts?: ExecutionArtifact[]; reason?: string }, state: "completed" | "interrupted"): StoredVerificationRun {
