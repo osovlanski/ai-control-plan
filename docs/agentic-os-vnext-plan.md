@@ -1,7 +1,7 @@
 # Agentic OS — vNext Enhancement Plan
 
-**Status:** Proposed — revision 5 (planning only; no production implementation in this pass)
-**Review:** `docs/agentic-os-vnext-review-log.md` (Codex adversarial review, rounds 1–4 folded in; round-4 findings applied without a confirming round — MAX_ROUNDS reached)
+**Status:** Proposed — revision 6 (planning only; no production implementation in this pass)
+**Review:** `docs/agentic-os-vnext-review-log.md` (Codex adversarial review, rounds 1–4, plus an independent cold review of revision 5 — `docs/agentic-os-vnext-review-log.md`)
 **Date:** 2026-09-03
 **Reconciled against:** `ai-control-plan` `main@37066e9`, `cockpit` `main@f17bd1b`
 **Verified baselines:** ai-control-plan `pnpm typecheck && pnpm test` → core 70 / adapters 8 / api 378 / web 3, exit 0. cockpit `npm test` → 1296 pass / 0 fail, exit 0.
@@ -36,8 +36,9 @@ up front rather than buried:
 | A1 | Remove `CockpitEventSink`; Cockpit consumes canonical durable reads, never a telemetry push path | `operator-observability-verification.md` §9 sink list | CR-11 |
 | A2 | One Control-Plane planning service owns the initial plan and every revision (was two entry points) | current implementation, not a document | CR-7 |
 | A3 | Pre-execution repository inspection moves behind a read-only `RepositoryInspector` port with a **neutral-infrastructure** adapter; `WorkspaceAuthority` keeps writes and command execution and stays a Harness adapter | current implementation | CR-7, CR-13 |
-| A4 | Authenticated transport becomes a precondition of the whole API, not just the command surface | `operator-observability-verification.md` §8.1 (`commands.write` "separately authorized") | CR-12 |
+| A4 | Authenticated transport becomes a precondition of the whole API, not just the command surface, **and read/write capabilities are independently grantable now** | `operator-observability-verification.md` §8.1 (`commands.write` "separately authorized") **and `cockpit/docs/specs/E-agentic-os-role.md:22`, which defers the read/write split until a multi-user or non-loopback deployment** | CR-12 |
 | A5 | Parent partial-success is a **verdict field**, never a new `TaskState`; the 9-state task machine is untouched | implied by §3 of this document | CR-14 |
+| A6 | Ephemeral per-run profiles are materialized, retained and disposed by the **Harness** through `WorkspaceAuthority`; the Control Plane selects and passes content or references but writes no files | `cockpit/docs/specs/E-agentic-os-role.md` line 14 ("the control plane only ever writes ephemeral per-run overlays inside task worktrees") and M9 ("The control plane validates paths and writes the returned content into its own profile") | CR-15, increment 5 |
 
 ---
 
@@ -129,16 +130,23 @@ same major required, client minor ≤ server minor accepted, unknown fields igno
 availability decided by the existing capability list and never by version arithmetic. The policy
 belongs in the contract document, with the client and a producer fixture both testing it.
 
-### 3.2 CRITICAL — the design source of truth is not in version control
+### 3.2 HIGH — the design corpus is tracked but not yet merged to canonical main
 
-`docs/execution-harness.md`, `docs/harness-implementation-plan.md`, `docs/harness-review.md`,
-`docs/operator-observability-verification.md` and
-`docs/operator-observability-verification-implementation-plan.md` are **untracked files in one
-local worktree** (`git log --all --` returns nothing for them). They are cited as the normative
-source for ~13.6k LOC of merged implementation. A lost directory loses the design.
+**Restated 2026-09-03 after this defect was partly repaired.** As originally found, five documents
+— `execution-harness.md`, `harness-implementation-plan.md`, `harness-review.md`,
+`operator-observability-verification.md` and
+`operator-observability-verification-implementation-plan.md` — were **untracked files in one local
+worktree**, cited as the normative source for ~13.6k merged LOC. `git log --all --` returned
+nothing for them.
 
-Cockpit's equivalents (specs A–E) are committed on `docs/agentic-os-cockpit-contracts`, so this
-risk is one-sided.
+They are now tracked: commit `4d1b150` on branch `docs/agentic-os-vnext` (PR #18) adds all five
+plus this plan and its review log, and repoints two references that named the sibling worktree by
+path. `git log --all -- docs/execution-harness.md` is therefore no longer empty.
+
+The residual defect is narrower and still real: **the corpus is on a branch, not on `main`.** Until
+that PR merges, canonical main still cites a source of truth it does not contain, and the untracked
+copies in the worktree remain the ones people edit. Increment 1b is consequently a *merge and
+reconciliation* task, not a rescue.
 
 ### 3.3 HIGH — the Harness is dark code
 
@@ -282,7 +290,7 @@ here only where this pass adds a migration path.
 - **Cost this decision accepts:** two-repo contract coordination. It is only safe with the
   compatibility policy of §3.1 made normative, published producer fixtures, a stated support
   window for older clients, and a coordinated release test that runs both sides together. Those
-  are deliverables of increments 1 and 9, not assumptions.
+  are deliverables of increments 1 and 4, not assumptions.
 - **Migration:** none. Delete the stale `cockpit-agentic-os` worktree (CR-6, owner-confirmed).
 
 ### CR-2 — Cockpit inferred phases vs Agentic OS lifecycle states
@@ -332,8 +340,8 @@ here only where this pass adds a migration path.
 
 ### CR-6 — Documentation worktrees vs canonical repositories
 - **A:** `ai-control-plan-agentic-os` + `cockpit-agentic-os` worktrees.
-- **B:** docs committed on branches of the canonical repositories.
-- **Decision:** **REPLACE_A_WITH_B**, then **REMOVE** A.
+- **B:** docs committed on branches of the canonical repositories, then merged to `main`.
+- **Decision:** **REPLACE_A_WITH_B**, then **REMOVE** A. Partly executed: `4d1b150` / PR #18.
 - **Reason:** §3.2 — untracked normative design. Also removes two stale code checkouts.
 - **Migration:** commit the untracked docs (plus this one and the review log) to a branch off
   current `main` and merge. Worktree removal is **separate and optional** — developer-environment
@@ -436,6 +444,28 @@ here only where this pass adds a migration path.
   answers "what did it conclude". Child outcomes map deterministically into the parent verdict.
 - **Migration:** parent verdict is a new versioned read-contract field; child→parent mapping is a
   pure function with a table-driven test; no migration of existing task rows.
+
+### CR-15 — Who materializes the per-run profile
+- **A:** Spec E — the Control Plane writes ephemeral per-run overlays into task worktrees and
+  "validates paths and writes the returned content into its own profile"
+  (`cockpit/docs/specs/E-agentic-os-role.md:14`, M9).
+- **B:** this plan's ownership matrix — every filesystem write belongs to the Harness's
+  `WorkspaceAuthority`.
+- **Decision:** **KEEP_B**, and amend Spec E (amendment A6).
+- **Reason:** Spec E was written before the Execution Harness existed, when the Control Plane was
+  the only thing with a workspace. Now that `WorkspaceAuthority` owns containment, symlink
+  refusal, size caps and command execution, a second writer with its own path validation is both
+  duplicated safety logic and a second place for a containment bug. The split that keeps every
+  invariant intact is: Cockpit renders and returns bytes, the Control Plane decides and passes
+  content or content-addressed references, the Harness materializes.
+- **Why this is called out separately:** revision 5 corrected the contradiction *inside* this
+  document and inside §4.1, but left Spec E saying the opposite while §0 claimed every unlisted
+  prior design remained authoritative — recreating across two documents the exact conflict it had
+  just closed in one. Found by an independent cold review.
+- **Migration:** amending Spec E's line 14 and M9 is a **deliverable of increment 5**, merged in
+  the same change as the split, so no window exists where the two documents disagree. Spec E's
+  other invariants — no caller-supplied output directory, no content history, no security verdict
+  — are unaffected.
 
 ## 4.1 Ownership matrix
 
@@ -619,7 +649,8 @@ Harness and make it a router.
 
 ## 10. vNext roadmap
 
-Ten increments. The first three are P0, all three defect repair; nothing new ships on a
+Thirteen increments (see the note above increment 10 for why not ten). The first three are P0, all
+three defect repair; nothing new ships on a
 broken boundary, an unauthenticated command surface, or an untracked design.
 
 ### Dependency graph
@@ -636,8 +667,8 @@ broken boundary, an unauthenticated command surface, or an untracked design.
                           │                                               │
               8 ArtifactStore + GC ──► 9 ApiVerifier ─► BrowserVerifier ──┤
                                                                           │
-                                            10 Task/Subtask + fan-out (10a–10d)
-                                            (also needs 4 and 6)
+                                    10 contracts + verdict algebra ─► 11 single-repo fan-out
+                                              ─► 12 multi-repo saga ─► 13 progress projection
 ```
 
 **P0 is increments 1–3.** Increment 4 is the first P1. *(Revision 4: revision 3's prose said "the
@@ -676,9 +707,11 @@ neither may mask the other's failure.
 **1b — design corpus into git.**
 - **Adds:** a docs branch off `main` carrying the five untracked docs plus this plan and its review
   log, baselines updated to `37066e9`.
-- **Acceptance:** `git log --all -- docs/execution-harness.md` is non-empty; no document cites a
-  worktree-local path as source of truth; amendments A1–A5 are reflected in the documents they
-  amend. *(Worktree pruning is out of scope — §3.10.)*
+- **Status:** partly done — `4d1b150` on `docs/agentic-os-vnext` (PR #18) tracks all seven documents
+  and repoints the two worktree-path references. What remains is the merge.
+- **Acceptance:** PR #18 merged to `main`; `git log main -- docs/execution-harness.md` is non-empty;
+  no document cites a worktree-local path as source of truth; amendments A1–A6 are reflected in the
+  documents they amend, including Spec E (A6, and A4's read/write split). *(Worktree pruning is out of scope — §3.10.)*
 
 - **Repos:** cockpit + ai-control-plan. **Depends on:** nothing. **Model:** CHEAP.
 
@@ -692,10 +725,19 @@ neither may mask the other's failure.
     (`apps/web/src/api.ts`) and would break the moment auth is mandatory. Minting a session for any
     loopback request would defeat the local-process threat model, and handing the long-lived bearer
     to JavaScript would violate the acceptance criterion below. The protocol is therefore: the
-    privileged launcher that already has filesystem access to the credential mints a **one-time,
-    short-expiry bootstrap token**, passes it once to the browser, and the server exchanges it for a
-    `Secure` + `HttpOnly` + `SameSite=Strict` cookie, with origin validation, single-use replay
-    prevention, and forced re-authentication after credential rotation.
+    privileged launcher that already has filesystem access to the credential is the **issuer**: it
+    mints a **one-time bootstrap token** — short expiry (seconds, not minutes), bound to the
+    intended audience (the API origin) and to a single use — and delivers it by a
+    **launcher-mediated form POST to a dedicated exchange endpoint** (`POST /api/auth/bootstrap`),
+    or an equivalent non-URL channel.
+    **Explicitly prohibited channels:** a query string (leaks through history, server logs,
+    screenshots and referrers), a URL fragment (JavaScript-readable, which would violate the
+    acceptance criterion below), an environment variable inherited by unrelated child processes,
+    and any channel readable by another local process.
+    The token is never stored — it is consumed on first exchange and discarded; the server returns
+    a `Secure` + `HttpOnly` + `SameSite=Strict` cookie as the only durable browser credential, and
+    sets `Referrer-Policy: no-referrer` on the exchange. Origin is validated, replay of a consumed
+    token is refused, and credential rotation forces browser re-authentication.
   - **Credential protocol, not "surfaced".** An OS-permissioned credential file (mode `0600`,
     owner-only directory) or a Unix domain socket; atomic rotation with an overlap grace window so
     active clients are not cut off and no restart is required; Cockpit reads the file by path from
@@ -769,9 +811,14 @@ neither may mask the other's failure.
     - **Cockpit** renders and returns bundle content and its manifest. It writes nothing outside
       its own machine-global scope.
     - **Control Plane** selects assets, records the explanation, persists the immutable
-      composition/AgentSpec revision, and puts the bundle **content or content-addressed
-      references** into the `ExecutionRequest`. It performs no filesystem write and holds no
-      profile.
+      composition/AgentSpec revision, and puts the **bundle content inline, size-bounded** into
+      the `ExecutionRequest`. It performs no filesystem write and holds no profile.
+      *Not* content-addressed references: the only content-addressed store in this roadmap arrives
+      in increment 8 and is scoped to artifacts, so a reference here would name a blob no component
+      owns, authorizes, resolves or retains — and would make composition revisions unreplayable the
+      moment that blob aged out. Inline bounded bytes keep the revision self-contained. A dedicated
+      immutable composition-blob store is the upgrade path if bundles outgrow the bound, and would
+      become an explicit dependency of this increment.
     - **Execution Harness** materializes the ephemeral profile through `WorkspaceAuthority`,
       invokes the adapter `prepare` / `provision` / `verify` / `dispose` lifecycle, reports
       achieved fidelity on the result, and owns profile retention and disposal.
@@ -807,17 +854,23 @@ neither may mask the other's failure.
 
 ### 6 — Harness parity for the remaining modes, then retire the legacy path · **P1**
 - **Objective:** one execution path (CR-4).
-- **Reuses:** everything under `harness/`; the per-mode flag from increment 2.
+- **Reuses:** everything under `harness/`; the per-mode flag from increment 3.
 - **Adds:** Harness-backed compare / race / parallel; the handoff-envelope claim protocol
   (standing deferral #7); then deletion of the legacy execution branch and the
   `Orchestrator` → `ControlPlane` rename (deferral #5) as a separate no-behaviour-change commit.
 - **Repos:** ai-control-plan.
-- **Depends on:** 3 + soak.
+- **Depends on:** 3 + soak for the parity work; **and 5 before the legacy path is deleted**,
+  because increment 5 composes single mode only and this increment is where composition is
+  extended to compare/race/parallel. Retiring the legacy path before that would silently ship
+  three uncomposed execution modes. Parity and composition-extension may proceed in either order;
+  deletion is gated on both.
 - **Acceptance:** each mode is evaluated and enabled independently with the scorecard extended per
   mode; `uq_live_successor` enforces one live successor per origin envelope and a crash between
   claim and first event leaves a recoverable `start_ambiguous` row; only after every mode is
   enabled and soaked, no `adapter.start` call exists outside `harness/` and the per-mode flags are
-  removed; failover/retry/parallel/verdict behaviour is unchanged and still tested.
+  removed; **every enabled mode composes** — a compare or race run carries a composition revision
+  and a verified profile exactly as single mode does; failover/retry/parallel/verdict behaviour is
+  unchanged and still tested.
 - **Model:** STANDARD.
 
 ### 7 — `RepositoryInspector` port, one planner, kind-aware discovery · **P1**
@@ -891,44 +944,83 @@ neither may mask the other's failure.
   config; a network-isolated run produces `blocked` with a reason rather than attempting a download.
 - **Model:** STANDARD (security review STRONG for 9a).
 
-### 10 — Task → Subtask decomposition and multi-repository fan-out · **P1**
-- **Objective:** close §3.5 and §3.6 — the last unowned gap between the code and the vision.
-- **Vocabulary:** **Task → Subtask only.** No Mission, no Goal.
-- **Scope warning, and how it is handled.** Codex round 2 #9 is right that this is several
-  architectural slices with different failure modes, and the ten-increment cap is the only reason
-  it appears as one entry. It is therefore specified as four internally gated slices; **10c and
-  10d are separately gated and may slip without blocking 10a–10b**, and this increment must be
-  re-planned into its own slice sequence before execution rather than started as written:
-  - **10a — durable contracts.** Task/Subtask entities, `parent_task_id`/`group_id` finally given
-    a producer, `subtasks.read` added to the contract. Parent verdict — including partial
-    success — is a **verdict field, never a new `TaskState`** (CR-14); child→parent mapping is a
-    pure, table-driven function; the 9-state machine is untouched.
-  - **10b — single-repository fan-out.** Multiple subtasks in one repository, with a dependency
-    DAG and cancellation propagation from parent to children.
-  - **10c — multi-repository saga.** A pinned base revision per repository; defined behaviour for
-    worktree-creation failure; compensating cleanup of already-created worktrees; partial success
-    as a first-class outcome. **Cross-repository atomicity is explicitly not provided.**
-  - **10d — projection.** Structural progress only — `6 / 8 subtasks complete`, current phase,
-    blockers, per-subtask repo/assistant/model/elapsed/usage; `TaskEnvelope.completed`/`remaining`
-    becomes a rendered projection of this model. **No percentage without a real denominator;
-    absent progress renders as absent.**
-- **Reuses:** the correlation columns, `ExecutionTarget`, the repository registry, the task state
-  machine (unchanged), the H6 contract from increment 4.
-- **Repos:** ai-control-plan + cockpit.
-- **Depends on:** 4, 6, 7.
-- **Acceptance:** per slice. 10a — a parent verdict is derived deterministically from child
-  outcomes and no `TaskState` is added, proven by a transition-matrix regression test plus new tests
-  asserting verdict/state independence — not by test-file byte identity, which can hold while
-  behaviour changes. 10b — cancelling a parent cancels its children and cleans up their worktrees.
-  10c — one parent task drives subtasks in three repositories (`cockpit`, `ai-control-plan`,
-  `scramble-stack` fixtures) with no cwd, `PLAN.md` or provider session id as canonical identity;
-  each subtask records the base revision it ran against; a mid-fan-out failure yields an
-  explainable partial-success verdict. 10d — progress is always a count over a known total or is
-  absent.
+### Increments 10–13 — decomposition and multi-repository fan-out
+
+> **The ten-increment cap is deliberately broken here, once.** The original brief asked for no more
+> than ten ordered increments. Slicing decomposition to fit that produced a single "increment" that
+> spanned a new entity model, DAG scheduling, multi-repository compensation and UI projection, and
+> that carried an instruction to re-plan itself before execution — which is the definition of not
+> being an increment. An independent cold review named this presentation-driven architecture, and it
+> was right. The cap was a reporting constraint, not an architectural one, so these are four real
+> increments with their own dependencies and rollback gates. Increments 1–9 are unchanged.
+
+**Vocabulary across all four:** **Task → Subtask only.** No Mission, no Goal.
+
+#### 10 — Task/Subtask contracts and verdict algebra · **P1**
+- **Objective:** the durable model and, before anything consumes it, the complete rule for turning
+  child outcomes into a parent verdict.
+- **Reuses:** the `parent_task_id` / `group_id` columns that already exist and have no producer;
+  the task state machine, unchanged.
+- **Adds:** Task/Subtask entities and `subtasks.read` on the contract. Parent partial-success is a
+  **verdict field, never a new `TaskState`** (CR-14). And the part revision 5 hand-waved as "a pure,
+  table-driven function" without ever defining it — the **verdict algebra**, written before any
+  fan-out exists:
+  - the parent verdict vocabulary, enumerated;
+  - a truth table over mixed child outcomes — completed, failed, cancelled, blocked, timed-out,
+    yielded — including children that completed execution but failed **required** verification,
+    which is a distinct case from failing execution (H-I6);
+  - precedence between cancellation and failure when both are present;
+  - how a retried child collapses into one contribution rather than two;
+  - what a descendant skipped because its DAG dependency failed contributes, and whether that is
+    distinguishable from one never scheduled.
+- **Depends on:** 4.
+- **Acceptance:** no `TaskState` is added, proven by a transition-matrix regression test plus tests
+  asserting verdict/state independence — not by test-file byte identity; the truth table is
+  exhaustive over the outcome cross-product and every cell is asserted; a required-verification
+  failure and an execution failure produce distinguishable parent verdicts.
 - **Model:** STRONG.
 
+#### 11 — Single-repository fan-out · **P1**
+- **Objective:** multiple subtasks under one parent, in one repository, before any cross-repository
+  concern is introduced.
+- **Adds:** the decomposition service; a dependency DAG between subtasks; cancellation propagation
+  from parent to children.
+- **Depends on:** 10, 6.
+- **Acceptance:** cancelling a parent cancels its children and cleans up their worktrees; a DAG
+  cycle is rejected at decomposition, never at execution; a child failing mid-DAG marks its
+  dependents skipped with a reason and produces the verdict increment 10's table specifies.
+- **Rollback:** decomposition is off by default; a parent with one subtask is behaviourally
+  identical to today's single task.
+- **Model:** STRONG.
+
+#### 12 — Multi-repository saga · **P1**
+- **Objective:** one parent task spanning repositories.
+- **Adds:** a **pinned base revision per repository**; defined behaviour for worktree-creation
+  failure; compensating cleanup of already-created worktrees; partial success as a first-class
+  outcome. **Cross-repository atomicity is explicitly not provided** and is documented as such.
+- **Depends on:** 11, 7.
+- **Acceptance:** one parent drives subtasks in three repositories (`cockpit`, `ai-control-plan`,
+  `scramble-stack` fixtures) with no cwd, `PLAN.md` or provider session id as canonical identity;
+  each subtask records the base revision it ran against; a mid-fan-out failure yields an
+  explainable partial-success verdict and leaves no orphaned worktree.
+- **Rollback:** single-repository fan-out (increment 11) remains fully functional if this is
+  disabled.
+- **Model:** STRONG.
+
+#### 13 — Progress projection · **P1**
+- **Objective:** make a long mission legible without inventing precision.
+- **Adds:** **structural** progress only — `6 / 8 subtasks complete`, current phase, blockers,
+  per-subtask repo/assistant/model/elapsed/usage; `TaskEnvelope.completed` / `remaining` becomes a
+  rendered projection of this model rather than a parallel one. **No percentage without a real
+  denominator; absent progress renders as absent, never as zero or as a spinner implying motion.**
+- **Depends on:** 11 (12 only for the multi-repository columns).
+- **Acceptance:** progress is always a count over a known total or is explicitly absent; a task
+  whose decomposition is still in flight shows no denominator rather than a provisional one; no
+  UI surface derives a percentage from elapsed time, event count or token spend.
+- **Model:** STANDARD.
+
 ### P2 backlog — decided, not scheduled
-These have owners and decisions (CR-3, CR-11, §5) but no vNext increment; they follow increment 10.
+These have owners and decisions (CR-3, CR-11, §5) but no vNext increment; they follow increment 13.
 - **C3** observed-session store: JSON snapshot → append-only SQLite/WAL with cursors and retention,
   CCAM patterns as reference only.
 - **C4** explicit, reversible managed↔observed linking; a provider-session-id collision must never auto-link.
@@ -965,4 +1057,6 @@ These have owners and decisions (CR-3, CR-11, §5) but no vNext increment; they 
 - No Control-Plane module depends on a Harness class; pre-execution inspection goes through the
   `RepositoryInspector` port (CR-13), enforced by an import-boundary test.
 - The 9-state task machine is not extended; partial success is a verdict, not a state (CR-14).
-- Every amendment to prior accepted design is listed in §0, not discovered in a later section.
+- Every amendment to prior accepted design is listed in §0, not discovered in a later section, and
+  **is reconciled in the document it amends** — an amendment that leaves the companion contract
+  saying the opposite has not been made.

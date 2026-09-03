@@ -313,3 +313,84 @@ one ownership contradiction that both sides agree on the fix for, and that Codex
 classified as ordinary implementation judgment. Score trajectory across rounds — 5.4 → 7.4 → 8.2 →
 8.8 — was monotonic with no oscillation and no round where the two positions diverged by more
 than the findings themselves.
+
+## Independent cold review of revision 5 — Codex, fresh session
+
+Outside the four-round loop budget: a new Codex thread with no memory of the prior rounds, asked to
+verify revision 5's claimed fixes *and* review the whole plan cold against the source.
+
+Weighted **8.2/10**, VERDICT: REVISE — lower than round 4's 8.8, which is the expected and healthy
+result of a reviewer who did not watch the plan improve. Confirmed independently: canonical state
+does remain independent of AgentTrail, CCAM, Langfuse and Postman.
+
+Three HIGH, six MEDIUM, two LOW. The three HIGH were all verified in the text before disposition.
+
+### Claude's response — revision 6
+
+**HIGH 1 — the provisioning fix created a cross-document contradiction.** Revision 5 moved profile
+materialization to the Harness inside this plan and §4.1, while `cockpit/docs/specs/E-agentic-os-role.md`
+line 14 and M9 still say the Control Plane writes ephemeral per-run overlays and "validates paths and
+writes the returned content into its own profile" — and §0 claimed every unlisted prior design
+remained authoritative. Fixing the conflict in one document while leaving it standing in another is
+not fixing it. Added **amendment A6** and **CR-15**, with the Spec E amendment made an explicit
+deliverable of increment 5 so no window exists where the two documents disagree.
+
+**HIGH 2 — my revision-5 edit silently failed to apply.** The bootstrap-token channel still read
+"passes it once to the browser". The `str.replace` found no match after earlier edits shifted the
+text, and I verified only one of that batch's replacements. Now applied and asserted: the launcher
+is the named issuer, the token is audience-bound and single-use with a seconds-scale expiry,
+delivery is a form POST to `/api/auth/bootstrap` or an equivalent non-URL channel, and query
+strings, fragments, inherited environment variables and any channel readable by another local
+process are explicitly prohibited with their leak vectors named. Every subsequent edit in this
+round carries an assertion.
+
+**HIGH 3 — the dependency graph allowed an impossible order.** Increment 6 depended only on 3, so
+it could retire the legacy path before increment 5 existed — shipping three uncomposed execution
+modes. Increment 6 now gates *deletion* on 5 as well as 3, and its acceptance requires every enabled
+mode to compose. Also corrected: increment 6 credited the per-mode flag to increment 2; it comes
+from 3 (a renumbering miss from revision 4).
+
+**MEDIUM — the §3.2 evidence was stale within the hour.** Codex noticed that
+`git log --all -- docs/execution-harness.md` is no longer empty, because commit `4d1b150` (PR #18)
+tracked the corpus during this session. §3.2 recast from CRITICAL to HIGH and from "a lost directory
+loses the design" to the accurate residual: tracked on a branch, not yet merged to `main`. Increment
+1b is now a merge task with its partial completion recorded.
+
+**MEDIUM — A4 named the wrong contradicting document.** Spec E line 22 defers the read/write
+capability split until a multi-user or non-loopback deployment; the roadmap requires it now. A4 now
+cites Spec E alongside the observability document.
+
+**MEDIUM — content-addressed bundle references named a blob nobody owns.** The only
+content-addressed store arrives in increment 8 and is scoped to artifacts. Increment 5 now passes
+**inline, size-bounded bundle content**, keeping composition revisions self-contained and
+replayable; a dedicated immutable composition-blob store is named as the upgrade path if bundles
+outgrow the bound.
+
+**MEDIUM — "pure and table-driven" was not a definition.** The parent verdict algebra is now
+specified in increment 10 *before* any fan-out consumes it: the verdict vocabulary, an exhaustive
+truth table over the child-outcome cross-product, the distinction between execution failure and
+required-verification failure, cancellation-versus-failure precedence, retry collapsing, and what a
+dependency-skipped descendant contributes.
+
+**MEDIUM — increment 10 was not an increment.** Accepted, and it required breaking the brief's
+ten-increment cap. An "increment" that spans a new entity model, DAG scheduling, multi-repository
+compensation and UI projection, and that instructs the reader to re-plan it before execution, is a
+heading. Promoted to real increments **10 (contracts + verdict algebra), 11 (single-repository
+fan-out), 12 (multi-repository saga), 13 (progress projection)**, each with its own dependencies,
+acceptance and rollback. The cap was a reporting constraint; slicing architecture to satisfy it
+produced a fake unit, so it is broken once, with the reason recorded in the document.
+
+**LOW — CR-1 cross-reference** corrected from increments 1 and 9 to 1 and 4.
+
+**Rejected (1), with reason:** the claim that §6 repeats the correlation-token introductory
+sentence. It does not — §6 is nine lines with no repetition (verified). Any duplicated headings in
+the *companion* documents are outside this document's scope and were not touched.
+
+### Loop outcome, restated
+
+Revision 6 is unreviewed. The last independently scored artifacts are revision 4 at 8.8 (round 4,
+same thread) and revision 5 at 8.2 (fresh cold reviewer). Both are below the 9.0 bar and both had
+open HIGHs, so the plan remains **not** READY_FOR_VNEXT. Fable escalation remains unwarranted: every
+finding across five reviews was accepted or rejected on verifiable evidence, no round produced a
+genuine architectural disagreement between the two models, and the cold reviewer explicitly
+confirmed the external-tool independence and migration-preservation criteria.
