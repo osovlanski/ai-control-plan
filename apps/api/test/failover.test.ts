@@ -9,7 +9,7 @@ import { bootHarnessOrchestrator, loadHarnessTestConfig } from "./helpers/boot-o
 import { openDb, type Db } from "../src/db/index.js";
 import { CheckpointService } from "../src/modules/checkpoint.js";
 import { CooldownStore } from "../src/modules/cooldown.js";
-import { Orchestrator } from "../src/modules/orchestrator.js";
+import type { Orchestrator } from "../src/modules/orchestrator.js";
 import { Registry } from "../src/modules/registry.js";
 import { TaskEventBus, type TaskStreamPayload } from "../src/modules/sse.js";
 import { TaskStore } from "../src/modules/tasks.js";
@@ -54,6 +54,24 @@ afterEach(async () => {
   db.close();
   rmSync(home, { recursive: true, force: true });
 });
+
+/**
+ * Under single-mode Harness routing, `startTask` returns as soon as the
+ * session is created — the runner then works the FakeAdapter asynchronously.
+ * A manual handoff / cancel racing that startup (before the run has even
+ * reached the state its goal describes) is not the scenario these tests mean
+ * to exercise, so wait for the observable milestone first (matches the
+ * working idiom in apps/api/test/harness/cutover.test.ts).
+ */
+async function pollFor<T>(fn: () => T | undefined, timeoutMs = 5000): Promise<T> {
+  const start = Date.now();
+  for (;;) {
+    const v = fn();
+    if (v !== undefined) return v;
+    if (Date.now() - start > timeoutMs) throw new Error("pollFor timed out");
+    await new Promise((r) => setTimeout(r, 10));
+  }
+}
 
 function runsOf(taskId: string) {
   return db
@@ -224,8 +242,13 @@ describe("manual handoff", () => {
 
   it("interrupts an in-flight run before handing over, without racing it to a terminal state", async () => {
     const envelope = tasks.create({ goal: "Long task [FAKE:APPROVAL]" });
+    let requested = false;
+    bus.subscribe(envelope.taskId, (p: TaskStreamPayload) => {
+      if (p.event?.type === "approval.requested") requested = true;
+    });
     tasks.transition(envelope.taskId, "ROUTING");
     await orchestrator.startTask(envelope.taskId, PRIMARY);
+    await pollFor(() => (requested ? true : undefined));
 
     const result = await orchestrator.handoff(envelope.taskId, BACKUP);
     expect(result.assistantId).toBe(BACKUP);
@@ -234,16 +257,21 @@ describe("manual handoff", () => {
     expect(runs[0]).toMatchObject({ assistant_id: PRIMARY });
     // The interrupted run did not drag the task into FAILED behind the handoff.
     expect(tasks.get(envelope.taskId)!.state).toBe("RUNNING");
-  });
+  }, 15_000); // harnessHandoff synchronously drains the interrupted session (<=10s ceiling)
 
   it("refuses when the requested target fails a hard filter", async () => {
     cooldowns.penalize(BACKUP, "limit", "quota exhausted");
     const envelope = tasks.create({ goal: "Long task [FAKE:APPROVAL]" });
+    let requested = false;
+    bus.subscribe(envelope.taskId, (p: TaskStreamPayload) => {
+      if (p.event?.type === "approval.requested") requested = true;
+    });
     tasks.transition(envelope.taskId, "ROUTING");
     await orchestrator.startTask(envelope.taskId, PRIMARY);
+    await pollFor(() => (requested ? true : undefined));
 
     await expect(orchestrator.handoff(envelope.taskId, BACKUP)).rejects.toThrow(/No eligible assistant/);
-  });
+  }, 15_000); // harnessHandoff drains the source session before checking target eligibility
 });
 
 describe("checkpoints over a real git worktree", () => {

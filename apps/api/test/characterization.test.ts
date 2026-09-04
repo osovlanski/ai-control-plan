@@ -21,7 +21,7 @@ import { bootHarnessOrchestrator, loadHarnessTestConfig } from "./helpers/boot-o
 import { openDb, type Db } from "../src/db/index.js";
 import { CheckpointService } from "../src/modules/checkpoint.js";
 import { CooldownStore } from "../src/modules/cooldown.js";
-import { Orchestrator } from "../src/modules/orchestrator.js";
+import type { Orchestrator } from "../src/modules/orchestrator.js";
 import { Registry } from "../src/modules/registry.js";
 import { TaskEventBus } from "../src/modules/sse.js";
 import { TaskStore } from "../src/modules/tasks.js";
@@ -148,6 +148,11 @@ describe("Orchestrator characterization", () => {
 
     await orchestrator.cancelTask(env.taskId);
     expect(tasks.get(env.taskId)!.state).toBe("CANCELLED");
+    // Under single-mode Harness routing the task transitions synchronously but
+    // the runner attempts the cancel checkpoint asynchronously as it settles
+    // the session — wait for that before asserting on it (same idiom as
+    // apps/api/test/harness/cutover.test.ts's cancel-mid-approval test).
+    await orchestrator.waitForSettled(env.taskId);
     const ckpt = db
       .prepare("SELECT reason FROM checkpoints WHERE task_id = ? ORDER BY at DESC LIMIT 1")
       .get(env.taskId) as { reason: string } | undefined;

@@ -9,7 +9,7 @@ import { bootHarnessOrchestrator, loadHarnessTestConfig } from "./helpers/boot-o
 import { openDb, type Db } from "../src/db/index.js";
 import { CheckpointService } from "../src/modules/checkpoint.js";
 import { CooldownStore } from "../src/modules/cooldown.js";
-import { Orchestrator } from "../src/modules/orchestrator.js";
+import type { Orchestrator } from "../src/modules/orchestrator.js";
 import { Registry } from "../src/modules/registry.js";
 import { TaskEventBus, type TaskStreamPayload } from "../src/modules/sse.js";
 import { TaskStore } from "../src/modules/tasks.js";

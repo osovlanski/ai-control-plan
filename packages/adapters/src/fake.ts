@@ -68,6 +68,12 @@ export class FakeAdapter implements AgentAdapter {
         execution: { shell: true, filesystem: true, web: "no" },
         auth: { state: "ok", account: "fake" },
       },
+      // Honest for a synthetic double: `pump()` deterministically emits one
+      // final-total `usage.updated` event, relays approvals via `send()`, and
+      // gates nothing else — declaring it lets the Execution Harness's
+      // token-usage telemetry (deferral-#5-adjacent, increment 3) see the same
+      // numbers the legacy path reads straight off the raw event payload.
+      harness: { usageAccounting: "cumulative", toolGating: "none", approvalRelay: true, processIsolation: "none" },
       providerDetail: { runtime: "fake" },
       evidence: { source: "runtime-probe", observedAt: new Date().toISOString() },
     };

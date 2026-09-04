@@ -8,7 +8,8 @@ import { bootHarnessOrchestrator, loadHarnessTestConfig } from "./helpers/boot-o
 import { openDb, type Db } from "../src/db/index.js";
 import { CheckpointService } from "../src/modules/checkpoint.js";
 import { CooldownStore } from "../src/modules/cooldown.js";
-import { Orchestrator } from "../src/modules/orchestrator.js";
+import { effectiveUsageJoin, effectiveUsageSql } from "../src/modules/harness/state-vocab.js";
+import type { Orchestrator } from "../src/modules/orchestrator.js";
 import { Registry } from "../src/modules/registry.js";
 import { TaskEventBus, type TaskStreamPayload } from "../src/modules/sse.js";
 import { TaskStore } from "../src/modules/tasks.js";
@@ -69,7 +70,13 @@ describe("orchestrator end-to-end (fake adapter)", () => {
       .all(runId) as Array<{ seq: number; type: string; summary: string }>;
     const types = events.map((e) => e.type);
     expect(types[0]).toBe("run.started");
-    expect(types.at(-1)).toBe("run.ended");
+    expect(types).toContain("run.ended");
+    // Under single-mode Harness routing, real project verification now runs
+    // after the provider ends and appends its own durable event (§3.3 — this
+    // is the increment's whole point: verification was previously dark code).
+    // The legacy path has no such event, so `run.ended` is its last one.
+    const last = types.at(-1);
+    expect(last === "run.ended" || last === "verification.result").toBe(true);
     expect(types).toContain("file.changed");
     expect(types).toContain("test.result");
     // seq is monotonic starting at 1 — the append-only contract the UI paginates on
@@ -81,12 +88,16 @@ describe("orchestrator end-to-end (fake adapter)", () => {
     expect(finalEnvelope.artifacts.testResults.at(-1)).toMatchObject({ passed: 3, failed: 0 });
     expect(finalEnvelope.status.phase).toBe("testing");
 
-    // Run row closed out with usage recorded
-    const run = db.prepare("SELECT state, usage, ended_at FROM runs WHERE id = ?").get(runId) as {
-      state: string;
-      usage: string | null;
-      ended_at: string | null;
-    };
+    // Run row closed out with usage recorded. Under single-mode Harness
+    // routing `runs.usage` itself is never written — usage rides on the
+    // terminal `execution_results` row instead (§5/8e's dual-field window,
+    // no dual-write) — so read it the same way telemetry.ts does.
+    const run = db
+      .prepare(
+        `SELECT state, ${effectiveUsageSql("r")} AS usage, ended_at
+           FROM runs r ${effectiveUsageJoin("r")} WHERE r.id = ?`,
+      )
+      .get(runId) as { state: string; usage: string | null; ended_at: string | null };
     expect(run.state).toBe("ENDED_OK");
     expect(run.ended_at).not.toBeNull();
     expect(JSON.parse(run.usage!)).toMatchObject({ inputTokens: 1200, outputTokens: 450 });
