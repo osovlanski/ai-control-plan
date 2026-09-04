@@ -1,0 +1,73 @@
+name: Eval
+
+on:
+  schedule:
+    - cron: "0 9 * * *" # 09:00 UTC nightly
+  workflow_dispatch: {}
+
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    # Non-blocking: this never gates a PR or a push to main. It is the
+    # credential-gated real-provider eval program (increment 3,
+    # docs/agentic-os-eval-plan.md areas 1/2/6), separate from the per-PR
+    # fakes-only pnpm test / test:harness-on / test:recovery-chaos.
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Run eval
+        env:
+          AGENT_PLANE_EVAL: "1"
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: pnpm eval
+
+      - name: Upload scorecard
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-scorecard-${{ github.run_id }}
+          path: eval/out/
+          retention-days: 90
+
+      # Promotion is manual-dispatch only — never every nightly (plan §4 step
+      # 23) — so docs/eval-history/ doesn't churn on every scheduled run.
+      - name: Promote scorecard to docs/eval-history/
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          pnpm eval:promote
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/eval-history/
+          git diff --cached --quiet || git commit -m "docs: promote eval scorecard ($(date -u +%Y-%m-%d))"
+          git push
+
+      - name: Open an issue on a red run
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = "Nightly eval failed";
+            const body = `Run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner, repo: context.repo.repo, state: "open", labels: "nightly-eval",
+            });
+            if (existing.data.length === 0) {
+              await github.rest.issues.create({
+                owner: context.repo.owner, repo: context.repo.repo, title, body, labels: ["nightly-eval"],
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo, issue_number: existing.data[0].number, body,
+              });
+            }

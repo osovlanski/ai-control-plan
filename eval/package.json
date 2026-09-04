@@ -1,0 +1,21 @@
+{
+  "name": "@agent-plane/eval",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "eval": "tsx run.ts",
+    "promote": "tsx promote.ts"
+  },
+  "dependencies": {
+    "@agent-plane/adapters": "workspace:*",
+    "@agent-plane/core": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.15.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.2"
+  }
+}

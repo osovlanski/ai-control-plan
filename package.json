@@ -10,11 +10,13 @@
   "packageManager": "pnpm@10.33.0",
   "scripts": {
     "dev": "concurrently -k -n api,web -c blue,green \"pnpm --filter @agent-plane/api dev\" \"pnpm --filter @agent-plane/web dev\"",
-    "typecheck": "pnpm -r typecheck",
+    "typecheck": "pnpm -r --filter '!@agent-plane/eval' typecheck",
     "lint": "eslint .",
-    "test": "pnpm -r --if-present test",
+    "test": "pnpm -r --filter '!@agent-plane/eval' --if-present test",
     "test:harness-on": "pnpm --filter @agent-plane/api test:harness-on",
     "test:recovery-chaos": "pnpm --filter @agent-plane/api test:recovery-chaos",
+    "eval": "pnpm --filter @agent-plane/eval eval",
+    "eval:promote": "pnpm --filter @agent-plane/eval promote",
     "build": "pnpm -r --if-present build"
   },
   "devDependencies": {
