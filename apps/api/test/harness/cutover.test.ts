@@ -2,7 +2,7 @@
  * Phase 8d — flag-ON single-mode cutover end to end (PLAN.md 8c/8d).
  *
  * A real `SessionRunner` wired through `buildServer` with
- * `execution.harnessSingleMode: true`, driven by the in-process `FakeAdapter` +
+ * `execution.harnessModes.single: true`, driven by the in-process `FakeAdapter` +
  * in-repo SQLite. Asserts the Harness path reproduces the legacy task-level
  * outcomes, the SSE frame shape, the transactional envelope/quota derivation,
  * and the boot-recovery sweeps.
@@ -31,7 +31,7 @@ async function boot(extraConfig = ""): Promise<void> {
   mkdirSync(join(home, "personal"), { recursive: true });
   writeFileSync(
     join(home, "personal", "config.yaml"),
-    `assistants:\n  fake-a:\n    provider: fake\n  fake-b:\n    provider: fake\nexecution:\n  harnessSingleMode: true\n${extraConfig}`,
+    `assistants:\n  fake-a:\n    provider: fake\n  fake-b:\n    provider: fake\nexecution:\n  harnessModes:\n    single: true\n${extraConfig}`,
   );
   config = loadConfig({ AGENT_PLANE_HOME: home });
   db = openDb(config.dbPath);

@@ -85,6 +85,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   const credentials = new CredentialStore(credentialPath(config.dir), now);
   const authSessions: SessionMap = new Map();
   registerAuth(app, { config, credentials, sessions: authSessions, db, now });
+  for (const warning of config.warnings ?? []) app.log.warn(warning);
   const read = {
     tasks: { config: { auth: { require: "tasks.read" } } }, events: { config: { auth: { require: "events.read" } } },
     stream: { config: { auth: { require: "events.stream" } } }, routing: { config: { auth: { require: "routing.read" } } },
@@ -105,11 +106,15 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     verification: verificationStore,
   });
 
-  // When a test injects its own orchestrator it owns the harness wiring; the
-  // internal bridge is built (and asserted) only for the real composition root.
+  // The internal bridge + recovery are wired for every real composition root,
+  // NOT gated on any harnessModes value (increment 3, D6): rollback safety needs
+  // an already-started Harness session to stay Harness-owned and settle under
+  // HarnessRecovery after a mode is disabled. `harnessRouting()` is the only
+  // flag-gated decision (new starts). A test that injects its own orchestrator
+  // owns the harness wiring itself.
   let harnessBridge: HarnessBridge | undefined;
   let projectVerification: ((worktreePath: string) => ReturnType<typeof planProjectVerification>) | undefined;
-  if (config.execution?.harnessSingleMode && !deps.orchestrator) {
+  if (!deps.orchestrator) {
     // --- flag-ON parity plumbing (PLAN.md 8d) ---
     const sessionTaskCache = new Map<string, string>();
     const taskOfSession = (sid: string): string | undefined => {
@@ -199,8 +204,8 @@ export function buildServer(deps: ServerDeps): BuiltServer {
       onError: (err) => app.log.error(err),
     });
   }
-  if (config.execution?.harnessSingleMode && !deps.orchestrator && !harnessBridge) {
-    throw new Error("harnessSingleMode ON but the execution-harness bridge is not wired");
+  if (!deps.orchestrator && !harnessBridge) {
+    throw new Error("execution-harness bridge is not wired for the internal composition root");
   }
 
   const orchestrator =

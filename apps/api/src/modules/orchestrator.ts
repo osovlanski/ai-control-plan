@@ -120,9 +120,11 @@ export class Orchestrator {
      */
     private harnessRecovery?: { reconcileOnBoot(): Promise<unknown> },
     /**
-     * Flag-ON single-mode seam to `SessionRunner` (PLAN.md 8c). Injected by
-     * `buildServer` only when `config.execution.harnessSingleMode` is on; the
-     * legacy adapter-driving path is used whenever it is absent.
+     * Single-mode seam to `SessionRunner` (PLAN.md 8c). Injected by `buildServer`
+     * for every internal composition root (increment 3, D6) — its presence does
+     * NOT mean routing is on. `harnessRouting()` gates new starts on
+     * `config.execution.harnessModes.single`; `harnessOwns()` keeps an
+     * already-started session on the Harness branch regardless of the flag.
      */
     private harnessBridge?: HarnessBridge,
     /** Authority-backed project snapshot + pure planner adapter, injected by the composition root. */
@@ -131,9 +133,9 @@ export class Orchestrator {
     private repositoryIdentities?: Pick<RepositoryIdentityRegistry, "resolve">,
   ) {}
 
-  /** Flag-ON single-mode routing applies to this start (non-parallel, non-compare/race). */
+  /** `harnessModes.single` routing applies to this start (non-parallel, non-compare/race). */
   private harnessRouting(taskId: string, options: StartOptions): boolean {
-    if (!this.config.execution?.harnessSingleMode || !this.harnessBridge) return false;
+    if (!this.config.execution?.harnessModes?.single || !this.harnessBridge) return false;
     if (options.parallel) return false;
     const mode = this.tasks.get(taskId)?.mode;
     return mode !== "compare" && mode !== "race";

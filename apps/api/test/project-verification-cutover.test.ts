@@ -36,7 +36,7 @@ beforeEach(async () => {
   mkdirSync(join(home, "personal"), { recursive: true });
   writeFileSync(
     join(home, "personal", "config.yaml"),
-    `assistants:\n  fake-project:\n    provider: fake\nrepoAllowlist:\n  - ${JSON.stringify(repo)}\nexecution:\n  harnessSingleMode: true\n`,
+    `assistants:\n  fake-project:\n    provider: fake\nrepoAllowlist:\n  - ${JSON.stringify(repo)}\nexecution:\n  harnessModes:\n    single: true\n`,
   );
   const config = loadConfig({ AGENT_PLANE_HOME: home });
   db = openDb(config.dbPath);

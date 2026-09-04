@@ -3,7 +3,7 @@
  *
  * Same task-level contracts (start→COMPLETED, denied approval→FAILED with no
  * failover, hard limit→failover→COMPLETED) driven through the real
- * `SessionRunner` with `execution.harnessSingleMode` ON. Run-row assertions read
+ * `SessionRunner` with `execution.harnessModes.single` ON. Run-row assertions read
  * `session_state`. The four byte-frozen safety-net files are untouched.
  */
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -29,7 +29,7 @@ async function boot(extra = ""): Promise<void> {
   mkdirSync(join(home, "personal"), { recursive: true });
   writeFileSync(
     join(home, "personal", "config.yaml"),
-    `assistants:\n  fake-a:\n    provider: fake\n  fake-b:\n    provider: fake\nexecution:\n  harnessSingleMode: true\n${extra}`,
+    `assistants:\n  fake-a:\n    provider: fake\n  fake-b:\n    provider: fake\nexecution:\n  harnessModes:\n    single: true\n${extra}`,
   );
   config = loadConfig({ AGENT_PLANE_HOME: home });
   db = openDb(config.dbPath);
