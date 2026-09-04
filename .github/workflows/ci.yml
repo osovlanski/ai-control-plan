@@ -30,5 +30,13 @@ jobs:
       - name: Test
         run: pnpm test
 
+      - name: Test (single mode forced ON)
+        run: pnpm test:harness-on
+        env:
+          AGENT_PLANE_HARNESS_SINGLE_MODE: "1"
+
+      - name: Recovery chaos
+        run: pnpm test:recovery-chaos
+
       - name: Build
         run: pnpm build
