@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { loadConfig } from "../src/config.js";
 import { openDb, type Db } from "../src/db/index.js";
 import { buildServer, type BuiltServer } from "../src/server.js";
+import { credentialPath, readCredential } from "../src/auth/credential-file.js";
 
 let home: string;
 let db: Db;
@@ -28,15 +29,17 @@ function makeApp(): BuiltServer {
   return built;
 }
 
+function bearer() { return { authorization: `Bearer ${readCredential(credentialPath(loadConfig({ AGENT_PLANE_HOME: home }).dir)).secrets[0]!.secret}` }; }
+
 describe("api server", () => {
   it("publishes a versioned read-only integration contract", async () => {
     const { app } = makeApp();
-    const res = await app.inject({ method: "GET", url: "/api/meta" });
+    const res = await app.inject({ method: "GET", url: "/api/meta", headers: bearer() });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toMatchObject({
-      apiVersion: "1.1",
+      apiVersion: "2.0",
       eventVersion: "1.0",
-      workspace: "personal",
+      authRequired: true,
       capabilities: [
         "tasks.read",
         "events.read",
@@ -45,13 +48,14 @@ describe("api server", () => {
         "sessions.read",
         "verification.read",
         "approvals.read",
+        "commands.write",
       ],
     });
   });
 
   it("reports health with workspace and migration count", async () => {
     const { app } = makeApp();
-    const res = await app.inject({ method: "GET", url: "/api/health" });
+    const res = await app.inject({ method: "GET", url: "/api/health", headers: bearer() });
     expect(res.statusCode).toBe(200);
     const body = res.json();
     expect(body.status).toBe("ok");
@@ -61,7 +65,7 @@ describe("api server", () => {
 
   it("exposes workspace policy without any secrets", async () => {
     const { app } = makeApp();
-    const res = await app.inject({ method: "GET", url: "/api/workspace" });
+    const res = await app.inject({ method: "GET", url: "/api/workspace", headers: bearer() });
     const body = res.json();
     expect(body.failover.softThresholdPct).toBe(85);
     expect(body.assistants).toEqual(["personal-claude", "personal-codex"]);
@@ -70,7 +74,7 @@ describe("api server", () => {
 
   it("seeds default assistants from config", async () => {
     const { app } = makeApp();
-    const res = await app.inject({ method: "GET", url: "/api/assistants" });
+    const res = await app.inject({ method: "GET", url: "/api/assistants", headers: bearer() });
     const body = res.json() as Array<{ id: string; provider: string; enabled: boolean }>;
     expect(body.map((a) => [a.id, a.provider, a.enabled])).toEqual([
       ["personal-claude", "anthropic", true],
@@ -81,11 +85,12 @@ describe("api server", () => {
   it("rejects task creation without a goal and outside the repo allowlist", async () => {
     const { app } = makeApp();
     expect(
-      (await app.inject({ method: "POST", url: "/api/tasks", payload: {} })).statusCode,
+      (await app.inject({ method: "POST", url: "/api/tasks", headers: bearer(), payload: {} })).statusCode,
     ).toBe(400);
     const res = await app.inject({
       method: "POST",
       url: "/api/tasks",
+      headers: bearer(),
       payload: { goal: "x", repoPath: "/not/allowed" },
     });
     expect(res.statusCode).toBe(403);
@@ -152,6 +157,7 @@ describe("api server", () => {
     const created = await app.inject({
       method: "POST",
       url: "/api/tasks",
+      headers: bearer(),
       payload: { goal: "Fix the auth bug", constraints: ["no breaking changes"] },
     });
     expect(created.statusCode).toBe(201);
@@ -159,7 +165,7 @@ describe("api server", () => {
     expect(envelope.status.state).toBe("CREATED");
     expect(envelope.decisions[0]).toMatchObject({ text: "no breaking changes", madeBy: "user" });
 
-    const res = await app.inject({ method: "GET", url: `/api/tasks/${envelope.taskId}` });
+    const res = await app.inject({ method: "GET", url: `/api/tasks/${envelope.taskId}`, headers: bearer() });
     const body = res.json();
     expect(body.state).toBe("CREATED");
     expect(body.runs).toEqual([]);

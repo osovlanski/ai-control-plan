@@ -27,6 +27,7 @@ import { EventRecorder } from "../../src/modules/harness/event-recorder.js";
 import { SessionRunner } from "../../src/modules/harness/session-runner.js";
 import { SessionStore } from "../../src/modules/harness/session-store.js";
 import { VerificationStore } from "../../src/modules/harness/verification-store.js";
+import { credentialPath, readCredential } from "../../src/auth/credential-file.js";
 
 let home: string;
 let db: Db;
@@ -40,6 +41,8 @@ beforeEach(() => {
   const config = loadConfig({ AGENT_PLANE_HOME: home });
   db = openDb(config.dbPath);
   built = buildServer({ config, db });
+  const inject = built.app.inject.bind(built.app); const authorization = `Bearer ${readCredential(credentialPath(config.dir)).secrets[0]!.secret}`;
+  built.app.inject = ((options: Record<string, unknown> = {}) => inject({ ...options, headers: { ...(options.headers as Record<string, string> | undefined), authorization } } as never)) as typeof built.app.inject;
   built.registry.init();
 
   db.prepare("INSERT INTO assistants (id, provider) VALUES ('a1','fake')").run();

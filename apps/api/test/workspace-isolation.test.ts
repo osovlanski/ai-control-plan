@@ -6,6 +6,7 @@ import { loadConfig } from "../src/config.js";
 import { openDb, type Db } from "../src/db/index.js";
 import type { Registry } from "../src/modules/registry.js";
 import { buildServer, type BuiltServer } from "../src/server.js";
+import { credentialPath, readCredential } from "../src/auth/credential-file.js";
 
 let home: string;
 const open: Db[] = [];
@@ -28,6 +29,8 @@ function instance(workspace: string, yaml?: string): BuiltServer & { dbPath: str
   const db = openDb(config.dbPath);
   open.push(db);
   const built = buildServer({ config, db });
+  const inject = built.app.inject.bind(built.app); const authorization = `Bearer ${readCredential(credentialPath(config.dir)).secrets[0]!.secret}`;
+  built.app.inject = ((options: Record<string, unknown> = {}) => inject({ ...options, headers: { ...(options.headers as Record<string, string> | undefined), authorization } } as never)) as typeof built.app.inject;
   built.registry.init();
   servers.push(built);
   return { ...built, dbPath: config.dbPath };

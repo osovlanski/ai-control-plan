@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api } from "../src/api.js";
+import { AuthExpiredError, onAuthExpired } from "../src/auth.js";
+import { openTaskEventStream } from "../src/TaskDetail.jsx";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -13,6 +15,32 @@ describe("web API client", () => {
 
     await expect(api.workspace()).resolves.toMatchObject({ workspace: "personal" });
     expect(fetchMock).toHaveBeenCalledWith("/api/workspace", expect.any(Object));
+    expect(fetchMock).toHaveBeenCalledWith("/api/workspace", expect.objectContaining({ credentials: "include" }));
+  });
+
+  it("signals global expiry and throws AuthExpiredError on 401",async()=>{let fired=0;const off=onAuthExpired(()=>fired++);vi.stubGlobal("fetch",vi.fn().mockResolvedValue(new Response("{}",{status:401})));await expect(api.workspace()).rejects.toBeInstanceOf(AuthExpiredError);expect(fired).toBe(1);off();});
+
+  it("probes exactly once when a closed EventSource reports repeated errors", async () => {
+    class FakeEventSource {
+      static readonly CLOSED = 2;
+      readonly readyState = FakeEventSource.CLOSED;
+      onerror: (() => void) | null = null;
+      onmessage: ((message: MessageEvent<string>) => void) | null = null;
+      constructor(public readonly url: string, public readonly options: EventSourceInit) {}
+      close() {}
+    }
+    vi.stubGlobal("EventSource", FakeEventSource);
+    const fetchMock = vi.fn().mockResolvedValue(new Response("{}", { status: 401 }));
+    vi.stubGlobal("fetch", fetchMock);
+    let expired = 0;
+    const off = onAuthExpired(() => expired++);
+    const source = openTaskEventStream("AG-1", () => undefined) as unknown as FakeEventSource;
+    source.onerror?.();
+    source.onerror?.();
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    expect(fetchMock).toHaveBeenCalledWith("/api/workspace", expect.objectContaining({ credentials: "include" }));
+    expect(expired).toBe(1);
+    off();
   });
 
   it("reads Execution Harness session drill-down from the durable endpoints", async () => {

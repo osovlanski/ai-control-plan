@@ -10,3 +10,5 @@ coverage/
 .env.local
 .DS_Store
 graphify-out/
+apps/web/test-results/
+apps/web/playwright-report/
