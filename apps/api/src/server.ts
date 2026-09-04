@@ -6,7 +6,6 @@ import { fileURLToPath } from "node:url";
 import {
   COMMAND_CAPABILITIES,
   CONTROL_PLANE_API_VERSION,
-  DEFAULT_REDACTION_RULES,
   NORMALIZED_EVENT_VERSION,
   OBSERVABILITY_CAPABILITIES,
   redactSecrets,
@@ -18,20 +17,11 @@ import type { ResolvedConfig } from "./config.js";
 import { appliedMigrations, type Db } from "./db/index.js";
 import { CheckpointService } from "./modules/checkpoint.js";
 import { CooldownStore } from "./modules/cooldown.js";
-import { ApprovalService } from "./modules/harness/approval-service.js";
-import { HarnessBridge } from "./modules/harness/control-plane-bridge.js";
-import { deriveEnvelopeUpdate } from "./modules/harness/envelope-derivation.js";
-import { EventRecorder } from "./modules/harness/event-recorder.js";
-import { snapshotQuota } from "./modules/harness/quota-snapshot.js";
-import { HarnessRecovery } from "./modules/harness/recovery.js";
-import { SessionRunner } from "./modules/harness/session-runner.js";
-import { SessionStore } from "./modules/harness/session-store.js";
+import type { HarnessBridge } from "./modules/harness/control-plane-bridge.js";
+import { buildHarnessComposition } from "./modules/harness/composition.js";
 import { effectiveStateSql, effectiveUsageJoin, effectiveUsageSql } from "./modules/harness/state-vocab.js";
-import { WorkspaceAuthority } from "./modules/harness/workspace-authority.js";
-import { VerificationStore } from "./modules/harness/verification-store.js";
 import { Orchestrator } from "./modules/orchestrator.js";
-import { VerificationCoordinator } from "./modules/verification-coordinator.js";
-import { planProjectVerification, snapshotProjectVerification } from "./modules/project-verification.js";
+import type { planProjectVerification } from "./modules/project-verification.js";
 import { Registry } from "./modules/registry.js";
 import { persistRoutingDecision, route, routingHistory, type RouteRequest } from "./modules/router.js";
 import { TaskEventBus } from "./modules/sse.js";
@@ -43,9 +33,6 @@ import { renderHandoffMd } from "./render/handoff.js";
 import { renderProgressMd } from "./render/progress.js";
 import { registerAuth, type SessionMap } from "./auth/index.js";
 import { CredentialStore, credentialPath } from "./auth/credential-file.js";
-
-/** Legacy `applyEvent` snapshots quota on exactly these event types. */
-const QUOTA_EVENT_TYPES = new Set(["usage.updated", "limit.approaching", "limit.hit"]);
 
 export interface ServerDeps {
   config: ResolvedConfig;
@@ -93,134 +80,30 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   } as const;
   const write = { config: { auth: { require: "commands.write" } } } as const;
 
-  // One SessionStore / ApprovalService shared by recovery + (flag-ON) the runner
-  // and bridge — the composition root (PLAN.md 8c.6).
-  const sessionStore = new SessionStore(db);
-  const approvals = new ApprovalService(db);
-  const verificationStore = new VerificationStore(db);
-  const harnessRecovery = new HarnessRecovery({
-    store: sessionStore,
-    approvals,
-    checkpoints, // CheckpointService is structurally a RunnerCheckpoints
-    registry, // Registry is structurally a { adapter, manifest } facade
-    verification: verificationStore,
-    // Fail-closed mode resolution (increment 3, D6): a Harness session only ever
-    // exists for a `single`-mode task (compare/race are rejected at start), so
-    // this reduces to "is harnessModes.single currently disabled". A missing or
-    // corrupt session -> execution_request -> task binding terminalises too.
-    shouldTerminalizeOnRecovery: (sessionId) => {
-      const row = db
-        .prepare(
-          `SELECT t.mode AS mode
-             FROM runs r
-             JOIN execution_requests er ON er.id = r.execution_request_id
-             JOIN tasks t ON t.id = er.task_id
-            WHERE r.id = ?`,
-        )
-        .get(sessionId) as { mode: string } | undefined;
-      if (!row || row.mode !== "single") return true;
-      return !config.execution.harnessModes.single;
-    },
+  // The internal bridge + recovery are wired for every real composition root
+  // (extracted to modules/harness/composition.ts so a test factory can build a
+  // production-equivalent Harness-wired Orchestrator without duplicating this
+  // wiring — increment 3, D5), NOT gated on any harnessModes value (D6):
+  // rollback safety needs an already-started Harness session to stay
+  // Harness-owned and settle under HarnessRecovery after a mode is disabled.
+  // `harnessRouting()` is the only flag-gated decision (new starts). A test
+  // that injects its own orchestrator owns the harness wiring itself.
+  // harnessRecovery is always built (the lease sweep below runs regardless of
+  // whether a test injects its own orchestrator); harnessBridge/projectVerification
+  // are only wired into the internal composition root.
+  const composed = buildHarnessComposition({
+    db,
+    config,
+    tasks,
+    bus,
+    checkpoints,
+    registry,
+    onError: (err) => app.log.error(err),
   });
-
-  // The internal bridge + recovery are wired for every real composition root,
-  // NOT gated on any harnessModes value (increment 3, D6): rollback safety needs
-  // an already-started Harness session to stay Harness-owned and settle under
-  // HarnessRecovery after a mode is disabled. `harnessRouting()` is the only
-  // flag-gated decision (new starts). A test that injects its own orchestrator
-  // owns the harness wiring itself.
-  let harnessBridge: HarnessBridge | undefined;
-  let projectVerification: ((worktreePath: string) => ReturnType<typeof planProjectVerification>) | undefined;
-  if (!deps.orchestrator) {
-    // --- flag-ON parity plumbing (PLAN.md 8d) ---
-    const sessionTaskCache = new Map<string, string>();
-    const taskOfSession = (sid: string): string | undefined => {
-      let t = sessionTaskCache.get(sid);
-      if (!t) {
-        t = (db.prepare("SELECT task_id FROM runs WHERE id = ?").get(sid) as { task_id?: string } | undefined)?.task_id;
-        if (t) sessionTaskCache.set(sid, t); // a session's task is immutable — no invalidation
-      }
-      return t;
-    };
-    const assistantOfSession = (sid: string): string | undefined =>
-      (db.prepare("SELECT assistant_id FROM runs WHERE id = ?").get(sid) as { assistant_id?: string } | undefined)
-        ?.assistant_id;
-    const lastPublishedPhase = new Map<string, string | undefined>();
-
-    const recorder = new EventRecorder(
-      db,
-      DEFAULT_REDACTION_RULES,
-      // publish (post-commit, best-effort): reproduce the legacy per-event SSE
-      // frame verbatim, plus a deduped {kind:"state"} on a derived phase change.
-      (sessionId, durableEvents) => {
-        const taskId = taskOfSession(sessionId);
-        if (!taskId) return;
-        for (const { seq, event } of durableEvents) {
-          bus.publish(taskId, { kind: "event", event: { ...event, seq } });
-        }
-        const status = tasks.envelope(taskId).status;
-        if (status.phase !== lastPublishedPhase.get(taskId)) {
-          lastPublishedPhase.set(taskId, status.phase);
-          bus.publish(taskId, {
-            kind: "state",
-            state: { state: status.state, phase: status.phase, assistantId: assistantOfSession(sessionId) },
-          });
-        }
-      },
-      undefined, // now
-      undefined, // onPublishError
-      // afterInsertInTx (transactional): task-envelope derivation + quota
-      // snapshots, atomic with the event insert. Never writes `runs`.
-      (sessionId, committed, txDb) => {
-        const taskId = taskOfSession(sessionId);
-        if (!taskId) return;
-        const assistantId = assistantOfSession(sessionId) ?? "";
-        const envelope = tasks.envelope(taskId);
-        let changed = false;
-        for (const { event } of committed) {
-          if (deriveEnvelopeUpdate(envelope, event)) changed = true;
-          // Same event-type gate as the legacy applyEvent switch — a quota
-          // snapshot only on usage.updated / limit.approaching / limit.hit.
-          if (QUOTA_EVENT_TYPES.has(event.type)) snapshotQuota(txDb, assistantId, event);
-        }
-        if (changed) tasks.saveEnvelope(envelope);
-      },
-    );
-    const authority = new WorkspaceAuthority({
-      repoAllowlist: config.repoAllowlist,
-      worktreeRoot: join(config.dir, "worktrees"),
-    });
-    projectVerification = (worktreePath) => {
-      try {
-        return planProjectVerification(snapshotProjectVerification(authority, worktreePath));
-      } catch {
-        return { warnings: ["project verification skipped: project metadata rejected by workspace authority"] };
-      }
-    };
-    const runner = new SessionRunner({
-      store: sessionStore,
-      recorder,
-      approvals,
-      checkpoints,
-      registry,
-      authority,
-      verificationCoordinator: new VerificationCoordinator(
-        verificationStore,
-        checkpoints,
-        authority,
-      ),
-      softThresholdPct: config.failover.softThresholdPct,
-      // No `handoff` dep — the envelope-yield path is out of scope this pass, so
-      // the runner never commits an envelope.
-    });
-    harnessBridge = new HarnessBridge({
-      runner,
-      store: sessionStore,
-      approvals,
-      db,
-      onError: (err) => app.log.error(err),
-    });
-  }
+  const harnessRecovery = composed.harnessRecovery;
+  const harnessBridge: HarnessBridge | undefined = deps.orchestrator ? undefined : composed.harnessBridge;
+  const projectVerification: ((worktreePath: string) => ReturnType<typeof planProjectVerification>) | undefined =
+    deps.orchestrator ? undefined : composed.projectVerification;
   if (!deps.orchestrator && !harnessBridge) {
     throw new Error("execution-harness bridge is not wired for the internal composition root");
   }
