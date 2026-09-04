@@ -104,6 +104,23 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     checkpoints, // CheckpointService is structurally a RunnerCheckpoints
     registry, // Registry is structurally a { adapter, manifest } facade
     verification: verificationStore,
+    // Fail-closed mode resolution (increment 3, D6): a Harness session only ever
+    // exists for a `single`-mode task (compare/race are rejected at start), so
+    // this reduces to "is harnessModes.single currently disabled". A missing or
+    // corrupt session -> execution_request -> task binding terminalises too.
+    shouldTerminalizeOnRecovery: (sessionId) => {
+      const row = db
+        .prepare(
+          `SELECT t.mode AS mode
+             FROM runs r
+             JOIN execution_requests er ON er.id = r.execution_request_id
+             JOIN tasks t ON t.id = er.task_id
+            WHERE r.id = ?`,
+        )
+        .get(sessionId) as { mode: string } | undefined;
+      if (!row || row.mode !== "single") return true;
+      return !config.execution.harnessModes.single;
+    },
   });
 
   // The internal bridge + recovery are wired for every real composition root,

@@ -96,9 +96,13 @@ describe("api server", () => {
     expect(res.statusCode).toBe(403);
   });
 
-  it("reconciles a live Harness session on boot instead of blanket-failing it", async () => {
+  it("terminalises a stranded Harness session on boot when its mode is disabled, instead of blanket-failing the task", async () => {
     makeApp();
-    // A RUNNING task whose newest run is a live Harness execution session.
+    // A RUNNING task whose newest run is a live Harness execution session, and
+    // whose task.mode ("single") is disabled in this server's default config
+    // (harnessModes.single: false) — the rollback-terminalisation policy
+    // (increment 3, D6) applies: the session must reach a terminal state on
+    // this boot, not be offered for resume (nothing will ever consume it).
     db.prepare(
       "INSERT INTO tasks (id, goal, envelope, state, created_at, updated_at) VALUES ('AG-boot', 'g', ?, 'RUNNING', 't', 't')",
     ).run(JSON.stringify({ status: { state: "RUNNING" } }));
@@ -133,19 +137,20 @@ describe("api server", () => {
     // harness-owned in-flight task is handled by the Harness sweep, not counted
     // as a legacy orphan.
     expect(reconciled).toBe(0);
-    // Harness session: resume-offered by HarnessRecovery, NOT stomped, no premature result row.
+    // Harness session: terminalised (mode disabled), not stomped by the legacy
+    // blanket-fail and not left dangling as a resume offer nobody will consume.
     const sess = db.prepare("SELECT state, session_state FROM runs WHERE id = 'harness-sess'").get() as {
       state: string;
       session_state: string;
     };
-    expect(sess.session_state).toBe("RUNNING");
-    expect(sess.state).toBe("ACTIVE");
+    expect(sess.session_state).toBe("FAILED");
+    expect(sess.state).toBe("ENDED_ERROR");
     expect(db.prepare("SELECT COUNT(*) AS n FROM execution_results WHERE session_id = 'harness-sess'").get()).toEqual({
-      n: 0,
+      n: 1,
     });
     expect(
       db.prepare("SELECT COUNT(*) AS n FROM events WHERE run_id = 'harness-sess' AND type = 'recovery.decision'").get(),
-    ).toEqual({ n: 2 }); // lease_taken_over + resume_offered
+    ).toEqual({ n: 2 }); // lease_taken_over + mode_disabled_terminalized
   });
 
   it("creates a task and serves it with envelope and empty runs", async () => {
