@@ -37,7 +37,7 @@ async function boot(extraConfig = ""): Promise<void> {
   db = openDb(config.dbPath);
   built = buildServer({ config, db });
   const inject = built.app.inject.bind(built.app); const authorization = `Bearer ${readCredential(credentialPath(config.dir)).secrets[0]!.secret}`;
-  built.app.inject = ((options: any) => inject({ ...options, headers: { ...options.headers, authorization } })) as typeof built.app.inject;
+  built.app.inject = ((options: Record<string, unknown> = {}) => inject({ ...options, headers: { ...(options.headers as Record<string, string> | undefined), authorization } } as never)) as typeof built.app.inject;
   built.registry.init();
   await built.registry.syncAll();
 }

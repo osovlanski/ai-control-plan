@@ -3,7 +3,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { CONTROL_PLANE_API_VERSION, redactSecrets, registerSecret } from "@agent-plane/core";
 import type { ResolvedConfig } from "../config.js";
 import type { Db } from "../db/index.js";
-import { CredentialStore } from "./credential-file.js";
+import type { CredentialStore } from "./credential-file.js";
 import { parseBootstrapToken, verifyBootstrapSignature } from "./bootstrap-token.js";
 
 declare module "fastify" { interface FastifyContextConfig { auth?: null|{require:string} } interface FastifyRequest { cred?: AuthenticatedCredential } }

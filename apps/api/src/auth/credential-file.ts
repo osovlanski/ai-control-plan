@@ -1,4 +1,4 @@
-import { closeSync, fsyncSync, lstatSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, fsyncSync, lstatSync, openSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { COMMAND_CAPABILITIES, OBSERVABILITY_CAPABILITIES, registerSecret } from "@agent-plane/core";
@@ -31,7 +31,7 @@ export function withCredentialLock<T>(path: string, fn: () => T): T {
     try { writeFileSync(lock, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }), { flag: "wx", mode: 0o600 }); break; }
     catch (e) { if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e; const x = JSON.parse(readFileSync(lock,"utf8")) as {pid:number;startedAt:string}; let dead=false; try { process.kill(x.pid,0); } catch (z) { dead=(z as NodeJS.ErrnoException).code==="ESRCH"; } if (!dead && Date.now()-Date.parse(x.startedAt)<=30000) throw new Error(`Credential rotation lock held: ${lock}`); unlinkSync(lock); }
   }
-  try { return fn(); } finally { try { unlinkSync(lock); } catch {} }
+  try { return fn(); } finally { rmSync(lock, { force: true }); }
 }
 export function atomicWriteCredential(path: string, value: CredentialFile): void {
   const tmp = `${path}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
