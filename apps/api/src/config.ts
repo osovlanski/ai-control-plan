@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { ensureCredential } from "./auth/credential-file.js";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { parse, stringify } from "yaml";
@@ -30,6 +31,7 @@ export interface WorkspaceConfig {
     /** Bind host. Keep 127.0.0.1 unless auth is added first (arch §12.6). */
     host: string;
     port: number;
+    auth: { bootstrapTtlSeconds: number; sessionTtlSeconds: number; rotationGraceSeconds: number };
   };
   /** Assistant environments this workspace instance may route to. */
   assistants: Record<string, AssistantConfig>;
@@ -65,7 +67,7 @@ export interface ResolvedConfig extends WorkspaceConfig {
 }
 
 const PERSONAL_DEFAULTS: Omit<WorkspaceConfig, "workspace"> = {
-  api: { host: "127.0.0.1", port: 4176 },
+  api: { host: "127.0.0.1", port: 4176, auth: { bootstrapTtlSeconds: 10, sessionTtlSeconds: 43200, rotationGraceSeconds: 300 } },
   assistants: {
     "personal-claude": { provider: "anthropic" },
     "personal-codex": { provider: "openai" },
@@ -89,7 +91,7 @@ const PERSONAL_DEFAULTS: Omit<WorkspaceConfig, "workspace"> = {
  */
 const WORK_DEFAULTS: Omit<WorkspaceConfig, "workspace"> = {
   ...PERSONAL_DEFAULTS,
-  api: { host: "127.0.0.1", port: 4186 },
+  api: { host: "127.0.0.1", port: 4186, auth: { ...PERSONAL_DEFAULTS.api.auth } },
   assistants: {},
   policy: { approvalMode: "prompt-on-escalation" },
   failover: { ...PERSONAL_DEFAULTS.failover, auto: false },
@@ -122,7 +124,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ResolvedConfig
   const configPath = join(dir, "config.yaml");
 
   if (!existsSync(configPath)) {
-    mkdirSync(dir, { recursive: true });
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
     writeFileSync(configPath, renderDefaultConfig(workspace), "utf8");
   }
 
@@ -138,7 +140,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ResolvedConfig
 
   const config: WorkspaceConfig = {
     workspace: file.workspace ?? workspace,
-    api: { ...defaults.api, ...file.api },
+    api: { ...defaults.api, ...file.api, auth: { ...defaults.api.auth, ...file.api?.auth } },
     assistants: file.assistants ?? defaults.assistants,
     repoAllowlist: file.repoAllowlist ?? defaults.repoAllowlist,
     policy: { ...defaults.policy, ...file.policy },
@@ -156,6 +158,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ResolvedConfig
 
   validate(config, configPath);
 
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  chmodSync(dir, 0o700);
+  const ds = statSync(dir);
+  if (!ds.isDirectory() || ds.uid !== process.getuid?.() || (ds.mode & 0o077) !== 0) {
+    throw new Error(`Unsafe config directory ${dir}; run: chmod 700 ${dir} && chown $(id -u) ${dir}`);
+  }
+  ensureCredential(dir);
+
   return { ...config, dir, dbPath: join(dir, "agent-plane.db") };
 }
 
@@ -167,6 +177,9 @@ function validate(config: WorkspaceConfig, path: string): void {
   }
   if (!Number.isInteger(config.api.port) || config.api.port < 1 || config.api.port > 65535) {
     problems.push(`api.port must be 1-65535, got ${config.api.port}`);
+  }
+  for (const [key, value] of Object.entries(config.api.auth)) {
+    if (!Number.isInteger(value) || value <= 0) problems.push(`api.auth.${key} must be a positive integer, got ${value}`);
   }
   if (config.failover.softThresholdPct < 1 || config.failover.softThresholdPct > 100) {
     problems.push(`failover.softThresholdPct must be 1-100, got ${config.failover.softThresholdPct}`);

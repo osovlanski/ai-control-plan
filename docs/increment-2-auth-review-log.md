@@ -143,3 +143,54 @@ Converged in 5 rounds. What the loop changed, in three lines:
 3. **Redaction / rotation / tests** hardened: append-only literal set (retired secrets included) across every enumerated ingress incl. telemetry; per-auth `isActive`; await-own-reload so a bogus miss can't starve a rotated key; Playwright E2E promoted to a hard completion gate.
 
 **Open for the user (blocks BUILD): the PREREQUISITE DECISION** in `PLAN_FILE` § Risks — (a) block this increment on 1a + the Cockpit client update, or (b) staged delivery where stage 1 (server + `apps/web` + the follow-up doc) ships now but cannot claim the roadmap increment complete.
+
+---
+
+## Act 3 — Build (codex-build; user decision (b) staged delivery)
+
+Builder: Codex (`codex exec`, session `01a068cf-39e7-75b0-b7fc-8bc47462af4c`), cli 0.152.1, model CLI default.
+Spec handed over: `docs/increment-2-auth-plan.md` + this log, STAGE 1 scope. Clean tree at `c28e5d7`.
+
+### Round 1 — Codex build
+
+Files: 31 changed/added (full list in the build report). Core: `apps/api/src/auth/{bootstrap-token,credential-file,index}.ts`, `apps/api/src/bin/{open-web,rotate-credential}.ts`, `apps/api/src/db/migrations/013_bootstrap_jti.sql`, route-capability table + auth hook + startup assertion + static SPA + redacted logger in `server.ts`, `api.auth` block + first-boot credential + dir validation in `config.ts`, append-only `registerSecret`/`redactSecrets` in `packages/core/src/redaction.ts`, `2.0` + `COMMAND_CAPABILITIES` in `contracts.ts`, `apps/web/src/{auth.ts,api.ts,App.tsx,TaskDetail.tsx}`, `apps/api/test/auth.test.ts` (cases 1–14 + 9b/9c), `apps/web/e2e/auth.spec.ts` (specs a–f), `docs/increment-2-cockpit-followup.md`.
+
+### Claude's verdict — Round 1
+
+Read the full diff. Ran the proof independently:
+- `pnpm install && pnpm typecheck && pnpm test` → **EXIT 0** — web 4, core 70, adapters 8, api 396 (478 total), all green.
+- `pnpm --filter @agent-plane/web test:e2e` (Chromium) → **6/6 passed**, run by Claude.
+
+Spec conformance: the ordered bootstrap checks (§4 1–8), the per-route capability table (§5, all ~30 routes; startup throw verified by case 14), atomic-INSERT jti consume with no prior SELECT, hardened `__Host-` cookie + `Referrer-Policy: no-referrer` + `Cache-Control: no-store`, O_EXCL 0600 credential under a 0700-validated dir, lockfile `{pid,startedAt}` + stale reclaim, atomic rotate with `notAfter` grace + fsync file+dir, coalesced await-own-reload, injected clock throughout, launcher binds `127.0.0.1:0` first then mints `lo`-bound token + self-registers redaction literals + single-serve→410 + per-launch CSP nonce — all present and faithful. All 14 numbered §13 cases + specs a–f exist and pass.
+
+Accepted deviations (noted, not fixed): (5) no `{ino,size,mtimeNs}` snapshot — full-file reload is correctness-equivalent, plan called it an optimization; (7) wrong-uid refuse is code-only (cannot `chown` without root in CI) — the `mode & 0o077` sibling branch is tested; (8) an existing config dir is `chmod`-healed to `0700` rather than refused — §1 explicitly instructs `chmodSync`, self-heal is strictly safer; (1) root `npx playwright` is not hoisted, the workspace-scoped command is the proof.
+
+Dispatched **fix round 1** for the material §13 coverage gaps Codex self-flagged:
+- broaden the redaction canary (case 12) to also assert an SSE frame and an error body carry no literal;
+- add the web-unit test that drives `EventSource.onerror` at `CLOSED` and asserts exactly one credentialed probe → `onAuthExpired` (plan §13 `apps/web/test/api.test.ts`);
+- add a stale-lockfile-reclaim test for `withCredentialLock`;
+- add a test that exercises the real `apps/api/src/bin/open-web.ts` (bind → serve once → 410), not an in-process reimplementation;
+- nits: drop the unused `statSync` import in `credential-file.ts`; fix the pino `redact` path `res.headers["set-cookie"]`.
+
+### Round 2 — Codex fix
+
+Resumed the same session. 8 files touched, no runtime behavior change beyond the two nits + the redaction boundary the canaries needed:
+- `apps/api/src/auth/credential-file.ts` — dropped the unused `statSync` import.
+- `apps/api/src/server.ts` — pino `redact` path corrected to `res.headers["set-cookie"]`; added `app.setErrorHandler` returning a `redactValue`-scrubbed body so uncaught handler errors cannot leak a literal.
+- `apps/api/src/bin/open-web.ts` — extracted `startOpenWeb()` (injectable `openBrowser`, `config`, `apiOrigin`) with the CLI path guarded by an `import.meta.url` check; bind-first / lo-bound-mint / self-register / serve-once / 410 / 30s-timeout behavior unchanged.
+- `apps/web/src/TaskDetail.tsx` — extracted `openTaskEventStream(taskId, onMessage)` (the `withCredentials` EventSource + `onerror`→CLOSED→one-probe logic), same behavior, now unit-testable.
+- `apps/api/test/auth.test.ts` — new case 12b: real listening server, live-secret canary pushed through the bus into an SSE frame and thrown from an extra route, asserts both the `data:` frame and the uncaught-error body carry `[REDACTED]` and not the literal.
+- `apps/api/test/open-web.test.ts` — new: drives the real `startOpenWeb()` — ephemeral `127.0.0.1` bind, one 200 + one 410, CSP header shape, hidden `token` input, and `parseBootstrapToken(token).payload.lo === listener.origin`.
+- `apps/api/test/config.test.ts` — new: dead-pid `<path>.lock` is reclaimed and rotation succeeds; a live-pid lock within 30s is never stolen (`rotateCredential` throws `/lock held/`, lock file remains).
+- `apps/web/test/api.test.ts` — new: `FakeEventSource` at `readyState=CLOSED`, `onerror()` fired twice, asserts exactly one credentialed `/api/workspace` probe and one `onAuthExpired`.
+
+### Claude's verdict — Round 2 (final)
+
+Read the full diff. Ran the proof independently:
+- `pnpm typecheck` → PASS.
+- `pnpm test` → **EXIT 0** — web 5, core 70, adapters 8, api 399 (482 total).
+- `pnpm --filter @agent-plane/web test:e2e` (Chromium) → **6/6 passed**, run by Claude.
+
+All five §13 coverage gaps closed. No acceptance criterion is weakened. The three accepted deviations stand (snapshot-metadata optimization, wrong-uid refuse is code-only, config-dir self-heal per §1's explicit `chmodSync`).
+
+**Build complete — STAGE 1.** Ready for the human commit gate on branch `increment-2-auth`. Stage 2 (1a merge + Cockpit `ControlPlaneClient` per `docs/increment-2-cockpit-followup.md`) remains, and until it lands the `2.0` server breaks Cockpit's `/api/control-plane/status` — the known, recorded interim gap.

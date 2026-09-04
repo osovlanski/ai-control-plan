@@ -1,5 +1,5 @@
 import type { RoutingProfile, TaskEnvelope, TaskId, TaskMode, TaskState } from "@agent-plane/core";
-import { assertTransition, isTaskState, newTaskId } from "@agent-plane/core";
+import { assertTransition, isTaskState, newTaskId, redactValue } from "@agent-plane/core";
 import type { Db } from "../db/index.js";
 
 export interface CreateTaskInput {
@@ -30,6 +30,7 @@ export class TaskStore {
   constructor(private db: Db) {}
 
   create(input: CreateTaskInput): TaskEnvelope {
+    input = redactValue(input);
     const taskId = newTaskId();
     const now = new Date().toISOString();
     const envelope: TaskEnvelope = {
@@ -76,6 +77,7 @@ export class TaskStore {
   }
 
   saveEnvelope(envelope: TaskEnvelope): void {
+    envelope = redactValue(envelope);
     this.db
       .prepare("UPDATE tasks SET envelope = ?, activity_phase = ?, updated_at = ? WHERE id = ?")
       .run(JSON.stringify(envelope), envelope.status.phase ?? null, new Date().toISOString(), envelope.taskId);

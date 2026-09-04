@@ -1,10 +1,15 @@
 import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
-import { join } from "node:path";
+import fastifyStatic from "@fastify/static";
+import { existsSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
+  COMMAND_CAPABILITIES,
   CONTROL_PLANE_API_VERSION,
   DEFAULT_REDACTION_RULES,
   NORMALIZED_EVENT_VERSION,
   OBSERVABILITY_CAPABILITIES,
+  redactSecrets,
   redactValue,
   type AssistantId,
   type RoutingProfile,
@@ -36,6 +41,8 @@ import { EventRetention } from "./modules/retention.js";
 import { RepositoryIdentityRegistry } from "./repo/identity-registry.js";
 import { renderHandoffMd } from "./render/handoff.js";
 import { renderProgressMd } from "./render/progress.js";
+import { registerAuth, type SessionMap } from "./auth/index.js";
+import { CredentialStore, credentialPath } from "./auth/credential-file.js";
 
 /** Legacy `applyEvent` snapshots quota on exactly these event types. */
 const QUOTA_EVENT_TYPES = new Set(["usage.updated", "limit.approaching", "limit.hit"]);
@@ -48,6 +55,8 @@ export interface ServerDeps {
   orchestrator?: Orchestrator;
   bus?: TaskEventBus;
   tasks?: TaskStore;
+  now?: () => Date;
+  registerExtraRoutes?: (app: FastifyInstance) => void;
 }
 
 export interface BuiltServer {
@@ -71,7 +80,17 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   const telemetry = new TelemetryService(db);
   const retention = new EventRetention(db);
   const repositoryIdentities = new RepositoryIdentityRegistry(db);
-  const app = Fastify({ logger: true });
+  const now = deps.now ?? (() => new Date());
+  const app = Fastify({ logger: { stream: { write: (line) => process.stdout.write(redactSecrets(line)) }, serializers: { req: (r) => ({ method: r.method, url: String(r.url).split("?")[0] }), res: (r) => ({ statusCode: r.statusCode }) }, redact: ["req.headers.authorization", "req.headers.cookie", "res.headers[\"set-cookie\"]"] } });
+  const credentials = new CredentialStore(credentialPath(config.dir), now);
+  const authSessions: SessionMap = new Map();
+  registerAuth(app, { config, credentials, sessions: authSessions, db, now });
+  const read = {
+    tasks: { config: { auth: { require: "tasks.read" } } }, events: { config: { auth: { require: "events.read" } } },
+    stream: { config: { auth: { require: "events.stream" } } }, routing: { config: { auth: { require: "routing.read" } } },
+    sessions: { config: { auth: { require: "sessions.read" } } }, verification: { config: { auth: { require: "verification.read" } } },
+  } as const;
+  const write = { config: { auth: { require: "commands.write" } } } as const;
 
   // One SessionStore / ApprovalService shared by recovery + (flag-ON) the runner
   // and bridge — the composition root (PLAN.md 8c.6).
@@ -232,21 +251,21 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     return { explanation, routingDecisionId };
   };
 
-  app.get("/api/meta", () => ({
+  app.get("/api/meta", read.tasks, () => ({
     apiVersion: CONTROL_PLANE_API_VERSION,
     eventVersion: NORMALIZED_EVENT_VERSION,
-    workspace: config.workspace,
-    capabilities: OBSERVABILITY_CAPABILITIES,
+    authRequired: true,
+    capabilities: [...OBSERVABILITY_CAPABILITIES, ...COMMAND_CAPABILITIES],
   }));
 
-  app.get("/api/health", () => ({
+  app.get("/api/health", read.tasks, () => ({
     status: "ok",
     workspace: config.workspace,
     migrations: appliedMigrations(db).length,
-    now: new Date().toISOString(),
+    now: now().toISOString(),
   }));
 
-  app.get("/api/workspace", () => ({
+  app.get("/api/workspace", read.tasks, () => ({
     workspace: config.workspace,
     assistants: Object.keys(config.assistants),
     repoAllowlist: config.repoAllowlist,
@@ -256,7 +275,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
 
   // ---- Assistants / registry ----
 
-  app.get("/api/assistants", () =>
+  app.get("/api/assistants", read.tasks, () =>
     registry.list().map((a) => ({
       id: a.id,
       provider: a.provider,
@@ -266,7 +285,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     })),
   );
 
-  app.post<{ Params: { id: string } }>("/api/assistants/:id/sync", async (req, reply) => {
+  app.post<{ Params: { id: string } }>("/api/assistants/:id/sync", write, async (req, reply) => {
     try {
       return await registry.sync(req.params.id);
     } catch (err) {
@@ -274,25 +293,25 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     }
   });
 
-  app.get("/api/assistants/changes", () => registry.recentChanges());
+  app.get("/api/assistants/changes", read.tasks, () => registry.recentChanges());
 
-  app.get("/api/cooldowns", () => cooldowns.list());
+  app.get("/api/cooldowns", read.tasks, () => cooldowns.list());
 
   // ---- Tasks ----
 
   app.post<{
     Body: { goal?: string; constraints?: string[]; repoPath?: string; profile?: RoutingProfile };
-  }>("/api/tasks", async (req, reply) => {
+  }>("/api/tasks", write, async (req, reply) => {
     const { goal, constraints, repoPath, profile } = req.body ?? {};
     if (!goal || !goal.trim()) return reply.status(400).send({ error: "goal is required" });
     if (repoPath && !repoAllowed(repoPath)) {
       return reply.status(403).send({ error: `Repository ${repoPath} is not in this workspace's allowlist` });
     }
-    const envelope = tasks.create({ goal: goal.trim(), constraints, repoPath, profile });
+    const envelope = tasks.create(redactValue({ goal: goal.trim(), constraints, repoPath, profile }));
     return reply.status(201).send(envelope);
   });
 
-  app.get("/api/tasks", () =>
+  app.get("/api/tasks", read.tasks, () =>
     tasks.list().map((t) => ({
       id: t.id,
       goal: t.goal,
@@ -305,7 +324,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     })),
   );
 
-  app.get<{ Params: { id: string } }>("/api/tasks/:id", (req, reply) => {
+  app.get<{ Params: { id: string } }>("/api/tasks/:id", read.tasks, (req, reply) => {
     const row = tasks.get(req.params.id);
     if (!row) return reply.status(404).send({ error: "not found" });
     const runs = db
@@ -330,7 +349,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   });
 
   app.post<{ Params: { id: string }; Body: { assistantId?: AssistantId } }>(
-    "/api/tasks/:id/route",
+    "/api/tasks/:id/route", write,
     (req, reply) => {
       const routed = computeRoute(req.params.id, req.body?.assistantId);
       if (!routed) return reply.status(404).send({ error: "not found" });
@@ -339,7 +358,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   );
 
   app.post<{ Params: { id: string }; Body: { assistantId?: AssistantId } }>(
-    "/api/tasks/:id/start",
+    "/api/tasks/:id/start", write,
     async (req, reply) => {
       const taskId = req.params.id;
       const row = tasks.get(taskId);
@@ -377,7 +396,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   app.post<{
     Params: { id: string };
     Body: { kind?: string; requestId?: string; approved?: boolean };
-  }>("/api/tasks/:id/input", async (req, reply) => {
+  }>("/api/tasks/:id/input", write, async (req, reply) => {
     const { kind, requestId, approved } = req.body ?? {};
     if (kind !== "approval" || !requestId || typeof approved !== "boolean") {
       return reply.status(400).send({ error: "Body must be {kind:'approval', requestId, approved}" });
@@ -390,7 +409,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     }
   });
 
-  app.post<{ Params: { id: string } }>("/api/tasks/:id/cancel", async (req, reply) => {
+  app.post<{ Params: { id: string } }>("/api/tasks/:id/cancel", write, async (req, reply) => {
     try {
       await orchestrator.cancelTask(req.params.id);
       return { ok: true };
@@ -399,7 +418,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     }
   });
 
-  app.post<{ Params: { id: string } }>("/api/tasks/:id/checkpoint", async (req, reply) => {
+  app.post<{ Params: { id: string } }>("/api/tasks/:id/checkpoint", write, async (req, reply) => {
     if (!tasks.get(req.params.id)) return reply.status(404).send({ error: "not found" });
     try {
       const cp = await orchestrator.createCheckpoint(req.params.id);
@@ -409,13 +428,13 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     }
   });
 
-  app.get<{ Params: { id: string } }>("/api/tasks/:id/checkpoints", (req, reply) => {
+  app.get<{ Params: { id: string } }>("/api/tasks/:id/checkpoints", read.tasks, (req, reply) => {
     if (!tasks.get(req.params.id)) return reply.status(404).send({ error: "not found" });
     return checkpoints.list(req.params.id);
   });
 
   app.post<{ Params: { id: string }; Body: { to?: AssistantId } }>(
-    "/api/tasks/:id/handoff",
+    "/api/tasks/:id/handoff", write,
     async (req, reply) => {
       if (!tasks.get(req.params.id)) return reply.status(404).send({ error: "not found" });
       try {
@@ -426,7 +445,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     },
   );
 
-  app.get<{ Params: { id: string } }>("/api/tasks/:id/handoffs", (req, reply) => {
+  app.get<{ Params: { id: string } }>("/api/tasks/:id/handoffs", read.tasks, (req, reply) => {
     if (!tasks.get(req.params.id)) return reply.status(404).send({ error: "not found" });
     const live = db
       .prepare(
@@ -441,7 +460,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     return live;
   });
 
-  app.get<{ Params: { id: string } }>("/api/tasks/:id/files/handoff.md", (req, reply) => {
+  app.get<{ Params: { id: string } }>("/api/tasks/:id/files/handoff.md", read.tasks, (req, reply) => {
     if (!tasks.get(req.params.id)) return reply.status(404).send({ error: "not found" });
     const cp = checkpoints.latest(req.params.id);
     if (!cp) return reply.status(404).send({ error: "no checkpoint yet — take one first" });
@@ -461,7 +480,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   });
 
   app.post<{ Params: { id: string }; Body: { assistants?: AssistantId[]; mode?: "compare" | "race" } }>(
-    "/api/tasks/:id/parallel",
+    "/api/tasks/:id/parallel", write,
     async (req, reply) => {
       const { assistants, mode } = req.body ?? {};
       if (!Array.isArray(assistants) || assistants.length < 2) {
@@ -475,7 +494,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     },
   );
 
-  app.get<{ Params: { id: string } }>("/api/tasks/:id/comparison", async (req, reply) => {
+  app.get<{ Params: { id: string } }>("/api/tasks/:id/comparison", read.tasks, async (req, reply) => {
     try {
       return await orchestrator.comparison(req.params.id);
     } catch (err) {
@@ -484,7 +503,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   });
 
   app.post<{ Params: { id: string }; Body: { winnerRunId?: string; reason?: string } }>(
-    "/api/tasks/:id/comparison/resolve",
+    "/api/tasks/:id/comparison/resolve", write,
     async (req, reply) => {
       const { winnerRunId, reason } = req.body ?? {};
       if (!winnerRunId) return reply.status(400).send({ error: "winnerRunId is required" });
@@ -496,12 +515,12 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     },
   );
 
-  app.get<{ Querystring: { kind?: string } }>("/api/scores", (req) => {
+  app.get<{ Querystring: { kind?: string } }>("/api/scores", read.tasks, (req) => {
     // What the router is actually measuring, so a recommendation can be checked.
     return [...telemetry.scores(req.query.kind).values()];
   });
 
-  app.get<{ Params: { id: string } }>("/api/tasks/:id/events", (req, reply) => {
+  app.get<{ Params: { id: string } }>("/api/tasks/:id/events", read.events, (req, reply) => {
     const row = tasks.get(req.params.id);
     if (!row) return reply.status(404).send({ error: "not found" });
     const live = db
@@ -518,7 +537,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     return [...retention.events(req.params.id), ...live];
   });
 
-  app.get<{ Params: { id: string } }>("/api/tasks/:id/events/stream", (req, reply) => {
+  app.get<{ Params: { id: string } }>("/api/tasks/:id/events/stream", read.stream, (req, reply) => {
     const row = tasks.get(req.params.id);
     if (!row) return reply.status(404).send({ error: "not found" });
     sseHeaders(reply);
@@ -527,13 +546,13 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     req.raw.on("close", unsubscribe);
   });
 
-  app.get<{ Params: { id: string } }>("/api/tasks/:id/routing", (req, reply) => {
+  app.get<{ Params: { id: string } }>("/api/tasks/:id/routing", read.routing, (req, reply) => {
     const row = tasks.get(req.params.id);
     if (!row) return reply.status(404).send({ error: "not found" });
     return routingHistory(db, req.params.id);
   });
 
-  app.get<{ Params: { id: string } }>("/api/tasks/:id/files/progress.md", (req, reply) => {
+  app.get<{ Params: { id: string } }>("/api/tasks/:id/files/progress.md", read.tasks, (req, reply) => {
     const row = tasks.get(req.params.id);
     if (!row) return reply.status(404).send({ error: "not found" });
     const lastRun = db
@@ -548,7 +567,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   // nothing is inferred from SSE. `sessionState` is primary (§5); the legacy
   // `state` vocabulary is still served during the dual-field window.
 
-  app.get<{ Params: { id: string } }>("/api/tasks/:id/sessions", (req, reply) => {
+  app.get<{ Params: { id: string } }>("/api/tasks/:id/sessions", read.sessions, (req, reply) => {
     if (!tasks.get(req.params.id)) return reply.status(404).send({ error: "not found" });
     const rows = db
       .prepare(
@@ -566,7 +585,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
 
   // Correlated navigation (§11): sessions across a subtask GROUP or under a
   // PARENT task — the fan-out the single-task list above cannot express.
-  app.get<{ Querystring: { groupId?: string; parentTaskId?: string } }>("/api/sessions", (req, reply) => {
+  app.get<{ Querystring: { groupId?: string; parentTaskId?: string } }>("/api/sessions", read.sessions, (req, reply) => {
     const { groupId, parentTaskId } = req.query;
     if (!groupId && !parentTaskId) {
       return reply.status(400).send({ error: "provide groupId or parentTaskId" });
@@ -586,7 +605,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     return rows.map((r) => ({ ...sessionSummary(r), taskId: r.task_id }));
   });
 
-  app.get<{ Params: { id: string } }>("/api/sessions/:id", (req, reply) => {
+  app.get<{ Params: { id: string } }>("/api/sessions/:id", read.sessions, (req, reply) => {
     const run = db
       .prepare(
         `SELECT id, task_id, execution_request_id, assistant_id, session_state, state, version,
@@ -740,7 +759,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     };
   });
 
-  app.get<{ Params: { id: string } }>("/api/sessions/:id/verification", (req, reply) => {
+  app.get<{ Params: { id: string } }>("/api/sessions/:id/verification", read.verification, (req, reply) => {
     const run = db.prepare(
       "SELECT id, execution_request_id FROM runs WHERE id = ?",
     ).get(req.params.id) as { id: string; execution_request_id: string | null } | undefined;
@@ -795,6 +814,21 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   }, 60_000);
   leaseSweep.unref();
   app.addHook("onClose", async () => clearInterval(leaseSweep));
+  deps.registerExtraRoutes?.(app);
+  app.setErrorHandler((error, _req, reply) => {
+    const statusCode = error && typeof error === "object" && "statusCode" in error &&
+      typeof error.statusCode === "number" ? error.statusCode : 500;
+    return reply.status(statusCode).send({ error: message(error) });
+  });
+
+  const staticRoot = join(dirname(fileURLToPath(import.meta.url)), "../../web/dist");
+  if (existsSync(staticRoot)) {
+    void app.register(fastifyStatic, { root: staticRoot, wildcard: false });
+    app.setNotFoundHandler((req, reply) => {
+      if (req.url.split("?")[0]!.startsWith("/api/")) return reply.code(404).send({ error: "not found" });
+      return reply.sendFile("index.html");
+    });
+  }
 
   return { app, registry, orchestrator, tasks, bus, checkpoints, cooldowns, telemetry };
 }
@@ -810,11 +844,11 @@ function sseHeaders(reply: FastifyReply): void {
 }
 
 function send(reply: FastifyReply, payload: unknown): void {
-  reply.raw.write(`data: ${JSON.stringify(payload)}\n\n`);
+  reply.raw.write(`data: ${JSON.stringify(redactValue(payload))}\n\n`);
 }
 
 function message(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
+  return redactValue(err instanceof Error ? err.message : String(err));
 }
 
 /** Parse a durable JSON column; a corrupt one yields null rather than a 500. */

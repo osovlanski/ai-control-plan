@@ -3,6 +3,7 @@ import { api, type Assistant, type CapabilityChange, type TaskSummary, type Work
 import { NewTask } from "./NewTask.jsx";
 import { TaskDetail } from "./TaskDetail.jsx";
 import { Button, Card, QuotaBar, StateBadge, tokens } from "./ui.jsx";
+import { onAuthExpired } from "./auth.js";
 
 type View = { screen: "board" } | { screen: "new" } | { screen: "task"; taskId: string } | { screen: "catalog" };
 
@@ -10,11 +11,15 @@ export function App() {
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
   const [view, setView] = useState<View>({ screen: "board" });
   const [error, setError] = useState<string | null>(null);
+  const [expired, setExpired] = useState(false);
+
+  useEffect(() => onAuthExpired(() => setExpired(true)), []);
 
   useEffect(() => {
     api.workspace().then(setWorkspace).catch((e: Error) => setError(e.message));
   }, []);
 
+  if (expired) return <div style={{minHeight:"100vh",display:"grid",placeItems:"center",background:tokens.bg,color:tokens.text}}><h1>Session expired — re-open with <code>pnpm --filter @agent-plane/api open</code></h1></div>;
   return (
     <div style={{ minHeight: "100vh", background: tokens.bg, color: tokens.text }}>
       <header

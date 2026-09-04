@@ -41,6 +41,7 @@ describe("migrations", () => {
     expect(tables).toEqual([
       "approvals",
       "assistants",
+      "bootstrap_jti",
       "capability_changes",
       "capability_probes",
       "checkpoints",

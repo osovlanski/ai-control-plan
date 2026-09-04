@@ -1,8 +1,9 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { loadConfig, workspaceName } from "../src/config.js";
+import { credentialPath, readCredential, rotateCredential } from "../src/auth/credential-file.js";
 
 let home: string;
 
@@ -36,6 +37,28 @@ describe("workspace config", () => {
     expect(config.dbPath).toBe(join(home, "personal", "agent-plane.db"));
     const written = readFileSync(join(home, "personal", "config.yaml"), "utf8");
     expect(written).toContain("never stored here");
+    expect(lstatSync(config.dir).mode & 0o777).toBe(0o700);
+    expect(lstatSync(join(config.dir, "api-credential.json")).mode & 0o777).toBe(0o600);
+    expect(config.api.auth).toEqual({ bootstrapTtlSeconds: 10, sessionTtlSeconds: 43200, rotationGraceSeconds: 300 });
+  });
+
+  it("merges auth TTL overrides", () => { const dir=join(home,"personal");mkdirSync(dir,{recursive:true});writeFileSync(join(dir,"config.yaml"),"api:\n  auth:\n    bootstrapTtlSeconds: 7\n    sessionTtlSeconds: 99\n    rotationGraceSeconds: 12\n");expect(loadConfig(env()).api.auth).toEqual({bootstrapTtlSeconds:7,sessionTtlSeconds:99,rotationGraceSeconds:12}); });
+
+  it("refuses an unsafe credential file and symlink",()=>{const config=loadConfig(env());const path=join(config.dir,"api-credential.json");chmodSync(path,0o644);expect(()=>loadConfig(env())).toThrow(/Unsafe credential file/);rmSync(path);symlinkSync(join(config.dir,"config.yaml"),path);expect(()=>loadConfig(env())).toThrow(/Unsafe credential file/);});
+
+  it("reclaims a stale dead-pid rotation lock but never steals a fresh live-pid lock", () => {
+    const config = loadConfig(env());
+    const path = credentialPath(config.dir);
+    const lock = `${path}.lock`;
+    writeFileSync(lock, JSON.stringify({ pid: 2_147_483_647, startedAt: new Date().toISOString() }), { mode: 0o600 });
+    const before = readCredential(path).secrets.length;
+    rotateCredential(path, config.api.auth.rotationGraceSeconds);
+    expect(readCredential(path).secrets).toHaveLength(before + 1);
+    expect(existsSync(lock)).toBe(false);
+
+    writeFileSync(lock, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }), { mode: 0o600 });
+    expect(() => rotateCredential(path, config.api.auth.rotationGraceSeconds)).toThrow(/lock held/);
+    expect(existsSync(lock)).toBe(true);
   });
 
   it("isolates workspaces into separate dirs and DB files", () => {

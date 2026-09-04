@@ -23,6 +23,19 @@ interface Notice {
   at: string;
 }
 
+export function openTaskEventStream(taskId: string, onMessage: (message: MessageEvent<string>) => void): EventSource {
+  const source = new EventSource(`/api/tasks/${taskId}/events/stream`, { withCredentials: true });
+  let probed = false;
+  source.onerror = () => {
+    if (source.readyState === EventSource.CLOSED && !probed) {
+      probed = true;
+      void api.workspace().catch(() => undefined);
+    }
+  };
+  source.onmessage = onMessage;
+  return source;
+}
+
 export function TaskDetail({ taskId, onBack }: { taskId: string; onBack: () => void }) {
   const [detail, setDetail] = useState<Detail | null>(null);
   const [events, setEvents] = useState<TaskEvent[]>([]);
@@ -68,8 +81,7 @@ export function TaskDetail({ taskId, onBack }: { taskId: string; onBack: () => v
     refresh();
 
     // Live tail: SSE carries normalized events and authoritative state changes.
-    const source = new EventSource(`/api/tasks/${taskId}/events/stream`);
-    source.onmessage = (msg) => {
+    const source = openTaskEventStream(taskId, (msg) => {
       const payload = JSON.parse(msg.data) as {
         kind: "event" | "state" | "notice";
         event?: TaskEvent;
@@ -94,7 +106,7 @@ export function TaskDetail({ taskId, onBack }: { taskId: string; onBack: () => v
           });
         }
       }
-    };
+    });
     return () => source.close();
   }, [taskId]);
 

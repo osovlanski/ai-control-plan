@@ -2,6 +2,15 @@ import type { RedactionRule } from "./adapter.js";
 import type { NormalizedEvent } from "./events.js";
 
 export const REDACTED = "[REDACTED]";
+const redactionLiterals = new Set<string>();
+export function registerSecret(value: string): void {
+  if (value) redactionLiterals.add(value);
+}
+export function redactSecrets(text: string): string {
+  let result = text;
+  for (const literal of redactionLiterals) result = result.split(literal).join(REDACTED);
+  return result;
+}
 export const DEFAULT_REDACTION_RULES: RedactionRule[] = [
   { name: "OpenAI-style API key", pattern: "\\bsk-[A-Za-z0-9_-]{12,}\\b" },
   { name: "Bearer token", pattern: "\\bBearer\\s+[A-Za-z0-9._~+\\/-]+=*" },
@@ -11,7 +20,7 @@ export const DEFAULT_REDACTION_RULES: RedactionRule[] = [
 ];
 const SECRET_KEY = /(?:^|[_-])(api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|passwd|credential)(?:$|[_-])/i;
 export function redactText(value: string, rules: RedactionRule[] = DEFAULT_REDACTION_RULES): string {
-  let result = value;
+  let result = redactSecrets(value);
   for (const rule of rules) {
     const regex = new RegExp(rule.pattern, "gim");
     result = result.replace(regex, (_match, ...args: unknown[]) => {

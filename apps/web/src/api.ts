@@ -97,9 +97,11 @@ export interface TaskDetail {
 async function req<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, {
     ...init,
+    credentials: "include",
     headers: init?.body ? { "content-type": "application/json" } : undefined,
   });
   if (!res.ok) {
+    if (res.status === 401) { emitAuthExpired(); throw new AuthExpiredError(); }
     const body: unknown = await res.json().catch(() => ({}));
     const detail = (body as { error?: string }).error ?? `HTTP ${res.status}`;
     throw new Error(detail);
@@ -302,3 +304,4 @@ export interface AssistantScore {
   failovers: number;
   errors: number;
 }
+import { AuthExpiredError, emitAuthExpired } from "./auth.js";
