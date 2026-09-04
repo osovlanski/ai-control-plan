@@ -3,7 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { AssistantId } from "@agent-plane/core";
-import { loadConfig, type ResolvedConfig } from "../src/config.js";
+import type { ResolvedConfig } from "../src/config.js";
+import { bootHarnessOrchestrator, loadHarnessTestConfig } from "./helpers/boot-orchestrator.js";
 import { openDb, type Db } from "../src/db/index.js";
 import { CheckpointService } from "../src/modules/checkpoint.js";
 import { CooldownStore } from "../src/modules/cooldown.js";
@@ -32,7 +33,7 @@ beforeEach(async () => {
     join(home, "personal", "config.yaml"),
     "assistants:\n  personal-fake:\n    provider: fake\n",
   );
-  config = loadConfig({ AGENT_PLANE_HOME: home });
+  config = loadHarnessTestConfig({ AGENT_PLANE_HOME: home });
   db = openDb(config.dbPath);
   registry = new Registry(db, config);
   registry.init();
@@ -41,7 +42,7 @@ beforeEach(async () => {
   bus = new TaskEventBus();
   checkpoints = new CheckpointService(db, tasks);
   cooldowns = new CooldownStore(db);
-  orchestrator = new Orchestrator(db, config, registry, tasks, bus, checkpoints, cooldowns);
+  orchestrator = bootHarnessOrchestrator({ db, config, registry, tasks, bus, checkpoints, cooldowns });
 });
 
 afterEach(async () => {
@@ -173,7 +174,7 @@ describe("orchestrator end-to-end (fake adapter)", () => {
       "INSERT INTO runs (id, task_id, assistant_id, state, started_at) VALUES ('orphan-run', ?, ?, 'ACTIVE', 't')",
     ).run(envelope.taskId, FAKE_ID);
 
-    const fresh = new Orchestrator(db, config, registry, tasks, bus, checkpoints, cooldowns);
+    const fresh = bootHarnessOrchestrator({ db, config, registry, tasks, bus, checkpoints, cooldowns });
     expect(await fresh.reconcileOnBoot()).toBe(1);
     expect(tasks.get(envelope.taskId)!.state).toBe("FAILED");
     expect(

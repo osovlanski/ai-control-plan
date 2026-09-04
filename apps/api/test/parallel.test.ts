@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { AssistantId } from "@agent-plane/core";
-import { loadConfig, type ResolvedConfig } from "../src/config.js";
+import type { ResolvedConfig } from "../src/config.js";
+import { bootHarnessOrchestrator, loadHarnessTestConfig } from "./helpers/boot-orchestrator.js";
 import { openDb, type Db } from "../src/db/index.js";
 import { CheckpointService } from "../src/modules/checkpoint.js";
 import { CooldownStore } from "../src/modules/cooldown.js";
@@ -35,7 +36,7 @@ beforeEach(async () => {
     join(home, "personal", "config.yaml"),
     "assistants:\n  fake-a: { provider: fake }\n  fake-b: { provider: fake }\n",
   );
-  config = loadConfig({ AGENT_PLANE_HOME: home });
+  config = loadHarnessTestConfig({ AGENT_PLANE_HOME: home });
   db = openDb(config.dbPath);
   registry = new Registry(db, config);
   registry.init();
@@ -43,7 +44,15 @@ beforeEach(async () => {
   tasks = new TaskStore(db);
   bus = new TaskEventBus();
   telemetry = new TelemetryService(db);
-  orchestrator = new Orchestrator(db, config, registry, tasks, bus, new CheckpointService(db, tasks), new CooldownStore(db));
+  orchestrator = bootHarnessOrchestrator({
+    db,
+    config,
+    registry,
+    tasks,
+    bus,
+    checkpoints: new CheckpointService(db, tasks),
+    cooldowns: new CooldownStore(db),
+  });
 
   repoRoot = mkdtempSync(join(tmpdir(), "agent-plane-par-repo-"));
   repo = join(repoRoot, "repo");

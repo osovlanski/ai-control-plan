@@ -16,7 +16,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { AssistantId } from "@agent-plane/core";
-import { loadConfig, type ResolvedConfig } from "../src/config.js";
+import type { ResolvedConfig } from "../src/config.js";
+import { bootHarnessOrchestrator, loadHarnessTestConfig } from "./helpers/boot-orchestrator.js";
 import { openDb, type Db } from "../src/db/index.js";
 import { CheckpointService } from "../src/modules/checkpoint.js";
 import { CooldownStore } from "../src/modules/cooldown.js";
@@ -45,7 +46,7 @@ async function boot(extraConfig = ""): Promise<void> {
     join(home, "personal", "config.yaml"),
     `assistants:\n  fake-a:\n    provider: fake\n  fake-b:\n    provider: fake\n${extraConfig}`,
   );
-  config = loadConfig({ AGENT_PLANE_HOME: home });
+  config = loadHarnessTestConfig({ AGENT_PLANE_HOME: home });
   db = openDb(config.dbPath);
   registry = new Registry(db, config);
   registry.init();
@@ -54,7 +55,7 @@ async function boot(extraConfig = ""): Promise<void> {
   bus = new TaskEventBus();
   checkpoints = new CheckpointService(db, tasks);
   cooldowns = new CooldownStore(db);
-  orchestrator = new Orchestrator(db, config, registry, tasks, bus, checkpoints, cooldowns);
+  orchestrator = bootHarnessOrchestrator({ db, config, registry, tasks, bus, checkpoints, cooldowns });
 }
 
 beforeEach(() => boot());
