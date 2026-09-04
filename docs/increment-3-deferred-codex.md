@@ -2,7 +2,7 @@
 
 Codex hit its account usage limit during the claudex-loop Phase 2 review (resets **2026-09-07 06:53**). Two Codex passes are owed and were deferred; run them once quota is back and fold the results into `docs/increment-3-eval-canary-review-log.md`.
 
-Increment 3 was **built by Claude** in the interim (Phase 3, Claude-built path). The plan is `docs/increment-3-eval-canary-plan.md` Rev 5, which had already absorbed every finding from Codex review rounds 1-4.
+Increment 3 was **built by Claude** in the interim (Phase 3, Claude-built path, commits `09174dd`..`5b7c074` on `increment-3-eval-canary`). The plan is `docs/increment-3-eval-canary-plan.md` Rev 5, which had already absorbed every finding from Codex review rounds 1-4. Build status is in the review log's `## Phase 3 — Claude build` section: everything is built, tested, and green except the real-credentialled `pnpm eval` run (§4 step 22's hard completion gate) — no provider credentials were available in the building session. Run that gate first if it still hasn't landed; it changes what "cold" means for the inspection below.
 
 ---
 
@@ -27,7 +27,7 @@ The claudex-loop default is a fresh **read-only** Codex session inspecting the C
 
 ```bash
 cd ~/workspace/personal/ai-control-plan
-BASE=<commit the increment-3 branch forked from>   # git merge-base main increment-3-eval-canary
+BASE=ebe1c41b6d2cc90c86e7ffd5df744126768cb24f   # git merge-base main increment-3-eval-canary (re-derive if either has moved)
 codex exec -s read-only --json -o /tmp/codex-i3-inspect.txt "$(cat <<PROMPT
 You are doing a cold PR-style review of a completed implementation. Read docs/increment-3-eval-canary-plan.md (the spec, Rev 5) and docs/increment-3-eval-canary-review-log.md (rounds 1-5). Then review the diff of branch increment-3-eval-canary against ${BASE}: git diff ${BASE}...HEAD. You are read-only; do NOT modify files.
 Report PR-style findings only — correctness, spec fidelity vs the plan, edge cases, missing tests, anything that would break the acceptance criteria (four safety-net files green with single mode ON on the Harness path; recovery-chaos + E2E scenario suites; real Claude + real Codex single-mode E2E with durable sessions/plan revisions/verification results; scorecard names the gated flows; rollback = new-starts-legacy + in-flight settle to terminal under HarnessRecovery, proven by a test). No verdict line needed — this is advisory review, not a gate.

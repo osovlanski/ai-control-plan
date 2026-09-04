@@ -182,6 +182,17 @@ adapters 8 / web 3, lint clean. **Next phase is the orchestrator/control-plane c
    (`origin:{kind:"fresh"}`), exact legacy parity. Flag OFF ⇒ the legacy
    adapter-driving path, and `apps/api/test/{characterization,orchestrator,failover,parallel}.test.ts`
    are byte-unedited and green.
+   **Superseded (increment 3):** the boolean is now the per-mode
+   `config.execution.harnessModes.single` (the deprecated `harnessSingleMode`
+   key + `AGENT_PLANE_HARNESS_SINGLE_MODE` env still work via a one-release
+   shim). The four files above now boot through a shared production-equivalent
+   factory and are proven to actually exercise the Harness path on a forced-ON
+   CI leg (`test:harness-on`) — their assertions are unchanged flag-OFF, and
+   six real single-mode parity gaps the ON leg surfaced were fixed (not
+   weakened): a dropped limit-event reason string, an async-timing assumption
+   in two tests, a legitimate new `verification.result` trailing event, and a
+   missing `harness` capability block on `FakeAdapter` that silently zeroed
+   token-usage telemetry. See `docs/increment-3-eval-canary-plan.md` §3.
 2. ~~**Destructive `runs.state` vocabulary rewrite.**~~ **RESOLVED (Phase 8e) as
    read-time derivation, no dual-write.** `runs.state` is authoritative for legacy
    rows (`execution_request_id IS NULL`), `session_state` for harness rows;
@@ -197,6 +208,13 @@ adapters 8 / web 3, lint clean. **Next phase is the orchestrator/control-plane c
    real adapter `provision()/verify()` are NOT built (the progress steps said keep
    verification inline in `session-runner.ts`). Staged eval program for this and
    deferrals #6/#7: `docs/agentic-os-eval-plan.md`.
+   **Partially closed (increment 3):** `eval/` + `.github/workflows/eval.yml`
+   land the credential-gated harness (nightly + `workflow_dispatch`, non-blocking).
+   The `happy-path` gating scenarios include a usage-accounting conformance
+   slice. The full per-capability sweep (every manifest claim moved to
+   "verified against provider X at commit Y") is still not built, and no run
+   with real credentials has happened yet — `docs/harness-rollout.md` carries
+   it as a flip precondition.
 5. **Cosmetic `Orchestrator` → `ControlPlane` rename** — deferred out of the
    Phase 8 cutover (kept the class named `Orchestrator` this pass to hold the diff
    down). A separate no-logic commit.
@@ -204,6 +222,13 @@ adapters 8 / web 3, lint clean. **Next phase is the orchestrator/control-plane c
    `resumableRef`) — out of scope for the cutover. The flag-ON path always
    `adapter.start`s a fresh session; only reachable via a manual same-assistant
    re-start, which `routeFor` avoids.
+   **Touched, not closed (increment 3):** the rollback-terminalisation policy
+   deliberately does not build resume consumption either — a stranded
+   resume-capable session whose mode is disabled is terminalised (`FAILED`),
+   not resumed, and its `providerSessionRef` is left for manual reconciliation
+   (`docs/increment-3-eval-canary-plan.md` R7/R9). Building real resume
+   consumption would let both this deferral and that acceptance decision be
+   revisited together.
 7. **Harness handoff-envelope claim protocol (post-cutover).** The Phase 8 cutover
    routes flag-ON handoff/failover as a fresh-prompt start with
    `origin:{kind:"fresh"}`. The landed-but-still-test-only `handoff_envelopes`
@@ -226,6 +251,10 @@ adapters 8 / web 3, lint clean. **Next phase is the orchestrator/control-plane c
    origin envelope; a crash between claim and first-event leaves a recoverable
    `start_ambiguous` row and never a double-start; the four safety-net test files
    stay green; a new test drives claim → consume → recover.
+   **Touched, not closed (increment 3):** the eval program's `cross-provider-reroute`
+   scenario (`eval/scenarios/cross-provider-reroute.ts`) exercises today's
+   fresh-prompt failover path with two `FakeAdapter`s — real evidence for the
+   *current* behaviour, not for the still-unwired claim protocol above.
 
 ---
 

@@ -154,3 +154,24 @@ The round-5 resume failed: `error: "You've hit your usage limit. … try again a
 ## Phase 2 resolution + Phase 3 decision (user, 2026-09-04)
 
 MAX_ROUNDS reached without a final `APPROVED` for an external reason (Codex quota, resets 2026-09-07). Every finding from rounds 1-4 was accepted; no standing disagreement. **User decision: proceed to Phase 3 with Claude as builder**, and keep the two owed Codex passes (round-5 verdict on Rev 5 + the read-only post-build cross-inspection) for when quota resets — both captured in `docs/increment-3-deferred-codex.md`. This is a logged deferral of `inspect=on`, not an opt-out.
+
+---
+
+## Phase 3 — Claude build (2026-09-04)
+
+Built directly against the Rev 5 plan (branch `increment-3-eval-canary`, 9 commits: `09174dd`..`5b7c074`). No fresh Codex round available (quota); every finding from review rounds 1-4 had already been folded into Rev 5 before the build started.
+
+**§1 (`09174dd`)** — `execution.harnessModes.single` replacing the global boolean, legacy shim, full precedence + validation test matrix. **§2 (`ba45a5b`, `b6a0651`, `c1b7d94`)** — the rollback-terminalisation policy in `HarnessRecovery` (fail-closed mode resolution via the session→request→task join, typed `orphaned` failure, exhaustive over every reachable non-terminal session state), the mixed-live-ownership guard (interactive throw + boot-time forced quarantine that never aborts the sweep), 17 new tests. **§3 (`10a0902`, `c118efd`, `7da70f4`)** — extracted `buildHarnessComposition()` as the single wiring source, migrated the four safety-net files onto it, then closed all 6 real single-mode parity gaps the forced-ON leg surfaced (two async-timing test assumptions, a dropped limit-event reason string, a legitimate new `verification.result` event, a missing `FakeAdapter` capability block that silently zeroed token telemetry) — **428/428 api tests green under both flag states**. **§5 (`00a4d4f`)** — `test:harness-on` and `test:recovery-chaos` wired into `ci.yml` as required steps. **§4/§6 (`5b7c074`)** — the `eval/` workspace (fixtures, fixture isolation, bearer auth, scorer, versioned scorecard schema, seven scenario definitions), `.github/workflows/eval.yml`, `docs/harness-rollout.md`.
+
+**Verified independently, not just by the builder** (there was no separate builder/reviewer split this round — Claude built and verified in the same session, which the plan's Phase 3 "Claude builds, fresh Codex cross-inspects" default could not run against for the same quota reason; the cross-inspection is deferred alongside round 5, see `docs/increment-3-deferred-codex.md`):
+- `pnpm typecheck && pnpm lint && pnpm test` — green (5+70+8+428 = 511 tests).
+- `AGENT_PLANE_HARNESS_SINGLE_MODE=1 pnpm test:harness-on` — 428/428 green.
+- `pnpm test:recovery-chaos` — 56/56 green.
+- `pnpm eval` (no provider credentials in this session) — the five FAKE scenarios ran end to end against the real `buildServer`/Harness composition over real bearer-authed HTTP (5/5 ok, real usage-accounting numbers, a real superseding verification-plan revision on `cross-provider-reroute`'s second session); the three REAL scenarios (`happy-path`×2, `replan-needed`) reported **skipped** with the exact reason, per the plan's completion-gate rule — no fabricated scorecard was written.
+
+**Increment status: INCOMPLETE per the plan's own hard gate (§4 step 22).** Everything else in Rev 5 is built, tested, and green. The gate — a real Claude and a real Codex single-mode run producing a committed `docs/eval-history/` scorecard — was not attempted with real credentials, because none were available in this session. `docs/agentic-os-eval-plan.md`'s status table and `docs/harness-implementation-progress.md`'s standing deferrals #1/#4/#6/#7 are updated to say exactly this. The roadmap (`docs/agentic-os-vnext-plan.md`) increment-3 checkbox is deliberately **not** ticked (plan step 31: only once the gate is satisfied).
+
+**Still owed before this can be called complete:**
+1. Run `AGENT_PLANE_EVAL=1 pnpm eval` with real `ANTHROPIC_API_KEY`/`CLAUDE_CODE_OAUTH_TOKEN` and `OPENAI_API_KEY`/`CODEX_API_KEY` (or let `eval.yml`'s nightly do it with the repo's secrets configured), producing a real committed scorecard via `pnpm eval:promote`.
+2. The deferred Codex passes in `docs/increment-3-deferred-codex.md` (round-5 verdict on Rev 5 + the post-build cross-inspection) once quota resets.
+3. Tick the roadmap increment-3 acceptance box once (1) lands.
