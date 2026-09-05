@@ -67,7 +67,7 @@ export function NewTask({ onStarted }: { onStarted: (taskId: string) => void }) 
   };
 
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr)", gap: "1.5rem" }}>
+    <div className="new-task-layout">
       <Card>
         <h2 style={{ marginTop: 0, fontSize: "1.05rem" }}>New task</h2>
         <Field label="Goal">

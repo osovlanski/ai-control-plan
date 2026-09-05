@@ -1,15 +1,15 @@
 import type { CSSProperties, ReactNode } from "react";
 
 export const tokens = {
-  bg: "#f6f7f9",
-  surface: "#ffffff",
-  border: "#e2e4ea",
-  text: "#12131a",
-  muted: "#646b7a",
-  accent: "#2f5bd7",
-  ok: "#0f7b4f",
-  warn: "#a2600a",
-  danger: "#b3261e",
+  bg: "#090e14",
+  surface: "#101720",
+  border: "#2c3946",
+  text: "#e8edf2",
+  muted: "#a1aeba",
+  accent: "#77d9e4",
+  ok: "#93d4b2",
+  warn: "#edc084",
+  danger: "#f49b9b",
   mono: "ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace",
 };
 
@@ -18,7 +18,8 @@ const STATE_COLORS: Record<string, string> = {
   ROUTING: tokens.accent,
   RUNNING: tokens.accent,
   WAITING_INPUT: tokens.warn,
-  LIMIT_PAUSED: tokens.warn,
+  WAITING_RESOURCE: "#9aafde",
+  LIMIT_PAUSED: "#e6a275",
   HANDING_OFF: tokens.warn,
   COMPLETED: tokens.ok,
   FAILED: tokens.danger,
@@ -74,7 +75,7 @@ export function Button({
   disabled?: boolean;
 }) {
   const palette = {
-    primary: { bg: tokens.accent, fg: "#fff", border: tokens.accent },
+    primary: { bg: tokens.accent, fg: "#09151b", border: tokens.accent },
     secondary: { bg: "transparent", fg: tokens.text, border: tokens.border },
     danger: { bg: "transparent", fg: tokens.danger, border: `${tokens.danger}55` },
   }[variant];

@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
-import { api, type Assistant, type CapabilityChange, type TaskSummary, type Workspace } from "./api.js";
+import { api, type Assistant, type CapabilityChange, type Workspace } from "./api.js";
 import { NewTask } from "./NewTask.jsx";
 import { TaskDetail } from "./TaskDetail.jsx";
-import { Button, Card, QuotaBar, StateBadge, tokens } from "./ui.jsx";
+import { Button, Card, QuotaBar, tokens } from "./ui.jsx";
+import { OrbitalBoard } from "./OrbitalBoard.js";
 import { onAuthExpired } from "./auth.js";
 
 type View = { screen: "board" } | { screen: "new" } | { screen: "task"; taskId: string } | { screen: "catalog" };
@@ -64,56 +65,15 @@ export function App() {
         </nav>
       </header>
 
-      <main style={{ maxWidth: 1080, margin: "0 auto", padding: "1.5rem" }}>
+      <main style={{ maxWidth: 1480, margin: "0 auto", padding: "1.5rem" }}>
         {error && <p style={{ color: tokens.danger }}>API unreachable: {error}</p>}
-        {view.screen === "board" && <Board onOpen={(taskId) => setView({ screen: "task", taskId })} />}
+        {view.screen === "board" && <OrbitalBoard onOpen={(taskId) => setView({ screen: "task", taskId })} onNew={() => setView({ screen: "new" })} />}
         {view.screen === "new" && <NewTask onStarted={(taskId) => setView({ screen: "task", taskId })} />}
         {view.screen === "task" && (
           <TaskDetail taskId={view.taskId} onBack={() => setView({ screen: "board" })} />
         )}
         {view.screen === "catalog" && <Catalog />}
       </main>
-    </div>
-  );
-}
-
-function Board({ onOpen }: { onOpen: (taskId: string) => void }) {
-  const [tasks, setTasks] = useState<TaskSummary[]>([]);
-
-  useEffect(() => {
-    const load = () => void api.tasks().then(setTasks);
-    load();
-    const timer = setInterval(load, 4000);
-    return () => clearInterval(timer);
-  }, []);
-
-  if (tasks.length === 0) {
-    return (
-      <Card>
-        <p style={{ margin: 0, color: tokens.muted }}>
-          No tasks yet. Start one from <strong>New task</strong> — the router will explain its choice before anything runs.
-        </p>
-      </Card>
-    );
-  }
-
-  return (
-    <div style={{ display: "grid", gap: "0.7rem" }}>
-      {tasks.map((t) => (
-        <Card key={t.id} style={{ cursor: "pointer" }}>
-          <div onClick={() => onOpen(t.id)}>
-            <div style={{ display: "flex", alignItems: "center", gap: "0.7rem" }}>
-              <code style={{ fontFamily: tokens.mono, fontSize: "0.85rem" }}>{t.id}</code>
-              <StateBadge state={t.state} />
-              {t.phase && <span style={{ fontSize: "0.8rem", color: tokens.muted }}>{t.phase}</span>}
-              <span style={{ marginLeft: "auto", fontSize: "0.78rem", color: tokens.muted }}>
-                {new Date(t.updatedAt).toLocaleString()}
-              </span>
-            </div>
-            <p style={{ margin: "0.5rem 0 0", fontSize: "0.92rem" }}>{t.goal}</p>
-          </div>
-        </Card>
-      ))}
     </div>
   );
 }
