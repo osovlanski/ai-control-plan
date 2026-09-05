@@ -203,6 +203,8 @@ class RunContext {
   private sawError = false;
   private endedOk: boolean | undefined;
   private rerouteReason: RerouteRequest["reason"] | undefined;
+  /** The provider's own limit-event summary (e.g. "quota exhausted"), captured for a "limit"-kind yield — increment 3 parity with the legacy path's `run.limit.reason = event.summary`. */
+  private limitSummary: string | undefined;
   private snapshot: GuardSnapshot;
   private lastEvidenceSeq = 0;
   private evidence: RerouteRequest["evidence"] = [];
@@ -497,6 +499,13 @@ class RunContext {
    */
   private async onTick(adapter: AgentAdapter, handle: RunHandle): Promise<void> {
     if (this.ticking || this.tickPlan) return;
+    // The heartbeat is detached from execute()'s own lifecycle (§9's fencing
+    // requires it to keep firing even while a provider stream is stalled), so
+    // a tick can still be in flight after whoever owns the store has closed
+    // it (production never does; the eval harness closes per-scenario). Once
+    // closed there is no session left to guard — treat it like one that no
+    // longer exists, the same tolerance `!session` already gets below.
+    if (!this.d.store.open) return;
     this.ticking = true;
     try {
       const session = this.d.store.get(this.sessionId);
@@ -874,6 +883,10 @@ class RunContext {
       case "run.ended":
         this.endedOk = (event.payload as { ok?: boolean } | undefined)?.ok !== false;
         break;
+      case "limit.hit":
+      case "limit.approaching":
+        this.limitSummary = event.summary;
+        break;
       default:
         break;
     }
@@ -1215,7 +1228,7 @@ class RunContext {
       sessionId: this.sessionId as HandoffRequest["sessionId"],
       taskId: this.request.taskId,
       ...(envelopeId ? { envelopeId } : {}),
-      reason: this.rerouteReason ?? "session yielded",
+      reason: this.rerouteReason ?? this.limitSummary ?? "session yielded",
     };
   }
 

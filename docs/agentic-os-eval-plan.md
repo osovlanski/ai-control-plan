@@ -8,14 +8,20 @@ with `config.execution.harnessSingleMode` **OFF** in production.
 | Area | State |
 | --- | --- |
 | 3 — routing offline eval | **done** — `router.test.ts` cases + `routing-eval.corpus.json` + `routing-eval.test.ts` (labelled corpus, accuracy gate) |
-| 4 — recovery crash-origin coverage | **done** — `recovery.test.ts` PREPARED/STARTING crash-origin cases |
-| 1 — real-adapter conformance | **proposal / future** — needs a CI-with-creds workflow (standing deferral #4) |
-| 2 — end-to-end scenario evals | **proposal / future** — needs CI-with-creds + fixture repos |
-| 5 — rollout canary | **proposal / future** — needs a staging workspace and a real flip decision |
-| 6 — scorecard artifact | **proposal / future** — wraps areas 1+2, blocked with them |
+| 4 — recovery crash-origin coverage | **done** — `recovery.test.ts` PREPARED/STARTING crash-origin cases + `mode-rollback.test.ts`'s exhaustive non-terminal-state rollback matrix (increment 3), enforced by the `test:recovery-chaos` CI step |
+| 1 — real-adapter conformance | **future — flip precondition** — `eval.yml` (increment 3) runs the credential-gated nightly, but the conformance slice landed so far is limited to the two `happy-path` gating runs' usage-accounting check; the full per-capability "asserted → verified against provider X at commit Y" sweep is not built |
+| 2 — end-to-end scenario evals | **single-mode E2E harness + seven scenario definitions landed (increment 3)** — `eval/scenarios/`: `happy-path` (×2 providers), `replan-needed`, `needs-approval` (REAL, `needs-approval` currently runs the documented FakeAdapter fallback — R8), `hits-token-cap`/`adapter-error-mid-run`/`cross-provider-reroute`/`boot-crash-recovery` (FAKE, real Harness path). The five FAKE scenarios run and pass against the real `buildServer` composition; the REAL ones require `AGENT_PLANE_EVAL=1` + provider credentials neither this repo's CI nor the session that built this had. **≥ 6/7 green over two consecutive nightlies remains a flip precondition**, not yet met |
+| 5 — rollout canary | **runbook landed (increment 3)** — `docs/harness-rollout.md`: staging flip → one-week parity watch → production flip → 48h watch → rollback (drain-then-restart, with the rollback-terminalisation policy as the crash-during-rollback safety net). The flip itself has not been exercised |
+| 6 — scorecard artifact | **scorecard schema + `pnpm eval` landed (increment 3)** — versioned JSON (commit SHA, config/fixture digests, durable row ids) + rendered Markdown, `pnpm eval:promote` commits both to `docs/eval-history/`. No real scorecard has been promoted yet — area 1/2's real runs haven't happened |
 
-The "done" areas are the cheap, per-PR, fakes-only slices. The rest is scoped
-below but not built — pick each up as its own effort when its blocker clears.
+The original "done" areas (3, 4) are the cheap, per-PR, fakes-only slices.
+Increment 3 (`docs/increment-3-eval-canary-plan.md`) landed the single-mode
+harness for areas 2/5/6 and a first slice of area 1, but **the roadmap
+increment-3 acceptance gate — a real Claude and a real Codex single-mode run
+producing a committed scorecard — has not been met**: no session that built
+this had provider credentials to run `AGENT_PLANE_EVAL=1`. `eval.yml` is
+wired and will attempt it nightly; `pnpm eval` can be run locally with
+credentials at any time.
 
 ## Why this exists
 

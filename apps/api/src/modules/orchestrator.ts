@@ -116,13 +116,16 @@ export class Orchestrator {
      * Execution-Harness boot reconcile (execution-harness §9). When present it
      * decides every live Harness session's fate (resume-offer / orphan+checkpoint
      * / complete-from-verifying) BEFORE the legacy blanket fail-all below, which
-     * is then scoped to legacy `runs` rows only.
+     * is then scoped to legacy `runs` rows only. `quarantineSession` forcibly
+     * terminalises a session regardless of mode (increment 3, mixed ownership).
      */
-    private harnessRecovery?: { reconcileOnBoot(): Promise<unknown> },
+    private harnessRecovery?: { reconcileOnBoot(): Promise<unknown>; quarantineSession(sessionId: string): Promise<unknown> },
     /**
-     * Flag-ON single-mode seam to `SessionRunner` (PLAN.md 8c). Injected by
-     * `buildServer` only when `config.execution.harnessSingleMode` is on; the
-     * legacy adapter-driving path is used whenever it is absent.
+     * Single-mode seam to `SessionRunner` (PLAN.md 8c). Injected by `buildServer`
+     * for every internal composition root (increment 3, D6) — its presence does
+     * NOT mean routing is on. `harnessRouting()` gates new starts on
+     * `config.execution.harnessModes.single`; `harnessOwns()` keeps an
+     * already-started session on the Harness branch regardless of the flag.
      */
     private harnessBridge?: HarnessBridge,
     /** Authority-backed project snapshot + pure planner adapter, injected by the composition root. */
@@ -131,9 +134,9 @@ export class Orchestrator {
     private repositoryIdentities?: Pick<RepositoryIdentityRegistry, "resolve">,
   ) {}
 
-  /** Flag-ON single-mode routing applies to this start (non-parallel, non-compare/race). */
+  /** `harnessModes.single` routing applies to this start (non-parallel, non-compare/race). */
   private harnessRouting(taskId: string, options: StartOptions): boolean {
-    if (!this.config.execution?.harnessSingleMode || !this.harnessBridge) return false;
+    if (!this.config.execution?.harnessModes?.single || !this.harnessBridge) return false;
     if (options.parallel) return false;
     const mode = this.tasks.get(taskId)?.mode;
     return mode !== "compare" && mode !== "race";
@@ -152,12 +155,64 @@ export class Orchestrator {
     return !!row && row.execution_request_id !== null;
   }
 
+  private hasLiveLegacyRun(taskId: string): boolean {
+    return !!this.db
+      .prepare("SELECT 1 FROM runs WHERE task_id = ? AND execution_request_id IS NULL AND ended_at IS NULL LIMIT 1")
+      .get(taskId);
+  }
+
+  private hasLiveHarnessSession(taskId: string): boolean {
+    return !!this.db
+      .prepare(
+        `SELECT 1 FROM runs WHERE task_id = ? AND execution_request_id IS NOT NULL
+           AND session_state NOT IN ('COMPLETED','FAILED','CANCELLED','TIMED_OUT','YIELDED') LIMIT 1`,
+      )
+      .get(taskId);
+  }
+
+  /**
+   * A task with both a live legacy run and a live Harness session is an
+   * ambiguity `harnessOwns()`'s newest-row heuristic cannot resolve safely
+   * (increment 3, §2 step 16). Interactive control ops refuse it; the boot
+   * sweep quarantines it instead (never aborts — see `reconcileOnBoot`).
+   */
+  private assertNoMixedOwnership(taskId: string): void {
+    if (this.hasLiveLegacyRun(taskId) && this.hasLiveHarnessSession(taskId)) {
+      throw new Error(`Task ${taskId} has mixed live ownership (both a legacy run and a Harness session)`);
+    }
+  }
+
   /** Crash recovery (arch §5): tasks left in-flight by a dead process are failed with a record. */
   async reconcileOnBoot(): Promise<number> {
     // Step 1 — per-session Harness recovery (§9): decides every live Harness
     // session (resume-offer / orphan+checkpoint / complete-from-verifying),
     // writing a terminal execution_results row for the settled cases.
     await this.harnessRecovery?.reconcileOnBoot();
+
+    // Step 1.5 — mixed-live-ownership quarantine (increment 3, §2 step 16),
+    // BEFORE the Harness sweep. A task with both a live legacy run and a live
+    // Harness session is an ambiguity `harnessOwns()`'s newest-row heuristic
+    // cannot resolve safely. Quarantine it — terminalise the Harness session,
+    // fail the task — and CONTINUE reconciling every other task: a boot-wide
+    // throw here would strand unrelated sessions, the exact failure the
+    // rollback guarantee must not have.
+    if (this.harnessBridge && this.harnessRecovery) {
+      for (const row of this.tasks.runningTasks()) {
+        if (!this.hasLiveLegacyRun(row.id) || !this.hasLiveHarnessSession(row.id)) continue;
+        const sid = this.harnessBridge.latestSessionId(row.id);
+        try {
+          if (sid) await this.harnessRecovery.quarantineSession(sid);
+          this.tasks.transition(row.id, "FAILED");
+          this.db
+            .prepare(
+              "UPDATE runs SET state = 'ENDED_ERROR', ended_at = ? WHERE task_id = ? AND ended_at IS NULL AND execution_request_id IS NULL",
+            )
+            .run(new Date().toISOString(), row.id);
+        } catch (err) {
+          this.notice(row.id, "warn", `mixed-ownership quarantine failed to settle cleanly: ${message(err)}`);
+        }
+      }
+    }
 
     // Step 2 — Harness in-flight sweep, BEFORE the legacy blanket-fail
     // (PLAN.md 8c.3, Codex R4/R5). Over every in-flight task state
@@ -734,6 +789,7 @@ export class Orchestrator {
   async handoff(taskId: string, to?: AssistantId): Promise<{ runId: string; assistantId: string }> {
     const row = this.tasks.get(taskId);
     if (!row) throw new Error(`Unknown task ${taskId}`);
+    this.assertNoMixedOwnership(taskId);
     if (isTerminal(row.state)) {
       throw new Error(
         `Task ${taskId} is ${row.state}. A finished task cannot be handed off — create a follow-up task instead.`,
@@ -894,6 +950,7 @@ export class Orchestrator {
   }
 
   async createCheckpoint(taskId: string, reason: CheckpointReason = "manual") {
+    this.assertNoMixedOwnership(taskId);
     const sessionId = this.harnessOwns(taskId)
       ? (this.harnessBridge!.latestSessionId(taskId) ?? null)
       : (this.soleRun(taskId)?.runId ?? null);
@@ -905,6 +962,7 @@ export class Orchestrator {
    * parallel comparison can have several assistants waiting at once.
    */
   async respondApproval(taskId: string, requestId: string, approved: boolean): Promise<void> {
+    this.assertNoMixedOwnership(taskId);
     if (this.harnessOwns(taskId)) {
       const sid = this.harnessBridge!.liveSessionId(taskId);
       if (!sid) throw new Error(`No live harness session for task ${taskId}`);
@@ -929,6 +987,7 @@ export class Orchestrator {
   }
 
   async cancelTask(taskId: string): Promise<void> {
+    this.assertNoMixedOwnership(taskId);
     if (this.harnessOwns(taskId)) {
       // Durable cancel intent FIRST, then the task transition. The runner
       // observes the intent, settles the session terminal CANCELLED (+ a

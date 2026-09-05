@@ -1,7 +1,7 @@
 import { chmodSync, existsSync, lstatSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { loadConfig, workspaceName } from "../src/config.js";
 import { credentialPath, readCredential, rotateCredential } from "../src/auth/credential-file.js";
 
@@ -92,57 +92,91 @@ describe("workspace config", () => {
     expect(() => loadConfig(env())).toThrow(/api\.host must be a loopback address/);
   });
 
-  it("defaults execution.harnessSingleMode OFF and documents it", () => {
+  const writeCfg = (yaml: string) => {
+    const dir = join(home, "personal");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "config.yaml"), yaml);
+  };
+
+  it("defaults execution.harnessModes.single OFF and documents it", () => {
     const config = loadConfig(env());
-    expect(config.execution?.harnessSingleMode).toBe(false);
+    expect(config.execution.harnessModes.single).toBe(false);
+    expect(config.warnings).toEqual([]);
     const written = readFileSync(join(home, "personal", "config.yaml"), "utf8");
-    expect(written).toContain("execution.harnessSingleMode");
+    expect(written).toContain("execution.harnessModes");
   });
 
-  it("defaults execution.harnessSingleMode OFF in a non-personal workspace too", () => {
-    expect(loadConfig(env({ AGENT_PLANE_WORKSPACE: "work" })).execution?.harnessSingleMode).toBe(false);
+  it("defaults OFF in a non-personal workspace too", () => {
+    expect(loadConfig(env({ AGENT_PLANE_WORKSPACE: "work" })).execution.harnessModes.single).toBe(false);
   });
 
-  it("parses execution.harnessSingleMode: true from the file", () => {
-    const dir = join(home, "personal");
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, "config.yaml"), "execution:\n  harnessSingleMode: true\n");
-    expect(loadConfig(env()).execution?.harnessSingleMode).toBe(true);
+  describe("per-mode flag resolution matrix", () => {
+    const cases: Array<{ name: string; yaml?: string; env?: Record<string, string>; single: boolean }> = [
+      { name: "harnessModes.single: true", yaml: "execution:\n  harnessModes:\n    single: true\n", single: true },
+      { name: "harnessModes.single: false", yaml: "execution:\n  harnessModes:\n    single: false\n", single: false },
+      { name: "harnessModes: {} (partial)", yaml: "execution:\n  harnessModes: {}\n", single: false },
+      { name: "legacy harnessSingleMode: true", yaml: "execution:\n  harnessSingleMode: true\n", single: true },
+      { name: "legacy harnessSingleMode: false", yaml: "execution:\n  harnessSingleMode: false\n", single: false },
+      { name: "env 1 over file false", yaml: "execution:\n  harnessModes:\n    single: false\n", env: { AGENT_PLANE_HARNESS_SINGLE_MODE: "1" }, single: true },
+      { name: "env TRUE (uppercase) over legacy false", yaml: "execution:\n  harnessSingleMode: false\n", env: { AGENT_PLANE_HARNESS_SINGLE_MODE: "TRUE" }, single: true },
+      { name: "env 0 over file true", yaml: "execution:\n  harnessModes:\n    single: true\n", env: { AGENT_PLANE_HARNESS_SINGLE_MODE: "0" }, single: false },
+      { name: "env false over legacy true", yaml: "execution:\n  harnessSingleMode: true\n", env: { AGENT_PLANE_HARNESS_SINGLE_MODE: "false" }, single: false },
+      { name: "env alone, no file", env: { AGENT_PLANE_HARNESS_SINGLE_MODE: "true" }, single: true },
+      { name: "empty env string is a no-op", yaml: "execution:\n  harnessModes:\n    single: true\n", env: { AGENT_PLANE_HARNESS_SINGLE_MODE: "" }, single: true },
+    ];
+    for (const c of cases) {
+      it(c.name, () => {
+        if (c.yaml) writeCfg(c.yaml);
+        expect(loadConfig(env(c.env)).execution.harnessModes.single).toBe(c.single);
+      });
+    }
   });
 
-  it("env AGENT_PLANE_HARNESS_SINGLE_MODE=1 overrides file false", () => {
-    const dir = join(home, "personal");
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, "config.yaml"), "execution:\n  harnessSingleMode: false\n");
-    expect(loadConfig(env({ AGENT_PLANE_HARNESS_SINGLE_MODE: "1" })).execution?.harnessSingleMode).toBe(true);
+  it("a legacy harnessSingleMode file emits exactly one deprecation warning and never touches stdout", () => {
+    writeCfg("execution:\n  harnessSingleMode: true\n");
+    const spy = vi.spyOn(process.stdout, "write").mockReturnValue(true);
+    const errSpy = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    try {
+      const { warnings } = loadConfig(env());
+      expect(warnings.filter((w) => /harnessSingleMode is deprecated/.test(w))).toHaveLength(1);
+    } finally {
+      spy.mockRestore();
+      errSpy.mockRestore();
+    }
+    expect(spy).not.toHaveBeenCalled();
+    expect(errSpy).not.toHaveBeenCalled();
   });
 
-  it("env AGENT_PLANE_HARNESS_SINGLE_MODE=0 overrides file true", () => {
-    const dir = join(home, "personal");
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, "config.yaml"), "execution:\n  harnessSingleMode: true\n");
-    expect(loadConfig(env({ AGENT_PLANE_HARNESS_SINGLE_MODE: "0" })).execution?.harnessSingleMode).toBe(false);
+  it("rejects both execution.harnessModes and execution.harnessSingleMode set together", () => {
+    writeCfg("execution:\n  harnessModes:\n    single: true\n  harnessSingleMode: true\n");
+    expect(() => loadConfig(env())).toThrow(/not both/);
   });
 
-  it("env AGENT_PLANE_HARNESS_SINGLE_MODE=true/false (word spellings) also override", () => {
-    expect(loadConfig(env({ AGENT_PLANE_HARNESS_SINGLE_MODE: "true" })).execution?.harnessSingleMode).toBe(true);
-    const dir = join(home, "personal");
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, "config.yaml"), "execution:\n  harnessSingleMode: true\n");
-    expect(loadConfig(env({ AGENT_PLANE_HARNESS_SINGLE_MODE: "false" })).execution?.harnessSingleMode).toBe(false);
+  it("rejects an unknown execution.harnessModes key naming it", () => {
+    for (const key of ["compare", "race", "parallel", "singel"]) {
+      writeCfg(`execution:\n  harnessModes:\n    ${key}: true\n`);
+      expect(() => loadConfig(env())).toThrow(new RegExp(`harnessModes\\.${key}`));
+    }
   });
 
-  it("rejects a non-boolean execution.harnessSingleMode", () => {
-    const dir = join(home, "personal");
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, "config.yaml"), "execution:\n  harnessSingleMode: yep\n");
-    expect(() => loadConfig(env())).toThrow(/execution\.harnessSingleMode/);
+  it("rejects a non-boolean execution.harnessModes.single", () => {
+    writeCfg("execution:\n  harnessModes:\n    single: yep\n");
+    expect(() => loadConfig(env())).toThrow(/harnessModes\.single must be a boolean/);
+  });
+
+  it("rejects a non-boolean legacy execution.harnessSingleMode", () => {
+    writeCfg("execution:\n  harnessSingleMode: yep\n");
+    expect(() => loadConfig(env())).toThrow(/harnessSingleMode must be a boolean/);
+  });
+
+  it("rejects a malformed AGENT_PLANE_HARNESS_SINGLE_MODE value", () => {
+    expect(() => loadConfig(env({ AGENT_PLANE_HARNESS_SINGLE_MODE: "maybe" }))).toThrow(
+      /AGENT_PLANE_HARNESS_SINGLE_MODE must be one of/,
+    );
   });
 
   it("rejects a non-mapping execution section", () => {
-    const dir = join(home, "personal");
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, "config.yaml"), "execution: nope\n");
+    writeCfg("execution: nope\n");
     expect(() => loadConfig(env())).toThrow(/execution must be a mapping/);
   });
 });

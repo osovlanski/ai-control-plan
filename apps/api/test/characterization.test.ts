@@ -16,11 +16,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { AssistantId } from "@agent-plane/core";
-import { loadConfig, type ResolvedConfig } from "../src/config.js";
+import type { ResolvedConfig } from "../src/config.js";
+import { bootHarnessOrchestrator, loadHarnessTestConfig } from "./helpers/boot-orchestrator.js";
 import { openDb, type Db } from "../src/db/index.js";
 import { CheckpointService } from "../src/modules/checkpoint.js";
 import { CooldownStore } from "../src/modules/cooldown.js";
-import { Orchestrator } from "../src/modules/orchestrator.js";
+import type { Orchestrator } from "../src/modules/orchestrator.js";
 import { Registry } from "../src/modules/registry.js";
 import { TaskEventBus } from "../src/modules/sse.js";
 import { TaskStore } from "../src/modules/tasks.js";
@@ -45,7 +46,7 @@ async function boot(extraConfig = ""): Promise<void> {
     join(home, "personal", "config.yaml"),
     `assistants:\n  fake-a:\n    provider: fake\n  fake-b:\n    provider: fake\n${extraConfig}`,
   );
-  config = loadConfig({ AGENT_PLANE_HOME: home });
+  config = loadHarnessTestConfig({ AGENT_PLANE_HOME: home });
   db = openDb(config.dbPath);
   registry = new Registry(db, config);
   registry.init();
@@ -54,7 +55,7 @@ async function boot(extraConfig = ""): Promise<void> {
   bus = new TaskEventBus();
   checkpoints = new CheckpointService(db, tasks);
   cooldowns = new CooldownStore(db);
-  orchestrator = new Orchestrator(db, config, registry, tasks, bus, checkpoints, cooldowns);
+  orchestrator = bootHarnessOrchestrator({ db, config, registry, tasks, bus, checkpoints, cooldowns });
 }
 
 beforeEach(() => boot());
@@ -70,6 +71,16 @@ const runsOf = (taskId: string) =>
     .all(taskId) as Array<{ id: string; assistant_id: string; state: string; outcome: string | null }>;
 
 describe("Orchestrator characterization", () => {
+  // These are the frozen legacy behaviours, written against the old ambient
+  // default (prompt-on-escalation). auto-approve never raises approval.requested,
+  // so the [FAKE:APPROVAL] cases below need the mode restored explicitly.
+  beforeEach(async () => {
+    await orchestrator.shutdown();
+    db.close();
+    rmSync(home, { recursive: true, force: true });
+    await boot("policy:\n  approvalMode: prompt-on-escalation\n");
+  });
+
   it("[intentional] start → COMPLETED with a single ENDED_OK run and monotonic events", async () => {
     const env = tasks.create({ goal: "do it" });
     tasks.transition(env.taskId, "ROUTING");
@@ -147,6 +158,11 @@ describe("Orchestrator characterization", () => {
 
     await orchestrator.cancelTask(env.taskId);
     expect(tasks.get(env.taskId)!.state).toBe("CANCELLED");
+    // Under single-mode Harness routing the task transitions synchronously but
+    // the runner attempts the cancel checkpoint asynchronously as it settles
+    // the session — wait for that before asserting on it (same idiom as
+    // apps/api/test/harness/cutover.test.ts's cancel-mid-approval test).
+    await orchestrator.waitForSettled(env.taskId);
     const ckpt = db
       .prepare("SELECT reason FROM checkpoints WHERE task_id = ? ORDER BY at DESC LIMIT 1")
       .get(env.taskId) as { reason: string } | undefined;

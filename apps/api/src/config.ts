@@ -53,17 +53,32 @@ export interface WorkspaceConfig {
   /** Execution-Harness cutover switches (execution-harness.md §5/§10). */
   execution?: {
     /**
-     * Route single-mode task execution through `SessionRunner` instead of the
-     * Orchestrator driving adapters directly. Default off this release.
+     * Per-mode Execution-Harness routing. `single` is the only key with Harness
+     * parity today; `compare` / `race` / `parallel` land in vNext increment 6
+     * together with a durable routing key. Every mode defaults OFF.
+     */
+    harnessModes?: { single?: boolean };
+    /**
+     * @deprecated Use `harnessModes.single`. Accepted for one release; mapped
+     * onto `harnessModes.single` at load with a startup warning. Setting both
+     * this and `harnessModes` is a config error.
      */
     harnessSingleMode?: boolean;
   };
 }
 
-export interface ResolvedConfig extends WorkspaceConfig {
+/** The resolved execution block — always canonical `harnessModes`, never the deprecated key. */
+export interface ResolvedExecutionConfig {
+  harnessModes: { single: boolean };
+}
+
+export interface ResolvedConfig extends Omit<WorkspaceConfig, "execution"> {
+  execution: ResolvedExecutionConfig;
   /** Directory holding config.yaml and the workspace DB. */
   dir: string;
   dbPath: string;
+  /** Non-fatal load-time diagnostics (e.g. deprecated keys). Never written to stdout by the loader. */
+  warnings: string[];
 }
 
 const PERSONAL_DEFAULTS: Omit<WorkspaceConfig, "workspace"> = {
@@ -73,14 +88,22 @@ const PERSONAL_DEFAULTS: Omit<WorkspaceConfig, "workspace"> = {
     "personal-codex": { provider: "openai" },
   },
   repoAllowlist: [],
-  policy: { approvalMode: "prompt-on-escalation" },
+  // `approvalMode` is workspace-global, not per-assistant (arch §12.7) — every
+  // configured assistant must be able to honor it. CodexAdapter has no
+  // approval-relay path by design (it self-sandboxes, approvalPolicy "never"),
+  // so "prompt-on-escalation" here made any personal-codex invocation fail
+  // instantly with policy_unenforceable. auto-approve is the mode every
+  // shipped adapter can honor; a workspace that wants escalation prompts for
+  // Claude specifically needs a per-assistant override this schema doesn't
+  // have yet, not this shared default.
+  policy: { approvalMode: "auto-approve" },
   failover: {
     auto: true,
     softThresholdPct: 85,
     triggers: ["quota", "rate_limit", "provider_unavailable"],
   },
   sync: { dailyHour: 7 },
-  execution: { harnessSingleMode: false },
+  execution: { harnessModes: { single: false } },
 };
 
 /**
@@ -138,6 +161,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ResolvedConfig
     throw new Error(`${configPath} execution must be a mapping`);
   }
 
+  const warnings: string[] = [];
+  const execution = resolveExecution(file.execution, env, configPath, warnings);
+
   const config: WorkspaceConfig = {
     workspace: file.workspace ?? workspace,
     api: { ...defaults.api, ...file.api, auth: { ...defaults.api.auth, ...file.api?.auth } },
@@ -146,15 +172,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ResolvedConfig
     policy: { ...defaults.policy, ...file.policy },
     failover: { ...defaults.failover, ...file.failover },
     sync: { ...defaults.sync, ...file.sync },
-    execution: { ...defaults.execution, ...file.execution },
+    execution,
   };
-
-  const envSingleMode = env.AGENT_PLANE_HARNESS_SINGLE_MODE;
-  if (envSingleMode === "1" || envSingleMode === "true") {
-    config.execution = { ...config.execution, harnessSingleMode: true };
-  } else if (envSingleMode === "0" || envSingleMode === "false") {
-    config.execution = { ...config.execution, harnessSingleMode: false };
-  }
 
   validate(config, configPath);
 
@@ -166,7 +185,77 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ResolvedConfig
   }
   ensureCredential(dir);
 
-  return { ...config, dir, dbPath: join(dir, "agent-plane.db") };
+  return { ...config, execution, dir, dbPath: join(dir, "agent-plane.db"), warnings };
+}
+
+/**
+ * Resolve `execution` to the canonical `{ harnessModes: { single } }` shape.
+ * Precedence (low → high): default `false` < exactly one file representation
+ * (`harnessModes` XOR the deprecated `harnessSingleMode`) < the
+ * `AGENT_PLANE_HARNESS_SINGLE_MODE` env var. Setting both file keys, an unknown
+ * `harnessModes` key, or a non-`1|true|0|false` env value is a hard error.
+ */
+function resolveExecution(
+  fileExecution: WorkspaceConfig["execution"] | undefined,
+  env: NodeJS.ProcessEnv,
+  configPath: string,
+  warnings: string[],
+): ResolvedExecutionConfig {
+  let single = false;
+
+  const hasModes = fileExecution?.harnessModes !== undefined;
+  const hasLegacy = fileExecution?.harnessSingleMode !== undefined;
+  if (hasModes && hasLegacy) {
+    throw new Error(
+      `${configPath}: set either execution.harnessModes or the deprecated execution.harnessSingleMode, not both`,
+    );
+  }
+
+  if (hasModes) {
+    const modes = fileExecution!.harnessModes as Record<string, unknown>;
+    if (typeof modes !== "object" || modes === null || Array.isArray(modes)) {
+      throw new Error(`${configPath}: execution.harnessModes must be a mapping`);
+    }
+    for (const key of Object.keys(modes)) {
+      if (key !== "single") {
+        throw new Error(
+          `${configPath}: execution.harnessModes.${key} — "${key}" mode has no Execution Harness parity yet (vNext increment 6); only "single" is accepted`,
+        );
+      }
+    }
+    if (modes.single !== undefined) {
+      if (typeof modes.single !== "boolean") {
+        throw new Error(
+          `${configPath}: execution.harnessModes.single must be a boolean, got ${JSON.stringify(modes.single)}`,
+        );
+      }
+      single = modes.single;
+    }
+  } else if (hasLegacy) {
+    if (typeof fileExecution!.harnessSingleMode !== "boolean") {
+      throw new Error(
+        `${configPath}: execution.harnessSingleMode must be a boolean, got ${JSON.stringify(fileExecution!.harnessSingleMode)}`,
+      );
+    }
+    single = fileExecution!.harnessSingleMode;
+    warnings.push(
+      "config: execution.harnessSingleMode is deprecated — use execution.harnessModes.single. The old key is accepted for one release.",
+    );
+  }
+
+  const raw = env.AGENT_PLANE_HARNESS_SINGLE_MODE;
+  if (raw !== undefined && raw !== "") {
+    const v = raw.toLowerCase();
+    if (v === "1" || v === "true") single = true;
+    else if (v === "0" || v === "false") single = false;
+    else {
+      throw new Error(
+        `AGENT_PLANE_HARNESS_SINGLE_MODE must be one of 1|true|0|false, got ${JSON.stringify(raw)}`,
+      );
+    }
+  }
+
+  return { harnessModes: { single } };
 }
 
 function validate(config: WorkspaceConfig, path: string): void {
@@ -199,9 +288,9 @@ function validate(config: WorkspaceConfig, path: string): void {
       problems.push(`assistants.${id} must have a provider`);
     }
   }
-  if (typeof config.execution?.harnessSingleMode !== "boolean") {
+  if (typeof config.execution?.harnessModes?.single !== "boolean") {
     problems.push(
-      `execution.harnessSingleMode must be a boolean, got ${JSON.stringify(config.execution?.harnessSingleMode)}`,
+      `execution.harnessModes.single must be a boolean, got ${JSON.stringify(config.execution?.harnessModes?.single)}`,
     );
   }
   if (problems.length > 0) {
@@ -213,7 +302,11 @@ function renderDefaultConfig(workspace: string): string {
   const doc = { workspace, ...defaultsFor(workspace) };
   const yaml = stringify(doc).replace(
     /^execution:/m,
-    "# execution.harnessSingleMode: route single-mode runs through the Execution Harness. Default off.\nexecution:",
+    [
+      "# execution.harnessModes: per-mode Execution Harness routing. Only `single` has parity today; default off.",
+      "# The deprecated `execution.harnessSingleMode: <bool>` is still accepted for one release and maps to harnessModes.single.",
+      "execution:",
+    ].join("\n"),
   );
   return [
     `# Agent Control Plane — workspace "${workspace}"`,

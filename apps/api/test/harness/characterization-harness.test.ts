@@ -3,7 +3,7 @@
  *
  * Same task-level contracts (start→COMPLETED, denied approval→FAILED with no
  * failover, hard limit→failover→COMPLETED) driven through the real
- * `SessionRunner` with `execution.harnessSingleMode` ON. Run-row assertions read
+ * `SessionRunner` with `execution.harnessModes.single` ON. Run-row assertions read
  * `session_state`. The four byte-frozen safety-net files are untouched.
  */
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -29,7 +29,7 @@ async function boot(extra = ""): Promise<void> {
   mkdirSync(join(home, "personal"), { recursive: true });
   writeFileSync(
     join(home, "personal", "config.yaml"),
-    `assistants:\n  fake-a:\n    provider: fake\n  fake-b:\n    provider: fake\nexecution:\n  harnessSingleMode: true\n${extra}`,
+    `assistants:\n  fake-a:\n    provider: fake\n  fake-b:\n    provider: fake\nexecution:\n  harnessModes:\n    single: true\n${extra}`,
   );
   config = loadConfig({ AGENT_PLANE_HOME: home });
   db = openDb(config.dbPath);
@@ -79,6 +79,13 @@ describe("characterization (flag ON)", () => {
   });
 
   it("denied approval → FAILED, no failover (single session on A)", async () => {
+    // auto-approve (the workspace default) never raises approval.requested —
+    // this test is specifically about the relay path, so it needs it.
+    await built.orchestrator.shutdown();
+    await built.app.close();
+    db.close();
+    rmSync(home, { recursive: true, force: true });
+    await boot("policy:\n  approvalMode: prompt-on-escalation\n");
     const { taskId, frames } = await run("sign off [FAKE:APPROVAL]");
     await built.orchestrator.respondApproval(taskId, await awaitApprovalId(frames), false);
     expect(await built.orchestrator.waitForSettled(taskId)).toBe("FAILED");

@@ -54,6 +54,14 @@ export interface RecoveryDeps {
    * answer.
    */
   approvalAckLookup?: (sessionId: string, providerRequestId: string) => Promise<boolean> | boolean;
+  /**
+   * Rollback-terminalisation (increment 3, D6). When this returns true for a
+   * session, recovery must drive it to a terminal state on this boot — a
+   * disabled Harness mode must not leave a session `resume_offered` or parked at
+   * `AWAITING_APPROVAL`. Backed by the session -> execution request -> task
+   * `mode` join, and **fail-closed**: a missing/corrupt binding returns true.
+   */
+  shouldTerminalizeOnRecovery?: (sessionId: string) => boolean;
 }
 
 export type RecoveryAction =
@@ -220,6 +228,27 @@ export class HarnessRecovery {
         return { sessionId, action: timedOut ? "timed_out" : "completed_from_verifying" };
       }
 
+      // 3b. Rollback-terminalisation (increment 3, D6): the task's Harness mode
+      //     is disabled, so this stranded session must reach a terminal state on
+      //     this boot rather than be offered for resume or parked awaiting an
+      //     approval nobody will relay. No adapter status-probe contract exists,
+      //     so a provider run that finished after the last persisted event is
+      //     not distinguishable here — the providerSessionRef is retained on the
+      //     recovery event for an operator to reconcile manually (accepted, R9).
+      if (this.deps.shouldTerminalizeOnRecovery?.(sessionId)) {
+        const checkpoint = await this.attemptCheckpoint(sessionId, s.executionRequestId);
+        this.finalize(sessionId, s, lease, "FAILED", {
+          failure: {
+            kind: "orphaned",
+            retryable: true,
+            message: "Harness single mode disabled during rollback recovery",
+          },
+          checkpoint,
+        });
+        this.deps.store.appendRecoveryEvent(sessionId, "mode_disabled_terminalized", s.providerSessionRef ?? undefined);
+        return { sessionId, action: "orphaned", detail: "harness mode disabled" };
+      }
+
       // 4. Probe-resumable → offer resume; the Control Plane issues origin:resume.
       //    The offer is emitted ONCE — until the (deferred) orchestrator cutover
       //    consumes it, later sweeps of the still-live session must not re-emit.
@@ -239,6 +268,45 @@ export class HarnessRecovery {
       this.finalize(sessionId, s, lease, "FAILED", { failure, checkpoint });
       this.deps.store.appendRecoveryEvent(sessionId, "orphaned", checkpoint.committed ? "checkpoint committed" : "checkpoint not committed");
       return { sessionId, action: "orphaned" };
+    }
+  }
+
+  /**
+   * Forced quarantine (increment 3, §2 step 16): a task with both a live legacy
+   * run and a live Harness session is an ambiguity `harnessOwns()`'s newest-row
+   * heuristic cannot resolve safely. Terminalise the Harness session through the
+   * same fenced terminal CAS `decide()` uses, **independent of whether the mode
+   * is enabled** — mixed ownership is refused regardless. Never throws past a
+   * lost fencing lease (a concurrent settle/sweep already resolved it); the
+   * caller's boot sweep must continue to the next task either way.
+   */
+  async quarantineSession(sessionId: string): Promise<SessionRecoveryOutcome> {
+    const s0 = this.deps.store.get(sessionId);
+    if (!s0) return { sessionId, action: "skipped", detail: "no such session" };
+    if (isTerminal(s0.state)) return { sessionId, action: "already_terminal" };
+    const lease = this.deps.store.acquireLease(sessionId);
+    if (!lease) return { sessionId, action: "skipped", detail: "leased by a live runner" };
+    try {
+      const s = this.deps.store.get(sessionId)!;
+      if (isTerminal(s.state)) return { sessionId, action: "already_terminal" };
+      const checkpoint = await this.attemptCheckpoint(sessionId, s.executionRequestId);
+      this.finalize(sessionId, s, lease, "FAILED", {
+        failure: {
+          kind: "orphaned",
+          retryable: true,
+          message: "session quarantined: task has both a live legacy run and a live Harness session",
+        },
+        checkpoint,
+      });
+      this.deps.store.appendRecoveryEvent(sessionId, "mixed_ownership_quarantined");
+      return { sessionId, action: "orphaned", detail: "mixed live ownership" };
+    } catch (err) {
+      if (err instanceof SessionCasConflictError) {
+        return { sessionId, action: "skipped", detail: "lost the fencing lease mid-quarantine" };
+      }
+      throw err;
+    } finally {
+      this.deps.store.releaseLease(sessionId, lease);
     }
   }
 
