@@ -1,8 +1,8 @@
 # Agentic OS — vNext Enhancement Plan
 
-**Status:** Proposed — revision 7 (planning only; no production implementation in this pass)
+**Status:** Proposed — revision 8 (planning only; no production implementation in this pass)
 **Review:** `docs/agentic-os-vnext-review-log.md` (Codex adversarial review, rounds 1–4, plus an independent cold review of revision 5 — `docs/agentic-os-vnext-review-log.md`)
-**Date:** 2026-09-05 (revision 7 adds the kernel-services increments 14–17; revisions 1–6 dated 2026-09-03)
+**Date:** 2026-09-05 (revision 8 reconciles increments 14–17 with the adversarial review of kernel-services revision 1; revision 7 added them; revisions 1–6 dated 2026-09-03)
 **Reconciled against:** `ai-control-plan` `main@77a0b79`, `cockpit` `main@337f9fa`
 **Delivery status at revision 7:** increments 1a/1b merged (PR #18, #19; cockpit #34 makes the version check a policy); increment 2 merged (PR #21 stage 1; cockpit stage 2 in #34); increment 3 merged as WIP (PR #22) with the real-provider completion gate still open (`docs/eval-history/scorecard-2026-09-05.md`, `docs/increment-3-deferred-codex.md`).
 **Verified baselines:** ai-control-plan `pnpm typecheck && pnpm test` → core 70 / adapters 8 / api 378 / web 3, exit 0. cockpit `npm test` → 1296 pass / 0 fail, exit 0.
@@ -40,9 +40,11 @@ up front rather than buried:
 | A4 | Authenticated transport becomes a precondition of the whole API, not just the command surface, **and read/write capabilities are independently grantable now** | `operator-observability-verification.md` §8.1 (`commands.write` "separately authorized") **and `cockpit/docs/specs/E-agentic-os-role.md:22`, which defers the read/write split until a multi-user or non-loopback deployment** | CR-12 |
 | A5 | Parent partial-success is a **verdict field**, never a new `TaskState`; the 9-state task machine is untouched | implied by §3 of this document | CR-14 |
 | A6 | Ephemeral per-run profiles are materialized, retained and disposed by the **Harness** through `WorkspaceAuthority`; the Control Plane selects and passes content or references but writes no files | `cockpit/docs/specs/E-agentic-os-role.md` line 14 ("the control plane only ever writes ephemeral per-run overlays inside task worktrees") and M9 ("The control plane validates paths and writes the returned content into its own profile") | CR-15, increment 5 |
-| A7 | The 9-state task machine gains **exactly one** state, `WAITING_RESOURCE`, for waits the Scheduler resolves. CR-14's rule is narrowed, not reversed: outcomes/verdicts never become states; a lifecycle wait with a non-human resolver may | CR-14 as previously worded ("the task state machine is not extended") | `docs/agentic-os-kernel-services.md` CR-16, increment 14 |
-| A8 | Model-level selection is kernel scope (M12); the "deferred indefinitely" entry is withdrawn. Synthetic benchmark *running* stays deferred; published scores are consumed as cold-start priors only | `plans/implementation-plan.md` "Deferred indefinitely … model-level auto-selection" | kernel-services CR-17, increment 16 |
-| A9 | The live context gauge (O10) is mandatory M14 scope; O9's selection half folds into M12 | `docs/agentic-os-plan.md` §5 O9/O10 | kernel-services CR-27, increments 15–16 |
+| A7 | The 9-state task machine gains **exactly one** state, `WAITING_RESOURCE`, for waits the Scheduler resolves. CR-14's rule is narrowed, not reversed: outcomes/verdicts never become states; a lifecycle wait with a non-human resolver may. `WAITING_RESOURCE` means the scheduler owns a parked task with **no live or ambiguous execution owner**; deferral never bypasses an approval, verification or comparison decision | CR-14 as previously worded ("the task state machine is not extended") | `docs/agentic-os-kernel-services.md` CR-16, CR-32, increment 14 |
+| A8 | Model-level selection is kernel scope (M12) **in two steps**: execution identity and provider facts first (K7), selection in shadow mode with hard filters no benchmark can bypass (K13), activation gated. The "deferred indefinitely" entry is withdrawn. Synthetic benchmark *running* stays deferred; published scores are consumed as cold-start priors only | `plans/implementation-plan.md` "Deferred indefinitely … model-level auto-selection" | kernel-services CR-17, CR-33, increment 16 |
+| A9 | The live context gauge (O10) is mandatory M14 scope **and M14's first deliverable** (observation before intervention; unknown occupancy is a rendered value); O9's selection half folds into M12 after K13 activation | `docs/agentic-os-plan.md` §5 O9/O10 | kernel-services CR-27, CR-34, increments 15–16 |
+| A10 | K7 supplies versioned price **evidence**; standing deferral #3 (bounded cost caps) stays open behind five named gates. Benchmark prices and Cockpit's family-match fallback never authorize a hard cap | revision 7's "16a closes standing deferral #3" | kernel-services §4.4.5, CR-19, increment 16a |
+| A11 | M15's typed runtime enum, `enforcement.runtime` and the global launch-boundary test are **deferred**; `SessionRunner.startProvider` is the seam. K16 timer consolidation is deferred. Herdr is optional and unscheduled | revision 7's increment 17 and CR-24/CR-28 as worded | kernel-services §4.5, CR-24, CR-28 |
 
 ---
 
@@ -275,11 +277,14 @@ confirmation before any removal.
 
 Format per §13 of the request. Prior decisions already recorded in `docs/DECISIONS.md` and
 `docs/operator-observability-verification.md` §10 are **carried forward unchanged** and listed
-here only where this pass adds a migration path. **CR-16…CR-29** (kernel services: task-state
-extension, model-level selection, profiles as presets, pricing ownership, Schedule-tab
-ownership, dimension classification, idle quota probes, dependency waits vs the subtask DAG,
-timer loops, yield kinds, resume vs clean session, O9/O10, herdr/dsh, wake fallback) live in
-`docs/agentic-os-kernel-services.md` §3 and are not restated here.
+here only where this pass adds a migration path. **CR-16…CR-34** (kernel services: task-state
+extension and its ownership meaning, model-level selection in two steps, profiles as presets,
+pricing ownership, Schedule-tab ownership, dimension classification, optional quota probes,
+dependency waits vs the subtask DAG, timer loops, yield kinds, resume vs clean session,
+O9/O10, herdr/dsh, wake fallback with evidence, one routing entry point, explicit
+fresh-vs-resume, deferral never bypassing human decisions, one execution-identity authority,
+provider auto-management primary) live in `docs/agentic-os-kernel-services.md` §3 and are not
+restated here.
 
 ### CR-1 — Cockpit repository vs Agentic OS repository
 - **A:** `cockpit` (separate product, own release cadence, own privileged local scope).
@@ -508,15 +513,22 @@ without a row here is an unresolved overlap.
 | API credential issuance, storage, rotation | Control Plane | clients read, never mint |
 | Inferred phase + confidence | Cockpit | never presented as managed lifecycle |
 | External trace export | `TelemetrySink` adapters | never canonical |
-| Schedules, wait conditions, next-fire, wake, re-composition at wake | Control Plane (Scheduler) | Cockpit renders and may create via `commands.write`; never computes next-fire (CR-20) |
-| Idle quota probes (`QuotaProbe`) | Control Plane `capability-probe.ts` | provider credentials stay in provider tooling; evidence source `provider-api` |
-| Model catalog, evidence, freshness, pricing (`pricingVersion`) | Control Plane | Cockpit's `modelPricing.ts` becomes a fallback, then goes (CR-19) |
-| External benchmark fetch (Artificial Analysis, LiveBench, BenchLM) | Control Plane, neutral fetch adapter | never on the routing path; attribution stored per row |
-| Model recommendation + explanation | Control Plane (inside `routing_decisions.explanation`) | one decision row per routing, no second audit table |
-| Context policy (thresholds, budgets) | Control Plane (workspace config) | |
-| Context measurement, guard directives, `context.*` events | Execution Harness (`ContextMeter`, `ContextPressureGuard`) | mechanism is the adapter's; Harness never clears a session |
-| Context capacity when the provider does not report it | Control Plane model catalog | M14 depends on M12 K7 |
-| Runtime kind (`harness.runtime`) | Adapter manifest; reported on `ExecutionResult.enforcement` | `RuntimeBackend` interface only with a second implementation |
+| Wait conditions (generations), dispatch identity, wake, routing at wake, boot recovery of dispatches | Control Plane (Scheduler) | one `wake(generation)` operation for timer, event and operator; at most one live owner per task; no exactly-once provider claim (kernel-services §4.2.3) |
+| Schedules, occurrences, next-fire (K5) | Control Plane (Scheduler) | Cockpit renders and may create via `commands.write`; never computes next-fire (CR-20) |
+| Durable user intent (`TaskIntent`, explicit overrides) vs resolved execution choices | Control Plane | intent persists; assistant/model/assets recomputed at every dispatch (I-S1) |
+| Effective quota projection (blockers, snapshots, probes, cooldowns merged by freshness) | Control Plane (`QuotaProjection`) | the single reader for router and scheduler; `CooldownStore.until` is a retry instant, not recovery evidence |
+| Optional idle quota probes (`QuotaProbe`) | Control Plane `capability-probe.ts` | account/bucket-scoped `provider-api` observations; provider credentials stay in provider tooling; manifest `reportsLimits` untouched (CR-22) |
+| Execution identity (requested selector vs resolved model, serving provider, harness version, catalog/pricing revision) | Control Plane decides the selector; Harness bridge projects it into `RunSpec.model`; adapters report the resolved identity or `unknown` | one authority (CR-33) |
+| Assistant availability | Provider discovery (`capability-probe.ts`, `registry.ts`) | M12 joins; Cockpit presents without a competing catalog |
+| Model catalog, evidence, freshness, price **evidence** (`pricingVersion`) | Control Plane | Cockpit reads it, keeps an offline snapshot, then retires `modelPricing.ts`; family-match fallback never authorizes a hard cap (CR-19) |
+| Bounded cost-cap enforcement | Control Plane + Harness, **still deferred** (standing deferral #3) | five gates in kernel-services §4.4.5 |
+| External benchmark fetch (one source first: Artificial Analysis) | Control Plane, neutral fetch adapter | never on the routing path; attribution, release identity and normalization version stored per row |
+| Model recommendation + explanation | Control Plane (inside `routing_decisions.explanation`) | shadow until activated; one decision row per routing, no second audit table |
+| Context policy (thresholds, task-level continuation limits) | Control Plane (workspace config) | |
+| Context observations, guard directives, `context.*` events | Execution Harness (`ContextObserver`, `ContextGuard`) | mechanism is the adapter's (capability-gated session control); unknown occupancy is a value; Harness never clears a session |
+| Context window hints when the provider does not report them | Control Plane model catalog | advisory only; K9 does not depend on K7 |
+| Clean-session continuation decision | Control Plane | checkpoint-anchored, evidence-adequate, bounded per task; not lossless (kernel-services §4.3.3) |
+| Runtime kind / backend abstraction | **deferred** (M15) | `SessionRunner.startProvider` is the seam; no enum or interface before a second implementation |
 
 ---
 
@@ -688,18 +700,23 @@ broken boundary, an unauthenticated command surface, or an untracked design.
                                     10 contracts + verdict algebra ─► 11 single-repo fan-out
                                               ─► 12 multi-repo saga ─► 13 progress projection
 
-   KERNEL SERVICES (revision 7; docs/agentic-os-kernel-services.md) — sequenced AHEAD of 8–13
-   2 ──► 14 Scheduler (M13) ──────────────────────────┐
-         16a model catalog + priors (M12 part 1) ─┬──► 15 Context lifecycle (M14) ──► 16b model selection (M12 part 2)
-   3 (single mode ON in staging) ─────────────────┘        │
-                                                          17 runtime seam (M15) — bundled with 15
-   11 single-repo fan-out now builds on 14's dependency wait (CR-23); Phase 9 economics waits for 16
+   KERNEL SERVICES (revision 8; docs/agentic-os-kernel-services.md §6) — independent slices, no blanket gate
+   2 ──► 14 Scheduler (M13): K1 dispatch contract + time waits ──► K2 quota evidence ──► K3 probes
+                                                     └──► K4 dependency waits (before 11) · K5/K6 recurrence (demand-driven)
+   16a (M12 part 1): K7 identity + provider facts + price evidence ──► K8 one benchmark source ──► 16b K13 shadow selection ─► gated activation
+                                                                 └──► K14 Cockpit catalog/pricing (independent of K13)
+   3 (single mode ON in staging) ──► 15 (M14): K9 observation + K12 gauge ──► K11 bounded continuation (+min K10) ──► K10 provider-command compaction
+                                                                                          ▲ K2 (checkpoint-anchored wake)
+   17 runtime seam (M15) — DEFERRED; K15/K16 deferred
+   11 single-repo fan-out builds on K4's dependency wait (CR-23); Phase 9 economics needs K7 price evidence and K14, not K13
 ```
 
-**Kernel services outrank increments 8–13 and Phase 9.** Increments 14–16 are P1 and are
-scheduled immediately after 3 (they need only the authenticated API and, for 15, the Harness
-path enabled in a staging workspace). They may run in parallel with 4–7, which are independent
-modules. Increments 8–13 keep their dependencies and follow.
+**Kernel services are P1 and start right after 3, but they do not block unrelated increments.**
+Increment 14 needs only the authenticated API; 15 needs the Harness path enabled in a staging
+workspace; 16a needs nothing. They may run in parallel with 4–7. Increments 8–13 keep their own
+dependencies; only 11 depends on a kernel slice (K4). Nothing in 8–13 or Phase 9 waits for
+benchmark ingestion (K8), selection activation (K13), context intervention (K10/K11) or the
+deferred runtime work.
 
 **P0 is increments 1–3.** Increment 4 is the first P1. *(Revision 4: revision 3's prose said "the
 first four are P0" while labelling increment 4 as P1 — corrected.)*
@@ -1049,78 +1066,129 @@ neither may mask the other's failure.
   UI surface derives a percentage from elapsed time, event count or token spend.
 - **Model:** STANDARD.
 
-### Increments 14–17 — kernel services (revision 7)
+### Increments 14–17 — kernel services (revision 7, reconciled in revision 8)
 
 Architecture, types, state transitions, APIs and the per-item acceptance tests are in
-`docs/agentic-os-kernel-services.md` (§4–§5); the slice table there (K1–K16) is the build
-order. This section only fixes roadmap position, dependencies and gates.
+`docs/agentic-os-kernel-services.md` (§4–§5); the slice tables there (§6: core sequence,
+demand-driven, deferred) are the build order. This section only fixes roadmap position,
+dependencies and gates. Stable identifiers are kept; deferred or split slices are marked, not
+renumbered.
 
 #### 14 — Deferred execution / Scheduler (M13) · **P1**
-- **Objective:** "run this tonight", "continue when Claude/Codex quota resets", "run the
-  reviewer after implementation finishes" — with the task **re-composed at wake** (I-S1).
-- **Adds:** `WAITING_RESOURCE` (A7), `WaitCondition` (time · quota · resource · dependency),
-  recurring `Schedule`, `QuotaProbe` idle probes, migration 014, `schedules.read`, API 2.1.
-  Slices K1–K6.
-- **Reuses:** `CooldownStore.until`, `quota_snapshots`, `failoverTask`'s checkpoint→route→start
-  chain, the `jobs.ts` timer pattern, Cockpit's `humanizeCron`/`classifyJobPurpose`.
+- **Objective:** "run this tonight" first, then "continue when Claude/Codex quota resets",
+  then "run the reviewer after implementation finishes" — with durable user intent preserved,
+  execution choices recomputed at every dispatch, continuation anchored to a specific
+  checkpoint, and a new routing decision recorded (I-S1).
+- **Adds (K1, first):** `WAITING_RESOURCE` (A7) with its ownership meaning, `WaitCondition`
+  with generations, durable `dispatches`, one `wake(generation)` operation for timer/event/
+  operator, cancellation semantics, boot recovery distinguishing not-started /
+  start-attempted-ambiguous / started, `pause_kind` (CR-32), persisted `TaskIntent`,
+  `routeTask` as the single routing entry point (CR-30), explicit `continuation` on
+  `startTask` (CR-31), migration 014, minimal waiting-state UI. **Scope: newly created
+  single-task `time` waits.**
+- **Adds (K2):** `quota` waits with `QuotaBlocker` evidence (kind, source, observation time,
+  scope, reset provenance), the shared `QuotaProjection`, the Harness-path `resetsAt`
+  propagation fix, controlling-reset computation, bounded retry, and **conversion of already
+  parked work** (`LIMIT_PAUSED`/`WAITING_INPUT → WAITING_RESOURCE`) once the settled-predecessor
+  precondition holds — on the Harness path through the deferral #7 claim machinery.
+- **Adds (K3, optional):** account/bucket-scoped idle probes as `provider-api` observations;
+  manifest `reportsLimits` untouched (CR-22).
+- **Demand-driven:** K4 dependency waits with cycle/self rejection (before increment 11;
+  resource slots deferred as K4b); K5 recurrence with atomic firing and unique occurrences,
+  skip-only overlap, after time waits soak; K6 Cockpit schedule UI.
+- **Reuses:** `handoff_envelopes` claim protocol (`claim`/`enterStartAmbiguous`/`markConsumed`/
+  `release`), `SessionStore` `PREPARED→STARTING`, `HarnessRecovery` ack-lookup-or-hold,
+  `CooldownStore` rows (reinterpreted as retry instants), `quota_snapshots` (extended),
+  `failoverTask`'s checkpoint→route→start chain, the `jobs.ts` timer pattern, Cockpit's
+  `humanizeCron`/`classifyJobPurpose`.
 - **Repos:** ai-control-plan (+ `apps/web` board) + cockpit (K6).
-- **Depends on:** 2. Works on both execution paths (Control-Plane only).
-- **Gate:** kernel-services §5.1 acceptance 1–9; the all-limited failover test now expects
-  `WAITING_RESOURCE`; `eval/scenarios/quota-wait-and-resume.ts` proves re-composition.
-- **Rollback:** `scheduler.enabled: false` keeps the timer unarmed; existing `WAITING_RESOURCE`
-  rows are surfaced as `WAITING_INPUT`-equivalent in the UI with their condition, never lost.
-- **Model:** STANDARD.
+- **Depends on:** 2. K1 works on both execution paths (Control-Plane only); K2's Harness-path
+  conversion depends on standing deferral #7.
+- **Gate:** kernel-services §5.1 K1 acceptance 1–12 (crash between persistence and start
+  steps, duplicate wakeups, condition replacement, wake-vs-cancel, failover-vs-scheduler race);
+  K2 acceptance 13–18 including the all-blocked failover test on **both** paths expecting
+  `WAITING_RESOURCE` and `eval/scenarios/quota-wait-and-resume.ts` proving routing at wake with
+  a checkpoint anchor. **The Composer is not built; asset recomposition at wake is conditional
+  on increment 5.**
+- **Rollback:** `scheduler.enabled: false` keeps the timer unarmed and conditions unevaluated;
+  existing `WAITING_RESOURCE` rows stay visible with their condition and a banner; operator
+  run-now still works.
+- **Model:** STANDARD (STRONG for the dispatch/recovery review).
 
-#### 15 — Context Lifecycle Manager (M14) · **P1**
-- **Objective:** measure context pressure per Harness session and act on it before the provider
-  does something we cannot see: warn → prune → compact → verify → checkpoint + clean session.
-  Delivers O10 (gauge) as mandatory scope.
-- **Adds:** `ContextCapability` on manifests, `ContextMeter`, `ContextPressureGuard`, `context.*`
-  events, `yield.kind = "context"` (CR-25), `preferSame` clean-session restart, `context.read`,
-  web + Cockpit gauge. Slices K9–K12 (+ K15 runtime seam bundled).
+#### 15 — Context Lifecycle Manager (M14) · **P1**, observation first
+- **Objective:** show trustworthy context observations per Harness session before any
+  automatic intervention; then bounded, checkpoint-anchored continuation; then
+  provider-command compaction where a real control exists. Delivers O10 (gauge) as the first
+  deliverable.
+- **Adds (K9 + K12):** `ContextCapability` on manifests, `ContextObserver` producing
+  `ContextObservation` (occupancy, effective window, advertised max, source, estimator,
+  freshness — unknown allowed), `context.observed` events, `context.read`, web + Cockpit gauge;
+  the Claude adapter forwards `SDKContextUsage` and `compact_boundary` instead of dropping
+  them; Codex occupancy is `unavailable` (the per-turn accounting estimator is withdrawn).
+- **Adds (K11 with the minimum K10 safety):** `yield.kind = "context"` (CR-25) on fresh
+  observations only, clean-session continuation anchored to a checkpoint with evidence
+  adequacy, settled predecessor, preserved constraints, composition provenance, task-level
+  continuation/no-progress limits and a defined failure path; `preferSame` routing without
+  cooldown penalty.
+- **Adds (K10, after real-adapter conformance for the control):** capability-gated session
+  control for Claude's programmatic `/compact`, durable non-idempotent directives,
+  observe-after-act, relief-based (not fraction-based) success, provider auto-management
+  primary (CR-34). Codex App Server compaction is beyond the installed SDK and unscheduled.
 - **Reuses:** guard/directive machinery, checkpoint + handoff prompt, Claude SDK
-  `get_context_usage` / `compact_boundary`, Codex per-turn usage as an estimator.
+  `get_context_usage` / `compact_boundary`.
 - **Repos:** ai-control-plan + cockpit (K12).
 - **Depends on:** 3 (Harness path ON in a staging workspace — M14 has no legacy-path
-  implementation, by CR-4) and 16a (catalog capacity for Codex/Cursor/Bedrock).
-- **Gate:** kernel-services §5.2 acceptance 1–11, including the credential-gated real-provider
-  scenario `context-pressure` and the I-C1 history-untouched test.
-- **Rollback:** `context.policy.enabled: false` turns the guard into measure-only (gauge stays);
-  no schema change to roll back.
-- **Model:** STANDARD (STRONG for the guard's replay/idempotency review).
+  implementation, by CR-4). K11 depends on K2 (checkpoint-anchored wake). **Does not depend on
+  16a**; catalog window hints are advisory.
+- **Gate:** kernel-services §5.2 acceptance 1–4 (K9/K12), 5–10 (K11), 11–13 (K10), including
+  the credential-gated real-provider scenario `context-pressure` and the I-C1 history-untouched
+  test.
+- **Rollback:** `context.policy.enabled: false` turns the guard into observe-only (gauge
+  stays); no schema change to roll back.
+- **Model:** STANDARD (STRONG for the continuation and directive-recovery review).
 
 #### 16 — Model Intelligence Service (M12) · **P1**, two parts
-- **16a — catalog + priors (K7–K8):** `model_catalog`, `model_evidence`, `runs.model`
-  backfill, provider-official refresh, Artificial Analysis / LiveBench / BenchLM fetchers with
-  TTL + freshness + attribution, `models.read`. **Closes standing deferral #3** (bounded cost
-  caps get a `pricingVersion`). Depends on nothing; sequenced before 15 because 15 needs
-  capacity for non-Claude models.
-- **16b — selection (K13–K14):** `classifyTask` dimensions, `selectModel`, blending
-  `n/(n+k)`, explanation inside the routing decision, profiles as presets (CR-18), Cockpit
-  catalog view, `modelPricing.ts` fallback (CR-19). Depends on 16a and on enough Harness/legacy
-  runs carrying `runs.model` for the telemetry side to be testable with real rows (synthetic
-  rows suffice for the table tests).
-- **Gate:** kernel-services §5.3 acceptance 1–9; the non-goal test (a leaderboard-best model
-  loses to own telemetry once `n > k`) and the egress test are mandatory.
+- **16a — identity, provider facts, price evidence (K7), then one benchmark source (K8):**
+  `runs.model_requested`/`model_resolved` (backfilled only from proven evidence; Codex rows
+  `unknown`), the bridge plumbing that makes `ExecutionRequest.model` the one authority and
+  `RunSpec.model` its projection (CR-33), `model_catalog`, `model_evidence`, provider-official
+  refresh, versioned price **evidence**, `models.read`. **Does not close standing deferral #3**
+  (A10; five gates in kernel-services §4.4.5). K8 adds Artificial Analysis only; LiveBench and
+  BenchLM stay pinned snapshots until their reuse terms are established. K14 (Cockpit
+  catalog/pricing presentation with an offline snapshot) depends on K7 only.
+- **16b — shadow selection, then gated activation (K13):** `classifyTask` over three initial
+  dimensions (coding, speed, cost), `selectModel` in shadow with hard filters no benchmark can
+  bypass, blending `n/(n+k)` with missing-prior, tie, normalization-version, evidence-age and
+  cohort rules, explanation inside the routing decision, profiles as presets (CR-18). Activation
+  requires resolved-identity telemetry on ≥ `k` runs and a reviewed shadow log.
+- **Gate:** kernel-services §5.3 acceptance 1–4 (K7), K8 item, 5–9 (K13), K14 item. The
+  blending test asserts the formula and one constructed reversal case; it does **not** assert
+  that worse own telemetry always loses once `n > k`. The egress test is mandatory.
 - **Rollback:** `models.selection.enabled: false` returns routing to assistant-only with the
-  catalog still readable; recommendations already persisted remain explainable.
+  catalog still readable; shadow recommendations already persisted remain explainable.
 - **Model:** STANDARD (STRONG for the blending review).
 
-#### 17 — Runtime Backend seam (M15) · **P1, bundled with 15**
-- **Objective:** name the seam, declare the kind, do not abstract. Typed `harness.runtime`,
-  `enforcement.runtime`, the import-boundary test, and a grep test asserting no `RuntimeBackend`
-  interface exists until a second implementation does (CR-28).
+#### 17 — Runtime Backend seam (M15) · **deferred**
+- **Decision:** the seam is `SessionRunner.startProvider`; `ProviderSessionDriver` is a
+  conceptual name. The typed `harness.runtime` enum, `enforcement.runtime`, the grep test and
+  the global "no launches outside `harness/`" test are deferred — the boundary test only after
+  increment 6 retires the legacy launch path (A11, kernel-services §4.5).
 - **Optional futures, decided:** `herdr` as an attachable backend for managed sessions;
-  `DshAdapter` as an assistant environment. Neither is scheduled.
-- **Model:** CHEAP.
+  `DshAdapter` as an assistant environment. Neither is scheduled; no K1–K14 requirement needs
+  them.
 
 ### P2 backlog — decided, not scheduled
 These have owners and decisions (CR-3, CR-11, §5, kernel-services §2) but no vNext increment; they follow increment 13.
 - **Archify** as a Cockpit registry asset tagged `architecture, system-design, refactor, review`,
-  attached by the Composer on M12's `architecture` dimension (after increment 5's registry API).
+  attached by the Composer once the Composer exists (increment 5) and M12 has an `architecture`
+  dimension (not in K13's initial three).
 - **`verifier ≠ implementer`** rule for `review`/`evaluator` checks (with the first evaluator provider).
-- **`[DECISION]` / `[RESULT]` marker grammar** in `deriveEnvelopeUpdate` (tiny, any time).
-- **`DshAdapter`**, **`herdr` runtime backend**, **fold `jobs.ts` into `system` schedules (K16)** — on demonstrated need / after soak.
+- **`[DECISION]` / `[RESULT]` marker grammar** in `deriveEnvelopeUpdate` as untrusted
+  agent-reported evidence, never authority (tiny, any time).
+- **`DshAdapter`**, **`herdr` runtime backend**, **K15 runtime enum/abstraction**, **K16 fold
+  `jobs.ts` into `system` schedules**, **K4b resource slots**, **schedule queue-mode overlap**,
+  **second/third benchmark sources**, **Codex app-server transport for compaction** — on
+  demonstrated need / after the named gate (kernel-services §6 deferred table).
 - **C3** observed-session store: JSON snapshot → append-only SQLite/WAL with cursors and retention,
   CCAM patterns as reference only.
 - **C4** explicit, reversible managed↔observed linking; a provider-session-id collision must never auto-link.
@@ -1132,7 +1200,9 @@ These have owners and decisions (CR-3, CR-11, §5, kernel-services §2) but no v
 
 ### Explicitly not on this roadmap
 - **Remote runners (Phase 8).** No real remote use case. Contracts already carry the keys.
-- **Bounded cost caps.** Needs a pricing table; token caps work today.
+- **Bounded cost caps.** K7 supplies price evidence, which is necessary but not sufficient; the
+  five gates in kernel-services §4.4.5 (applicable tariff, resolved identity, proven usage
+  accounting, latency/overshoot bounds, call costs) must all hold. Token caps work today.
 - **Postman, AgentTrail ingestion, CCAM deployment.** Deferred per §5, off the critical path.
 - **Cross-repository atomic commits.** Not offered; partial success is the contract.
 - **Repository merges of any kind.**
@@ -1156,15 +1226,25 @@ These have owners and decisions (CR-3, CR-11, §5, kernel-services §2) but no v
 - No large-binary evidence producer ships before the artifact store and GC.
 - No Control-Plane module depends on a Harness class; pre-execution inspection goes through the
   `RepositoryInspector` port (CR-13), enforced by an import-boundary test.
-- The 9-state task machine is not extended; partial success is a verdict, not a state (CR-14).
+- The task machine is extended by exactly one state, `WAITING_RESOURCE` (A7); partial success
+  and every other outcome is a verdict, not a state (CR-14).
 - Every amendment to prior accepted design is listed in §0, not discovered in a later section, and
   **is reconciled in the document it amends** — an amendment that leaves the companion contract
   saying the opposite has not been made.
-- **Revision 7 additions.** Exactly one task state is added (`WAITING_RESOURCE`), with every new
-  edge in the transition matrix test and no outcome flavour in the machine. A scheduled task
-  stores intent only and is re-composed at wake (I-S1). Context management never mutates
-  persisted history and never clears a session (I-C1, I-C3). External benchmark evidence is a
-  prior whose weight decays as own runs accumulate and cannot replace telemetry (I-M2). Catalog
-  refresh sends no task data off the machine and routing never waits on it (I-M3). No
-  `RuntimeBackend` interface exists before its second implementation. Increments 14–16 land
-  before increments 8–13 and before Phase 9 economics.
+- **Revision 7/8 additions.** Exactly one task state is added (`WAITING_RESOURCE`), with every
+  new edge's precondition in the transition matrix test and no outcome flavour in the machine;
+  it means scheduler ownership with no live or ambiguous execution owner, and deferral never
+  bypasses an approval, verification or comparison decision (CR-32). A parked task stores
+  durable intent and wait subjects only; execution choices are recomputed at every dispatch,
+  anchored to an explicit checkpoint or explicitly fresh, and recorded as a new decision
+  (I-S1). Dispatch identity is durable before any provider call; at most one live owner per
+  task; exactly-once provider execution is not claimed (I-S3). A retry timestamp is not
+  recovery evidence (I-S4). Context observations may be unknown and are shown before anything
+  acts on them; context management never mutates persisted history, never clears a session,
+  and never continues automatically on unknown or stale observations (I-C1, I-C2, I-C3).
+  External benchmark evidence is a prior whose weight is monotone in own-run count, never
+  grants eligibility, and cannot replace telemetry (I-M2). Requested and resolved model
+  identity are recorded separately (I-M5). Catalog refresh sends no task data off the machine
+  and routing never waits on it (I-M3). No runtime enum or `RuntimeBackend` interface exists
+  before a second implementation. Kernel slices are independent; no unrelated increment waits
+  on benchmark, context-intervention or runtime work.

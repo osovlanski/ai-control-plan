@@ -201,8 +201,13 @@ adapters 8 / web 3, lint clean. **Next phase is the orchestrator/control-plane c
    non-load-bearing consistency backfill. The legacy write path is unchanged.
 3. **Bounded *cost* caps** (`budget.maxCostUsd` with `enforcement:"bounded"`) —
    Prepare rejects them `policy_unenforceable` (no pricing table). Token caps work.
-   **Closure planned:** vNext increment 16a (M12 model catalog with `pricingVersion`,
-   `docs/agentic-os-kernel-services.md` §4.4, slice K7).
+   **Partial input planned, not closure:** vNext increment 16a (M12 model catalog with
+   versioned price *evidence*, `docs/agentic-os-kernel-services.md` §4.4, slice K7) supplies
+   one of five gates. Closure additionally needs an applicable tariff for the serving
+   provider/account, a resolved (not `unknown`) execution identity, the proven
+   `usageReporting` contract (#4), declared reporting latency/overshoot bounds, and priced or
+   excluded call costs (kernel-services §4.4.5). Benchmark prices and Cockpit's family-match
+   fallback never authorize a hard cap.
 4. **Real-adapter conformance** (CI-with-creds) unlocking real
    `toolGating`/`processIsolation`/`usageReporting`/`approvalAckLookup`
    declarations for Claude/Codex — the `verifyIsolation` dep is the "equivalent

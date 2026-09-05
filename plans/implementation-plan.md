@@ -68,7 +68,7 @@ Phases are vertical slices: each ends with something runnable and demonstrable. 
 
 Remote/EC2 runners (`RemoteAdapter` seam exists), LLM task classifier, federated cross-workspace dashboard, Postgres/Redis/BullMQ, generic MCP/CLI adapters, synthetic benchmark suite (running benchmarks; consuming published scores as priors is M12), workflow DSL, multi-user/RBAC/billing, vector DB.
 
-~~model-level auto-selection~~ — withdrawn 2026-09-05: now M12 Model Intelligence (`docs/agentic-os-kernel-services.md` CR-17).
+~~model-level auto-selection~~ — withdrawn 2026-09-05: now M12 Model Intelligence (`docs/agentic-os-kernel-services.md` CR-17), delivered as execution identity first (K7), then shadow selection with hard filters and gated activation (K13).
 
 ## Standing rules
 

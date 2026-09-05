@@ -375,10 +375,10 @@ loop), in dependency order.
 | M5 | Context-bundle request path: Cockpit returns deterministic bundle content + manifest; control plane writes and owns it | M9 |
 | M6 | Idempotent composition telemetry: distinguish attached/invoked/validated and observed outcome; shadow-score before affecting selection | telemetry |
 | M7 | UI: New Task shows the full CompositionDecision (not just routing); Task Detail gains a "Composition" tab | existing panels |
-| M12 | **Model Intelligence Service** — model catalog (capacity, pricing, capabilities) with provenance; task-dimension classification; assistant × model selection blending provider-official data, external benchmark priors (Artificial Analysis, LiveBench, BenchLM) and own telemetry, with telemetry weight `n/(n+k)` so personal evidence progressively dominates; recommendation persisted inside the routing explanation. Closes standing deferral #3 (pricing for bounded cost caps). Supersedes the "model-level auto-selection deferred indefinitely" entry in `plans/implementation-plan.md` (CR-17) | router, telemetry, `EvidenceSource`; design: `docs/agentic-os-kernel-services.md` §4.4 |
-| M13 | **Deferred Execution / Scheduler** — one new task state `WAITING_RESOURCE` (CR-16) plus durable `WaitCondition` (time · quota · resource · dependency) and recurring `Schedule` templates; all-limited failover waits for the earliest reset instead of parking for a human; idle `QuotaProbe` per provider. Invariant I-S1: a scheduled task is **re-composed at wake**, never frozen to the assistant/model chosen when scheduled. Cockpit renders/creates; the plane owns semantics (CR-20) | cooldowns, quota snapshots, `failoverTask`, `jobs.ts` pattern; design: kernel-services §4.2 |
-| M14 | **Context Lifecycle Manager** — per-session `ContextMeter` (provider-reported or estimated, capacity from provider or M12 catalog), `ContextPressureGuard` in the Harness with the ladder healthy → warn → prune → compact → verify → checkpoint + clean session; typed `context.*` events; never a blind clear; compaction never touches persisted history (I-C1). **Absorbs O10** (live gauge) as mandatory scope in `apps/web` and Cockpit. Harness path only | session-runner guards, checkpoint/handoff path; DeepSeek Harness compaction as reference; design: kernel-services §4.3 |
-| M15 | **Runtime Backend seam** — `harness.runtime: native-sdk \| local-process \| herdr \| remote` typed on the manifest and reported on the result; `ProviderSessionDriver` named as the only launch path; a `RuntimeBackend` interface arrives only with its second implementation (herdr / remote are optional, on demonstrated need) | adapter manifest, session-runner; design: kernel-services §4.5 |
+| M12 | **Model Intelligence Service** — **identity before catalog completeness**: requested model selector recorded separately from the observed resolved identity (`unknown` allowed; Codex reports none today), with serving provider, harness version and catalog/pricing revision (K7); provider-official catalog with provenance and versioned price **evidence**; one verified external benchmark source first (K8); task classification over three initial dimensions and assistant × model selection in **shadow mode** blending priors and own telemetry with weight `n/(n+k)` (monotone in `n`, not in time), hard filters (auth, capabilities, workspace policy, quota, security, compatibility) that no benchmark can bypass, activation gated (K13). Recommendation persisted inside the routing explanation. **Does not by itself close standing deferral #3** (bounded cost caps keep five gates, kernel-services §4.4.5). Supersedes the "model-level auto-selection deferred indefinitely" entry in `plans/implementation-plan.md` (CR-17, CR-33) | router, telemetry, `EvidenceSource`, Harness bridge plumbing; design: `docs/agentic-os-kernel-services.md` §4.4 |
+| M13 | **Deferred Execution / Scheduler** — one new task state `WAITING_RESOURCE` (CR-16) meaning *the scheduler owns a parked task with no live or ambiguous execution owner*; durable `WaitCondition` with generations and durable dispatch identity, one `wake(generation)` operation for timer, event and operator run-now, cancellation that reaches an in-flight successor, boot recovery distinguishing not-started / start-attempted-ambiguous / started (K1: newly created single-task time waits); quota waits with explicit blocker evidence and one effective quota projection shared with the router (K2); optional account-scoped idle probes (K3); dependency waits with cycle rejection (K4); recurring schedules with atomic firing and unique occurrences (K5). Invariant I-S1: durable user intent is preserved, execution choices are **recomputed at every dispatch**, continuation is anchored to a specific checkpoint, and a new routing decision is recorded. Deferral never bypasses an approval, verification or comparison decision (CR-32). Cockpit renders/creates; the plane owns semantics (CR-20). Resource slots deferred | `handoff_envelopes` claim protocol, `HarnessRecovery`, cooldowns (as retry instants), quota snapshots, `failoverTask`, `jobs.ts` pattern; design: kernel-services §4.2 |
+| M14 | **Context Lifecycle Manager** — **observation first**: per-session `ContextObservation` separating occupancy, effective window, advertised maximum, source/estimator and freshness, with unknown as a first-class value (Claude provider-reported via the forwarded `SDKContextUsage`; Codex unavailable); the live gauge (ex-O10) in `apps/web` and Cockpit is the first deliverable (K9/K12). Then bounded, checkpoint-anchored clean-session continuation with evidence adequacy, settled predecessor, preserved constraints, provenance and task-level limits — not lossless (K11). Then provider-command compaction where a real control exists (Claude programmatic `/compact`; Codex App Server beyond the installed SDK), with durable non-idempotent directives, observe-after-act and relief-based success; provider auto-management stays primary (K10, CR-34). Typed `context.*` events; never a blind clear; compaction never touches persisted history (I-C1). Harness path only | session-runner guards, checkpoint/handoff path, capability-gated adapter session control; DeepSeek Harness compaction as a modified reference; design: kernel-services §4.3 |
+| M15 | **Runtime Backend seam — deferred.** The seam is `SessionRunner.startProvider`; `ProviderSessionDriver` is a conceptual name. No typed runtime enum, no `enforcement.runtime`, no `RuntimeBackend` interface and no global launch-boundary test before increment 6 retires the legacy path and a second implementation exists (herdr / remote optional, unscheduled) | session-runner; design: kernel-services §4.5 |
 
 ### cockpit
 
@@ -411,8 +411,8 @@ None block the core; each lists its prerequisite.
 | O6 | Memory write-back proposals at checkpoint | M2, checkpoint assembler |
 | O7 | Vector indexes + retrieval for stage 3/4; 3D memory graph upgrade (current graph is 2D force-directed) | M8; embedding runtime choice |
 | O8 | LLM-assisted intent classifier (stage 1 upgrade) | M2; budget it, cache it |
-| O9 | ~~Cheap-model **pre-flight**~~ — the model-selection half is **folded into M12** (a small model is an ordinary selection outcome); the "SDK-direct single-model run for non-repo tasks" half stays deferred (CR-27) | M12 |
-| O10 | ~~Live context-window gauge per running agent~~ — **moved into M14 mandatory scope** (CR-27); listed here only so the numbering stays stable | M14 |
+| O9 | ~~Cheap-model **pre-flight**~~ — the model-selection half is **folded into M12** (a small model is an ordinary selection outcome once K13 is activated); the "SDK-direct single-model run for non-repo tasks" half stays deferred (CR-27) | M12 K13 activation |
+| O10 | ~~Live context-window gauge per running agent~~ — **moved into M14 mandatory scope as its first deliverable** (CR-27, K9/K12); listed here only so the numbering stays stable | M14 |
 | O11 | Cursor/Bedrock provisioning (partial by design) | M3 pattern |
 | O12 | Personal integrations (Gmail/Calendar/Drive/Notion) as first-class MCP assets in the registry | M4, M8 |
 
@@ -433,9 +433,9 @@ None block the core; each lists its prerequisite.
 |---|---|---|
 | **6 — Contracts, threat model & registry** | M0, M8, M4 | Versioned contract tests pass in both repos; catalog sync handles digests, deletions, auth and a stale cache |
 | **7 — Bundles, Composer & provisioning** | M9, M5, M1, M2, M3, M7, M11 | Deterministic bundle and verified isolated profile; resume, failover and parallel-run lifecycle demonstrated; one deduped usage stream once M1's ingestion boundary exists |
-| **7b — Kernel services** (may run in parallel with 7; **must close before 9**) | M13, M12 (catalog + priors), M14, M15 seam | "run tonight" / "continue when quota resets" / "run reviewer after implementation" work and re-compose at wake; a Harness run crossing 85 % context pressure compacts, re-measures and verifies, or continues clean from a checkpoint on the same model; `/api/models` lists capacity, price and benchmark priors with provenance; the live context gauge (ex-O10) is on |
-| **8 — Learning loop & memory** | M6, M10, O6, M12 (blended selection) | Telemetry is idempotent; shadow scoring is inspectable; a stale memory bundle is visibly demoted without automatically changing production selection; per-model telemetry visibly overtakes benchmark priors as runs accumulate |
-| **9 — Economics & insights** | O1–O4 | Dashboard matches mockups with honest chips; tier advice derived from real ledger (pricing from the M12 catalog, CR-19). **Does not start before 7b closes** — kernel services outrank dashboards |
+| **7b — Kernel services** (may run in parallel with 7; slices independent, see kernel-services §6) | M13 (K1 → K2 → K3; K4 before increment 11; K5/K6 on demand), M12 part 1 (K7, then K8; K14 presentation), M14 (K9/K12 observation, then K11, then K10) | "run tonight" parks, wakes exactly once, routes at wake and survives crashes at every step with at most one owner; "continue when quota resets" re-parks on evidence and revalidates before it starts; every run records requested and resolved model identity (or `unknown`); `/api/models` lists capacity and price evidence with provenance; the context gauge (ex-O10) shows occupancy, window, method and freshness including unknown; a Harness run at critical pressure with fresh observations continues from a specific checkpoint on the same model, bounded per task |
+| **8 — Learning loop & memory** | M6, M10, O6, M12 part 2 (K13 shadow selection, then gated activation) | Telemetry is idempotent; shadow scoring is inspectable; a stale memory bundle is visibly demoted without automatically changing production selection; per-model telemetry with resolved identity weighs more than priors as `n` grows, and activation waits for the shadow gate |
+| **9 — Economics & insights** | O1–O4 | Dashboard matches mockups with honest chips; tier advice derived from real ledger (price evidence from the M12 catalog with labelled source, CR-19). Needs K7 price evidence and K14 presentation; **does not wait for K8, K13, K10/K11 or the deferred M15** |
 | **10 — Depth** | O5, O7, O8, O9, O11, O12 | per feature |
 
 Each phase is a vertical slice ending demonstrable, same discipline as Phases 0–5; no phase
@@ -483,6 +483,26 @@ starts until the previous one's success condition is shown live. Phases now span
 
 ## 8. Revision notes
 
+### 2026-09-05 — kernel services reconciled (revision 2 of `agentic-os-kernel-services.md`)
+
+- M13 restated around a durable dispatch/ownership contract (`WAITING_RESOURCE` = scheduler
+  owns a parked task with no live or ambiguous execution owner; one `wake(generation)`
+  operation; boot recovery of dispatch phases; no exactly-once provider claim); K1 limited to
+  newly created single-task time waits; quota handling given explicit blocker evidence and one
+  shared projection; resource slots deferred; recurrence gets atomic firing and unique
+  occurrences.
+- M14 reordered to observation first (gauge with unknown as a value), then bounded
+  checkpoint-anchored continuation, then provider-command compaction; Codex estimator
+  withdrawn; Claude programmatic `/compact` and Codex App Server compaction recorded from
+  primary references; continuation is not lossless.
+- M12 reordered to execution identity first, one benchmark source, shadow selection with hard
+  filters, gated activation; K7 supplies price evidence and does not close deferral #3.
+- M15 deferred (no runtime enum, no abstraction, no global launch-boundary test before
+  increment 6). K15/K16 deferred. Phase 7b no longer gates Phase 9 as a whole; Phase 9 needs
+  K7 and K14 only.
+- Conflict decisions CR-30…CR-34 added; CR-22, CR-23, CR-24, CR-25, CR-26, CR-27, CR-28,
+  CR-29 amended in place in the kernel-services document.
+
 ### 2026-09-05 — kernel services (M12–M15)
 
 - Added M12 Model Intelligence, M13 Scheduler, M14 Context Lifecycle, M15 Runtime seam to §4;
@@ -493,7 +513,8 @@ starts until the previous one's success condition is shown live. Phases now span
 - Recorded conflict decisions CR-16…CR-29 (one new task state; model-level selection no longer
   deferred; profiles become dimension presets; plane catalog owns pricing; Cockpit Schedule tab
   stays, reads plane schedules; herdr/dsh optional, never mandatory).
-- Increments 14–17 in `docs/agentic-os-vnext-plan.md` §10 carry the delivery slices (K1–K16).
+- Increments 14–17 in `docs/agentic-os-vnext-plan.md` §10 carry the delivery slices (K1–K16 as
+  first numbered; revision 2 above re-sequences them and defers K4b/K15/K16).
 
 ### 2026-08-26 — contract and lifecycle hardening
 
