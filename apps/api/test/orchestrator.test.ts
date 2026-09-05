@@ -26,13 +26,13 @@ let orchestrator: Orchestrator;
 
 const FAKE_ID = "personal-fake" as AssistantId;
 
-beforeEach(async () => {
+async function boot(extraConfig = ""): Promise<void> {
   home = mkdtempSync(join(tmpdir(), "agent-plane-orch-"));
   // A workspace whose only assistant is the deterministic fake adapter.
   mkdirSync(join(home, "personal"), { recursive: true });
   writeFileSync(
     join(home, "personal", "config.yaml"),
-    "assistants:\n  personal-fake:\n    provider: fake\n",
+    `assistants:\n  personal-fake:\n    provider: fake\n${extraConfig}`,
   );
   config = loadHarnessTestConfig({ AGENT_PLANE_HOME: home });
   db = openDb(config.dbPath);
@@ -44,7 +44,9 @@ beforeEach(async () => {
   checkpoints = new CheckpointService(db, tasks);
   cooldowns = new CooldownStore(db);
   orchestrator = bootHarnessOrchestrator({ db, config, registry, tasks, bus, checkpoints, cooldowns });
-});
+}
+
+beforeEach(() => boot());
 
 afterEach(async () => {
   await orchestrator.shutdown();
@@ -108,6 +110,12 @@ describe("orchestrator end-to-end (fake adapter)", () => {
   });
 
   it("relays an approval round-trip and continues the run", async () => {
+    // auto-approve (the workspace default) never raises approval.requested —
+    // this test is specifically about the relay path, so it needs it.
+    await orchestrator.shutdown();
+    db.close();
+    rmSync(home, { recursive: true, force: true });
+    await boot("policy:\n  approvalMode: prompt-on-escalation\n");
     const envelope = tasks.create({ goal: "Delete something [FAKE:APPROVAL]" });
     let requestId: string | undefined;
     bus.subscribe(envelope.taskId, (p) => {
@@ -127,6 +135,12 @@ describe("orchestrator end-to-end (fake adapter)", () => {
   });
 
   it("ends the run when an approval is denied", async () => {
+    // auto-approve (the workspace default) never raises approval.requested —
+    // this test is specifically about the relay path, so it needs it.
+    await orchestrator.shutdown();
+    db.close();
+    rmSync(home, { recursive: true, force: true });
+    await boot("policy:\n  approvalMode: prompt-on-escalation\n");
     const envelope = tasks.create({ goal: "Delete something [FAKE:APPROVAL]" });
     let requestId: string | undefined;
     bus.subscribe(envelope.taskId, (p) => {

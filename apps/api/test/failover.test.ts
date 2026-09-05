@@ -212,6 +212,15 @@ describe("automatic quota failover", () => {
 });
 
 describe("manual handoff", () => {
+  // auto-approve (the workspace default) never raises approval.requested —
+  // the mid-run interrupt tests below need it to actually reach that state.
+  beforeEach(async () => {
+    await orchestrator.shutdown();
+    db.close();
+    rmSync(home, { recursive: true, force: true });
+    await boot("policy:\n  approvalMode: prompt-on-escalation\n");
+  });
+
   it("moves a parked task to the other assistant, recording the handoff", async () => {
     // The realistic case: a limit parked the task, the user reroutes it by hand.
     cooldowns.penalize(BACKUP, "limit", "quota exhausted");

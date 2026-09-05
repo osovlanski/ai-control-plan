@@ -71,6 +71,16 @@ const runsOf = (taskId: string) =>
     .all(taskId) as Array<{ id: string; assistant_id: string; state: string; outcome: string | null }>;
 
 describe("Orchestrator characterization", () => {
+  // These are the frozen legacy behaviours, written against the old ambient
+  // default (prompt-on-escalation). auto-approve never raises approval.requested,
+  // so the [FAKE:APPROVAL] cases below need the mode restored explicitly.
+  beforeEach(async () => {
+    await orchestrator.shutdown();
+    db.close();
+    rmSync(home, { recursive: true, force: true });
+    await boot("policy:\n  approvalMode: prompt-on-escalation\n");
+  });
+
   it("[intentional] start → COMPLETED with a single ENDED_OK run and monotonic events", async () => {
     const env = tasks.create({ goal: "do it" });
     tasks.transition(env.taskId, "ROUTING");
