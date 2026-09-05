@@ -104,6 +104,11 @@ export class SessionStore {
     private now: () => Date = () => new Date(),
   ) {}
 
+  /** False once the underlying connection is closed — a detached heartbeat's cue to no-op. */
+  get open(): boolean {
+    return this.db.open;
+  }
+
   // --- execution_requests ---------------------------------------------------
 
   /**

@@ -221,6 +221,38 @@ const promptOnEscalation = (): Partial<ExecutionRequest> => ({
   policy: { ...request().policy, approval: { mode: "prompt-on-escalation" } },
 });
 
+describe("heartbeat outliving its store (eval-harness-style early close)", () => {
+  it("a tick that arrives after the db is closed does not throw or crash", async () => {
+    // An adapter that hangs forever, so the heartbeat keeps firing well past
+    // any single tick — no `timeout.hardMs` trip, so nothing besides the
+    // heartbeat itself ever touches the store again after close().
+    const hanging: AgentAdapter = {
+      id: "a1" as AssistantId,
+      describe: async () => MANIFEST,
+      start: async () => ({ runId: "h2", assistantId: "a1" as AssistantId }),
+      resume: async () => ({ runId: "h2", assistantId: "a1" as AssistantId }),
+      events: async function* () {
+        yield { runId: "h2" as RunId, ts: new Date().toISOString(), type: "run.started", summary: "started" };
+        await new Promise(() => {}); // hang
+      },
+      cancel: async () => {},
+    };
+    const rejections: unknown[] = [];
+    const onUnhandled = (err: unknown) => rejections.push(err);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const runner = new SessionRunner(deps(hanging, { approvalPollMs: 5 }));
+      runner.run(request({ policy: { ...request().policy, timeout: { hardMs: 10_000 } } })).catch(() => {});
+      await new Promise((r) => setTimeout(r, 15)); // let the session actually start
+      db.close(); // simulate a caller (eval harness) tearing down while still RUNNING
+      await new Promise((r) => setTimeout(r, 60)); // several heartbeat intervals (5ms * 5) past close
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+    expect(rejections).toEqual([]);
+  });
+});
+
 describe("approval pause / resume", () => {
   it("does NOT pause under auto-approve — it answers yes and runs to COMPLETED", async () => {
     const runner = new SessionRunner(deps(countingFake({ ok: true, events: defaultBody(), approvalAfter: 1 })));
