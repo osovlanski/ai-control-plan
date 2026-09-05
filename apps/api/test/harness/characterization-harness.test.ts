@@ -79,6 +79,13 @@ describe("characterization (flag ON)", () => {
   });
 
   it("denied approval → FAILED, no failover (single session on A)", async () => {
+    // auto-approve (the workspace default) never raises approval.requested —
+    // this test is specifically about the relay path, so it needs it.
+    await built.orchestrator.shutdown();
+    await built.app.close();
+    db.close();
+    rmSync(home, { recursive: true, force: true });
+    await boot("policy:\n  approvalMode: prompt-on-escalation\n");
     const { taskId, frames } = await run("sign off [FAKE:APPROVAL]");
     await built.orchestrator.respondApproval(taskId, await awaitApprovalId(frames), false);
     expect(await built.orchestrator.waitForSettled(taskId)).toBe("FAILED");

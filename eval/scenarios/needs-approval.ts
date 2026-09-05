@@ -13,7 +13,10 @@ import { scoreTask } from "../scorer.js";
 
 export async function needsApproval(): Promise<ScenarioScore> {
   const booted = await bootScenario({
-    extraConfigYaml: "assistants:\n  eval-fake:\n    provider: fake\n",
+    // auto-approve (the workspace default) never raises approval.requested —
+    // this scenario is specifically about the relay path, so it needs it.
+    extraConfigYaml:
+      "assistants:\n  eval-fake:\n    provider: fake\npolicy:\n  approvalMode: prompt-on-escalation\n",
     harnessSingle: true,
   });
   const { app } = booted.built;

@@ -88,7 +88,15 @@ const PERSONAL_DEFAULTS: Omit<WorkspaceConfig, "workspace"> = {
     "personal-codex": { provider: "openai" },
   },
   repoAllowlist: [],
-  policy: { approvalMode: "prompt-on-escalation" },
+  // `approvalMode` is workspace-global, not per-assistant (arch §12.7) — every
+  // configured assistant must be able to honor it. CodexAdapter has no
+  // approval-relay path by design (it self-sandboxes, approvalPolicy "never"),
+  // so "prompt-on-escalation" here made any personal-codex invocation fail
+  // instantly with policy_unenforceable. auto-approve is the mode every
+  // shipped adapter can honor; a workspace that wants escalation prompts for
+  // Claude specifically needs a per-assistant override this schema doesn't
+  // have yet, not this shared default.
+  policy: { approvalMode: "auto-approve" },
   failover: {
     auto: true,
     softThresholdPct: 85,

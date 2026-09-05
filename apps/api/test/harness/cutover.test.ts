@@ -141,6 +141,16 @@ describe("flag-ON cutover — happy path", () => {
 });
 
 describe("flag-ON cutover — approvals", () => {
+  // auto-approve (the workspace default) never raises approval.requested —
+  // these tests are specifically about the relay path, so they need it.
+  beforeEach(async () => {
+    await built.orchestrator.shutdown();
+    await built.app.close();
+    db.close();
+    rmSync(home, { recursive: true, force: true });
+    await boot("policy:\n  approvalMode: prompt-on-escalation\n");
+  });
+
   it("relays an approval and completes when approved", async () => {
     const { taskId, frames } = await startTask("needs sign-off [FAKE:APPROVAL]");
     // wait for the approval.requested SSE frame
@@ -165,6 +175,16 @@ describe("flag-ON cutover — approvals", () => {
 });
 
 describe("flag-ON cutover — cancel", () => {
+  // auto-approve (the workspace default) never raises approval.requested —
+  // this test is specifically about cancel-while-pending, so it needs it.
+  beforeEach(async () => {
+    await built.orchestrator.shutdown();
+    await built.app.close();
+    db.close();
+    rmSync(home, { recursive: true, force: true });
+    await boot("policy:\n  approvalMode: prompt-on-escalation\n");
+  });
+
   it("cancelTask mid-approval ends the task CANCELLED and settle no-ops", async () => {
     const { taskId, runId, frames } = await startTask("hold here [FAKE:APPROVAL]");
     await pollFor(() => {
