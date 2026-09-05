@@ -201,6 +201,8 @@ adapters 8 / web 3, lint clean. **Next phase is the orchestrator/control-plane c
    non-load-bearing consistency backfill. The legacy write path is unchanged.
 3. **Bounded *cost* caps** (`budget.maxCostUsd` with `enforcement:"bounded"`) —
    Prepare rejects them `policy_unenforceable` (no pricing table). Token caps work.
+   **Closure planned:** vNext increment 16a (M12 model catalog with `pricingVersion`,
+   `docs/agentic-os-kernel-services.md` §4.4, slice K7).
 4. **Real-adapter conformance** (CI-with-creds) unlocking real
    `toolGating`/`processIsolation`/`usageReporting`/`approvalAckLookup`
    declarations for Claude/Codex — the `verifyIsolation` dep is the "equivalent

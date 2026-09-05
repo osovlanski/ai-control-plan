@@ -1,9 +1,10 @@
 # Agentic OS — vNext Enhancement Plan
 
-**Status:** Proposed — revision 6 (planning only; no production implementation in this pass)
+**Status:** Proposed — revision 7 (planning only; no production implementation in this pass)
 **Review:** `docs/agentic-os-vnext-review-log.md` (Codex adversarial review, rounds 1–4, plus an independent cold review of revision 5 — `docs/agentic-os-vnext-review-log.md`)
-**Date:** 2026-09-03
-**Reconciled against:** `ai-control-plan` `main@37066e9`, `cockpit` `main@f17bd1b`
+**Date:** 2026-09-05 (revision 7 adds the kernel-services increments 14–17; revisions 1–6 dated 2026-09-03)
+**Reconciled against:** `ai-control-plan` `main@77a0b79`, `cockpit` `main@337f9fa`
+**Delivery status at revision 7:** increments 1a/1b merged (PR #18, #19; cockpit #34 makes the version check a policy); increment 2 merged (PR #21 stage 1; cockpit stage 2 in #34); increment 3 merged as WIP (PR #22) with the real-provider completion gate still open (`docs/eval-history/scorecard-2026-09-05.md`, `docs/increment-3-deferred-codex.md`).
 **Verified baselines:** ai-control-plan `pnpm typecheck && pnpm test` → core 70 / adapters 8 / api 378 / web 3, exit 0. cockpit `npm test` → 1296 pass / 0 fail, exit 0.
 
 ## 0. Why this document exists
@@ -39,6 +40,9 @@ up front rather than buried:
 | A4 | Authenticated transport becomes a precondition of the whole API, not just the command surface, **and read/write capabilities are independently grantable now** | `operator-observability-verification.md` §8.1 (`commands.write` "separately authorized") **and `cockpit/docs/specs/E-agentic-os-role.md:22`, which defers the read/write split until a multi-user or non-loopback deployment** | CR-12 |
 | A5 | Parent partial-success is a **verdict field**, never a new `TaskState`; the 9-state task machine is untouched | implied by §3 of this document | CR-14 |
 | A6 | Ephemeral per-run profiles are materialized, retained and disposed by the **Harness** through `WorkspaceAuthority`; the Control Plane selects and passes content or references but writes no files | `cockpit/docs/specs/E-agentic-os-role.md` line 14 ("the control plane only ever writes ephemeral per-run overlays inside task worktrees") and M9 ("The control plane validates paths and writes the returned content into its own profile") | CR-15, increment 5 |
+| A7 | The 9-state task machine gains **exactly one** state, `WAITING_RESOURCE`, for waits the Scheduler resolves. CR-14's rule is narrowed, not reversed: outcomes/verdicts never become states; a lifecycle wait with a non-human resolver may | CR-14 as previously worded ("the task state machine is not extended") | `docs/agentic-os-kernel-services.md` CR-16, increment 14 |
+| A8 | Model-level selection is kernel scope (M12); the "deferred indefinitely" entry is withdrawn. Synthetic benchmark *running* stays deferred; published scores are consumed as cold-start priors only | `plans/implementation-plan.md` "Deferred indefinitely … model-level auto-selection" | kernel-services CR-17, increment 16 |
+| A9 | The live context gauge (O10) is mandatory M14 scope; O9's selection half folds into M12 | `docs/agentic-os-plan.md` §5 O9/O10 | kernel-services CR-27, increments 15–16 |
 
 ---
 
@@ -271,7 +275,11 @@ confirmation before any removal.
 
 Format per §13 of the request. Prior decisions already recorded in `docs/DECISIONS.md` and
 `docs/operator-observability-verification.md` §10 are **carried forward unchanged** and listed
-here only where this pass adds a migration path.
+here only where this pass adds a migration path. **CR-16…CR-29** (kernel services: task-state
+extension, model-level selection, profiles as presets, pricing ownership, Schedule-tab
+ownership, dimension classification, idle quota probes, dependency waits vs the subtask DAG,
+timer loops, yield kinds, resume vs clean session, O9/O10, herdr/dsh, wake fallback) live in
+`docs/agentic-os-kernel-services.md` §3 and are not restated here.
 
 ### CR-1 — Cockpit repository vs Agentic OS repository
 - **A:** `cockpit` (separate product, own release cadence, own privileged local scope).
@@ -500,6 +508,15 @@ without a row here is an unresolved overlap.
 | API credential issuance, storage, rotation | Control Plane | clients read, never mint |
 | Inferred phase + confidence | Cockpit | never presented as managed lifecycle |
 | External trace export | `TelemetrySink` adapters | never canonical |
+| Schedules, wait conditions, next-fire, wake, re-composition at wake | Control Plane (Scheduler) | Cockpit renders and may create via `commands.write`; never computes next-fire (CR-20) |
+| Idle quota probes (`QuotaProbe`) | Control Plane `capability-probe.ts` | provider credentials stay in provider tooling; evidence source `provider-api` |
+| Model catalog, evidence, freshness, pricing (`pricingVersion`) | Control Plane | Cockpit's `modelPricing.ts` becomes a fallback, then goes (CR-19) |
+| External benchmark fetch (Artificial Analysis, LiveBench, BenchLM) | Control Plane, neutral fetch adapter | never on the routing path; attribution stored per row |
+| Model recommendation + explanation | Control Plane (inside `routing_decisions.explanation`) | one decision row per routing, no second audit table |
+| Context policy (thresholds, budgets) | Control Plane (workspace config) | |
+| Context measurement, guard directives, `context.*` events | Execution Harness (`ContextMeter`, `ContextPressureGuard`) | mechanism is the adapter's; Harness never clears a session |
+| Context capacity when the provider does not report it | Control Plane model catalog | M14 depends on M12 K7 |
+| Runtime kind (`harness.runtime`) | Adapter manifest; reported on `ExecutionResult.enforcement` | `RuntimeBackend` interface only with a second implementation |
 
 ---
 
@@ -649,7 +666,8 @@ Harness and make it a router.
 
 ## 10. vNext roadmap
 
-Thirteen increments (see the note above increment 10 for why not ten). The first three are P0, all
+Seventeen increments: thirteen from revisions 1–6 (see the note above increment 10 for why not
+ten) plus four kernel-services increments added in revision 7. The first three are P0, all
 three defect repair; nothing new ships on a
 broken boundary, an unauthenticated command surface, or an untracked design.
 
@@ -669,7 +687,19 @@ broken boundary, an unauthenticated command surface, or an untracked design.
                                                                           │
                                     10 contracts + verdict algebra ─► 11 single-repo fan-out
                                               ─► 12 multi-repo saga ─► 13 progress projection
+
+   KERNEL SERVICES (revision 7; docs/agentic-os-kernel-services.md) — sequenced AHEAD of 8–13
+   2 ──► 14 Scheduler (M13) ──────────────────────────┐
+         16a model catalog + priors (M12 part 1) ─┬──► 15 Context lifecycle (M14) ──► 16b model selection (M12 part 2)
+   3 (single mode ON in staging) ─────────────────┘        │
+                                                          17 runtime seam (M15) — bundled with 15
+   11 single-repo fan-out now builds on 14's dependency wait (CR-23); Phase 9 economics waits for 16
 ```
+
+**Kernel services outrank increments 8–13 and Phase 9.** Increments 14–16 are P1 and are
+scheduled immediately after 3 (they need only the authenticated API and, for 15, the Harness
+path enabled in a staging workspace). They may run in parallel with 4–7, which are independent
+modules. Increments 8–13 keep their dependencies and follow.
 
 **P0 is increments 1–3.** Increment 4 is the first P1. *(Revision 4: revision 3's prose said "the
 first four are P0" while labelling increment 4 as P1 — corrected.)*
@@ -1019,8 +1049,78 @@ neither may mask the other's failure.
   UI surface derives a percentage from elapsed time, event count or token spend.
 - **Model:** STANDARD.
 
+### Increments 14–17 — kernel services (revision 7)
+
+Architecture, types, state transitions, APIs and the per-item acceptance tests are in
+`docs/agentic-os-kernel-services.md` (§4–§5); the slice table there (K1–K16) is the build
+order. This section only fixes roadmap position, dependencies and gates.
+
+#### 14 — Deferred execution / Scheduler (M13) · **P1**
+- **Objective:** "run this tonight", "continue when Claude/Codex quota resets", "run the
+  reviewer after implementation finishes" — with the task **re-composed at wake** (I-S1).
+- **Adds:** `WAITING_RESOURCE` (A7), `WaitCondition` (time · quota · resource · dependency),
+  recurring `Schedule`, `QuotaProbe` idle probes, migration 014, `schedules.read`, API 2.1.
+  Slices K1–K6.
+- **Reuses:** `CooldownStore.until`, `quota_snapshots`, `failoverTask`'s checkpoint→route→start
+  chain, the `jobs.ts` timer pattern, Cockpit's `humanizeCron`/`classifyJobPurpose`.
+- **Repos:** ai-control-plan (+ `apps/web` board) + cockpit (K6).
+- **Depends on:** 2. Works on both execution paths (Control-Plane only).
+- **Gate:** kernel-services §5.1 acceptance 1–9; the all-limited failover test now expects
+  `WAITING_RESOURCE`; `eval/scenarios/quota-wait-and-resume.ts` proves re-composition.
+- **Rollback:** `scheduler.enabled: false` keeps the timer unarmed; existing `WAITING_RESOURCE`
+  rows are surfaced as `WAITING_INPUT`-equivalent in the UI with their condition, never lost.
+- **Model:** STANDARD.
+
+#### 15 — Context Lifecycle Manager (M14) · **P1**
+- **Objective:** measure context pressure per Harness session and act on it before the provider
+  does something we cannot see: warn → prune → compact → verify → checkpoint + clean session.
+  Delivers O10 (gauge) as mandatory scope.
+- **Adds:** `ContextCapability` on manifests, `ContextMeter`, `ContextPressureGuard`, `context.*`
+  events, `yield.kind = "context"` (CR-25), `preferSame` clean-session restart, `context.read`,
+  web + Cockpit gauge. Slices K9–K12 (+ K15 runtime seam bundled).
+- **Reuses:** guard/directive machinery, checkpoint + handoff prompt, Claude SDK
+  `get_context_usage` / `compact_boundary`, Codex per-turn usage as an estimator.
+- **Repos:** ai-control-plan + cockpit (K12).
+- **Depends on:** 3 (Harness path ON in a staging workspace — M14 has no legacy-path
+  implementation, by CR-4) and 16a (catalog capacity for Codex/Cursor/Bedrock).
+- **Gate:** kernel-services §5.2 acceptance 1–11, including the credential-gated real-provider
+  scenario `context-pressure` and the I-C1 history-untouched test.
+- **Rollback:** `context.policy.enabled: false` turns the guard into measure-only (gauge stays);
+  no schema change to roll back.
+- **Model:** STANDARD (STRONG for the guard's replay/idempotency review).
+
+#### 16 — Model Intelligence Service (M12) · **P1**, two parts
+- **16a — catalog + priors (K7–K8):** `model_catalog`, `model_evidence`, `runs.model`
+  backfill, provider-official refresh, Artificial Analysis / LiveBench / BenchLM fetchers with
+  TTL + freshness + attribution, `models.read`. **Closes standing deferral #3** (bounded cost
+  caps get a `pricingVersion`). Depends on nothing; sequenced before 15 because 15 needs
+  capacity for non-Claude models.
+- **16b — selection (K13–K14):** `classifyTask` dimensions, `selectModel`, blending
+  `n/(n+k)`, explanation inside the routing decision, profiles as presets (CR-18), Cockpit
+  catalog view, `modelPricing.ts` fallback (CR-19). Depends on 16a and on enough Harness/legacy
+  runs carrying `runs.model` for the telemetry side to be testable with real rows (synthetic
+  rows suffice for the table tests).
+- **Gate:** kernel-services §5.3 acceptance 1–9; the non-goal test (a leaderboard-best model
+  loses to own telemetry once `n > k`) and the egress test are mandatory.
+- **Rollback:** `models.selection.enabled: false` returns routing to assistant-only with the
+  catalog still readable; recommendations already persisted remain explainable.
+- **Model:** STANDARD (STRONG for the blending review).
+
+#### 17 — Runtime Backend seam (M15) · **P1, bundled with 15**
+- **Objective:** name the seam, declare the kind, do not abstract. Typed `harness.runtime`,
+  `enforcement.runtime`, the import-boundary test, and a grep test asserting no `RuntimeBackend`
+  interface exists until a second implementation does (CR-28).
+- **Optional futures, decided:** `herdr` as an attachable backend for managed sessions;
+  `DshAdapter` as an assistant environment. Neither is scheduled.
+- **Model:** CHEAP.
+
 ### P2 backlog — decided, not scheduled
-These have owners and decisions (CR-3, CR-11, §5) but no vNext increment; they follow increment 13.
+These have owners and decisions (CR-3, CR-11, §5, kernel-services §2) but no vNext increment; they follow increment 13.
+- **Archify** as a Cockpit registry asset tagged `architecture, system-design, refactor, review`,
+  attached by the Composer on M12's `architecture` dimension (after increment 5's registry API).
+- **`verifier ≠ implementer`** rule for `review`/`evaluator` checks (with the first evaluator provider).
+- **`[DECISION]` / `[RESULT]` marker grammar** in `deriveEnvelopeUpdate` (tiny, any time).
+- **`DshAdapter`**, **`herdr` runtime backend**, **fold `jobs.ts` into `system` schedules (K16)** — on demonstrated need / after soak.
 - **C3** observed-session store: JSON snapshot → append-only SQLite/WAL with cursors and retention,
   CCAM patterns as reference only.
 - **C4** explicit, reversible managed↔observed linking; a provider-session-id collision must never auto-link.
@@ -1060,3 +1160,11 @@ These have owners and decisions (CR-3, CR-11, §5) but no vNext increment; they 
 - Every amendment to prior accepted design is listed in §0, not discovered in a later section, and
   **is reconciled in the document it amends** — an amendment that leaves the companion contract
   saying the opposite has not been made.
+- **Revision 7 additions.** Exactly one task state is added (`WAITING_RESOURCE`), with every new
+  edge in the transition matrix test and no outcome flavour in the machine. A scheduled task
+  stores intent only and is re-composed at wake (I-S1). Context management never mutates
+  persisted history and never clears a session (I-C1, I-C3). External benchmark evidence is a
+  prior whose weight decays as own runs accumulate and cannot replace telemetry (I-M2). Catalog
+  refresh sends no task data off the machine and routing never waits on it (I-M3). No
+  `RuntimeBackend` interface exists before its second implementation. Increments 14–16 land
+  before increments 8–13 and before Phase 9 economics.
