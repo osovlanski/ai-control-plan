@@ -123,11 +123,11 @@ export class Orchestrator {
       (!intent.repository || (a.manifestParsed.core.execution.filesystem && a.manifestParsed.core.execution.shell &&
         this.config.repoAllowlist.some(p => intent.repository!.path === p || intent.repository!.path.startsWith(`${p}/`)))));
     const eligible = candidates.filter(a => a.manifestParsed!.core.auth.state === 'ok');
-    const projections = eligible.map(a => ({ id: a.id, ...new QuotaProjection(this.db).for(a.id, a.manifestParsed, attempt) }));
+    const projections = eligible.map(a => ({ id: a.id, ...new QuotaProjection(this.db, this.now).for(a.id, a.manifestParsed, attempt) }));
     const blockers = projections.flatMap(p => p.blockers);
     const interventions: QuotaBlocker[] = candidates.filter(a => a.manifestParsed!.core.auth.state !== 'ok').map(a => ({
       assistantId: a.id as AssistantId, kind: 'intervention-required', scope: { account: a.manifestParsed!.core.auth.account },
-      source: 'local-config', observedAt: a.manifest_updated_at ?? new Date().toISOString(), retryAt: new Date().toISOString(),
+      source: 'local-config', observedAt: a.manifest_updated_at ?? this.now().toISOString(), retryAt: this.now().toISOString(),
       resetProvenance: 'fallback', reason: `auth ${a.manifestParsed!.core.auth.state}`,
     }));
     return { blockers: [...blockers, ...interventions], notBefore: controllingRetry(blockers, projections.map(p => p.id)),
@@ -163,6 +163,8 @@ export class Orchestrator {
     private projectVerification?: (worktreePath: string) => ProjectVerificationDiscovery,
     /** Control Plane-owned stable identity resolver; only used for repository-backed Harness requests. */
     private repositoryIdentities?: Pick<RepositoryIdentityRegistry, "resolve">,
+    /** Kernel clock; every quota/freshness read goes through it (K1-K3 share one clock). */
+    private now: () => Date = () => new Date(),
   ) {}
 
   /** `harnessModes.single` routing applies to this start (non-parallel, non-compare/race). */
@@ -1086,7 +1088,7 @@ export class Orchestrator {
   }
 
   routeTask(taskId: string, origin: 'intake' | 'wake' | 'run-now' | 'failover' | 'context-yield', options: { exclude?: string; override?: AssistantId; dispatchId?: string } = {}) {
-    return routeTask({ db: this.db, config: this.config, tasks: this.tasks, registry: this.registry, cooldowns: this.cooldowns }, taskId, origin, options);
+    return routeTask({ db: this.db, config: this.config, tasks: this.tasks, registry: this.registry, cooldowns: this.cooldowns, now: this.now }, taskId, origin, options);
   }
 
   private lastAssistant(taskId: string): string | undefined {

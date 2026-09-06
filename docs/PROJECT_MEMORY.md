@@ -31,3 +31,12 @@ This is not an independent product: it is the `docs/agentic-os-contract-lifecycl
 - Migration 016 adds `quota_probes` (attempts only) so the one-per-assistant-per-15-minutes window survives a restart and `GET /api/scheduler/status` can report probe freshness. A failed probe writes no observation and changes nothing.
 - Probe attempts are recorded in the wait condition's `history` and never increment `auto_wakes`; wake revalidates the projection with a probe before deciding, so an exhausted window re-parks without a provider start.
 - K3 evidence: `docs/agentic-os-k3-implementation.md`.
+
+## Demo A: K1-K3 through the Orbital operator UI
+
+- `feat/agentic-os-demo-a` reconciles the Orbital UI (`feat/agentic-os-orbital-ui@04cbfb5`) onto current `main` instead of replacing the shipped board: one primary experience, with K1/K2/K3 backend truth winning wherever the two disagreed.
+- The Orbital inspector now reads persisted kernel state — wait kind/generation/next eligible time, quota blocker scope and provenance, checkpoint and continuation, dispatch phases, post-wake assistant identity, scheduler enablement and K3 probe freshness. `Planned` labels survive only for K4, K5 and K9.
+- `pnpm demo:a` runs `apps/web/e2e/demo-a.spec.ts` against an in-process API with an injected clock and probe transport: deterministic, no provider credentials, no real quota consumption, with trace/video/screenshots kept under `apps/web/test-results/`.
+- Operator runbook: `docs/demo/demo-a.md` (prerequisites, Oracle start, SSH tunnel, deterministic run, optional real-Claude smoke, artefact locations, deliberately unimplemented functionality).
+- Defect found and fixed here: routing-side quota reads (`routeTask`, `Orchestrator.quotaPlan`) and `CooldownStore` used wall time while the scheduler ran on the injected kernel clock, so under a divergent clock fresh evidence read as stale and expired cooldowns read as live — a blocked assistant could be started at a wake. All of them now share the kernel clock, with a regression test in `apps/api/test/quota-probe.test.ts`.
+- An API credential minted before K1 lacks `schedules.read`, so `GET /api/scheduler/status` answers 403 until `pnpm --filter @agent-plane/api rotate`.

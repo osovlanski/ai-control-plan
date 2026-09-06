@@ -28,7 +28,7 @@ import { Registry } from "./modules/registry.js";
 import { routingHistory } from "./modules/router.js";
 import { TaskEventBus } from "./modules/sse.js";
 import { Scheduler } from "./modules/scheduler.js";
-import { QuotaProbeService } from "./modules/quota-probe.js";
+import { QuotaProbeService, type QuotaProbeFn } from "./modules/quota-probe.js";
 import { QuotaProjection } from "./modules/quota.js";
 import { TaskStore } from "./modules/tasks.js";
 import { TelemetryService } from "./modules/telemetry.js";
@@ -49,6 +49,8 @@ export interface ServerDeps {
   tasks?: TaskStore;
   now?: () => Date;
   quotaProbes?: QuotaProbeService;
+  /** Overrides the idle quota probe transport (K3) when `quotaProbes` is not supplied. Test/demo only. */
+  quotaProbeFn?: QuotaProbeFn;
   registerExtraRoutes?: (app: FastifyInstance) => void;
 }
 
@@ -67,15 +69,15 @@ export interface BuiltServer {
 
 export function buildServer(deps: ServerDeps): BuiltServer {
   const { config, db } = deps;
+  const now = deps.now ?? (() => new Date());
   const bus = deps.bus ?? new TaskEventBus();
   const tasks = deps.tasks ?? new TaskStore(db);
   const registry = deps.registry ?? new Registry(db, config);
   const checkpoints = new CheckpointService(db, tasks);
-  const cooldowns = new CooldownStore(db);
+  const cooldowns = new CooldownStore(db, now);
   const telemetry = new TelemetryService(db);
   const retention = new EventRetention(db);
   const repositoryIdentities = new RepositoryIdentityRegistry(db);
-  const now = deps.now ?? (() => new Date());
   const app = Fastify({ logger: { stream: { write: (line) => process.stdout.write(redactSecrets(line)) }, serializers: { req: (r) => ({ method: r.method, url: String(r.url).split("?")[0] }), res: (r) => ({ statusCode: r.statusCode }) }, redact: ["req.headers.authorization", "req.headers.cookie", "res.headers[\"set-cookie\"]"] } });
   const credentials = new CredentialStore(credentialPath(config.dir), now);
   const authSessions: SessionMap = new Map();
@@ -133,12 +135,13 @@ export function buildServer(deps: ServerDeps): BuiltServer {
       harnessBridge,
       projectVerification,
       repositoryIdentities,
+      now,
     );
 
   const repoAllowed = (repoPath: string | null | undefined): boolean =>
     !repoPath || config.repoAllowlist.some((allowed) => repoPath === allowed || repoPath.startsWith(`${allowed}/`));
 
-  const probes = deps.quotaProbes ?? new QuotaProbeService(db, config, registry, undefined, now);
+  const probes = deps.quotaProbes ?? new QuotaProbeService(db, config, registry, deps.quotaProbeFn, now);
   const scheduler = new Scheduler({ db, tasks, orchestrator, bus, config, probes, now, onError: error => app.log.error(error) });
   const computeRoute = (taskId: string, userOverride?: AssistantId) => tasks.get(taskId)
     ? orchestrator.routeTask(taskId, 'intake', { override: userOverride }) : undefined;
