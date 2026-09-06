@@ -64,23 +64,22 @@ normalized-event contract version is `1.0`.
 deterministic FakeAdapter: no provider credentials, no wall-clock waits, no real
 quota exhaustion. Full operator runbook: [`docs/demo/demo-a.md`](docs/demo/demo-a.md).
 
-A task parked on a durable time wait — persisted wait kind, generation and next
-eligible time, owned by the scheduler:
+![Demo A: a durable time wait, a quota wait with blocker evidence, and an idle quota observation](docs/demo/assets/demo-a-walkthrough.gif)
 
-![Task parked on a K1 time wait](docs/demo/assets/demo-a-1-k1-waiting.png)
+The three panels above are read back from the API, not staged:
 
-A quota-limited task after checkpointing: the blocker's scope, source and
-provenance, the retry instant, and the checkpoint its continuation resumes from:
+1. **Durable time wait (K1)** — wait kind, condition state and generation, next
+   eligible time, wakes used, and whether a checkpoint anchors the wake.
+2. **Quota wait (K2)** — the checkpoint the continuation resumes from, and each
+   blocker's scope, source, provenance and retry instant.
+3. **Idle observation (K3)** — a scoped, timestamped reading where the account
+   exposes an endpoint, and an explicit `unsupported` where it does not.
 
-![Quota wait with blocker evidence](docs/demo/assets/demo-a-2-k2-quota-wait.png)
-
-Idle quota observation: a scoped, timestamped reading where the account exposes
-an endpoint, and an explicit `unsupported` where it does not:
-
-![Idle quota observation](docs/demo/assets/demo-a-3-k3-idle-probe.png)
-
-Each run also writes a Playwright trace and a video of the walkthrough; both stay
-out of git, under `apps/web/test-results/`.
+Full-page stills: [K1](docs/demo/assets/demo-a-1-k1-waiting.png) ·
+[K2](docs/demo/assets/demo-a-2-k2-quota-wait.png) ·
+[K3](docs/demo/assets/demo-a-3-k3-idle-probe.png). Each run also writes a
+Playwright trace and a video; both stay out of git, under
+`apps/web/test-results/`.
 
 ## Run and verify
 
