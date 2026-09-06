@@ -13,7 +13,7 @@ import {
   type AssistantId,
   type RoutingProfile,
   type TaskIntent,
-  type TimeWaitInput,
+  type WaitInput,
 } from "@agent-plane/core";
 import type { ResolvedConfig } from "./config.js";
 import { appliedMigrations, type Db } from "./db/index.js";
@@ -104,6 +104,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     checkpoints,
     registry,
     onError: (err) => app.log.error(err),
+    onQuotaObserved: () => orchestrator.scheduler?.quotaObserved(),
   });
   const harnessRecovery = composed.harnessRecovery;
   const harnessBridge: HarnessBridge | undefined = deps.orchestrator ? undefined : composed.harnessBridge;
@@ -187,7 +188,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   // ---- Tasks ----
 
   app.post<{
-    Body: { goal?: string; constraints?: string[]; repoPath?: string; profile?: RoutingProfile; wait?: TimeWaitInput; overrides?: TaskIntent["overrides"]; mode?: string };
+    Body: { goal?: string; constraints?: string[]; repoPath?: string; profile?: RoutingProfile; wait?: WaitInput; overrides?: TaskIntent["overrides"]; mode?: string };
   }>("/api/tasks", write, async (req, reply) => {
     const { goal, constraints, repoPath, profile, wait, overrides, mode } = req.body ?? {};
     if (typeof goal !== "string" || !goal.trim()) return reply.status(400).send({ error: "goal is required" });
@@ -264,7 +265,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
       schedulerEnabled: scheduler.enabled };
   });
 
-  app.post<{ Params: { id: string }; Body: TimeWaitInput }>('/api/tasks/:id/wait', write, (req, reply) => {
+  app.post<{ Params: { id: string }; Body: WaitInput }>('/api/tasks/:id/wait', write, (req, reply) => {
     if (!tasks.get(req.params.id)) return reply.status(404).send({ error: 'not found' });
     try { return scheduler.attach(req.params.id, req.body); }
     catch (err) { return reply.status(409).send({ error: message(err) }); }

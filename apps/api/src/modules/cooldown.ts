@@ -1,8 +1,7 @@
+import { retryDelay } from './quota.js';
 import type { Db } from "../db/index.js";
 
 /** Fallback windows when the provider gives us no resets_at to honour. */
-const DEFAULT_LIMIT_MS = 60 * 60 * 1000; // an unknown quota window: back off an hour
-const DEFAULT_FAILURE_MS = 10 * 60 * 1000;
 
 export interface Cooldown {
   assistantId: string;
@@ -24,13 +23,14 @@ export class CooldownStore {
     kind: "limit" | "failure",
     reason: string,
     resetsAt?: string,
+    attempt = 0,
   ): Cooldown {
     const now = Date.now();
     const parsed = resetsAt ? Date.parse(resetsAt) : Number.NaN;
     const until = new Date(
       Number.isFinite(parsed) && parsed > now
         ? parsed
-        : now + (kind === "limit" ? DEFAULT_LIMIT_MS : DEFAULT_FAILURE_MS),
+        : now + retryDelay(attempt, kind === "failure"),
     ).toISOString();
 
     this.db
@@ -40,6 +40,12 @@ export class CooldownStore {
       )
       .run(assistantId, reason, until, new Date(now).toISOString());
 
+    const manifest = this.db.prepare("SELECT json_extract(manifest, '$.core.auth.account') account FROM assistants WHERE id = ?").get(assistantId) as { account: string | null };
+    const snapshot = resetsAt ? this.db.prepare('SELECT window FROM quota_snapshots WHERE assistant_id = ? AND resets_at = ? ORDER BY observed_at DESC, id DESC LIMIT 1').get(assistantId, resetsAt) as { window: string } | undefined : undefined;
+    this.db.prepare('UPDATE cooldowns SET account = ?, bucket = ? WHERE assistant_id = ?').run(manifest?.account ?? null, snapshot?.window ?? null, assistantId);
+    this.db.prepare('UPDATE cooldowns SET kind = ?, source = ?, reset_provenance = ? WHERE assistant_id = ?')
+      .run(kind === 'failure' ? 'transient-unavailable' : Number.isFinite(parsed) && parsed > now ? 'provider-reset' : 'inferred-backoff',
+        'runtime-probe', Number.isFinite(parsed) && parsed > now ? 'provider-reported' : 'inferred', assistantId);
     return { assistantId, reason, until };
   }
 

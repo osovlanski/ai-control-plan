@@ -1,4 +1,4 @@
-import { DEFAULT_REDACTION_RULES, redactText, type RedactionRule, type TaskEnvelope } from "@agent-plane/core";
+import { DEFAULT_REDACTION_RULES, redactText, type RedactionRule, type HandoffEnvelope, type TaskEnvelope } from "@agent-plane/core";
 
 /**
  * Opening line of every handoff prompt. Receiving adapters (and the fake
@@ -104,4 +104,18 @@ export function renderHandoffMd(envelope: TaskEnvelope, ctx: HandoffContext, rul
   ]
     .filter((line, i, all) => !(line === "" && all[i - 1] === ""))
     .join("\n");
+}
+
+/** Deterministic successor rendering from the committed portable envelope. */
+export function renderCommittedHandoff(envelope: HandoffEnvelope): string {
+  return redactText([
+    HANDOFF_MARKER, '', '## Goal', envelope.objective,
+    '', '## Constraints', ...(envelope.constraints ?? []).map(c => `- ${c}`),
+    '', '## Completed', ...envelope.completedActions.map(c => `- ${c}`),
+    '', '## Remaining', ...envelope.outstanding.map(c => `- ${c}`),
+    '', '## Decisions', ...envelope.decisions.map(d => `- ${d.text} (${d.madeBy})`),
+    '', '## Repository', envelope.workspace.branch, envelope.artifacts.gitRef ?? '', envelope.artifacts.diffStat ?? '',
+    '', '## Why you are picking this up', envelope.reason,
+    '', '## Next action', envelope.currentSubtask ?? 'Continue the remaining work.',
+  ].join('\n'), DEFAULT_REDACTION_RULES);
 }

@@ -28,7 +28,7 @@ export interface Assistant {
 
 export interface CapabilityChange { assistant_id: string; field: string; old_value: string; new_value: string; source: string; observed_at: string }
 
-export interface TaskWait { generation: number; state: string; reason: string; notBefore: string }
+export interface TaskWait { generation: number; state: string; reason: string; notBefore: string; blockers?: Array<{ assistantId: string; reason: string; kind: string; source: string; observedAt: string; resetProvenance: string; scope: { bucket?: string; account?: string } }> }
 
 export interface TaskSummary {
   wait?: TaskWait;

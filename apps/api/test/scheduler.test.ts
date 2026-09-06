@@ -134,16 +134,16 @@ it('assistant pins survive replacement, block fallback, and retry with a bounded
 it('enforces open-dispatch uniqueness and stores no resolved choices on waits', async () => {
   await boot(); const s = scheduler(async () => { throw new Error('crash'); }); const id = task(s);
   await s.runNow(id).catch(() => {});
-  db.prepare("INSERT INTO wait_conditions SELECT task_id, 2, 'consumed', kind, not_before, created_by, created_at, auto_wakes, history, consumed_at, consumed_by, reason FROM wait_conditions WHERE task_id = ?").run(id);
+  db.prepare("INSERT INTO wait_conditions(task_id,generation,state,kind,not_before,created_by,created_at,auto_wakes,history,consumed_at,consumed_by,reason) SELECT task_id, 2, 'consumed', kind, not_before, created_by, created_at, auto_wakes, history, consumed_at, consumed_by, reason FROM wait_conditions WHERE task_id = ?").run(id);
   expect(() => db.prepare("INSERT INTO dispatches SELECT 'duplicate',task_id,2,origin,checkpoint_id,execution_path,phase,routing_decision_id,session_id,created_at,updated_at,reason FROM dispatches WHERE task_id = ?").run(id)).toThrow(/UNIQUE/);
   const columns = db.prepare('PRAGMA table_info(wait_conditions)').all() as { name: string }[];
-  expect(columns.some(c => /assistant|model|composition/.test(c.name))).toBe(false);
+  expect(columns.some(c => /^(assistant_id|model|composition)$/.test(c.name))).toBe(false);
 });
 
 it.each(['approval_pending','verification_failed','comparison_pending','handoff_requested'] as const)('never defers %s', async pause => {
   await boot(); expect(canTransition('WAITING_INPUT','WAITING_RESOURCE',pause)).toBe(false);
   const id = built.tasks.create({ goal: 'paused' }).taskId; built.tasks.transition(id,'ROUTING'); built.tasks.transition(id,'WAITING_INPUT',pause);
-  expect(() => scheduler().attach(id,{kind:'time',notBefore:now().toISOString()})).toThrow(/K1/);
+  expect(() => scheduler().attach(id,{kind:'time',notBefore:now().toISOString()})).toThrow(/operator decision/);
 });
 
 it('disabled timer preserves waits and run-now API still uses generation checking', async () => {
@@ -155,9 +155,9 @@ it('disabled timer preserves waits and run-now API still uses generation checkin
   expect(run.statusCode).toBe(200); expect(spy).toHaveBeenCalledWith(id,1,'operator');
 });
 
-it('creates and replaces waits through the authorized API, rejects K2+ and invalid inputs atomically', async () => {
+it('creates and replaces waits through the authorized API, rejects deferred kinds and invalid inputs atomically', async () => {
   await boot();
-  for (const wait of [{kind:'quota',notBefore:now().toISOString()},{kind:'time',notBefore:'tomorrow'}]) {
+  for (const wait of [{kind:'dependency',notBefore:now().toISOString()},{kind:'time',notBefore:'tomorrow'}]) {
     expect((await built.app.inject({method:'POST',url:'/api/tasks',headers:headers(),payload:{goal:'later',wait}})).statusCode).toBe(400);
   }
   expect(built.tasks.list()).toHaveLength(0);
@@ -251,11 +251,10 @@ it('migration 014 backfills intent and conservatively classifies historical paus
 it('the session insertion transaction refuses cancelled dispatches even when called directly', async () => {
   await boot(true);
   const { SessionStore } = await import('../src/modules/harness/session-store.js');
-  const { buildExecutionRequest } = await import('../src/modules/harness/control-plane-bridge.js');
   const s = scheduler(async phase=>{if(phase==='start_attempted')throw new Error('crash');}); const id = task(s);
   await s.runNow(id).catch(()=>{}); const dispatch = s.dispatches(id)[0]!; await s.cancel(id);
   const store = new SessionStore(db);
-  store.recordRequest(buildExecutionRequest({taskId:id,dispatchId:dispatch.dispatch_id,assistantId:A,attempt:1,prompt:'fresh',workdir:config.dir,approvalMode:'auto-approve',maxRuntimeMs:1000,routingDecisionRef:String(dispatch.routing_decision_id)}));
+
   expect(()=>store.createSession(dispatch.dispatch_id)).toThrow(/no longer owns/);
   expect(db.prepare('SELECT * FROM runs WHERE task_id = ?').all(id)).toHaveLength(0);
 });
@@ -295,9 +294,8 @@ it.each([false,true])('normal recovery owns a persisted session/run even if disp
   await s.runNow(id).catch(()=>{}); const d = s.dispatches(id)[0]!;
   if (harness) {
     const { SessionStore } = await import('../src/modules/harness/session-store.js');
-    const { buildExecutionRequest } = await import('../src/modules/harness/control-plane-bridge.js');
     const store = new SessionStore(db);
-    store.recordRequest(buildExecutionRequest({taskId:id,dispatchId:d.dispatch_id,assistantId:A,attempt:1,prompt:'fresh',workdir:config.dir,approvalMode:'auto-approve',maxRuntimeMs:1000,routingDecisionRef:String(d.routing_decision_id)}));
+
     store.createSession(d.dispatch_id);
   } else {
     db.prepare("INSERT INTO runs(id,task_id,assistant_id,state,started_at,dispatch_id) VALUES('crashed-run',?,?,'STARTING',?,?)").run(id,A,now().toISOString(),d.dispatch_id);

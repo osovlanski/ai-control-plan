@@ -538,7 +538,7 @@ stateDiagram-v2
 | `ROUTING → WAITING_RESOURCE` | `no_candidate_retry_computable` | routing produced no eligible candidate; a controlling retry instant exists (§4.2.4); no dispatch in `reserved`/`start_attempted` for this task (the routing dispatch, if any, is marked `reparked` in the same tx) | insert condition (`kind: quota`, blockers, `notBefore`); `autoWakes` carried from the consumed condition + 1 when this is a re-park after a wake; `tasks.state` |
 | `LIMIT_PAUSED → WAITING_RESOURCE` | `all_blocked_wait_for_retry` | predecessor session terminal **and** its `ExecutionResult` persisted (settled); checkpoint taken (as today); all candidates blocked with a computable retry | insert condition; `tasks.state`; the checkpoint id is recorded on the condition as the continuation anchor |
 | `WAITING_INPUT → WAITING_RESOURCE` | `operator_deferred` | `tasks.pause_kind ∈ {limit, provider_unavailable, no_candidate, harness_error}` (CR-32); no live/ambiguous session; no open dispatch | insert condition (operator-supplied `time` or `quota`); `tasks.state` |
-| `WAITING_RESOURCE → ROUTING` | `wake` | active condition `generation == expected`; task state is `WAITING_RESOURCE`; no open dispatch | condition → `consumed`; insert `dispatches` row `reserved`; `tasks.state`; (Harness path with a checkpoint anchor: claim the successor envelope and insert the successor `ExecutionRequest` in the same tx — deferral #7 machinery) |
+| `WAITING_RESOURCE → ROUTING` | `wake` | active condition `generation == expected`; task state is `WAITING_RESOURCE`; no open dispatch | condition → `consumed`; insert `dispatches` row `reserved`; `tasks.state`; continuation anchor and wake provenance only; successor materialization follows routing (§4.2.3) |
 | `WAITING_RESOURCE → WAITING_INPUT` | `auto_wake_budget_exhausted` / `intervention_required` / `dependency_failed` | as named; no open dispatch | condition → `expired`; `tasks.pause_kind` set; history attached to the task notice |
 | `WAITING_RESOURCE → CANCELLED` | `cancel_requested` | — | condition → `cancelled`; any dispatch `reserved`/`start_attempted` → `cancelled`; `tasks.state` |
 
@@ -550,27 +550,38 @@ stateDiagram-v2
 One operation, used by the timer, by dependency/quota events and by operator run-now:
 
 ```text
-wake(taskId, expectedGeneration, actor)                              ← ONE SQLite transaction
-  1. SELECT active condition FOR task; require generation == expectedGeneration
-     and tasks.state == WAITING_RESOURCE and no dispatch in {reserved, start_attempted}.
-     Otherwise: return {outcome: "stale"} — a no-op with a reason (duplicate timer,
-     replaced condition, concurrent run-now, cancel already applied).
-  2. UPDATE wait_conditions SET state='consumed', consumed_at, consumed_by=actor.
-  3. INSERT dispatches (dispatchId, taskId, conditionGeneration, origin, checkpointId, phase='reserved').
-  4. tasks.transition(WAITING_RESOURCE → ROUTING, trigger='wake').
-  5. Harness path with checkpointId ≠ null: handoff.claim(envelopeId, {requestId: dispatchId,
-     insertRequest}) — the successor ExecutionRequest is built once and inserted here.
+wake(taskId, expectedGeneration, actor)                              ← reservation transaction
+  1. Require active generation, WAITING_RESOURCE, settled predecessor and no open dispatch.
+     Duplicate/stale/cancelled wake returns a visible stale no-op.
+  2. Consume the condition; reserve dispatchId with checkpoint anchor and wake provenance;
+     transition WAITING_RESOURCE → ROUTING. Do not insert a successor request here.
 COMMIT.
 
-then, outside the transaction:
-  6. routeTask(taskId, origin)  → persistRoutingDecision → dispatches.routingDecisionId.
-     No candidate → re-park (ROUTING → WAITING_RESOURCE, dispatch phase='reparked', autoWakes+1)
-     or → WAITING_INPUT when CR-29 says so.
-  7. dispatches.phase='start_attempted'  (durable, BEFORE any provider call)
-  8. startTask(taskId, {continuation, dispatchId}) → session row exists → dispatches.phase='started',
-     sessionId recorded. The session start re-reads tasks.state under its own transaction and refuses
-     to insert a session for a task no longer in ROUTING (cancel raced ahead).
-  9. First event ack (Harness path): markConsumed(envelope) co-committed as deferral #7 specifies.
+routeTask(taskId, origin, dispatchId)                                ← routing transaction
+  3. Recheck task/dispatch ownership. If dispatch.routingDecisionId exists, load that decision.
+     Otherwise route against durable TaskIntent and current local evidence, persist the
+     RoutingDecision and link dispatch.routingDecisionId in ONE transaction.
+     A thrown routing operation rolls back both writes; recovery may route again only if
+     no decision was committed. No candidate: atomically re-park or require input (CR-29).
+COMMIT.
+
+materialize(dispatchId)                                             ← materialization transaction
+  4. Prepare local worktree/prompt inputs outside the transaction, without provider calls.
+     Recheck ownership and load the committed decision. Build the complete successor once,
+     with executionRequestId = dispatchId, chosen assistant/model, routingDecisionRef and
+     explicit continuation. Persist before any provider call. On the Harness checkpoint
+     path, handoff.claim(envelopeId, {requestId: dispatchId, insertRequest}) co-commits the
+     immutable request and envelope claim here (deferral #7), NOT in the wake transaction.
+     An existing materialized request reuses its resolved fields and immutable provenance;
+     re-render its prompt and verify the fingerprint before execution. Rendered prompts and
+     secretEnv remain unpersisted (execution-harness §10); never re-route or rebuild choices.
+COMMIT.
+
+start(dispatchId)
+  5. Recheck cancellation/ownership; durably mark dispatch start_attempted before any provider
+     call. Session insertion rechecks ownership transactionally. Harness PREPARED→STARTING
+     co-commits enterStartAmbiguous; first-event ack co-commits markConsumed (deferral #7).
+  6. Record the session/run identity and mark dispatch started; session recovery owns it.
 ```
 
 **Timer wake and operator run-now use exactly this operation.** Run-now reads the current
@@ -583,18 +594,42 @@ that later fires for `n` is stale.
 `cancelled`, any dispatch in `reserved`/`start_attempted` → `cancelled`. A dispatch already
 `started` gets the existing durable cancel intent (`requestCancel(sessionId)`), which the
 runner's loop and heartbeat observe. A successor whose start is in flight observes the cancel
-at step 8 (state re-read) or at its first heartbeat; the plane never has two owners.
+at the start/session-insertion boundary (state re-read) or at its first heartbeat; the plane never has two owners.
 
 **Recovery on boot** (`Scheduler.reconcileOnBoot`, part of **K1**, runs after
 `HarnessRecovery.reconcileOnBoot`):
 
 | Dispatch phase found | Meaning | Action |
 |---|---|---|
-| `reserved` | wake committed, routing/start never began | **not started**: continue at step 6 (route + start) — or, if the task was cancelled meanwhile, mark `cancelled` |
-| `start_attempted`, no session row | provider may or may not have been called | **ambiguous**: do not start again. Harness path: `HarnessRecovery` ack-lookup-or-hold on the claimed envelope (`start_ambiguous`); if no session appears within the recovery window, mark `aborted`, re-park with `autoWakes+1` and reason `start_ambiguous`. Legacy path: hold in `ROUTING` with a notice; operator run-now re-arms |
-| `start_attempted`, session row exists | start succeeded, phase update lost | mark `started`; normal session recovery owns it |
+| `reserved`, no routing decision (A) | wake committed, route not committed | recheck ownership, route and link decision atomically for the same dispatch |
+| `reserved`, decision linked, no request (B) | route committed, materialization not committed | reuse that exact decision; materialize once; no duplicate routing history |
+| `reserved`, immutable request exists (C) | materialization committed, start not attempted | reuse exact request and claim; never re-route or rebuild under this identity |
+| `start_attempted`, no session row (D) | labelled start ambiguity | no automatic start replay. Harness session-before-provider evidence can establish non-execution after the recovery window: release the pre-start claim, supersede request, abort dispatch, re-park with autoWakes+1; legacy requires operator reconciliation. A start_ambiguous envelope requires HarnessRecovery settlement, never TTL release |
+| session row exists, phase update missing (E) | session owns execution | mark started and let session recovery settle/resume; scheduler never starts a second session |
 | `started` | ordinary running/terminal session | nothing (session recovery) |
 | condition `active`, `notBefore` in the past, no dispatch | timer lost across restart | evaluate now (a wake, not a catch-up policy) |
+
+**Identity and boundaries.** `dispatchId` is the immutable successor request's idempotency
+key (one request per dispatch), not a second retry identity. A later wake has a new dispatch.
+`dispatches` owns generation, origin, checkpoint anchor, execution path, phase, decision/session
+references and lifecycle timestamps. The immutable request owns resolved assistant/model,
+prompt provenance/digest, policy and execution context. K1's existing `reserved` phase and
+`routing_decision_id` are reused; request existence supplies the materialization boundary.
+Legacy execution must also persist an immutable execution description before provider calls,
+without creating a Harness-owned session or changing legacy recovery ownership.
+
+**Cancellation (F).** Before a session exists, the plane atomically cancels the dispatch and
+condition/task, releases any claimed pre-start envelope and supersedes its request. Every
+later materialize/start/session insertion checks that dispatch still owns ROUTING. With a
+session, cancellation co-commits the durable session cancel intent; runner cancellation guards
+prevent a later provider call. An already in-flight provider start is cancelled when its
+handle arrives (legacy) or through runner cancellation (Harness). A start_ambiguous claim is
+settled by recovery, never blindly released. No request is reactivated after cancellation.
+**Duplicate wake (G)** is prevented by generation CAS and the unique open-dispatch index;
+request identity and the unique live-envelope successor constraint prevent duplicate successors.
+I-S1 means one recomputation per new dispatch, not per recovery of a committed decision.
+Changing a committed execution choice requires ending that dispatch and a new generation;
+recovery never silently changes its routing explanation.
 
 **Exactly-once provider execution is not promised.** Providers offer no idempotent start;
 the protocol guarantees **at most one live owner** and a **recoverable, labelled ambiguity**,
@@ -1121,7 +1156,7 @@ existing layout (`apps/api/test/**`, `packages/core/test/**`, `eval/scenarios/*`
 3. **Condition replacement:** `POST /wait` creates generation 2 and marks generation 1
    `replaced`; a timer firing for generation 1 is `stale` and creates nothing.
 4. **Wake vs cancel:** cancel committed before `wake` → `wake` is `stale`; cancel committed
-   between `wake` commit and session insert → step 8 refuses the session insert, the dispatch
+   between `wake` commit and session insert → the start boundary refuses the session insert, the dispatch
    is marked `cancelled`, no provider is called; cancel after `started` → durable cancel intent
    observed by the runner (existing test extended).
 5. **Crash between persistence and start steps** (fault-injection, existing harness):
@@ -1169,8 +1204,10 @@ existing layout (`apps/api/test/**`, `packages/core/test/**`, `eval/scenarios/*`
     history; `intervention-required` → `WAITING_INPUT` immediately.
 17. Converting parked work requires a settled predecessor: a `LIMIT_PAUSED` task whose session
     result is not yet persisted cannot enter `WAITING_RESOURCE` (precondition test); on the
-    Harness path the successor is claimed through `handoff.claim` in the `wake` transaction
-    (deferral #7 wiring, its acceptance criteria apply).
+    Harness path the successor is claimed through `handoff.claim` in the post-routing
+    materialization transaction, co-committed with its immutable request (deferral #7 wiring,
+    its acceptance criteria apply). Regression tests cover boundaries A–G in §4.2.3, including
+    one persisted decision per dispatch and exact request reuse after materialization.
 18. `eval/scenarios/quota-wait-and-resume.ts`: two `FakeAdapter`s with `[FAKE:LIMIT]`,
     provider-reported `resetsAt` in 2 s, asserts resume on whichever assistant is eligible at
     wake and that the successor's routing decision references the checkpoint anchor.

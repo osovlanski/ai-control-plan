@@ -7,6 +7,7 @@
  * when AGENT_PLANE_EVAL=1 and provider credentials are present; otherwise they
  * are skipped and reported, never faked.
  */
+import { quotaWaitAndResume } from './scenarios/quota-wait-and-resume.js';
 import { adapterErrorMidRun } from "./scenarios/adapter-error-mid-run.js";
 import { bootCrashRecovery } from "./scenarios/boot-crash-recovery.js";
 import { crossProviderReroute } from "./scenarios/cross-provider-reroute.js";
@@ -46,6 +47,9 @@ async function main(): Promise<void> {
   results.push(await attempt("cross-provider-reroute", "fake", crossProviderReroute));
   results.push(await attempt("boot-crash-recovery", "fake", bootCrashRecovery));
   results.push(await attempt("needs-approval", "fake", needsApproval)); // R8 fallback
+
+  results.push(await attempt('quota-wait-and-resume-harness', 'fake', () => quotaWaitAndResume(true)));
+  results.push(await attempt('quota-wait-and-resume-legacy', 'fake', () => quotaWaitAndResume(false)));
 
   // REAL — only with AGENT_PLANE_EVAL=1 and the relevant provider's creds.
   if (REAL_ENABLED && HAS_ANTHROPIC) {

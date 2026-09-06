@@ -205,6 +205,7 @@ class RunContext {
   private rerouteReason: RerouteRequest["reason"] | undefined;
   /** The provider's own limit-event summary (e.g. "quota exhausted"), captured for a "limit"-kind yield — increment 3 parity with the legacy path's `run.limit.reason = event.summary`. */
   private limitSummary: string | undefined;
+  private limitQuota: HandoffRequest['quota'];
   private snapshot: GuardSnapshot;
   private lastEvidenceSeq = 0;
   private evidence: RerouteRequest["evidence"] = [];
@@ -241,6 +242,7 @@ class RunContext {
   }
 
   async execute(): Promise<ExecutionResult> {
+    if (this.d.store.get(this.sessionId)?.cancelRequested) return this.finalize('PREPARED', 'CANCELLED', { cancellation: { requestedBy: 'plane', at: this.iso() }, checkpoint: await this.attemptCheckpoint('cancel') });
     // --- Prepare ---------------------------------------------------------
     const manifest = this.d.registry.manifest(this.request.assistantId);
     const unenforceable = this.checkEnforceability(manifest);
@@ -498,7 +500,7 @@ class RunContext {
         ? this.buildReroute(checkpoint.checkpointId)
         : this.buildHandoff(envelopeId);
     return this.finalize(from, "YIELDED", {
-      yield: { kind: plan.yieldKind, detail },
+      yield: { kind: plan.yieldKind, detail: plan.yieldKind === "limit" ? { ...detail, quota: this.limitQuota } : detail },
       checkpoint,
       extra,
     });
@@ -898,6 +900,7 @@ class RunContext {
       case "limit.hit":
       case "limit.approaching":
         this.limitSummary = event.summary;
+        this.limitQuota = (event.payload as { quota?: HandoffRequest['quota'] })?.quota;
         break;
       default:
         break;

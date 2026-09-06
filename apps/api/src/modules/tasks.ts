@@ -97,10 +97,14 @@ export class TaskStore {
       if (!this.db.prepare("SELECT 1 FROM dispatches d JOIN wait_conditions w ON w.task_id = d.task_id AND w.generation = d.condition_generation WHERE d.task_id = ? AND d.phase = 'reserved' AND w.state = 'consumed'").get(taskId)) throw new Error("Only wake(generation) can release scheduler ownership");
     }
     if (to === "WAITING_RESOURCE") {
-      if (row.state !== "CREATED" && row.state !== "ROUTING") throw new Error("Converting parked work is deferred to K2");
+      if (this.db.prepare(`SELECT 1 FROM runs r WHERE task_id = ? AND execution_request_id IS NOT NULL AND
+        (session_state NOT IN ('COMPLETED','FAILED','CANCELLED','TIMED_OUT','YIELDED') OR NOT EXISTS (SELECT 1 FROM execution_results e WHERE e.session_id = r.id))`).get(taskId)) throw new Error('Predecessor session must be settled');
       if (this.db.prepare("SELECT 1 FROM runs WHERE task_id = ? AND ended_at IS NULL").get(taskId) ||
           this.db.prepare("SELECT 1 FROM dispatches WHERE task_id = ? AND phase IN ('reserved','start_attempted')").get(taskId)) throw new Error("Execution owner prevents scheduler ownership");
-      if (!this.db.prepare("SELECT 1 FROM wait_conditions WHERE task_id = ? AND state = 'active'").get(taskId)) throw new Error("Active wait required");
+      const wait = this.db.prepare("SELECT checkpoint_id FROM wait_conditions WHERE task_id = ? AND state = 'active'").get(taskId) as { checkpoint_id: string | null } | undefined;
+      if (!wait) throw new Error('Active wait required');
+      const predecessor = this.db.prepare('SELECT id FROM runs WHERE task_id = ? ORDER BY started_at DESC, rowid DESC LIMIT 1').get(taskId) as { id: string } | undefined;
+      if (predecessor && !this.db.prepare('SELECT 1 FROM checkpoints WHERE id = ? AND task_id = ? AND run_id = ?').get(wait.checkpoint_id, taskId, predecessor.id)) throw new Error('Wait requires a checkpoint from the settled predecessor');
     }
     const envelope = JSON.parse(row.envelope) as TaskEnvelope;
     envelope.status.state = to;

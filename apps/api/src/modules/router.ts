@@ -1,3 +1,4 @@
+import { QuotaProjection } from './quota.js';
 import type { ResolvedConfig } from '../config.js';
 import type { TaskStore } from './tasks.js';
 import type { Registry } from './registry.js';
@@ -20,6 +21,7 @@ export interface RouteRequest {
   /** Assistants excluded by cooldown (failed/limited recently), with reason. */
   cooldowns: Map<string, string>;
   userOverride?: AssistantId;
+  projections?: Map<string, ReturnType<QuotaProjection['for']>>;
   /**
    * Rolling telemetry from the user's own runs. Absent until enough runs
    * exist — profiles must degrade to their rule behaviour and say so, never
@@ -46,7 +48,9 @@ export function route(req: RouteRequest, candidates: RouteCandidate[]): RoutingE
     if (req.needsRepo && !req.repoPathAllowed) failures.push("repository path not in workspace allowlist");
     const cooldown = req.cooldowns.get(c.id);
     if (cooldown) failures.push(`cooldown: ${cooldown}`);
-    const quota = latestQuota(c.manifest);
+    const projection = req.projections?.get(c.id);
+    if (projection?.blockers.length) failures.push(`quota blocked: ${[...new Set(projection.blockers.map(b => `${b.kind} until ${b.retryAt} (${b.reason})`))].join('; ')}`);
+    const quota = projection ? projection.quota : latestQuota(c.manifest);
     if (quota && quota.usedPercent >= 100) failures.push("quota exhausted");
     return { assistantId: c.id, passedFilters: failures.length === 0, filterFailures: failures, quota };
   });
@@ -198,20 +202,21 @@ export function routeTask(
   deps: { db: Db; config: ResolvedConfig; tasks: TaskStore;
     registry: Registry; cooldowns: CooldownStore },
   taskId: string, origin: 'intake' | 'wake' | 'run-now' | 'failover' | 'context-yield',
-  options: { exclude?: string; override?: AssistantId } = {},
+  options: { exclude?: string; override?: AssistantId; dispatchId?: string } = {},
 ) {
   const row = deps.tasks.get(taskId);
   if (!row) throw new Error(`Unknown task ${taskId}`);
   const intent = JSON.parse(row.intent_json) as TaskIntent;
-  const cooldowns = deps.cooldowns.active();
-  if (options.exclude && !cooldowns.has(options.exclude)) cooldowns.set(options.exclude, 'handing off from this assistant');
   const telemetry = new TelemetryService(deps.db);
   const scores = telemetry.scores();
   for (const [id, score] of telemetry.scores(classifyGoal(intent.goal))) scores.set(id, score);
-  const explanation = { ...route({
+  const candidates = deps.registry.list().map(a => ({ id: a.id as AssistantId, enabled: a.enabled === 1 && a.id !== options.exclude, manifest: a.manifestParsed }));
+  const dispatch = options.dispatchId ? deps.db.prepare('SELECT checkpoint_id FROM dispatches WHERE dispatch_id = ? AND task_id = ?').get(options.dispatchId, taskId) as { checkpoint_id: string | null } | undefined : undefined;
+  const explanation: RoutingExplanation & { origin: string } = { ...route({
     taskId, profile: intent.profile, needsRepo: !!intent.repository,
     repoPathAllowed: !intent.repository || deps.config.repoAllowlist.some(p => intent.repository!.path === p || intent.repository!.path.startsWith(`${p}/`)),
-    cooldowns, scores, userOverride: options.override ?? intent.overrides?.assistantId,
-  }, deps.registry.list().map(a => ({ id: a.id as AssistantId, enabled: a.enabled === 1, manifest: a.manifestParsed }))), origin };
+    cooldowns: new Map(), scores, projections: new Map(deps.registry.list().map(a => [a.id, new QuotaProjection(deps.db).for(a.id, a.manifestParsed)])), userOverride: options.override ?? intent.overrides?.assistantId,
+  }, candidates), origin,
+    ...(dispatch ? { dispatchId: options.dispatchId, continuation: dispatch.checkpoint_id ? { kind: 'checkpoint', checkpointId: dispatch.checkpoint_id } : { kind: 'fresh' } } : {}) };
   return { explanation, routingDecisionId: persistRoutingDecision(deps.db, taskId, explanation) };
 }

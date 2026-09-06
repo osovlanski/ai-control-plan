@@ -1,3 +1,4 @@
+import assert from 'node:assert/strict';
 /**
  * adapter-error-mid-run (FAKE — plan §4 step 21). A deterministic mid-run
  * provider crash needs a fake marker; `FakeAdapter`'s `[FAKE:FAIL]` is exactly
@@ -14,12 +15,18 @@ export async function adapterErrorMidRun(): Promise<ScenarioScore> {
     harnessSingle: true,
   });
   try {
-    return await runTaskToTerminal(booted, {
+    const score = await runTaskToTerminal(booted, {
       scenario: "adapter-error-mid-run",
       kind: "fake",
       goal: "Do the thing [FAKE:FAIL]",
       assistantId: "eval-fake",
     });
+    assert.equal(score.terminalState, 'WAITING_RESOURCE');
+    const condition = booted.built.scheduler.condition(score.taskId);
+    assert.equal(condition?.kind, 'quota');
+    assert.ok(condition?.checkpointId);
+    assert.ok(condition?.blockers?.length);
+    return score;
   } finally {
     await booted.close();
   }

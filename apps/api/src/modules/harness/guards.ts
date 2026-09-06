@@ -11,6 +11,7 @@
  */
 import type {
   ExecutionPolicy,
+  HandoffRequest,
   FailureKind,
   NormalizedEvent,
   UsagePayload,
@@ -49,6 +50,7 @@ export interface GuardDirective {
   failure?: { kind: FailureKind; retryable: boolean };
   /** Present for `yield`. */
   yieldKind?: "reroute" | "handoff" | "limit";
+  quota?: HandoffRequest['quota'];
 }
 
 const CONTINUE = (guard: GuardName): GuardDirective => ({ guard, action: "continue", reason: "ok" });
@@ -171,6 +173,7 @@ export function quotaGuard(_snap: GuardSnapshot, trigger: GuardTrigger): GuardDi
       action: "yield",
       reason: trigger.event.summary || "provider hard limit hit",
       yieldKind: "limit",
+      quota: (trigger.event.payload as { quota?: GuardDirective["quota"] })?.quota,
     };
   }
   return CONTINUE("quota");

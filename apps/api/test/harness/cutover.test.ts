@@ -211,8 +211,8 @@ describe("flag-ON cutover — failover", () => {
     expect(runs.map((r) => r.assistant_id)).toContain(B);
     const handoff = db.prepare("SELECT trigger FROM handoffs WHERE task_id = ?").get(taskId) as { trigger: string };
     expect(handoff.trigger).toBe("quota");
-    // fresh-prompt start this pass — no handoff_envelopes row
-    expect(db.prepare("SELECT COUNT(*) c FROM handoff_envelopes WHERE task_id = ?").get(taskId)).toMatchObject({ c: 0 });
+    // K2 closes deferral #7: the successor consumes the committed envelope.
+    expect(db.prepare("SELECT COUNT(*) c FROM handoff_envelopes WHERE task_id = ? AND state = 'consumed'").get(taskId)).toMatchObject({ c: 1 });
     // the limit.hit event carried a quota payload → a quota_snapshot landed
     // transactionally (afterInsertInTx), gated to the quota event types
     expect(

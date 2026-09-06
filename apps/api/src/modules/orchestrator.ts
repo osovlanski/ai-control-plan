@@ -1,6 +1,14 @@
+import { SessionStore } from './harness/session-store.js';
+import { HandoffService } from './harness/handoff.js';
+import { buildExecutionRequest } from './harness/control-plane-bridge.js';
+import type { ExecutionRequest } from '@agent-plane/core';
+import { QuotaProjection, controllingRetry } from './quota.js';
+import type { Scheduler } from './scheduler.js';
 import { join } from "node:path";
 import type {
   Continuation,
+  QuotaBlocker,
+  TaskIntent,
   PauseKind,
   AgentAdapter,
   AssistantId,
@@ -32,7 +40,7 @@ import {
   mergeWinner,
   runDiffSummary,
 } from "../repo/git.js";
-import { renderHandoffPrompt } from "../render/handoff.js";
+import { renderCommittedHandoff, renderHandoffPrompt } from "../render/handoff.js";
 import { renderTaskPrompt } from "../render/prompt.js";
 import type { CheckpointReason, CheckpointService } from "./checkpoint.js";
 import type { HarnessBridge } from "./harness/control-plane-bridge.js";
@@ -73,6 +81,7 @@ export interface StartOptions {
   trigger?: StartTrigger;
   continuation?: Continuation;
   dispatchId?: string;
+  beforeStart?: () => Promise<void>;
   /** Handoff reason, rendered into the receiving agent's prompt. */
   reason?: string;
   fromAssistantId?: string;
@@ -106,6 +115,24 @@ export class Orchestrator {
    * flight at once (one worktree per competing assistant).
    */
   private active = new Map<string, ActiveRun>();
+  scheduler?: Scheduler;
+  quotaPlan(taskId: string, attempt = 0) {
+    const intent = JSON.parse(this.tasks.get(taskId)!.intent_json) as TaskIntent;
+    const candidates = this.registry.list().filter(a => a.enabled && a.manifestParsed &&
+      (!intent.overrides?.assistantId || intent.overrides.assistantId === a.id) &&
+      (!intent.repository || (a.manifestParsed.core.execution.filesystem && a.manifestParsed.core.execution.shell &&
+        this.config.repoAllowlist.some(p => intent.repository!.path === p || intent.repository!.path.startsWith(`${p}/`)))));
+    const eligible = candidates.filter(a => a.manifestParsed!.core.auth.state === 'ok');
+    const projections = eligible.map(a => ({ id: a.id, ...new QuotaProjection(this.db).for(a.id, a.manifestParsed, attempt) }));
+    const blockers = projections.flatMap(p => p.blockers);
+    const interventions: QuotaBlocker[] = candidates.filter(a => a.manifestParsed!.core.auth.state !== 'ok').map(a => ({
+      assistantId: a.id as AssistantId, kind: 'intervention-required', scope: { account: a.manifestParsed!.core.auth.account },
+      source: 'local-config', observedAt: a.manifest_updated_at ?? new Date().toISOString(), retryAt: new Date().toISOString(),
+      resetProvenance: 'fallback', reason: `auth ${a.manifestParsed!.core.auth.state}`,
+    }));
+    return { blockers: [...blockers, ...interventions], notBefore: controllingRetry(blockers, projections.map(p => p.id)),
+      interventionRequired: eligible.length === 0 && interventions.length > 0 };
+  }
 
   constructor(
     private db: Db,
@@ -232,6 +259,7 @@ export class Orchestrator {
     if (this.harnessBridge) {
       for (const row of this.tasks.runningTasks()) {
         if (!this.harnessOwns(row.id)) continue;
+        if (this.db.prepare("SELECT 1 FROM dispatches WHERE task_id = ? AND phase IN ('reserved','start_attempted') AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.dispatch_id = dispatches.dispatch_id)").get(row.id)) continue;
         const sid = this.harnessBridge.latestSessionId(row.id);
         const assistantId = this.lastAssistant(row.id) ?? "";
         const result = sid ? this.harnessBridge.result(sid) : undefined;
@@ -301,6 +329,15 @@ export class Orchestrator {
     if (!options.parallel && this.isActive(taskId)) {
       throw new Error(`Task ${taskId} already has an active run`);
     }
+    if (options.dispatchId) {
+      const saved = this.db.prepare('SELECT request_json FROM execution_requests WHERE id = ? AND superseded = 0').get(options.dispatchId) as { request_json: string | null } | undefined;
+      if (saved?.request_json) {
+        const request = JSON.parse(saved.request_json) as ExecutionRequest;
+        request.runSpec.prompt = this.dispatchPrompt(request, options);
+        new SessionStore(this.db).recordRequest(request); // fingerprint witnesses semantic replay
+        return this.executeDispatch(request, options);
+      }
+    }
     const adapter = this.registry.adapter(assistantId);
     let row = this.tasks.get(taskId);
     if (!row) throw new Error(`Unknown task ${taskId}`);
@@ -343,7 +380,7 @@ export class Orchestrator {
 
     if (options.dispatchId) {
       const dispatch = this.db.prepare("SELECT phase FROM dispatches WHERE dispatch_id = ? AND task_id = ?").get(options.dispatchId, taskId) as { phase: string } | undefined;
-      if (this.tasks.get(taskId)?.state !== "ROUTING" || dispatch?.phase !== "start_attempted") throw new Error("Dispatch cancelled or no longer owns task");
+      if (this.tasks.get(taskId)?.state !== "ROUTING" || dispatch?.phase !== "reserved" && dispatch?.phase !== "start_attempted") throw new Error("Dispatch cancelled or no longer owns task");
     } else if (this.tasks.get(taskId)?.state === "WAITING_RESOURCE" || this.db.prepare("SELECT 1 FROM dispatches WHERE task_id = ? AND phase IN ('reserved','start_attempted')").get(taskId)) {
       throw new Error("Scheduler owns this task; use generation-aware run-now");
     }
@@ -352,6 +389,31 @@ export class Orchestrator {
       envelope = this.tasks.transition(taskId, "RUNNING");
     }
     this.publishState(taskId, envelope, assistantId);
+
+    if (options.dispatchId) {
+      const taskRow = this.tasks.get(taskId)!;
+      const attempt = ((this.db.prepare('SELECT MAX(attempt) m FROM execution_requests WHERE task_id = ?').get(taskId) as { m: number | null }).m ?? 0) + 1;
+      const project = envelope.repository && this.projectVerification ? this.projectVerification(workdir) : undefined;
+      const request = buildExecutionRequest({ taskId, dispatchId: options.dispatchId, assistantId, attempt, prompt, workdir,
+        worktree: envelope.repository ? { repoPath: envelope.repository.path, branch: taskRow.branch ?? envelope.repository.branch, worktreePath: workdir, baseRef: taskRow.base_ref ?? 'HEAD' } : undefined,
+        target: executionTarget, approvalMode: this.config.policy.approvalMode, maxRuntimeMs: this.maxRuntimeMs,
+        routingDecisionRef: options.routingDecisionRef!, verificationPlan: project?.plan });
+      this.db.transaction(() => {
+        const d = this.db.prepare('SELECT phase FROM dispatches WHERE dispatch_id = ?').get(options.dispatchId) as { phase: string };
+        if (d.phase !== 'reserved' || this.tasks.get(taskId)?.state !== 'ROUTING') throw new Error('Dispatch no longer owns materialization');
+        const store = new SessionStore(this.db);
+        const insert = () => {
+          store.recordRequest(request);
+          this.db.prepare('UPDATE execution_requests SET request_json = ? WHERE id = ?').run(JSON.stringify({ ...request, runSpec: { ...request.runSpec, prompt: undefined, secretEnv: undefined } }), request.executionRequestId);
+        };
+        if (options.continuation?.kind === 'checkpoint' && this.harnessRouting(taskId, options)) {
+          // The checkpoint snapshot is the same immutable source the envelope is derived from.
+          new HandoffService(this.db).bindSuccessor(options.continuation.checkpointId, request,
+            { reason: 'quota wake', fromAssistantId: this.lastAssistant(taskId) ?? assistantId, insertRequest: insert });
+        } else { request.runSpec.prompt = this.dispatchPrompt(request, options); insert(); }
+      })();
+      return this.executeDispatch(request, options);
+    }
 
     // Flag-ON single mode: route execution through SessionRunner via the bridge.
     // Skips the legacy runs INSERT / ActiveRun map / adapter.start / consume() —
@@ -381,6 +443,7 @@ export class Orchestrator {
           taskId,
           assistantId,
           dispatchId: options.dispatchId,
+          checkpointId: options.continuation?.kind === "checkpoint" ? options.continuation.checkpointId : undefined,
           attempt,
           prompt,
           workdir,
@@ -453,6 +516,51 @@ export class Orchestrator {
         void adapter.cancel(handle);
       }, this.maxRuntimeMs),
     };
+    this.db.prepare("UPDATE handoffs SET to_run_id = ? WHERE task_id = ? AND trigger = 'wake' AND to_run_id IS NULL").run(handle.runId, taskId);
+    this.active.set(handle.runId, run);
+    void this.consume(run);
+    return { runId: handle.runId };
+  }
+
+  private dispatchPrompt(request: ExecutionRequest, options: StartOptions): string {
+    if (request.origin.kind === 'handoff') {
+      const env = new HandoffService(this.db).get(request.origin.envelopeId);
+      if (!env || env.taskId !== request.taskId) throw new Error('Missing immutable continuation envelope');
+      return renderCommittedHandoff(env.envelope);
+    }
+    if (options.continuation?.kind === 'checkpoint') return this.renderHandoffFor(request.taskId, { continuation: options.continuation });
+    const intent = JSON.parse(this.tasks.get(request.taskId)!.intent_json) as TaskIntent;
+    const envelope = this.tasks.envelope(request.taskId);
+    return renderTaskPrompt({ ...envelope, goal: intent.goal, constraints: intent.constraints,
+      repository: intent.repository ? { path: intent.repository.path, branch: request.context.worktree?.branch ?? intent.repository.branch ?? '' } : undefined });
+  }
+
+  private async executeDispatch(request: ExecutionRequest, options: StartOptions): Promise<{ runId: string }> {
+    await options.beforeStart?.();
+    const taskId = request.taskId;
+    const d = this.db.prepare('SELECT phase, execution_path FROM dispatches WHERE dispatch_id = ?').get(request.executionRequestId) as { phase: string; execution_path: string };
+    if (d.phase !== 'start_attempted' || this.tasks.get(taskId)?.state !== 'ROUTING') throw new Error('Dispatch cancelled before provider start');
+    if (options.continuation?.kind === 'checkpoint') {
+      this.db.prepare("UPDATE handoffs SET trigger = 'wake' WHERE task_id = ? AND checkpoint_id = ? AND trigger = 'harness' AND to_run_id IS NULL").run(taskId, options.continuation.checkpointId);
+      this.db.prepare(`INSERT INTO handoffs(id,task_id,from_run_id,checkpoint_id,trigger,at)
+        SELECT ?,?,?,?,'wake',? WHERE NOT EXISTS (SELECT 1 FROM handoffs WHERE task_id = ? AND checkpoint_id = ? AND trigger = 'wake')`)
+        .run(newHandoffId(), taskId, this.checkpoints.latest(taskId, options.continuation.checkpointId)?.runId ?? null, options.continuation.checkpointId, new Date().toISOString(), taskId, options.continuation.checkpointId);
+    }
+    if (d.execution_path === 'harness') {
+      const result = this.harnessBridge!.startRequest(request, (result, sid) => this.settleFromResult(taskId, request.assistantId, sid, result));
+      if (this.tasks.get(taskId)?.state === 'ROUTING') this.tasks.transition(taskId, 'RUNNING');
+      this.db.prepare("UPDATE handoffs SET to_run_id = ? WHERE task_id = ? AND trigger = 'wake' AND to_run_id IS NULL").run(result.runId, taskId);
+      return result;
+    }
+    const adapter = this.registry.adapter(request.assistantId);
+    const handle = await adapter.start(request.runSpec);
+    if (this.tasks.get(taskId)?.state === 'CANCELLED') await adapter.cancel(handle);
+    this.db.prepare(`INSERT INTO runs(id,task_id,assistant_id,provider_session_ref,state,started_at,dispatch_id)
+      VALUES(?,?,?,?,'ACTIVE',?,?)`).run(handle.runId, taskId, request.assistantId, handle.providerSessionRef ?? null, new Date().toISOString(), request.executionRequestId);
+    if (this.tasks.get(taskId)?.state === 'ROUTING') this.tasks.transition(taskId, 'RUNNING');
+    const run: ActiveRun = { runId: handle.runId, taskId, assistantId: request.assistantId, adapter, handle,
+      timeout: setTimeout(() => { void adapter.cancel(handle); }, request.runSpec.env?.maxRuntimeMs ?? this.maxRuntimeMs) };
+    this.db.prepare("UPDATE handoffs SET to_run_id = ? WHERE task_id = ? AND trigger = 'wake' AND to_run_id IS NULL").run(handle.runId, taskId);
     this.active.set(handle.runId, run);
     void this.consume(run);
     return { runId: handle.runId };
@@ -504,6 +612,7 @@ export class Orchestrator {
         );
         await this.applyEvent(run, safeEvent);
         this.bus.publish(run.taskId, { kind: "event", event: { ...safeEvent, seq } });
+        if (quotaOf(safeEvent)) this.scheduler?.quotaObserved();
         if (event.type === "error") run.sawError = true;
         if (event.type === "run.ended") {
           endedOk = (event.payload as { ok?: boolean } | undefined)?.ok !== false;
@@ -663,20 +772,32 @@ export class Orchestrator {
   ): Promise<void> {
     const claimed = this.db.transaction(() => {
       if (!this.canSettle(taskId) || this.tasks.get(taskId)?.state !== "RUNNING") return false;
+      // The session row can commit before Scheduler records its final phase.
+      // Settlement proves that predecessor dispatch started; close that reservation
+      // in this transaction before a quota wait can take ownership.
+      this.db.prepare(`UPDATE dispatches SET phase = 'started', session_id = ?, updated_at = ?
+        WHERE dispatch_id = (SELECT dispatch_id FROM runs WHERE id = ?) AND task_id = ? AND phase = 'start_attempted'`)
+        .run(fromRunOrSessionId, new Date().toISOString(), fromRunOrSessionId, taskId);
       this.tasks.transition(taskId, "LIMIT_PAUSED");
       return true;
     })();
     if (!claimed) return;
     this.publishState(taskId, this.tasks.envelope(taskId), assistantId);
 
-    const checkpoint = await this.checkpoints.create(taskId, fromRunOrSessionId, "handoff");
+    const settled = this.harnessBridge?.result(fromRunOrSessionId);
+    const anchor = settled?.checkpoint.checkpointId
+      ? this.checkpoints.latest(taskId, settled.checkpoint.checkpointId) : undefined;
+    const checkpoint = anchor ?? await this.checkpoints.create(taskId, fromRunOrSessionId, 'handoff');
     if (!this.canSettle(taskId) || this.tasks.get(taskId)?.state !== "LIMIT_PAUSED") return;
-    this.cooldowns.penalize(assistantId, trigger === "quota" ? "limit" : "failure", reasonText, resetsAt);
+    const wait = this.scheduler?.condition(taskId);
+    const attempt = wait?.state === 'consumed' ? wait.autoWakes + 1 : 0;
+    this.cooldowns.penalize(assistantId, trigger === "quota" ? "limit" : "failure", reasonText, resetsAt, attempt);
 
     const { explanation, routingDecisionId } = this.routeTask(taskId, "failover", { exclude: assistantId });
 
     if (!explanation.chosen) {
-      const envelope = this.tasks.transition(taskId, "WAITING_INPUT", "no_candidate");
+      if (this.scheduler?.parkQuota(taskId, checkpoint.id)) return;
+      const envelope = this.tasks.transition(taskId, "WAITING_INPUT", this.quotaPlan(taskId).interventionRequired ? "intervention_required" : "no_candidate");
       this.publishState(taskId, envelope);
       this.notice(
         taskId,
@@ -695,11 +816,11 @@ export class Orchestrator {
       `${reasonText} — handing off to ${target}, continuing from the checkpoint.`,
     );
 
-    this.db
-      .prepare(
-        "INSERT INTO handoffs (id, task_id, from_run_id, to_run_id, checkpoint_id, trigger, at) VALUES (?, ?, ?, NULL, ?, ?, ?)",
-      )
-      .run(newHandoffId(), taskId, fromRunOrSessionId, checkpoint.id, trigger, new Date().toISOString());
+    const at = new Date().toISOString();
+    const pending = this.db.prepare("UPDATE handoffs SET trigger = ?, at = ? WHERE task_id = ? AND checkpoint_id = ? AND trigger = 'harness' AND to_run_id IS NULL")
+      .run(trigger, at, taskId, checkpoint.id);
+    if (!pending.changes) this.db.prepare('INSERT INTO handoffs(id,task_id,from_run_id,checkpoint_id,trigger,at) VALUES(?,?,?,?,?,?)')
+      .run(newHandoffId(), taskId, fromRunOrSessionId, checkpoint.id, trigger, at);
 
     try {
       const { runId } = await this.startTask(taskId, target, {
@@ -766,10 +887,11 @@ export class Orchestrator {
         const kind = result.yield?.kind;
         if (kind === "limit") {
           const reasonText = detailReason ?? `${assistantId} hit a usage limit`;
+          const resetsAt = (result.yield?.detail as { quota?: { resetsAt?: string }[] })?.quota?.find(q => q.resetsAt)?.resetsAt;
           if (this.triggerEnabled("quota") && this.config.failover.auto) {
-            await this.failoverTask(taskId, assistantId, "quota", reasonText, sessionId);
+            await this.failoverTask(taskId, assistantId, "quota", reasonText, sessionId, resetsAt);
           } else {
-            this.cooldowns.penalize(assistantId, "limit", reasonText);
+            this.cooldowns.penalize(assistantId, "limit", reasonText, resetsAt);
             tx("WAITING_INPUT", `${assistantId} hit a limit; automatic failover is off.`, "limit");
           }
         } else if (kind === "reroute") {
@@ -963,7 +1085,7 @@ export class Orchestrator {
     return { runId, assistantId: explanation.chosen };
   }
 
-  routeTask(taskId: string, origin: 'intake' | 'wake' | 'run-now' | 'failover' | 'context-yield', options: { exclude?: string; override?: AssistantId } = {}) {
+  routeTask(taskId: string, origin: 'intake' | 'wake' | 'run-now' | 'failover' | 'context-yield', options: { exclude?: string; override?: AssistantId; dispatchId?: string } = {}) {
     return routeTask({ db: this.db, config: this.config, tasks: this.tasks, registry: this.registry, cooldowns: this.cooldowns }, taskId, origin, options);
   }
 
@@ -1018,6 +1140,12 @@ export class Orchestrator {
       if (this.tasks.get(taskId)?.state === "CANCELLED") return;
       this.db.prepare("UPDATE wait_conditions SET state = 'cancelled' WHERE task_id = ? AND state = 'active'").run(taskId);
       this.db.prepare("UPDATE dispatches SET phase = 'cancelled', updated_at = ? WHERE task_id = ? AND phase IN ('reserved','start_attempted')").run(new Date().toISOString(), taskId);
+      const claims = this.db.prepare(`SELECT h.id, h.claimed_by_request_id FROM handoff_envelopes h JOIN dispatches d ON d.dispatch_id = h.claimed_by_request_id
+        WHERE d.task_id = ? AND d.phase = 'cancelled' AND h.state = 'claimed'
+        AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.execution_request_id = d.dispatch_id)` ).all(taskId) as { id: string; claimed_by_request_id: string }[];
+      for (const claim of claims) new HandoffService(this.db).release(claim.id, claim.claimed_by_request_id);
+      this.db.prepare(`UPDATE execution_requests SET superseded = 1 WHERE id IN (SELECT dispatch_id FROM dispatches WHERE task_id = ? AND phase = 'cancelled')
+        AND NOT EXISTS (SELECT 1 FROM runs WHERE execution_request_id = execution_requests.id)`).run(taskId);
       const sid = this.harnessBridge?.latestSessionId(taskId);
       if (sid) this.harnessBridge!.requestCancel(sid);
       this.tasks.transition(taskId, "CANCELLED");

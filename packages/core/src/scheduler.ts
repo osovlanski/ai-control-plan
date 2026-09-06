@@ -1,4 +1,5 @@
 import type { AssistantId } from './ids.js';
+import type { EvidenceSource } from './capabilities.js';
 import type { RoutingProfile } from './task.js';
 
 /** User intent, never the resolved execution choice. K1 accepts assistant pins only. */
@@ -13,13 +14,31 @@ export type Continuation = { kind: 'fresh' } | { kind: 'checkpoint'; checkpointI
 export type PauseKind = 'limit' | 'provider_unavailable' | 'no_candidate' | 'harness_error'
   | 'approval_pending' | 'verification_failed' | 'comparison_pending' | 'handoff_requested'
   | 'intervention_required' | 'unknown';
+export interface QuotaBlocker {
+  kind: 'provider-reset' | 'inferred-backoff' | 'transient-unavailable' | 'unknown-recovery' | 'intervention-required';
+  assistantId: AssistantId;
+  scope: { account?: string; bucket?: string };
+  source: EvidenceSource;
+  observedAt: string;
+  retryAt: string;
+  resetProvenance: 'provider-reported' | 'inferred' | 'fallback';
+  reason: string;
+}
+export interface QuotaObservation {
+  assistantId: AssistantId; scope: QuotaBlocker['scope'];
+  usedPercent?: number; resetsAt?: string; source: EvidenceSource; observedAt: string;
+}
+export type WaitInput = TimeWaitInput | { kind: 'quota'; notBefore: string; reason?: string; assistants?: AssistantId[] };
 export interface TimeWaitInput { kind: 'time'; notBefore: string; reason?: string }
 export interface WaitCondition {
   schemaVersion: 1;
   taskId: string;
   generation: number;
   state: 'active' | 'consumed' | 'replaced' | 'cancelled' | 'expired';
-  kind: 'time';
+  kind: 'time' | 'quota';
+  checkpointId?: string;
+  blockers?: QuotaBlocker[];
+  assistants?: AssistantId[];
   notBefore: string;
   createdBy: string;
   createdAt: string;

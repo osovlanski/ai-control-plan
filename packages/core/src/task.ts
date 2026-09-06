@@ -1,4 +1,5 @@
 import type { AssistantId, TaskId } from "./ids.js";
+import type { Continuation } from './scheduler.js';
 import type { TaskState } from "./state-machine.js";
 
 /** Informational only — annotates events/UI, never drives orchestration. */
@@ -66,6 +67,9 @@ export interface TaskEnvelope {
 }
 
 export interface RoutingExplanation {
+  /** Durable wake provenance; absent for non-scheduler routing. */
+  dispatchId?: string;
+  continuation?: Continuation;
   candidates: Array<{
     assistantId: AssistantId;
     passedFilters: boolean;

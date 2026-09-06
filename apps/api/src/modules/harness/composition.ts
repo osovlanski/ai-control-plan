@@ -1,3 +1,4 @@
+import { HandoffService } from './handoff.js';
 /**
  * The Execution-Harness composition root (PLAN.md 8c.6) — the exact wiring
  * `buildServer` uses for its internal `Orchestrator`, extracted so a test
@@ -42,6 +43,7 @@ export interface HarnessCompositionDeps {
   checkpoints: CheckpointService;
   registry: Registry;
   onError: (err: unknown) => void;
+  onQuotaObserved?: () => void;
 }
 
 export interface HarnessComposition {
@@ -107,6 +109,7 @@ export function buildHarnessComposition(deps: HarnessCompositionDeps): HarnessCo
       if (!taskId) return;
       for (const { seq, event } of durableEvents) {
         bus.publish(taskId, { kind: "event", event: { ...event, seq } });
+        if (QUOTA_EVENT_TYPES.has(event.type)) deps.onQuotaObserved?.();
       }
       const status = tasks.envelope(taskId).status;
       if (status.phase !== lastPublishedPhase.get(taskId)) {
@@ -156,8 +159,7 @@ export function buildHarnessComposition(deps: HarnessCompositionDeps): HarnessCo
     authority,
     verificationCoordinator: new VerificationCoordinator(verificationStore, checkpoints, authority),
     softThresholdPct: config.failover.softThresholdPct,
-    // No `handoff` dep — the envelope-yield path is out of scope this pass, so
-    // the runner never commits an envelope.
+    handoff: new HandoffService(db),
   });
   const harnessBridge = new HarnessBridge({ runner, store: sessionStore, approvals, db, onError });
 

@@ -1,3 +1,4 @@
+import { HandoffService } from './handoff.js';
 /**
  * SessionStore — durable substrate for the Execution Harness (Phase 1).
  *
@@ -203,6 +204,33 @@ export class SessionStore {
     return { executionRequestId: request.executionRequestId, fingerprint, deduped: false };
   }
 
+  /** Claim recovery uses durable session evidence; an ambiguous start is never TTL-released. */
+  reconcileHandoffClaims(): void {
+    this.db.transaction(() => {
+      const handoff = new HandoffService(this.db, this.now);
+      const claims = this.db.prepare(`SELECT h.id, h.state, h.claimed_by_request_id request_id,
+        r.id session_id, r.provider_start_acked, r.provider_session_ref, r.ended_at,
+        d.phase dispatch_phase FROM handoff_envelopes h
+        LEFT JOIN runs r ON r.execution_request_id = h.claimed_by_request_id
+        LEFT JOIN dispatches d ON d.dispatch_id = h.claimed_by_request_id
+        WHERE h.state IN ('claimed','start_ambiguous')`).all() as Array<{
+          id: string; state: string; request_id: string; session_id: string | null;
+          provider_start_acked: number | null; provider_session_ref: string | null; ended_at: string | null; dispatch_phase: string | null;
+        }>;
+      for (const claim of claims) {
+        if (claim.state === 'start_ambiguous') {
+          // Any recorded provider identity/ack or settled session establishes possible
+          // execution; consume conservatively, never replay the original envelope.
+          if (claim.session_id && (claim.provider_start_acked || claim.provider_session_ref || claim.ended_at)) handoff.settleAmbiguous(claim.id, { executionEstablished: true }, claim.request_id);
+        } else if (claim.ended_at || claim.dispatch_phase === 'cancelled') {
+          handoff.release(claim.id, claim.request_id);
+        } else if (!claim.session_id && !claim.dispatch_phase) {
+          handoff.expireClaim(claim.id, 60_000);
+        }
+      }
+    })();
+  }
+
   markRequestSuperseded(executionRequestId: string): void {
     this.db
       .prepare("UPDATE execution_requests SET superseded = 1 WHERE id = ?")
@@ -225,11 +253,12 @@ export class SessionStore {
     if (existing) return existing;
 
     const req = this.db
-      .prepare("SELECT id, task_id, attempt, assistant_id FROM execution_requests WHERE id = ?")
+      .prepare("SELECT id, task_id, attempt, assistant_id, superseded FROM execution_requests WHERE id = ?")
       .get(executionRequestId) as
-      | { id: string; task_id: string; attempt: number; assistant_id: string }
+      | { id: string; task_id: string; attempt: number; assistant_id: string; superseded: number }
       | undefined;
     if (!req) throw new Error(`No execution_request ${executionRequestId} to create a session for`);
+    if (req.superseded) throw new Error('Superseded request no longer owns execution');
 
     const dispatch = this.db.prepare('SELECT task_id, phase FROM dispatches WHERE dispatch_id = ?').get(executionRequestId) as { task_id: string; phase: string } | undefined;
     if (dispatch) {
@@ -292,6 +321,10 @@ export class SessionStore {
   // --- CAS transitions (every session write is fenced on the lease, H-I12) ---
 
   transition(sessionId: string, input: TransitionInput): ExecutionSession {
+    return this.db.transaction(() => this.transitionInTransaction(sessionId, input))();
+  }
+
+  private transitionInTransaction(sessionId: string, input: TransitionInput): ExecutionSession {
     assertSessionTransition(input.from, input.to);
     const sets: string[] = ["session_state = ?", "state = ?", "version = version + 1"];
     const params: unknown[] = [input.to, SESSION_STATE_TO_RUN_STATE[input.to]];
@@ -329,6 +362,14 @@ export class SessionStore {
         `expected version=${input.expectedVersion} state=${input.from} under a live lease` +
           (input.claimSettlement !== undefined ? " with settlement unclaimed" : ""),
       );
+    }
+    const origin = this.db.prepare(`SELECT er.id, er.origin_envelope_id FROM execution_requests er JOIN runs r ON r.execution_request_id = er.id WHERE r.id = ?`).get(sessionId) as { id: string; origin_envelope_id: string | null };
+    if (origin?.origin_envelope_id) {
+      const handoff = new HandoffService(this.db, this.now);
+      const env = handoff.get(origin.origin_envelope_id);
+      if (input.from === 'PREPARED' && input.to === 'STARTING') handoff.enterStartAmbiguous(origin.origin_envelope_id, origin.id);
+      if (input.patch?.providerStartAcked && env && ['claimed','start_ambiguous'].includes(env.state)) handoff.markConsumed(env.id, origin.id);
+      if (isSessionTerminal(input.to) && env?.state === 'claimed') handoff.release(env.id, origin.id);
     }
     return this.get(sessionId)!;
   }

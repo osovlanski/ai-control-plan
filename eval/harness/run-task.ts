@@ -19,7 +19,7 @@ export interface RunTaskOptions {
   onCreated?: (taskId: string) => Promise<void> | void;
 }
 
-const RESTING = new Set(["COMPLETED", "FAILED", "CANCELLED", "TIMED_OUT", "WAITING_INPUT"]);
+const RESTING = new Set(["COMPLETED", "FAILED", "CANCELLED", "TIMED_OUT", "WAITING_INPUT", "WAITING_RESOURCE"]);
 
 export async function runTaskToTerminal(booted: BootedScenario, opts: RunTaskOptions): Promise<ScenarioScore> {
   const { app } = booted.built;

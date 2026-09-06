@@ -46,7 +46,7 @@ export interface WorkspaceConfig {
     softThresholdPct: number;
     triggers: string[];
   };
-  scheduler?: { enabled: boolean };
+  scheduler?: { enabled: boolean; maxAutoWakes?: number };
   sync: {
     /** Local hour (0-23) for the daily capability sync. */
     dailyHour: number;
@@ -103,7 +103,7 @@ const PERSONAL_DEFAULTS: Omit<WorkspaceConfig, "workspace"> = {
     softThresholdPct: 85,
     triggers: ["quota", "rate_limit", "provider_unavailable"],
   },
-  scheduler: { enabled: true },
+  scheduler: { enabled: true, maxAutoWakes: 3 },
   sync: { dailyHour: 7 },
   execution: { harnessModes: { single: false } },
 };
@@ -174,7 +174,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ResolvedConfig
     policy: { ...defaults.policy, ...file.policy },
     failover: { ...defaults.failover, ...file.failover },
     sync: { ...defaults.sync, ...file.sync },
-    scheduler: { enabled: file.scheduler?.enabled ?? true },
+    scheduler: { enabled: file.scheduler?.enabled ?? true, maxAutoWakes: file.scheduler?.maxAutoWakes ?? 3 },
     execution,
   };
 
@@ -264,6 +264,7 @@ function resolveExecution(
 function validate(config: WorkspaceConfig, path: string): void {
   const problems: string[] = [];
   if (typeof config.scheduler?.enabled !== "boolean") problems.push("scheduler.enabled must be a boolean");
+  if (config.scheduler?.maxAutoWakes !== undefined && (!Number.isInteger(config.scheduler.maxAutoWakes) || config.scheduler.maxAutoWakes < 1 || config.scheduler.maxAutoWakes > 100)) problems.push("scheduler.maxAutoWakes must be an integer from 1 to 100");
   const loopbackHosts = new Set(["127.0.0.1", "::1", "localhost"]);
   if (!loopbackHosts.has(config.api.host)) {
     problems.push(`api.host must be a loopback address until authenticated remote mode exists, got ${config.api.host}`);
