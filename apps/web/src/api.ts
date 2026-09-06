@@ -28,7 +28,53 @@ export interface Assistant {
 
 export interface CapabilityChange { assistant_id: string; field: string; old_value: string; new_value: string; source: string; observed_at: string }
 
-export interface TaskWait { generation: number; state: string; reason: string; notBefore: string; blockers?: Array<{ assistantId: string; reason: string; kind: string; source: string; observedAt: string; resetProvenance: string; scope: { bucket?: string; account?: string } }> }
+export interface QuotaBlocker { assistantId: string; reason: string; kind: string; source: string; observedAt: string; retryAt?: string; resetProvenance: string; scope: { bucket?: string; account?: string } }
+export interface WaitHistoryEntry { at: string; actor: string; outcome: string; reason?: string }
+/** Frontend view of the kernel `WaitCondition` served by `/api/tasks` and `/api/tasks/:id` (K1 time / K2 quota). */
+export interface TaskWait {
+  generation: number;
+  state: string;
+  kind: "time" | "quota";
+  reason: string;
+  notBefore: string;
+  checkpointId?: string;
+  autoWakes?: number;
+  assistants?: string[];
+  history?: WaitHistoryEntry[];
+  blockers?: QuotaBlocker[];
+}
+
+/** One `/api/scheduler/status` snapshot — scheduler ownership plus optional K3 idle probes. */
+export interface SchedulerStatus {
+  enabled: boolean;
+  armed: boolean;
+  dueConditions: number;
+  openDispatches: number;
+  lastTick: string | null;
+  probesEnabled: boolean;
+  probes: Array<{
+    assistantId: string;
+    attemptedAt: string;
+    outcome: "ok" | "unavailable" | "unauthorized" | "unsupported";
+    ageMs: number;
+    detail?: string;
+  }>;
+}
+
+export interface Dispatch {
+  dispatch_id: string;
+  task_id: string;
+  condition_generation: number;
+  origin: string;
+  execution_path: string;
+  phase: string;
+  created_at: string;
+  updated_at: string;
+  checkpoint_id: string | null;
+  routing_decision_id: number | null;
+  session_id: string | null;
+  reason: string | null;
+}
 
 export interface TaskSummary {
   wait?: TaskWait;
@@ -69,6 +115,7 @@ export interface TaskEvent {
 
 export interface TaskDetail {
   schedulerEvents?: Array<{ id: number; at: string; type: string; payload: Record<string, unknown> }>;
+  dispatches?: Dispatch[];
   wait?: TaskWait;
   schedulerEnabled?: boolean;
   id: string;
@@ -122,6 +169,9 @@ export const api = {
   changes: () => req<CapabilityChange[]>("/api/assistants/changes"),
   syncAssistant: (id: string) => req<unknown>(`/api/assistants/${id}/sync`, { method: "POST" }),
   runNow: (id: string, generation: number) => req(`/api/tasks/${id}/run-now`, { method: "POST", body: JSON.stringify({ generation }) }),
+  schedulerStatus: () => req<SchedulerStatus>("/api/scheduler/status"),
+  attachWait: (id: string, wait: { kind: "time" | "quota"; notBefore: string; reason?: string }) =>
+    req<TaskWait>(`/api/tasks/${id}/wait`, { method: "POST", body: JSON.stringify(wait) }),
   tasks: () => req<TaskSummary[]>("/api/tasks"),
   task: (id: string) => req<TaskDetail>(`/api/tasks/${id}`),
   createTask: (body: { goal: string; constraints?: string[]; repoPath?: string; profile?: string; wait?: { kind: "time"; notBefore: string } }) =>

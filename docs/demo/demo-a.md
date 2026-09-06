@@ -1,0 +1,154 @@
+# Demo A — durable waits, quota resume and idle probes through the Orbital UI
+
+Demo A is the repeatable end-to-end demonstration of the merged kernel-scheduler
+slices K1 (durable time dispatch), K2 (quota wait, checkpoint and resume) and K3
+(optional idle quota probe), driven through the Orbital operator UI. It is an
+integration and validation artefact: it adds no kernel semantics of its own.
+
+## 1. What Demo A proves
+
+| Claim | Evidence in the demo |
+|---|---|
+| A task can be parked on a durable time wait and wakes exactly once | K1 task reaches `WAITING_RESOURCE` with a persisted wait condition (kind, generation, next eligible time), the scheduler owns it, the wake produces a dispatch and the task completes |
+| Operator overrides work on a parked task | `Run now` wakes a second task ahead of its time; `Cancel task` retires a third without ever starting a provider |
+| A quota-limited task checkpoints, waits and resumes | K2 task hits the deterministic `[FAKE:LIMIT]` path, checkpoints, parks with blocker evidence (source, provenance, retry time), and after the wake resumes from the checkpoint on a different assistant |
+| Quota waits are distinguishable from input/approval waits | The inspector labels the wait `Quota wait · K2` with its own blocker panel; `WAITING_INPUT` and approvals stay separate states |
+| Idle headroom is honest | K3 shows a scoped observation with freshness where the account exposes an endpoint, and `unsupported` with the reason where it does not |
+| The UI shows persisted kernel state, not a frontend simulation | Every field above is read back from `/api/tasks`, `/api/tasks/:id` and `/api/scheduler/status` |
+
+The Orbital positions are an operator index, not a forecast: nothing in the UI
+implies a predicted execution time, because the backend supplies no such
+semantics.
+
+## 2. Prerequisites
+
+- Node 22 and pnpm, with `pnpm install` already run.
+- For the deterministic demo: nothing else. It uses the in-process API, a
+  temporary workspace home and the deterministic FakeAdapter — no provider
+  credentials, no wall-clock waits, no real quota consumption.
+- For the real-provider smoke: a logged-in Claude CLI on the machine
+  (`~/.claude/.credentials.json`). No credential is ever copied into this repo,
+  the workspace config or the demo output.
+- For `GET /api/scheduler/status` on an existing workspace: the API credential
+  must carry the `schedules.read` capability that K1 added. A credential minted
+  before K1 does not have it and the endpoint answers `403`; mint a new one with
+  `pnpm --filter @agent-plane/api rotate` (the previous bearer stays valid for
+  the rotation grace window).
+- K3 probes are opt-in: set `scheduler.quotaProbe: true` in the workspace config
+  (`~/.agent-plane/<workspace>/config.yaml`). The default is `false`, and with it
+  off the UI reports probes as disabled rather than inventing headroom.
+
+## 3. Deterministic demo (the reproducible one)
+
+```bash
+pnpm demo:a
+```
+
+That builds the web app and runs `apps/web/e2e/demo-a.spec.ts` under the
+Playwright `demo-a` project, which keeps trace, video and screenshots. The spec
+boots a real API in-process against a temporary workspace, with an injected clock
+and an injected probe transport, so the whole walkthrough is deterministic.
+
+Artefacts land in
+`apps/web/test-results/demo-a-*-demo-a/` (git-ignored):
+
+| File | Content |
+|---|---|
+| `demo-a-1-k1-waiting.png` | K1 task parked: wait kind, generation, next eligible time, scheduler ownership |
+| `demo-a-2-k2-quota-wait.png` | K2 quota wait: blocker evidence, provenance, checkpoint/continuation |
+| `demo-a-3-k3-idle-probe.png` | K3 idle observation: `ok` with freshness, and `unsupported` with its reason |
+| `demo-a-4-laptop.png`, `demo-a-5-mobile.png` | 1100px and 390px layouts, asserted free of horizontal overflow |
+| `trace.zip` | Playwright trace — open with `pnpm --filter @agent-plane/web exec playwright show-trace <path>` |
+| `video.webm` | Full walkthrough recording |
+
+To run it against an already-built web bundle:
+
+```bash
+pnpm --filter @agent-plane/web exec playwright test --project=demo-a
+```
+
+## 4. Expected state progression
+
+**A. Time wait (K1).** `POST /api/tasks` with `wait: { kind: "time", notBefore }`
+→ task is `WAITING_RESOURCE` with generation 1 → the Schedule tab shows
+`Time wait · K1`, the next eligible time and "the scheduler owns this task" →
+at the wake the scheduler reserves a dispatch, routes, starts the provider and
+the task completes, with `dispatch.started` in the scheduler event list.
+`Run now` performs the same wake early; `Cancel task` ends the wait with no run.
+
+**B. Quota wait and resume (K2).** A running task hits the limit → the run is
+checkpointed → every candidate is quota-blocked → the task parks as
+`WAITING_RESOURCE` with `Quota wait · K2`, the blocker's scope, `source
+runtime-probe`, `provenance provider-reported` and the retry instant, and the
+checkpoint the continuation will resume from → at the wake the quota is
+revalidated, routing picks the assistant that is now eligible, and the run
+resumes from the checkpoint and completes. The Execution tab then shows the
+post-wake assistant identity.
+
+**C. Idle observation (K3).** With `scheduler.quotaProbe` on, the Quota tab lists
+one row per assistant: the probed account shows its bucket, used percent and
+freshness; an assistant whose provider exposes no verified idle endpoint shows
+`unsupported` and says so. Probes are rate-limited to one attempt per assistant
+per 15 minutes and are recorded separately from the wake budget.
+
+## 5. Running the plane on the Oracle machine
+
+```bash
+pnpm --filter @agent-plane/api start     # API on 127.0.0.1:4176
+pnpm --filter @agent-plane/web dev       # Vite dev server on 127.0.0.1:5173+
+```
+
+Both listen on loopback only. Do not change the bind address, the auth mode or
+the firewall to make the demo easier to reach.
+
+To open the UI from a laptop, forward the ports over SSH from the laptop:
+
+```bash
+ssh -N -L 4176:127.0.0.1:4176 -L 5173:127.0.0.1:5173 <user>@<oracle-host>
+```
+
+then browse `http://127.0.0.1:5173`. The SPA obtains its session through the
+normal single-use bootstrap flow (`pnpm --filter @agent-plane/api open`); the
+tunnel carries it unchanged.
+
+## 6. Optional real-provider smoke
+
+The deterministic demo intentionally proves K2 without burning real quota. To
+show that a real provider still executes end to end, create one small task
+pinned to the Claude assistant and let it run:
+
+```bash
+# with the plane running, using an API credential that has commands.write
+curl -sX POST http://127.0.0.1:4176/api/tasks \
+  -H "authorization: Bearer $ACP_TOKEN" -H 'content-type: application/json' \
+  -d '{"goal":"Reply with the single word: ready. Do not modify any files.","overrides":{"assistantId":"personal-claude"}}'
+curl -sX POST http://127.0.0.1:4176/api/tasks/<id>/start \
+  -H "authorization: Bearer $ACP_TOKEN" -H 'content-type: application/json' \
+  -d '{"assistantId":"personal-claude"}'
+```
+
+Expect: `ruleFired: user-override` in the routing explanation, a real provider
+run, normalized events, `COMPLETED`, and model/usage evidence on the run. Codex
+being unavailable does not fail Demo A.
+
+## 7. Deliberately not implemented
+
+- K4 dependency waits, K5 recurring schedules and K6 Cockpit scheduling: the
+  Orbital UI renders these as `Planned`, never as working controls.
+- K7+ execution identity/catalog, K9+ context lifecycle, K13 model selection:
+  the context panel stays `Planned · K9`.
+- A real Codex idle quota probe: its app-server RPC is unverified, so K3 answers
+  `unsupported` for that provider rather than inventing headroom.
+- Cockpit remains untouched by Demo A.
+
+## 8. Defect found and fixed during Demo A
+
+Integration surfaced one narrow kernel bug, fixed in the same branch with a
+regression test (`apps/api/test/quota-probe.test.ts`, "reads quota evidence and
+cooldowns on the injected kernel clock, not wall time"):
+
+The scheduler runs on an injected clock, but the routing-side quota reads
+(`routeTask`, `Orchestrator.quotaPlan`) and the cooldown store still used wall
+time. Whenever the two clocks diverged, fresh quota evidence looked stale and an
+expired cooldown looked live, so a blocked assistant could be started at a wake.
+Both now take the same kernel clock the scheduler and `QuotaProjection` use.

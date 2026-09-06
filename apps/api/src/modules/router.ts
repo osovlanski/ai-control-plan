@@ -200,7 +200,7 @@ function qualityScore(score: AssistantScore | undefined): number | undefined {
 /** CR-30: all Control Plane routing uses current evidence and durable intent. */
 export function routeTask(
   deps: { db: Db; config: ResolvedConfig; tasks: TaskStore;
-    registry: Registry; cooldowns: CooldownStore },
+    registry: Registry; cooldowns: CooldownStore; now?: () => Date },
   taskId: string, origin: 'intake' | 'wake' | 'run-now' | 'failover' | 'context-yield',
   options: { exclude?: string; override?: AssistantId; dispatchId?: string } = {},
 ) {
@@ -215,7 +215,7 @@ export function routeTask(
   const explanation: RoutingExplanation & { origin: string } = { ...route({
     taskId, profile: intent.profile, needsRepo: !!intent.repository,
     repoPathAllowed: !intent.repository || deps.config.repoAllowlist.some(p => intent.repository!.path === p || intent.repository!.path.startsWith(`${p}/`)),
-    cooldowns: new Map(), scores, projections: new Map(deps.registry.list().map(a => [a.id, new QuotaProjection(deps.db).for(a.id, a.manifestParsed)])), userOverride: options.override ?? intent.overrides?.assistantId,
+    cooldowns: new Map(), scores, projections: new Map(deps.registry.list().map(a => [a.id, new QuotaProjection(deps.db, deps.now).for(a.id, a.manifestParsed)])), userOverride: options.override ?? intent.overrides?.assistantId,
   }, candidates), origin,
     ...(dispatch ? { dispatchId: options.dispatchId, continuation: dispatch.checkpoint_id ? { kind: 'checkpoint', checkpointId: dispatch.checkpoint_id } : { kind: 'fresh' } } : {}) };
   return { explanation, routingDecisionId: persistRoutingDecision(deps.db, taskId, explanation) };

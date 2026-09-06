@@ -15,7 +15,8 @@ export interface Cooldown {
  * routing explanation the user reads.
  */
 export class CooldownStore {
-  constructor(private db: Db) {}
+  /** `now` is the kernel clock the scheduler and quota projection share. */
+  constructor(private db: Db, private clock: () => Date = () => new Date()) {}
 
   /** `resetsAt` from the provider wins; otherwise a default window by kind. */
   penalize(
@@ -25,7 +26,7 @@ export class CooldownStore {
     resetsAt?: string,
     attempt = 0,
   ): Cooldown {
-    const now = Date.now();
+    const now = this.clock().getTime();
     const parsed = resetsAt ? Date.parse(resetsAt) : Number.NaN;
     const until = new Date(
       Number.isFinite(parsed) && parsed > now
@@ -50,7 +51,7 @@ export class CooldownStore {
   }
 
   /** Active cooldowns as router hard-filter reasons, keyed by assistant. */
-  active(now: Date = new Date()): Map<string, string> {
+  active(now: Date = this.clock()): Map<string, string> {
     const rows = this.db
       .prepare("SELECT assistant_id, reason, until FROM cooldowns WHERE until > ?")
       .all(now.toISOString()) as Array<{ assistant_id: string; reason: string; until: string }>;

@@ -7,7 +7,7 @@ import { loadConfig, type ResolvedConfig } from '../src/config.js';
 import { openDb, type Db } from '../src/db/index.js';
 import { buildServer, type BuiltServer } from '../src/server.js';
 import { Scheduler } from '../src/modules/scheduler.js';
-import { QuotaProjection } from '../src/modules/quota.js';
+import { QuotaProjection, retryDelay } from '../src/modules/quota.js';
 import { PROBE_INTERVAL_MS, QuotaProbeService, probeQuota, type ProbeOutcome, type QuotaProbeFn } from '../src/modules/quota-probe.js';
 
 const A = 'fake-a' as AssistantId, B = 'fake-b' as AssistantId;
@@ -184,6 +184,25 @@ describe('K3 quota probes', () => {
     const status = built.scheduler.status();
     expect(status.probesEnabled).toBe(true);
     expect(status.probes).toEqual([expect.objectContaining({ assistantId: A, ageMs: 0 })]);
+  });
+
+  // Regression: routing-side quota reads once used wall time while the scheduler
+  // ran on the injected clock, so fresh evidence looked stale (and an expired
+  // cooldown looked live) whenever the two clocks diverged.
+  it('reads quota evidence and cooldowns on the injected kernel clock, not wall time', async () => {
+    await boot(true);
+    const id = built.tasks.create({ goal: 'needs headroom' }).taskId;
+    await service(async () => ok(100, new Date(clock.getTime() + 3_600_000).toISOString())).refresh([A]);
+    expect(built.orchestrator.quotaPlan(id).blockers).toEqual(expect.arrayContaining([
+      expect.objectContaining({ assistantId: A, source: 'provider-api', kind: 'provider-reset' }),
+    ]));
+
+    built.cooldowns.penalize(B, 'limit', 'no headroom');
+    // Default window measured from the kernel clock, so it is live at `now()`.
+    expect(Date.parse(built.cooldowns.list()[0]!.until) - clock.getTime()).toBe(retryDelay(0));
+    expect([...built.cooldowns.active().keys()]).toEqual([B]);
+    advance(retryDelay(0));
+    expect([...built.cooldowns.active().keys()]).toEqual([]);
   });
 });
 

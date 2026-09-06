@@ -15,6 +15,7 @@
     "test": "pnpm -r --filter '!@agent-plane/eval' --if-present test",
     "test:harness-on": "pnpm --filter @agent-plane/api test:harness-on",
     "test:recovery-chaos": "pnpm --filter @agent-plane/api test:recovery-chaos",
+    "demo:a": "pnpm --filter @agent-plane/web demo:a",
     "eval": "pnpm --filter @agent-plane/eval eval",
     "eval:promote": "pnpm --filter @agent-plane/eval promote",
     "build": "pnpm -r --if-present build"
