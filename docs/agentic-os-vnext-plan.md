@@ -1,8 +1,9 @@
 # Agentic OS — vNext Enhancement Plan
 
-**Implementation update:** K1 durable dispatch is implemented and regression-verified on
-`feat/agentic-os-k1-durable-dispatch`; see [the acceptance record](agentic-os-k1-implementation.md).
-K2+ and the other proposed Agentic OS services are not implemented by that slice.
+**Implementation update:** K1 durable dispatch, K2 quota retry and K3 optional quota probes are
+implemented and regression-verified; see the acceptance records for
+[K1](agentic-os-k1-implementation.md) and [K3](agentic-os-k3-implementation.md).
+K4+ and the other proposed Agentic OS services are not implemented by those slices.
 
 **Status:** Proposed — revision 8 (planning only; no production implementation in this pass)
 **Review:** `docs/agentic-os-vnext-review-log.md` (Codex adversarial review, rounds 1–4, plus an independent cold review of revision 5 — `docs/agentic-os-vnext-review-log.md`)

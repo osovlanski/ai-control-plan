@@ -28,6 +28,8 @@ import { Registry } from "./modules/registry.js";
 import { routingHistory } from "./modules/router.js";
 import { TaskEventBus } from "./modules/sse.js";
 import { Scheduler } from "./modules/scheduler.js";
+import { QuotaProbeService } from "./modules/quota-probe.js";
+import { QuotaProjection } from "./modules/quota.js";
 import { TaskStore } from "./modules/tasks.js";
 import { TelemetryService } from "./modules/telemetry.js";
 import { EventRetention } from "./modules/retention.js";
@@ -46,6 +48,7 @@ export interface ServerDeps {
   bus?: TaskEventBus;
   tasks?: TaskStore;
   now?: () => Date;
+  quotaProbes?: QuotaProbeService;
   registerExtraRoutes?: (app: FastifyInstance) => void;
 }
 
@@ -59,6 +62,7 @@ export interface BuiltServer {
   cooldowns: CooldownStore;
   telemetry: TelemetryService;
   scheduler: Scheduler;
+  quotaProbes: QuotaProbeService;
 }
 
 export function buildServer(deps: ServerDeps): BuiltServer {
@@ -134,7 +138,8 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   const repoAllowed = (repoPath: string | null | undefined): boolean =>
     !repoPath || config.repoAllowlist.some((allowed) => repoPath === allowed || repoPath.startsWith(`${allowed}/`));
 
-  const scheduler = new Scheduler({ db, tasks, orchestrator, bus, config, now, onError: error => app.log.error(error) });
+  const probes = deps.quotaProbes ?? new QuotaProbeService(db, config, registry, undefined, now);
+  const scheduler = new Scheduler({ db, tasks, orchestrator, bus, config, probes, now, onError: error => app.log.error(error) });
   const computeRoute = (taskId: string, userOverride?: AssistantId) => tasks.get(taskId)
     ? orchestrator.routeTask(taskId, 'intake', { override: userOverride }) : undefined;
 
@@ -164,13 +169,20 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   // ---- Assistants / registry ----
 
   app.get("/api/assistants", read.tasks, () =>
-    registry.list().map((a) => ({
-      id: a.id,
-      provider: a.provider,
-      enabled: a.enabled === 1,
-      manifest: a.manifestParsed,
-      manifestUpdatedAt: a.manifest_updated_at,
-    })),
+    registry.list().map((a) => {
+      // Effective headroom, not the manifest's copy: a fresh idle probe (K3)
+      // supersedes a stale run-stream snapshot and vice versa, by observedAt.
+      const projection = new QuotaProjection(db, now).for(a.id, a.manifestParsed);
+      return {
+        id: a.id,
+        provider: a.provider,
+        enabled: a.enabled === 1,
+        manifest: a.manifestParsed,
+        manifestUpdatedAt: a.manifest_updated_at,
+        quota: projection.quota,
+        quotaObservations: projection.observations,
+      };
+    }),
   );
 
   app.post<{ Params: { id: string } }>("/api/assistants/:id/sync", write, async (req, reply) => {
@@ -758,7 +770,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     });
   }
 
-  return { app, registry, orchestrator, tasks, bus, checkpoints, cooldowns, telemetry, scheduler };
+  return { app, registry, orchestrator, tasks, bus, checkpoints, cooldowns, telemetry, scheduler, quotaProbes: probes };
 }
 
 function sseHeaders(reply: FastifyReply): void {

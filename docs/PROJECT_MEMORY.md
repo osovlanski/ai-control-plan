@@ -22,3 +22,12 @@ This is not an independent product: it is the `docs/agentic-os-contract-lifecycl
 - Migration 014 separates waits/dispatches/task-scoped scheduler events from provider run events. A missing fresh Harness session can safely re-park after its recovery window; missing legacy run evidence remains an explicit operator-reconciled ambiguity, never an automatic retry.
 - K1 evidence: `docs/agentic-os-k1-implementation.md` maps all 12 acceptance criteria and records architecture corrections. Typecheck/lint/build passed; default tests core 70 / adapters 8 / API 475 / web 6, plus forced-Harness API 475.
 - K2+ quota conversion/projection/probes, model/context services, runtime backends, and Composer remain deferred. This feature branch implements K1 in the canonical application; it does not create a duplicate product.
+
+## K3 optional quota probes implementation
+
+- `feat/agentic-os-k3-quota-probes` adds an opt-in idle quota probe (`scheduler.quotaProbe`, default off) whose results are `provider-api` observations in the K2 `QuotaProjection`, scoped to account and bucket.
+- The Claude OAuth usage endpoint is implemented; every other provider returns `unsupported`. The Codex app-server rate-limits RPC stays unimplemented until it is verified against a running app-server — no placeholder data stands in for it.
+- Credentials are read in memory from the provider's own file and used only as the request credential; probe outcomes carry a classified reason, never a response body, and a redaction test asserts the credential reaches no table, log or API read.
+- Migration 016 adds `quota_probes` (attempts only) so the one-per-assistant-per-15-minutes window survives a restart and `GET /api/scheduler/status` can report probe freshness. A failed probe writes no observation and changes nothing.
+- Probe attempts are recorded in the wait condition's `history` and never increment `auto_wakes`; wake revalidates the projection with a probe before deciding, so an exhausted window re-parks without a provider start.
+- K3 evidence: `docs/agentic-os-k3-implementation.md`.

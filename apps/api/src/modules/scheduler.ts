@@ -5,6 +5,7 @@ import type { Db } from '../db/index.js';
 import type { ResolvedConfig } from '../config.js';
 import type { TaskStore } from './tasks.js';
 import type { Orchestrator } from './orchestrator.js';
+import type { QuotaProbeService } from './quota-probe.js';
 import type { TaskEventBus } from './sse.js';
 
 const RECHECK_MS = 60_000;
@@ -15,6 +16,8 @@ type Actor = 'timer' | 'event' | 'operator';
 type WakeResult = { outcome: 'stale'; reason: string } | { outcome: 'dispatched'; dispatchId: string };
 export interface SchedulerDeps {
   db: Db; tasks: TaskStore; orchestrator: Orchestrator; bus: TaskEventBus; config: ResolvedConfig;
+  /** Optional idle quota probes (K3). Absent or disabled: quota waits use run-stream evidence alone. */
+  probes?: QuotaProbeService;
   now?: () => Date;
   /** Deterministic fault injection at committed crash boundaries. */
   boundary?: (phase: 'reserved' | 'routed' | 'materialized' | 'start_attempted' | 'session_created', dispatch: Dispatch) => Promise<void>;
@@ -34,7 +37,8 @@ export class Scheduler {
   status() {
     const due = this.d.db.prepare("SELECT COUNT(*) AS count FROM wait_conditions WHERE state = 'active' AND not_before <= ?").get(this.iso()) as { count: number };
     const open = this.d.db.prepare("SELECT COUNT(*) AS count FROM dispatches WHERE phase IN ('reserved','start_attempted')").get() as { count: number };
-    return { enabled: this.enabled, armed: !this.stopped && this.enabled && this.timer !== undefined, dueConditions: due.count, openDispatches: open.count, lastTick: this.lastTick };
+    return { enabled: this.enabled, armed: !this.stopped && this.enabled && this.timer !== undefined, dueConditions: due.count, openDispatches: open.count, lastTick: this.lastTick,
+      probesEnabled: this.d.probes?.enabled ?? false, probes: this.d.probes?.status() ?? [] };
   }
 
   validate(input: WaitInput): WaitInput {
@@ -127,6 +131,7 @@ export class Scheduler {
   }
 
   async wake(taskId: string, expectedGeneration: number, actor: Actor): Promise<WakeResult> {
+    await this.revalidateQuota(taskId, expectedGeneration);
     const result = this.d.db.transaction((): WakeResult => {
       const c = this.condition(taskId);
       if (!c || c.state !== 'active' || c.generation !== expectedGeneration || this.d.tasks.get(taskId)?.state !== 'WAITING_RESOURCE' || this.hasOwner(taskId)) {
@@ -149,6 +154,25 @@ export class Scheduler {
     this.arm();
     return result;
   }
+  /**
+   * Revalidates quota evidence before the wake decides anything. A probe is an
+   * observation, not a wake: attempts are recorded in `history` with
+   * `outcome: 'probe'` and never increment `autoWakes`. A probe that fails
+   * writes no observation, so the projection is unchanged.
+   */
+  private async revalidateQuota(taskId: string, generation: number): Promise<void> {
+    if (!this.d.probes?.enabled) return;
+    const c = this.condition(taskId);
+    if (!c || c.state !== 'active' || c.generation !== generation || c.kind !== 'quota') return;
+    const attempts = await this.d.probes.refresh(c.assistants).catch(error => { this.d.onError?.(error); return []; });
+    if (!attempts.length) return;
+    const history = [...c.history, { at: this.iso(), actor: 'scheduler', outcome: 'probe',
+      reason: attempts.map(a => `${a.assistantId}: ${a.status}`).join('; ') }].slice(-10);
+    this.d.db.prepare("UPDATE wait_conditions SET history = ? WHERE task_id = ? AND generation = ? AND state = 'active'")
+      .run(JSON.stringify(redactValue(history)), taskId, generation);
+    this.publish(taskId);
+  }
+
   runNow(taskId: string, generation = this.condition(taskId)?.generation ?? 0, confirmNoLiveOwner = false): Promise<WakeResult> {
     const ambiguous = this.dispatches(taskId).find(d => d.phase === 'start_attempted' && d.execution_path === 'legacy');
     if (ambiguous && this.d.tasks.get(taskId)?.state === 'ROUTING') {
@@ -310,5 +334,8 @@ export class Scheduler {
       if (!this.inFlight.has(d.dispatch_id) && this.now().getTime() - Date.parse(d.updated_at) >= RECOVERY_WINDOW_MS &&
           !this.d.db.prepare('SELECT 1 FROM runs WHERE execution_request_id = ?').get(d.dispatch_id)) this.repark(d, 'start_ambiguous');
     }
+    // Idle headroom: due probes for every enabled assistant, not only the ones
+    // some task is parked on. Rate-limited per assistant inside the service.
+    if (this.d.probes?.enabled) await this.d.probes.refresh().catch(error => this.d.onError?.(error));
   }
 }
