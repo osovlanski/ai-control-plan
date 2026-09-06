@@ -58,6 +58,30 @@ normalized-event contract version is `1.0`.
 | [`docs/agentic-os-kernel-services.md`](docs/agentic-os-kernel-services.md) | Kernel services M12–M15: model intelligence, scheduler, context lifecycle, runtime seam (proposed) |
 | [`plans/progress.md`](plans/progress.md) | Living progress log |
 
+## Demo A — durable waits, quota resume and idle probes
+
+`pnpm demo:a` runs the whole walkthrough against an in-process API and the
+deterministic FakeAdapter: no provider credentials, no wall-clock waits, no real
+quota exhaustion. Full operator runbook: [`docs/demo/demo-a.md`](docs/demo/demo-a.md).
+
+A task parked on a durable time wait — persisted wait kind, generation and next
+eligible time, owned by the scheduler:
+
+![Task parked on a K1 time wait](docs/demo/assets/demo-a-1-k1-waiting.png)
+
+A quota-limited task after checkpointing: the blocker's scope, source and
+provenance, the retry instant, and the checkpoint its continuation resumes from:
+
+![Quota wait with blocker evidence](docs/demo/assets/demo-a-2-k2-quota-wait.png)
+
+Idle quota observation: a scoped, timestamped reading where the account exposes
+an endpoint, and an explicit `unsupported` where it does not:
+
+![Idle quota observation](docs/demo/assets/demo-a-3-k3-idle-probe.png)
+
+Each run also writes a Playwright trace and a video of the walkthrough; both stay
+out of git, under `apps/web/test-results/`.
+
 ## Run and verify
 
 ```bash
