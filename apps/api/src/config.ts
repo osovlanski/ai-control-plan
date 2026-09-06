@@ -46,7 +46,16 @@ export interface WorkspaceConfig {
     softThresholdPct: number;
     triggers: string[];
   };
-  scheduler?: { enabled: boolean; maxAutoWakes?: number };
+  scheduler?: {
+    enabled: boolean;
+    maxAutoWakes?: number;
+    /**
+     * Optional idle quota probes (K3). Off by default: a probe reads the
+     * provider's own credential file and calls an account-specific endpoint,
+     * so the operator opts in per workspace.
+     */
+    quotaProbe?: boolean;
+  };
   sync: {
     /** Local hour (0-23) for the daily capability sync. */
     dailyHour: number;
@@ -103,7 +112,7 @@ const PERSONAL_DEFAULTS: Omit<WorkspaceConfig, "workspace"> = {
     softThresholdPct: 85,
     triggers: ["quota", "rate_limit", "provider_unavailable"],
   },
-  scheduler: { enabled: true, maxAutoWakes: 3 },
+  scheduler: { enabled: true, maxAutoWakes: 3, quotaProbe: false },
   sync: { dailyHour: 7 },
   execution: { harnessModes: { single: false } },
 };
@@ -174,7 +183,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ResolvedConfig
     policy: { ...defaults.policy, ...file.policy },
     failover: { ...defaults.failover, ...file.failover },
     sync: { ...defaults.sync, ...file.sync },
-    scheduler: { enabled: file.scheduler?.enabled ?? true, maxAutoWakes: file.scheduler?.maxAutoWakes ?? 3 },
+    scheduler: { enabled: file.scheduler?.enabled ?? true, maxAutoWakes: file.scheduler?.maxAutoWakes ?? 3, quotaProbe: file.scheduler?.quotaProbe ?? false },
     execution,
   };
 
@@ -265,6 +274,7 @@ function validate(config: WorkspaceConfig, path: string): void {
   const problems: string[] = [];
   if (typeof config.scheduler?.enabled !== "boolean") problems.push("scheduler.enabled must be a boolean");
   if (config.scheduler?.maxAutoWakes !== undefined && (!Number.isInteger(config.scheduler.maxAutoWakes) || config.scheduler.maxAutoWakes < 1 || config.scheduler.maxAutoWakes > 100)) problems.push("scheduler.maxAutoWakes must be an integer from 1 to 100");
+  if (config.scheduler?.quotaProbe !== undefined && typeof config.scheduler.quotaProbe !== "boolean") problems.push("scheduler.quotaProbe must be a boolean");
   const loopbackHosts = new Set(["127.0.0.1", "::1", "localhost"]);
   if (!loopbackHosts.has(config.api.host)) {
     problems.push(`api.host must be a loopback address until authenticated remote mode exists, got ${config.api.host}`);

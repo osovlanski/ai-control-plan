@@ -55,6 +55,7 @@ describe("migrations", () => {
       "guard_directives",
       "handoff_envelopes",
       "handoffs",
+      "quota_probes",
       "quota_snapshots",
       "repository_identities",
       "repository_identity_observations",
