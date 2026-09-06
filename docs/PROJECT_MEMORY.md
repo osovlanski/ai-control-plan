@@ -14,3 +14,11 @@ AI Agent Control Plane routes work across complete assistant environments (Claud
 - Portfolio: the source of truth for control/execution-plane contracts. `ai-control-plan-agentic-os` was a documentation worktree; its design docs are now tracked here under `docs/`. It is not a separate product. Cockpit is a plausible UX/observability consumer, not currently integrated.
 - Open questions: intended trust boundary for the API; whether remote execution is actually required; ownership/versioning of contracts shared with Cockpit.
 This is not an independent product: it is the `docs/agentic-os-contract-lifecycle` documentation worktree of `ai-control-plan`. The branch proposes later Agentic OS lifecycle phases; proposals must not be reported as shipped features. Build/run/test and architecture match the parent repository; do not evolve duplicate application code here.
+
+## K1 durable dispatch implementation
+
+- `feat/agentic-os-k1-durable-dispatch` starts at kernel-services `56cf244`; Orbital UI is a sibling and excluded.
+- Newly created single-task time waits now have generation-aware durable dispatch, cancellation, boot reconciliation, immutable intent, pause kinds, routing at wake, and minimal waiting UI. API 2.1 adds scheduler-status reads under `schedules.read`.
+- Migration 014 separates waits/dispatches/task-scoped scheduler events from provider run events. A missing fresh Harness session can safely re-park after its recovery window; missing legacy run evidence remains an explicit operator-reconciled ambiguity, never an automatic retry.
+- K1 evidence: `docs/agentic-os-k1-implementation.md` maps all 12 acceptance criteria and records architecture corrections. Typecheck/lint/build passed; default tests core 70 / adapters 8 / API 475 / web 6, plus forced-Harness API 475.
+- K2+ quota conversion/projection/probes, model/context services, runtime backends, and Composer remain deferred. This feature branch implements K1 in the canonical application; it does not create a duplicate product.

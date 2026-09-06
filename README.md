@@ -54,6 +54,8 @@ normalized-event contract version is `1.0`.
 | [`docs/revised-architecture.md`](docs/revised-architecture.md) | The accepted target architecture |
 | [`plans/implementation-plan.md`](plans/implementation-plan.md) | Phased delivery plan (Phase 0–5) |
 | [`docs/agentic-os-plan.md`](docs/agentic-os-plan.md) | Agentic OS — design & change plan (Phases 6–10, proposed) |
+| [`docs/agentic-os-vnext-plan.md`](docs/agentic-os-vnext-plan.md) | vNext reconciliation and increments 1–17 (proposed) |
+| [`docs/agentic-os-kernel-services.md`](docs/agentic-os-kernel-services.md) | Kernel services M12–M15: model intelligence, scheduler, context lifecycle, runtime seam (proposed) |
 | [`plans/progress.md`](plans/progress.md) | Living progress log |
 
 ## Run and verify

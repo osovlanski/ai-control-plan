@@ -12,6 +12,8 @@ import {
   redactValue,
   type AssistantId,
   type RoutingProfile,
+  type TaskIntent,
+  type WaitInput,
 } from "@agent-plane/core";
 import type { ResolvedConfig } from "./config.js";
 import { appliedMigrations, type Db } from "./db/index.js";
@@ -23,10 +25,11 @@ import { effectiveStateSql, effectiveUsageJoin, effectiveUsageSql } from "./modu
 import { Orchestrator } from "./modules/orchestrator.js";
 import type { planProjectVerification } from "./modules/project-verification.js";
 import { Registry } from "./modules/registry.js";
-import { persistRoutingDecision, route, routingHistory, type RouteRequest } from "./modules/router.js";
+import { routingHistory } from "./modules/router.js";
 import { TaskEventBus } from "./modules/sse.js";
+import { Scheduler } from "./modules/scheduler.js";
 import { TaskStore } from "./modules/tasks.js";
-import { TelemetryService, classifyGoal } from "./modules/telemetry.js";
+import { TelemetryService } from "./modules/telemetry.js";
 import { EventRetention } from "./modules/retention.js";
 import { RepositoryIdentityRegistry } from "./repo/identity-registry.js";
 import { renderHandoffMd } from "./render/handoff.js";
@@ -55,6 +58,7 @@ export interface BuiltServer {
   checkpoints: CheckpointService;
   cooldowns: CooldownStore;
   telemetry: TelemetryService;
+  scheduler: Scheduler;
 }
 
 export function buildServer(deps: ServerDeps): BuiltServer {
@@ -78,6 +82,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     stream: { config: { auth: { require: "events.stream" } } }, routing: { config: { auth: { require: "routing.read" } } },
     sessions: { config: { auth: { require: "sessions.read" } } }, verification: { config: { auth: { require: "verification.read" } } },
   } as const;
+  const schedulerRead = { config: { auth: { require: "schedules.read" } } } as const;
   const write = { config: { auth: { require: "commands.write" } } } as const;
 
   // The internal bridge + recovery are wired for every real composition root
@@ -99,6 +104,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     checkpoints,
     registry,
     onError: (err) => app.log.error(err),
+    onQuotaObserved: () => orchestrator.scheduler?.quotaObserved(),
   });
   const harnessRecovery = composed.harnessRecovery;
   const harnessBridge: HarnessBridge | undefined = deps.orchestrator ? undefined : composed.harnessBridge;
@@ -128,33 +134,9 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   const repoAllowed = (repoPath: string | null | undefined): boolean =>
     !repoPath || config.repoAllowlist.some((allowed) => repoPath === allowed || repoPath.startsWith(`${allowed}/`));
 
-  const computeRoute = (taskId: string, userOverride?: AssistantId) => {
-    const row = tasks.get(taskId);
-    if (!row) return undefined;
-    const req: RouteRequest = {
-      taskId,
-      profile: row.profile,
-      needsRepo: row.repo_path !== null,
-      repoPathAllowed: repoAllowed(row.repo_path),
-      cooldowns: cooldowns.active(),
-      userOverride,
-      // Most specific evidence available, per assistant: scores for this kind
-      // of task where they exist (coding skill says little about review
-      // skill), falling back to that assistant's overall record rather than
-      // discarding a real measurement just because it came from another kind.
-      scores: preferSpecific(telemetry.scores(), telemetry.scores(classifyGoal(row.goal))),
-    };
-    const explanation = route(
-      req,
-      registry.list().map((a) => ({
-        id: a.id as AssistantId,
-        enabled: a.enabled === 1,
-        manifest: a.manifestParsed,
-      })),
-    );
-    const routingDecisionId = persistRoutingDecision(db, taskId, explanation);
-    return { explanation, routingDecisionId };
-  };
+  const scheduler = new Scheduler({ db, tasks, orchestrator, bus, config, now, onError: error => app.log.error(error) });
+  const computeRoute = (taskId: string, userOverride?: AssistantId) => tasks.get(taskId)
+    ? orchestrator.routeTask(taskId, 'intake', { override: userOverride }) : undefined;
 
   app.get("/api/meta", read.tasks, () => ({
     apiVersion: CONTROL_PLANE_API_VERSION,
@@ -176,6 +158,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     repoAllowlist: config.repoAllowlist,
     failover: config.failover,
     sync: config.sync,
+    scheduler: { enabled: scheduler.enabled },
   }));
 
   // ---- Assistants / registry ----
@@ -205,15 +188,29 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   // ---- Tasks ----
 
   app.post<{
-    Body: { goal?: string; constraints?: string[]; repoPath?: string; profile?: RoutingProfile };
+    Body: { goal?: string; constraints?: string[]; repoPath?: string; profile?: RoutingProfile; wait?: WaitInput; overrides?: TaskIntent["overrides"]; mode?: string };
   }>("/api/tasks", write, async (req, reply) => {
-    const { goal, constraints, repoPath, profile } = req.body ?? {};
-    if (!goal || !goal.trim()) return reply.status(400).send({ error: "goal is required" });
+    const { goal, constraints, repoPath, profile, wait, overrides, mode } = req.body ?? {};
+    if (typeof goal !== "string" || !goal.trim()) return reply.status(400).send({ error: "goal is required" });
+    if (repoPath !== undefined && typeof repoPath !== "string") return reply.status(400).send({ error: "repoPath must be a string" });
     if (repoPath && !repoAllowed(repoPath)) {
       return reply.status(403).send({ error: `Repository ${repoPath} is not in this workspace's allowlist` });
     }
-    const envelope = tasks.create(redactValue({ goal: goal.trim(), constraints, repoPath, profile }));
-    return reply.status(201).send(envelope);
+    try {
+      if (wait && mode && mode !== 'single') throw new Error('K1 waits require single mode');
+      if (overrides && (typeof overrides !== 'object' || Object.keys(overrides).some(k => k !== 'assistantId') ||
+          (overrides.assistantId !== undefined && typeof overrides.assistantId !== 'string'))) throw new Error('K1 accepts only assistantId overrides');
+      if (constraints && (!Array.isArray(constraints) || constraints.some(c => typeof c !== 'string'))) throw new Error('constraints must be strings');
+      if (profile && !['auto','preserve-quota','fastest','best-quality','lowest-tokens'].includes(profile)) throw new Error('Invalid routing profile');
+      if (wait) scheduler.validate(wait);
+      const envelope = db.transaction(() => {
+        const task = tasks.create(redactValue({ goal: goal.trim(), constraints, repoPath, profile, overrides }));
+        if (wait) scheduler.attach(task.taskId, wait);
+        return tasks.envelope(task.taskId);
+      })();
+      if (wait) scheduler.publish(envelope.taskId);
+      return reply.status(201).send(envelope);
+    } catch (err) { return reply.status(400).send({ error: message(err) }); }
   });
 
   app.get("/api/tasks", read.tasks, () =>
@@ -226,6 +223,8 @@ export function buildServer(deps: ServerDeps): BuiltServer {
       repoPath: t.repo_path,
       createdAt: t.created_at,
       updatedAt: t.updated_at,
+      wait: scheduler.condition(t.id),
+      schedulerEnabled: scheduler.enabled,
     })),
   );
 
@@ -250,7 +249,31 @@ export function buildServer(deps: ServerDeps): BuiltServer {
       envelope: JSON.parse(row.envelope) as unknown,
       runs: runs.map((r) => ({ ...r, usage: r.usage ? (JSON.parse(r.usage) as unknown) : null })),
       active: orchestrator.isActive(req.params.id),
+      wait: scheduler.condition(req.params.id),
+      dispatches: scheduler.dispatches(req.params.id),
+      schedulerEvents: scheduler.events(req.params.id),
+      schedulerEnabled: scheduler.enabled,
+      intent: JSON.parse(row.intent_json) as unknown,
     };
+  });
+
+  app.get('/api/scheduler/status', schedulerRead, () => scheduler.status());
+  app.get<{ Params: { id: string } }>('/api/tasks/:id/wait', read.tasks, (req, reply) => {
+    if (!tasks.get(req.params.id)) return reply.status(404).send({ error: 'not found' });
+    return { condition: scheduler.condition(req.params.id) ?? null,
+      openDispatch: scheduler.dispatches(req.params.id).find(d => ['reserved','start_attempted'].includes(d.phase)) ?? null,
+      schedulerEnabled: scheduler.enabled };
+  });
+
+  app.post<{ Params: { id: string }; Body: WaitInput }>('/api/tasks/:id/wait', write, (req, reply) => {
+    if (!tasks.get(req.params.id)) return reply.status(404).send({ error: 'not found' });
+    try { return scheduler.attach(req.params.id, req.body); }
+    catch (err) { return reply.status(409).send({ error: message(err) }); }
+  });
+  app.post<{ Params: { id: string }; Body: { generation?: number; confirmNoLiveOwner?: boolean } }>('/api/tasks/:id/run-now', write, async (req, reply) => {
+    if (!tasks.get(req.params.id)) return reply.status(404).send({ error: 'not found' });
+    const result = await scheduler.runNow(req.params.id, req.body?.generation, req.body?.confirmNoLiveOwner === true);
+    return reply.status(result.outcome === 'stale' ? 409 : 200).send(result);
   });
 
   app.post<{ Params: { id: string }; Body: { assistantId?: AssistantId } }>(
@@ -316,7 +339,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
 
   app.post<{ Params: { id: string } }>("/api/tasks/:id/cancel", write, async (req, reply) => {
     try {
-      await orchestrator.cancelTask(req.params.id);
+      await scheduler.cancel(req.params.id);
       return { ok: true };
     } catch (err) {
       return reply.status(409).send({ error: message(err) });
@@ -446,7 +469,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     const row = tasks.get(req.params.id);
     if (!row) return reply.status(404).send({ error: "not found" });
     sseHeaders(reply);
-    send(reply, { kind: "state", state: { state: row.state, phase: row.activity_phase ?? undefined } });
+    send(reply, { kind: "state", state: { state: row.state, phase: row.activity_phase ?? undefined, wait: scheduler.condition(row.id), schedulerEnabled: scheduler.enabled } });
     const unsubscribe = bus.subscribe(req.params.id, (payload) => send(reply, payload));
     req.raw.on("close", unsubscribe);
   });
@@ -718,7 +741,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     void harnessRecovery.sweepExpiredLeases().catch((err) => app.log.error(err, "lease sweep failed"));
   }, 60_000);
   leaseSweep.unref();
-  app.addHook("onClose", async () => clearInterval(leaseSweep));
+  app.addHook("onClose", async () => { clearInterval(leaseSweep); scheduler.stop(); });
   deps.registerExtraRoutes?.(app);
   app.setErrorHandler((error, _req, reply) => {
     const statusCode = error && typeof error === "object" && "statusCode" in error &&
@@ -735,7 +758,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     });
   }
 
-  return { app, registry, orchestrator, tasks, bus, checkpoints, cooldowns, telemetry };
+  return { app, registry, orchestrator, tasks, bus, checkpoints, cooldowns, telemetry, scheduler };
 }
 
 function sseHeaders(reply: FastifyReply): void {
@@ -820,11 +843,4 @@ function targetOf(row: Record<string, unknown>): Record<string, unknown> | null 
     };
   }
   return null;
-}
-
-/** Overall scores as the base, kind-specific ones overriding where present. */
-function preferSpecific<T>(overall: Map<string, T>, specific: Map<string, T>): Map<string, T> {
-  const merged = new Map(overall);
-  for (const [id, score] of specific) merged.set(id, score);
-  return merged;
 }

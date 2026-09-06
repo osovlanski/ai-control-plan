@@ -18,6 +18,7 @@
  */
 import type {
   AssistantId,
+  ExecutionRequest,
   EvaluationResult,
   HandoffEnvelope,
   TaskEnvelope,
@@ -25,6 +26,7 @@ import type {
 } from "@agent-plane/core";
 import { newHandoffId, redactValue } from "@agent-plane/core";
 import type { Db } from "../../db/index.js";
+import { renderCommittedHandoff } from "../../render/handoff.js";
 
 interface CheckpointRow {
   id: string;
@@ -82,6 +84,7 @@ export class HandoffService {
       taskId: cp.task_id as TaskId,
       checkpointId: cp.id,
       objective: snap.goal,
+      constraints: snap.constraints,
       currentSubtask: snap.nextAction,
       completedActions: snap.completed ?? [],
       outstanding: snap.remaining ?? [],
@@ -111,7 +114,7 @@ export class HandoffService {
   insertEnvelope(
     db: Db,
     envelope: HandoffEnvelope,
-    meta: { sourceSessionId: string | null },
+    meta: { sourceSessionId: string | null; recordHandoff?: boolean },
   ): void {
     const at = this.now().toISOString();
     db.prepare(
@@ -129,6 +132,7 @@ export class HandoffService {
       at,
       at,
     );
+    if (meta.recordHandoff === false) return;
     db.prepare(
       `INSERT INTO handoffs (id, task_id, from_run_id, to_run_id, checkpoint_id, trigger, at)
        VALUES (?, ?, ?, NULL, ?, 'harness', ?)`,
@@ -140,6 +144,29 @@ export class HandoffService {
       .prepare("SELECT * FROM handoff_envelopes WHERE id = ?")
       .get(envelopeId) as RawRow | undefined;
     return row ? toRow(row) : undefined;
+  }
+
+  /**
+   * Bind a checkpoint continuation to an immutable successor request: reuse (or
+   * derive) the envelope for that checkpoint, stamp the request's handoff origin
+   * and committed prompt, then claim it co-committed with `insertRequest`. The
+   * single place this rule lives — the scheduler dispatch path and the failover
+   * bridge both go through it.
+   */
+  bindSuccessor(
+    checkpointId: string,
+    request: ExecutionRequest,
+    meta: { reason: string; fromAssistantId: string; insertRequest: (db: Db) => void },
+  ): void {
+    let env = this.byCheckpoint(checkpointId).find(e => ["ready", "released"].includes(e.state));
+    if (!env) {
+      const derived = this.deriveEnvelope(checkpointId, { reason: meta.reason, fromAssistantId: meta.fromAssistantId });
+      this.insertEnvelope(this.db, derived.envelope, { ...derived, recordHandoff: false });
+      env = this.get(derived.envelope.envelopeId)!;
+    }
+    request.origin = { kind: "handoff", envelopeId: env.id };
+    request.runSpec.prompt = renderCommittedHandoff(env.envelope);
+    this.claim(env.id, { requestId: request.executionRequestId, insertRequest: meta.insertRequest });
   }
 
   /**
@@ -231,10 +258,8 @@ export class HandoffService {
    * prohibited (§7). CASes on `claimed_by_request_id` so a delayed start from a
    * superseded request cannot move a re-claimed envelope.
    *
-   * NOTE (Phase 7): §7 requires this flip to commit in the SAME transaction as
-   * the destination session's durable start intent (§9 step 2). The runner does
-   * not yet drive the claim protocol, so that co-commit is wired with the
-   * orchestrator cutover / recovery work — see docs/harness-implementation-progress.md.
+   * SessionStore co-commits this flip with PREPARED→STARTING. The dispatch's
+   * earlier start_attempted marker remains a separate Control Plane boundary.
    */
   enterStartAmbiguous(envelopeId: string, requestId: string): void {
     const at = this.now().toISOString();

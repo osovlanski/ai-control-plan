@@ -347,6 +347,7 @@ export interface EvidenceBundle {
 // ---------------------------------------------------------------------------
 
 export interface HandoffEnvelope {
+  constraints?: string[];
   schemaVersion: 1;
   envelopeId: string;
   taskId: TaskId;
@@ -378,6 +379,7 @@ export interface HandoffEnvelope {
 
 /** A request to hand off — the Harness yields; the Control Plane picks a target. */
 export interface HandoffRequest {
+  quota?: Array<{ window: string; usedPercent: number; resetsAt?: string }>;
   sessionId: ExecutionSessionId;
   taskId: TaskId;
   /**

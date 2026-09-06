@@ -97,6 +97,7 @@ export class HarnessRecovery {
     for (const s of this.deps.store.liveSessions()) {
       out.push(await this.recoverSession(s.sessionId));
     }
+    this.deps.store.reconcileHandoffClaims();
     return out;
   }
 
@@ -112,6 +113,7 @@ export class HarnessRecovery {
       if (s.leaseToken && s.leaseExpiresAt && s.leaseExpiresAt > nowIso) continue; // held by a live runner
       out.push(await this.recoverSession(s.sessionId));
     }
+    this.deps.store.reconcileHandoffClaims();
     return out;
   }
 

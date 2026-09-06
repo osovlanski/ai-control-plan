@@ -1,3 +1,4 @@
+import assert from 'node:assert/strict';
 /**
  * hits-token-cap (FAKE — plan §4 step 21). `HarnessBridge`'s budget is
  * advisory with no `maxTokens`, so a real token cap isn't reachable yet;
@@ -15,12 +16,18 @@ export async function hitsTokenCap(): Promise<ScenarioScore> {
     harnessSingle: true,
   });
   try {
-    return await runTaskToTerminal(booted, {
+    const score = await runTaskToTerminal(booted, {
       scenario: "hits-token-cap",
       kind: "fake",
       goal: "Burn the quota [FAKE:LIMIT]",
       assistantId: "eval-fake",
     });
+    assert.equal(score.terminalState, 'WAITING_RESOURCE');
+    const condition = booted.built.scheduler.condition(score.taskId);
+    assert.equal(condition?.kind, 'quota');
+    assert.ok(condition?.checkpointId);
+    assert.ok(condition?.blockers?.length);
+    return score;
   } finally {
     await booted.close();
   }

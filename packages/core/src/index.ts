@@ -11,3 +11,5 @@ export * from "./execution.js";
 export * from "./fingerprint.js";
 export * from "./verification-planner.js";
 export * from "./repository-identity.js";
+
+export * from "./scheduler.js";

@@ -6,11 +6,13 @@ import { scheduleDailyJobs } from "./modules/jobs.js";
 
 const config = loadConfig();
 const db = openDb(config.dbPath);
-const { app, registry, orchestrator } = buildServer({ config, db });
+const { app, registry, orchestrator, scheduler } = buildServer({ config, db });
 
 registry.init();
 const reconciled = await orchestrator.reconcileOnBoot();
 await registry.syncChangedAll();
+await scheduler.reconcileOnBoot();
+scheduler.startTimer();
 const stopJobs = scheduleDailyJobs(config.sync.dailyHour, registry, new EventRetention(db), app.log);
 
 app.log.info(

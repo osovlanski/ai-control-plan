@@ -28,7 +28,11 @@ export interface Assistant {
 
 export interface CapabilityChange { assistant_id: string; field: string; old_value: string; new_value: string; source: string; observed_at: string }
 
+export interface TaskWait { generation: number; state: string; reason: string; notBefore: string; blockers?: Array<{ assistantId: string; reason: string; kind: string; source: string; observedAt: string; resetProvenance: string; scope: { bucket?: string; account?: string } }> }
+
 export interface TaskSummary {
+  wait?: TaskWait;
+  schedulerEnabled?: boolean;
   id: string;
   goal: string;
   state: string;
@@ -64,6 +68,9 @@ export interface TaskEvent {
 }
 
 export interface TaskDetail {
+  schedulerEvents?: Array<{ id: number; at: string; type: string; payload: Record<string, unknown> }>;
+  wait?: TaskWait;
+  schedulerEnabled?: boolean;
   id: string;
   goal: string;
   state: string;
@@ -114,9 +121,10 @@ export const api = {
   assistants: () => req<Assistant[]>("/api/assistants"),
   changes: () => req<CapabilityChange[]>("/api/assistants/changes"),
   syncAssistant: (id: string) => req<unknown>(`/api/assistants/${id}/sync`, { method: "POST" }),
+  runNow: (id: string, generation: number) => req(`/api/tasks/${id}/run-now`, { method: "POST", body: JSON.stringify({ generation }) }),
   tasks: () => req<TaskSummary[]>("/api/tasks"),
   task: (id: string) => req<TaskDetail>(`/api/tasks/${id}`),
-  createTask: (body: { goal: string; constraints?: string[]; repoPath?: string; profile?: string }) =>
+  createTask: (body: { goal: string; constraints?: string[]; repoPath?: string; profile?: string; wait?: { kind: "time"; notBefore: string } }) =>
     req<{ taskId: string }>("/api/tasks", { method: "POST", body: JSON.stringify(body) }),
   route: (id: string, assistantId?: string) =>
     req<RoutingExplanation>(`/api/tasks/${id}/route`, {

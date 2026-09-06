@@ -21,10 +21,11 @@ export function quotaOf(
 export function snapshotQuota(db: Db, assistantId: string, event: NormalizedEvent): void {
   const quota = quotaOf(event);
   if (!quota) return;
+  const manifest = db.prepare("SELECT json_extract(manifest, '$.core.auth.account') account FROM assistants WHERE id = ?").get(assistantId) as { account: string | null } | undefined;
   const insert = db.prepare(
-    "INSERT INTO quota_snapshots (assistant_id, window, used_percent, resets_at, source, observed_at) VALUES (?, ?, ?, ?, 'runtime-probe', ?)",
+    "INSERT INTO quota_snapshots (assistant_id, window, used_percent, resets_at, source, observed_at, account) VALUES (?, ?, ?, ?, 'runtime-probe', ?, ?)",
   );
   for (const q of quota) {
-    insert.run(assistantId, q.window, q.usedPercent, q.resetsAt ?? null, event.ts);
+    insert.run(assistantId, q.window, q.usedPercent, q.resetsAt ?? null, event.ts, manifest?.account ?? null);
   }
 }

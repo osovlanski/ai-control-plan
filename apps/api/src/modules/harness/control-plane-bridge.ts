@@ -1,3 +1,4 @@
+import { HandoffService } from './handoff.js';
 /**
  * HarnessBridge — the flag-ON seam between the legacy `Orchestrator` control
  * plane and the `SessionRunner` execution harness (PLAN.md 8c.2).
@@ -24,6 +25,8 @@ import type { SessionStore } from "./session-store.js";
 
 export interface BridgeStartInput {
   taskId: string;
+  dispatchId?: string;
+  checkpointId?: string;
   assistantId: string;
   /** Harness attempt number — `MAX(execution_requests.attempt)+1` for this task. */
   attempt: number;
@@ -42,15 +45,14 @@ export interface BridgeStartInput {
 
 /**
  * Pure — the flag-ON equivalent of the legacy `startTask` runSpec build. No
- * assistant in the id (it lives in the request fingerprint); `origin` is always
- * `fresh` this pass (cross-provider handoff is a fresh-prompt start — legacy
- * parity; the `handoff_envelopes` claim protocol is a named post-cutover
- * deferral, PLAN.md 8e step 4).
+ * assistant in the id (it lives in the request fingerprint). This builder
+ * creates a fresh request; checkpoint callers bind the committed envelope and
+ * render its prompt before accepting the immutable request through claim().
  */
 export function buildExecutionRequest(input: BridgeStartInput): ExecutionRequest {
   return {
     schemaVersion: 1,
-    executionRequestId: `erq_${input.taskId}_${input.attempt}`,
+    executionRequestId: input.dispatchId ?? `erq_${input.taskId}_${input.attempt}`,
     taskId: input.taskId as ExecutionRequest["taskId"],
     attempt: input.attempt,
     assistantId: input.assistantId as ExecutionRequest["assistantId"],
@@ -124,6 +126,17 @@ export class HarnessBridge {
     onSettled: (result: ExecutionResult | null, sessionId: string) => void | Promise<void>,
   ): { runId: string } {
     const request = buildExecutionRequest(input);
+    if (input.checkpointId) {
+      const cp = this.db.prepare('SELECT r.assistant_id FROM checkpoints c JOIN runs r ON r.id = c.run_id WHERE c.id = ?').get(input.checkpointId) as { assistant_id: string } | undefined;
+      new HandoffService(this.db).bindSuccessor(input.checkpointId, request, {
+        reason: 'handoff', fromAssistantId: cp?.assistant_id ?? input.assistantId,
+        insertRequest: () => this.store.recordRequest(request),
+      });
+    }
+    return this.startRequest(request, onSettled);
+  }
+
+  startRequest(request: ExecutionRequest, onSettled: (result: ExecutionResult | null, sessionId: string) => void | Promise<void>): { runId: string } {
     const { sessionId, done } = this.runner.start(request);
     const settle = async (): Promise<void> => {
       let result: ExecutionResult | null;
