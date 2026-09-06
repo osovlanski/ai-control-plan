@@ -24,6 +24,7 @@ import type { SessionStore } from "./session-store.js";
 
 export interface BridgeStartInput {
   taskId: string;
+  dispatchId?: string;
   assistantId: string;
   /** Harness attempt number — `MAX(execution_requests.attempt)+1` for this task. */
   attempt: number;
@@ -50,7 +51,7 @@ export interface BridgeStartInput {
 export function buildExecutionRequest(input: BridgeStartInput): ExecutionRequest {
   return {
     schemaVersion: 1,
-    executionRequestId: `erq_${input.taskId}_${input.attempt}`,
+    executionRequestId: input.dispatchId ?? `erq_${input.taskId}_${input.attempt}`,
     taskId: input.taskId as ExecutionRequest["taskId"],
     attempt: input.attempt,
     assistantId: input.assistantId as ExecutionRequest["assistantId"],

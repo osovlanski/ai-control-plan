@@ -1,4 +1,4 @@
-import type { RoutingProfile, TaskEnvelope, TaskId, TaskMode, TaskState } from "@agent-plane/core";
+import type { PauseKind, TaskIntent, RoutingProfile, TaskEnvelope, TaskId, TaskMode, TaskState } from "@agent-plane/core";
 import { assertTransition, isTaskState, newTaskId, redactValue } from "@agent-plane/core";
 import type { Db } from "../db/index.js";
 
@@ -7,10 +7,13 @@ export interface CreateTaskInput {
   constraints?: string[];
   repoPath?: string;
   profile?: RoutingProfile;
+  overrides?: TaskIntent["overrides"];
 }
 
 export interface TaskRow {
   id: string;
+  intent_json: string;
+  pause_kind: PauseKind | null;
   goal: string;
   state: TaskState;
   activity_phase: string | null;
@@ -46,8 +49,8 @@ export class TaskStore {
     };
     this.db
       .prepare(
-        `INSERT INTO tasks (id, goal, state, profile, repo_path, branch, envelope, created_at, updated_at)
-         VALUES (?, ?, 'CREATED', ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO tasks (id, goal, state, profile, repo_path, branch, envelope, intent_json, created_at, updated_at)
+         VALUES (?, ?, 'CREATED', ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         taskId,
@@ -56,6 +59,7 @@ export class TaskStore {
         input.repoPath ?? null,
         envelope.repository?.branch ?? null,
         JSON.stringify(envelope),
+        JSON.stringify({ goal: input.goal, constraints: input.constraints ?? [], repository: envelope.repository, profile: input.profile ?? "auto", overrides: input.overrides } satisfies TaskIntent),
         now,
         now,
       );
@@ -84,16 +88,25 @@ export class TaskStore {
   }
 
   /** Guarded state transition; keeps row and envelope in sync. Returns the updated envelope. */
-  transition(taskId: string, to: TaskState): TaskEnvelope {
+  transition(taskId: string, to: TaskState, pauseKind?: PauseKind): TaskEnvelope {
     const row = this.get(taskId);
     if (!row) throw new Error(`Unknown task ${taskId}`);
     if (!isTaskState(row.state)) throw new Error(`Corrupt state for ${taskId}: ${row.state}`);
-    assertTransition(row.state, to);
+    assertTransition(row.state, to, row.pause_kind ?? undefined);
+    if (row.state === "WAITING_RESOURCE" && to === "ROUTING") {
+      if (!this.db.prepare("SELECT 1 FROM dispatches d JOIN wait_conditions w ON w.task_id = d.task_id AND w.generation = d.condition_generation WHERE d.task_id = ? AND d.phase = 'reserved' AND w.state = 'consumed'").get(taskId)) throw new Error("Only wake(generation) can release scheduler ownership");
+    }
+    if (to === "WAITING_RESOURCE") {
+      if (row.state !== "CREATED" && row.state !== "ROUTING") throw new Error("Converting parked work is deferred to K2");
+      if (this.db.prepare("SELECT 1 FROM runs WHERE task_id = ? AND ended_at IS NULL").get(taskId) ||
+          this.db.prepare("SELECT 1 FROM dispatches WHERE task_id = ? AND phase IN ('reserved','start_attempted')").get(taskId)) throw new Error("Execution owner prevents scheduler ownership");
+      if (!this.db.prepare("SELECT 1 FROM wait_conditions WHERE task_id = ? AND state = 'active'").get(taskId)) throw new Error("Active wait required");
+    }
     const envelope = JSON.parse(row.envelope) as TaskEnvelope;
     envelope.status.state = to;
     this.db
-      .prepare("UPDATE tasks SET state = ?, envelope = ?, updated_at = ? WHERE id = ?")
-      .run(to, JSON.stringify(envelope), new Date().toISOString(), taskId);
+      .prepare("UPDATE tasks SET state = ?, envelope = ?, pause_kind = ?, updated_at = ? WHERE id = ?")
+      .run(to, JSON.stringify(envelope), to === "WAITING_INPUT" ? (pauseKind ?? "unknown") : null, new Date().toISOString(), taskId);
     return envelope;
   }
 

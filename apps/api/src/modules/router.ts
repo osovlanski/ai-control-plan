@@ -1,6 +1,10 @@
-import type { AssistantId, CapabilityManifest, RoutingExplanation, RoutingProfile } from "@agent-plane/core";
+import type { ResolvedConfig } from '../config.js';
+import type { TaskStore } from './tasks.js';
+import type { Registry } from './registry.js';
+import type { CooldownStore } from './cooldown.js';
+import type { AssistantId, CapabilityManifest, RoutingExplanation, RoutingProfile, TaskIntent } from "@agent-plane/core";
 import type { Db } from "../db/index.js";
-import type { AssistantScore } from "./telemetry.js";
+import { TelemetryService, classifyGoal, type AssistantScore } from "./telemetry.js";
 
 export interface RouteCandidate {
   id: AssistantId;
@@ -187,4 +191,27 @@ function qualityScore(score: AssistantScore | undefined): number | undefined {
   if (!score || score.runs === 0) return undefined;
   const reliability = score.runs > 0 ? 1 - Math.min(1, score.failovers / score.runs) : 1;
   return 0.5 * score.successRate + 0.3 * (score.testPassRate ?? score.successRate) + 0.2 * reliability;
+}
+
+/** CR-30: all Control Plane routing uses current evidence and durable intent. */
+export function routeTask(
+  deps: { db: Db; config: ResolvedConfig; tasks: TaskStore;
+    registry: Registry; cooldowns: CooldownStore },
+  taskId: string, origin: 'intake' | 'wake' | 'run-now' | 'failover' | 'context-yield',
+  options: { exclude?: string; override?: AssistantId } = {},
+) {
+  const row = deps.tasks.get(taskId);
+  if (!row) throw new Error(`Unknown task ${taskId}`);
+  const intent = JSON.parse(row.intent_json) as TaskIntent;
+  const cooldowns = deps.cooldowns.active();
+  if (options.exclude && !cooldowns.has(options.exclude)) cooldowns.set(options.exclude, 'handing off from this assistant');
+  const telemetry = new TelemetryService(deps.db);
+  const scores = telemetry.scores();
+  for (const [id, score] of telemetry.scores(classifyGoal(intent.goal))) scores.set(id, score);
+  const explanation = { ...route({
+    taskId, profile: intent.profile, needsRepo: !!intent.repository,
+    repoPathAllowed: !intent.repository || deps.config.repoAllowlist.some(p => intent.repository!.path === p || intent.repository!.path.startsWith(`${p}/`)),
+    cooldowns, scores, userOverride: options.override ?? intent.overrides?.assistantId,
+  }, deps.registry.list().map(a => ({ id: a.id as AssistantId, enabled: a.enabled === 1, manifest: a.manifestParsed }))), origin };
+  return { explanation, routingDecisionId: persistRoutingDecision(deps.db, taskId, explanation) };
 }

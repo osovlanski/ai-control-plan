@@ -115,10 +115,10 @@ export class CheckpointService {
     return { id, taskId, runId, envelope, gitRef, diffStat, activitySummary, changedFiles, at };
   }
 
-  latest(taskId: string): Checkpoint | undefined {
+  latest(taskId: string, checkpointId?: string): Checkpoint | undefined {
     const row = this.db
-      .prepare("SELECT * FROM checkpoints WHERE task_id = ? ORDER BY at DESC, rowid DESC LIMIT 1")
-      .get(taskId) as
+      .prepare("SELECT * FROM checkpoints WHERE task_id = ? AND (? IS NULL OR id = ?) ORDER BY at DESC, rowid DESC LIMIT 1")
+      .get(taskId, checkpointId ?? null, checkpointId ?? null) as
       | {
           id: string;
           task_id: string;

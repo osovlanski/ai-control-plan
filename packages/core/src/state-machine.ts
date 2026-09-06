@@ -1,3 +1,4 @@
+import type { PauseKind } from "./scheduler.js";
 /**
  * Authoritative orchestration state machine (revised architecture §5).
  *
@@ -10,6 +11,7 @@ export const TASK_STATES = [
   "CREATED",
   "ROUTING",
   "RUNNING",
+  "WAITING_RESOURCE",
   "WAITING_INPUT",
   "LIMIT_PAUSED",
   "HANDING_OFF",
@@ -23,9 +25,9 @@ export type TaskState = (typeof TASK_STATES)[number];
 export const TERMINAL_STATES: readonly TaskState[] = ["COMPLETED", "FAILED", "CANCELLED"];
 
 const TRANSITIONS: Record<TaskState, readonly TaskState[]> = {
-  CREATED: ["ROUTING", "CANCELLED"],
+  CREATED: ["WAITING_RESOURCE", "ROUTING", "CANCELLED"],
   // ROUTING → WAITING_INPUT: no eligible assistant (all filtered/limited).
-  ROUTING: ["RUNNING", "WAITING_INPUT", "FAILED", "CANCELLED"],
+  ROUTING: ["WAITING_RESOURCE", "RUNNING", "WAITING_INPUT", "FAILED", "CANCELLED"],
   RUNNING: [
     "WAITING_INPUT",
     "LIMIT_PAUSED",
@@ -39,8 +41,9 @@ const TRANSITIONS: Record<TaskState, readonly TaskState[]> = {
   // assistant — the recovery path when failover found nowhere to go.
   // WAITING_INPUT → COMPLETED: the user resolves a finished comparison by
   // picking a winner, which completes the task without another run.
-  WAITING_INPUT: ["RUNNING", "ROUTING", "HANDING_OFF", "COMPLETED", "FAILED", "CANCELLED"],
-  LIMIT_PAUSED: ["HANDING_OFF", "WAITING_INPUT", "CANCELLED"],
+  WAITING_RESOURCE: ["ROUTING", "WAITING_INPUT", "CANCELLED"],
+  WAITING_INPUT: ["WAITING_RESOURCE", "RUNNING", "ROUTING", "HANDING_OFF", "COMPLETED", "FAILED", "CANCELLED"],
+  LIMIT_PAUSED: ["WAITING_RESOURCE", "HANDING_OFF", "WAITING_INPUT", "CANCELLED"],
   HANDING_OFF: ["RUNNING", "WAITING_INPUT", "FAILED", "CANCELLED"],
   COMPLETED: [],
   FAILED: [],
@@ -55,7 +58,9 @@ export function isTerminal(state: TaskState): boolean {
   return TERMINAL_STATES.includes(state);
 }
 
-export function canTransition(from: TaskState, to: TaskState): boolean {
+export function canTransition(from: TaskState, to: TaskState, pauseKind?: PauseKind): boolean {
+  if (from === "WAITING_INPUT" && to === "WAITING_RESOURCE" &&
+      !["limit", "provider_unavailable", "no_candidate", "harness_error"].includes(pauseKind ?? "")) return false;
   return TRANSITIONS[from].includes(to);
 }
 
@@ -70,8 +75,8 @@ export class InvalidTransitionError extends Error {
 }
 
 /** Returns `to` if the transition is legal, otherwise throws. */
-export function assertTransition(from: TaskState, to: TaskState): TaskState {
-  if (!canTransition(from, to)) throw new InvalidTransitionError(from, to);
+export function assertTransition(from: TaskState, to: TaskState, pauseKind?: PauseKind): TaskState {
+  if (!canTransition(from, to, pauseKind)) throw new InvalidTransitionError(from, to);
   return to;
 }
 

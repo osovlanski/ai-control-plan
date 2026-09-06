@@ -18,6 +18,7 @@ const STATE_COLORS: Record<string, string> = {
   ROUTING: tokens.accent,
   RUNNING: tokens.accent,
   WAITING_INPUT: tokens.warn,
+  WAITING_RESOURCE: tokens.accent,
   LIMIT_PAUSED: tokens.warn,
   HANDING_OFF: tokens.warn,
   COMPLETED: tokens.ok,

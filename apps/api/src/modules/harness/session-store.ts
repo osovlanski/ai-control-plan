@@ -217,6 +217,10 @@ export class SessionStore {
    * (this is how "duplicate executionRequestId → same session, one start" holds).
    */
   createSession(executionRequestId: string): ExecutionSession {
+    return this.db.transaction(() => this.insertSession(executionRequestId))();
+  }
+
+  private insertSession(executionRequestId: string): ExecutionSession {
     const existing = this.forRequest(executionRequestId);
     if (existing) return existing;
 
@@ -227,14 +231,19 @@ export class SessionStore {
       | undefined;
     if (!req) throw new Error(`No execution_request ${executionRequestId} to create a session for`);
 
+    const dispatch = this.db.prepare('SELECT task_id, phase FROM dispatches WHERE dispatch_id = ?').get(executionRequestId) as { task_id: string; phase: string } | undefined;
+    if (dispatch) {
+      const task = this.db.prepare('SELECT state FROM tasks WHERE id = ?').get(req.task_id) as { state: string };
+      if (dispatch.task_id !== req.task_id || dispatch.phase !== 'start_attempted' || task.state !== 'ROUTING') throw new Error('Dispatch no longer owns task at session insertion');
+    }
     const sessionId = newExecutionSessionId();
     try {
       this.db
         .prepare(
           `INSERT INTO runs
              (id, task_id, assistant_id, state, session_state, version, provider_start_acked,
-              cancel_requested, attempt, execution_request_id, started_at)
-           VALUES (?, ?, ?, ?, 'PREPARED', 0, 0, 0, ?, ?, ?)`,
+              cancel_requested, attempt, execution_request_id, started_at, dispatch_id)
+           VALUES (?, ?, ?, ?, 'PREPARED', 0, 0, 0, ?, ?, ?, ?)`,
         )
         .run(
           sessionId,
@@ -244,6 +253,7 @@ export class SessionStore {
           req.attempt,
           executionRequestId,
           this.iso(),
+          dispatch ? executionRequestId : null,
         );
     } catch (err) {
       // Lost a race on uq_runs_execution_request — return the winner.

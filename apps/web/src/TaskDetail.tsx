@@ -1,3 +1,4 @@
+import { WaitingSummary } from "./WaitingSummary.js";
 import { useEffect, useRef, useState } from "react";
 import {
   api,
@@ -135,6 +136,10 @@ export function TaskDetail({ taskId, onBack }: { taskId: string; onBack: () => v
         </Button>
         <h2 style={{ margin: 0, fontSize: "1.05rem" }}>{detail.id}</h2>
         <StateBadge state={state} />
+        {state === "WAITING_RESOURCE" && detail?.wait && <>
+          <WaitingSummary wait={detail.wait} enabled={detail.schedulerEnabled !== false} />
+          <Button disabled={busy} onClick={() => { setBusy(true); void api.runNow(taskId, detail.wait!.generation).then(refresh).catch((e: Error) => setNotices(prev => [...prev, { level: "warn", text: e.message, at: new Date().toISOString() }])).finally(() => setBusy(false)); }}>Run now</Button>
+        </>}
         <span style={{ marginLeft: "auto", display: "flex", gap: "0.4rem" }}>
           <Button
             variant="secondary"
@@ -151,7 +156,7 @@ export function TaskDetail({ taskId, onBack }: { taskId: string; onBack: () => v
           </Button>
           <Button
             variant="secondary"
-            disabled={busy || ["COMPLETED", "FAILED", "CANCELLED"].includes(state)}
+            disabled={busy || ["COMPLETED", "FAILED", "CANCELLED", "WAITING_RESOURCE", "ROUTING"].includes(state)}
             onClick={() => {
               setBusy(true);
               void api
@@ -165,7 +170,7 @@ export function TaskDetail({ taskId, onBack }: { taskId: string; onBack: () => v
           >
             Hand off
           </Button>
-          {detail.active && (
+          {(detail.active || state === "WAITING_RESOURCE" || state === "ROUTING") && (
             <Button variant="danger" onClick={() => void api.cancel(taskId).then(refresh)}>
               Cancel
             </Button>
@@ -174,6 +179,15 @@ export function TaskDetail({ taskId, onBack }: { taskId: string; onBack: () => v
       </div>
       <p style={{ marginTop: 0, color: tokens.muted }}>{detail.goal}</p>
 
+      {detail.schedulerEvents && detail.schedulerEvents.length > 0 && (
+        <details style={{ marginBottom: '1rem', color: tokens.muted }}>
+          <summary>Scheduling history</summary>
+          <ul>{detail.schedulerEvents.map(event => <li key={event.id}>
+            <time dateTime={event.at}>{new Date(event.at).toLocaleString()}</time> · {event.type}
+            {typeof event.payload.reason === 'string' ? ` · ${event.payload.reason}` : ''}
+          </li>)}</ul>
+        </details>
+      )}
       {notices.map((n, i) => (
         <Card
           key={i}

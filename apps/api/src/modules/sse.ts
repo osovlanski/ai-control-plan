@@ -1,9 +1,10 @@
-import type { NormalizedEvent } from "@agent-plane/core";
+import type { NormalizedEvent, SchedulerEvent, WaitCondition } from "@agent-plane/core";
 
 export interface TaskStreamPayload {
-  kind: "event" | "state" | "notice";
+  kind: "event" | "state" | "notice" | "scheduler";
+  scheduler?: SchedulerEvent;
   event?: NormalizedEvent & { seq: number };
-  state?: { state: string; phase?: string; assistantId?: string };
+  state?: { state: string; phase?: string; assistantId?: string; wait?: WaitCondition; schedulerEnabled?: boolean };
   /**
    * Control-plane announcement (handoff, failover, checkpoint) — deliberately
    * not a NormalizedEvent, which is reserved for provider activity. Automatic

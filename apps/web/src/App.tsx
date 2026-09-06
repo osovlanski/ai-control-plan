@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, type Assistant, type CapabilityChange, type TaskSummary, type Workspace } from "./api.js";
+import { WaitingSummary } from "./WaitingSummary.js";
 import { NewTask } from "./NewTask.jsx";
 import { TaskDetail } from "./TaskDetail.jsx";
 import { Button, Card, QuotaBar, StateBadge, tokens } from "./ui.jsx";
@@ -111,6 +112,7 @@ function Board({ onOpen }: { onOpen: (taskId: string) => void }) {
               </span>
             </div>
             <p style={{ margin: "0.5rem 0 0", fontSize: "0.92rem" }}>{t.goal}</p>
+            {t.state === "WAITING_RESOURCE" && t.wait && <WaitingSummary wait={t.wait} enabled={t.schedulerEnabled !== false} />}
           </div>
         </Card>
       ))}

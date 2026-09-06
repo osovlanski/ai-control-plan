@@ -1,5 +1,9 @@
 # Agentic OS — Kernel Services (M12–M15)
 
+**Implementation update:** K1 durable dispatch is implemented and regression-verified on
+`feat/agentic-os-k1-durable-dispatch`; see [the acceptance record](agentic-os-k1-implementation.md).
+K2+ and the other proposed Agentic OS services are not implemented by that slice.
+
 **Status:** Proposed — revision 2 (planning only; no production implementation in this pass).
 Revision 2 reconciles the adversarial review of revision 1 (2026-09-05): it makes the design
 smaller, replaces every promise the running code cannot keep with a truthful one, and marks

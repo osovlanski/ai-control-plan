@@ -1,5 +1,9 @@
 # Agentic OS — Design & Change Plan
 
+**Implementation update:** K1 durable dispatch is implemented and regression-verified on
+`feat/agentic-os-k1-durable-dispatch`; see [the acceptance record](agentic-os-k1-implementation.md).
+K2+ and the other proposed Agentic OS services are not implemented by that slice.
+
 **Status:** Proposed (plan only — no implementation in this document's branch)
 **Builds on:** `docs/revised-architecture.md` (control plane, Phases 0–5 delivered) and the
 `osovlanski/cockpit` repo (tooling manager, context compiler, lineage, memory garden — specs A–D implemented).

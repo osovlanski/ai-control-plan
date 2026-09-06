@@ -272,6 +272,18 @@ class RunContext {
         "STARTING",
       );
     }
+    // Cancellation can commit while adapter.start is unresolved and bumps the
+    // session version. Deliver it to the eventual handle before ackHandle CAS.
+    const afterStart = this.d.store.get(this.sessionId)!;
+    if (afterStart.cancelRequested) {
+      await safeCancel(adapter, handle);
+      this.version = this.d.store.get(this.sessionId)!.version;
+      const checkpoint = await this.attemptCheckpoint("cancel");
+      this.version = this.d.store.get(this.sessionId)!.version;
+      return this.finalize("STARTING", "CANCELLED", {
+        cancellation: { requestedBy: "plane", at: this.iso() }, checkpoint,
+      });
+    }
     if (handle.providerSessionRef) {
       this.version = this.d.store.ackHandle(this.sessionId, handle.providerSessionRef, {
         expectedVersion: this.version,
