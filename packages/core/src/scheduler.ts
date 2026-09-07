@@ -70,6 +70,49 @@ export interface Dispatch {
   updated_at: string;
   reason: string | null;
 }
+/** K5 recurring template. Stores intent only (I-S1); never a resolved choice. */
+export interface Schedule {
+  schemaVersion: 1;
+  scheduleId: string;
+  kind: 'user' | 'system';
+  intent: TaskIntent;
+  /** 5-field cron expression, evaluated in `timezone`. */
+  cron: string;
+  /** IANA zone name. */
+  timezone: string;
+  enabled: boolean;
+  /** 'queue' is deferred; a schedule never stacks occurrences. */
+  overlap: 'skip';
+  catchUpWindowMinutes: number;
+  lastFiredAt?: string;
+  nextFireAt?: string;
+  /** Display only - `schedule_occurrences` is the deduplication mechanism. */
+  lastTaskId?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+export type ScheduleOutcome = 'created' | 'skipped-overlap' | 'skipped-catch-up' | 'skipped-disabled';
+/** One row per scheduled occurrence; unique on (scheduleId, occurrenceAt). */
+export interface ScheduleOccurrence {
+  scheduleId: string;
+  /** The cron instant in UTC - the dedup key. */
+  occurrenceAt: string;
+  firedAt: string;
+  outcome: ScheduleOutcome;
+  taskId?: string;
+}
+export interface ScheduleInput {
+  goal: string;
+  cron: string;
+  timezone: string;
+  constraints?: string[];
+  repoPath?: string;
+  profile?: RoutingProfile;
+  overrides?: TaskIntent['overrides'];
+  kind?: 'user' | 'system';
+  enabled?: boolean;
+  catchUpWindowMinutes?: number;
+}
 export interface SchedulerEvent {
   id: number;
   taskId: string;

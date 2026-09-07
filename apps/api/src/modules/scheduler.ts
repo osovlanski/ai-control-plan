@@ -6,6 +6,7 @@ import type { ResolvedConfig } from '../config.js';
 import type { TaskStore } from './tasks.js';
 import type { Orchestrator } from './orchestrator.js';
 import type { QuotaProbeService } from './quota-probe.js';
+import { ScheduleService } from './schedules.js';
 import type { TaskEventBus } from './sse.js';
 
 const RECHECK_MS = 60_000;
@@ -33,17 +34,27 @@ export class Scheduler {
   private lastTick: string | null = null;
   private readonly now: () => Date;
   private inFlight = new Map<string, Promise<void>>();
+  /** K5 recurring schedules. Shares this scheduler's timer; no second loop. */
+  readonly schedules: ScheduleService;
   constructor(private d: SchedulerDeps) {
     this.now = d.now ?? (() => new Date());
     d.orchestrator.scheduler = this;
     d.tasks.onTerminal = taskId => this.taskTerminal(taskId);
+    this.schedules = new ScheduleService({
+      db: d.db, tasks: d.tasks, now: this.now, onError: d.onError,
+      // An occurrence is parked on a due time wait, so the existing K1 wake
+      // protocol dispatches it. K5 adds no execution path of its own.
+      park: (taskId, occurrenceAt, reason) => this.attach(taskId, { kind: 'time', notBefore: occurrenceAt, reason }),
+    });
   }
   get enabled(): boolean { return this.d.config.scheduler?.enabled !== false; }
   private iso(): string { return this.now().toISOString(); }
   status() {
     const due = this.d.db.prepare("SELECT COUNT(*) AS count FROM wait_conditions WHERE state = 'active' AND not_before <= ?").get(this.iso()) as { count: number };
     const open = this.d.db.prepare("SELECT COUNT(*) AS count FROM dispatches WHERE phase IN ('reserved','start_attempted')").get() as { count: number };
+    const schedules = this.d.db.prepare('SELECT COUNT(*) AS count FROM schedules WHERE enabled = 1').get() as { count: number };
     return { enabled: this.enabled, armed: !this.stopped && this.enabled && this.timer !== undefined, dueConditions: due.count, openDispatches: open.count, lastTick: this.lastTick,
+      enabledSchedules: schedules.count, nextScheduleFireAt: this.schedules.nextDeadline(),
       probesEnabled: this.d.probes?.enabled ?? false, probes: this.d.probes?.status() ?? [] };
   }
 
@@ -392,6 +403,8 @@ export class Scheduler {
       } catch (error) { this.d.onError?.(error); }
     }
     if (this.enabled) await this.tick();
+    // A disabled boot still has to leave the durable mark the next enable reads.
+    else this.schedules.observeEnabled(false);
   }
   startTimer(): void { this.stopped = false; this.arm(); }
   stop(): void { this.stopped = true; if (this.timer) clearTimeout(this.timer); this.timer = undefined; }
@@ -402,7 +415,10 @@ export class Scheduler {
     // Dependency waits are event-driven and their notBefore is only an earliest
     // re-check, so they never set the deadline; the 60 s cap still sweeps them.
     const next = this.d.db.prepare("SELECT MIN(not_before) AS at FROM wait_conditions WHERE state = 'active' AND kind != 'dependency'").get() as { at: string | null };
-    const delay = next.at ? Math.max(1, Math.min(60_000, Date.parse(next.at) - this.now().getTime())) : 60_000;
+    // One timer for both waits and schedules (I-S3): the earlier of the two wins.
+    const fire = this.schedules.nextDeadline();
+    const at = [next.at, fire].filter((v): v is string => !!v).sort()[0];
+    const delay = at ? Math.max(1, Math.min(60_000, Date.parse(at) - this.now().getTime())) : 60_000;
     this.timer = setTimeout(() => { void this.tick().catch(e => this.d.onError?.(e)).finally(() => this.arm()); }, delay);
     this.timer.unref();
   }
@@ -415,8 +431,13 @@ export class Scheduler {
   }
 
   async tick(): Promise<void> {
+    // Recorded even while disabled: the next enable needs to know it was off.
+    const wasDisabled = this.schedules.observeEnabled(this.enabled);
     if (!this.enabled) return;
     this.lastTick = this.iso();
+    // Schedules fire before the wake sweep, so an occurrence created now is
+    // dispatched by this same tick rather than waiting for the next one.
+    this.schedules.fireDue(wasDisabled ? 'disabled' : 'catch-up');
     for (const d of this.d.db.prepare("SELECT * FROM dispatches WHERE phase = 'reserved'").all() as Dispatch[]) {
       void this.continueDispatch(d.dispatch_id).catch(error => this.d.onError?.(error));
     }
