@@ -1,12 +1,52 @@
 import { useEffect, useState } from "react";
-import { api, type Assistant, type CapabilityChange, type Workspace } from "./api.js";
+import { api, type Assistant, type CapabilityChange, type SchedulerStatus, type Workspace } from "./api.js";
 import { NewTask } from "./NewTask.jsx";
 import { TaskDetail } from "./TaskDetail.jsx";
 import { OrbitalBoard } from "./OrbitalBoard.js";
 import { Button, Card, QuotaBar, tokens } from "./ui.jsx";
 import { onAuthExpired } from "./auth.js";
 
-type View = { screen: "board" } | { screen: "new" } | { screen: "task"; taskId: string } | { screen: "catalog" };
+type View =
+  | { screen: "board" }
+  | { screen: "new"; goal?: string }
+  | { screen: "task"; taskId: string }
+  | { screen: "catalog" };
+
+const NAV: Array<{ screen: View["screen"]; label: string; icon: string }> = [
+  { screen: "board", label: "Orbital", icon: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18Zm0 4.5v9M7.5 12h9" },
+  { screen: "new", label: "Intake", icon: "M12 5v14M5 12h14" },
+  { screen: "catalog", label: "Agents", icon: "M5 7h14M5 12h14M5 17h9M17 15l2 2 3-3" },
+];
+
+/** Scheduler ownership as the system health signal — read, never inferred. */
+function SystemHealth() {
+  const [status, setStatus] = useState<SchedulerStatus | null | "unavailable">(null);
+  useEffect(() => {
+    const load = () => api.schedulerStatus().then(setStatus).catch(() => setStatus("unavailable"));
+    load();
+    const t = setInterval(load, 10_000);
+    return () => clearInterval(t);
+  }, []);
+  const tone =
+    status === null ? "neutral" : status === "unavailable" ? "limit" : status.armed ? "active" : status.enabled ? "neutral" : "human";
+  return (
+    <div className={`os-health tone-${tone}`} role="status">
+      <i />
+      {status === null ? (
+        "Reading scheduler"
+      ) : status === "unavailable" ? (
+        "Scheduler status unavailable"
+      ) : (
+        <>
+          <b>{status.armed ? "Scheduler armed" : status.enabled ? "Scheduler idle" : "Scheduler disabled"}</b>
+          <span>
+            {status.dueConditions} due · {status.openDispatches} open
+          </span>
+        </>
+      )}
+    </div>
+  );
+}
 
 export function App() {
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
@@ -20,65 +60,61 @@ export function App() {
     api.workspace().then(setWorkspace).catch((e: Error) => setError(e.message));
   }, []);
 
-  if (expired) return <div style={{minHeight:"100vh",display:"grid",placeItems:"center",background:tokens.bg,color:tokens.text}}><h1>Session expired — re-open with <code>pnpm --filter @agent-plane/api open</code></h1></div>;
+  if (expired)
+    return (
+      <div className="os-expired">
+        <div className="os-environment" aria-hidden="true" />
+        <h1>
+          Session expired — re-open with <code>pnpm --filter @agent-plane/api open</code>
+        </h1>
+      </div>
+    );
   return (
-    <div style={{ minHeight: "100vh", background: tokens.bg, color: tokens.text }}>
-      <header
-        style={{
-          borderBottom: `1px solid ${tokens.border}`,
-          background: tokens.surface,
-          padding: "0.9rem 1.5rem",
-          display: "flex",
-          alignItems: "center",
-          gap: "1rem",
-        }}
-      >
-        <strong style={{ fontSize: "0.98rem" }}>Agent Control Plane</strong>
-        {workspace && (
-          <span
-            style={{
-              padding: "0.15rem 0.6rem",
-              borderRadius: 999,
-              fontSize: "0.78rem",
-              fontWeight: 600,
-              background: `${tokens.accent}14`,
-              color: tokens.accent,
-              border: `1px solid ${tokens.accent}33`,
-            }}
-          >
-            {workspace.workspace}
-          </span>
-        )}
-        <nav style={{ marginLeft: "auto", display: "flex", gap: "0.4rem" }}>
-          <Button variant={view.screen === "board" ? "primary" : "secondary"} onClick={() => setView({ screen: "board" })}>
-            Board
-          </Button>
-          <Button variant={view.screen === "new" ? "primary" : "secondary"} onClick={() => setView({ screen: "new" })}>
-            New task
-          </Button>
-          <Button
-            variant={view.screen === "catalog" ? "primary" : "secondary"}
-            onClick={() => setView({ screen: "catalog" })}
-          >
-            Assistants
-          </Button>
+    <div className="os-shell">
+      <div className="os-environment" aria-hidden="true" />
+      <aside className="os-rail">
+        <div className="os-mark" aria-hidden="true" />
+        <nav aria-label="System">
+          {NAV.map((n) => (
+            <button
+              key={n.screen}
+              className="os-nav"
+              aria-current={view.screen === n.screen || (n.screen === "board" && view.screen === "task") ? "page" : undefined}
+              onClick={() => setView({ screen: n.screen } as View)}
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d={n.icon} />
+              </svg>
+              {n.label}
+            </button>
+          ))}
         </nav>
-      </header>
-
-      <main style={{ maxWidth: 1480, margin: "0 auto", padding: "1.5rem" }}>
-        {error && <p style={{ color: tokens.danger }}>API unreachable: {error}</p>}
-        {view.screen === "board" && (
-          <OrbitalBoard
-            onOpen={(taskId) => setView({ screen: "task", taskId })}
-            onNew={() => setView({ screen: "new" })}
-          />
-        )}
-        {view.screen === "new" && <NewTask onStarted={(taskId) => setView({ screen: "task", taskId })} />}
-        {view.screen === "task" && (
-          <TaskDetail taskId={view.taskId} onBack={() => setView({ screen: "board" })} />
-        )}
-        {view.screen === "catalog" && <Catalog />}
-      </main>
+        <span className="os-rail-foot">Agentic OS</span>
+      </aside>
+      <div className="os-main">
+        <header className="os-topbar">
+          <div className="os-brand">
+            <strong>Agentic OS</strong>
+            <span>Agent Control Plane</span>
+          </div>
+          {workspace && <span className="os-workspace">{workspace.workspace}</span>}
+          <SystemHealth />
+        </header>
+        <main>
+          {error && <p className="error">API unreachable: {error}</p>}
+          {view.screen === "board" && (
+            <OrbitalBoard
+              onOpen={(taskId) => setView({ screen: "task", taskId })}
+              onNew={(goal) => setView({ screen: "new", goal })}
+            />
+          )}
+          {view.screen === "new" && (
+            <NewTask initialGoal={view.goal} onStarted={(taskId) => setView({ screen: "task", taskId })} />
+          )}
+          {view.screen === "task" && <TaskDetail taskId={view.taskId} onBack={() => setView({ screen: "board" })} />}
+          {view.screen === "catalog" && <Catalog />}
+        </main>
+      </div>
     </div>
   );
 }

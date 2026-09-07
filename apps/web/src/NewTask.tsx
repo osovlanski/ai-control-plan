@@ -1,9 +1,9 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, type RoutingExplanation } from "./api.js";
 import { Button, Card, Field, inputStyle, QuotaBar, tokens } from "./ui.jsx";
 
-export function NewTask({ onStarted }: { onStarted: (taskId: string) => void }) {
-  const [goal, setGoal] = useState("");
+export function NewTask({ onStarted, initialGoal }: { onStarted: (taskId: string) => void; initialGoal?: string }) {
+  const [goal, setGoal] = useState(initialGoal ?? "");
   const [constraints, setConstraints] = useState("");
   const [repoPath, setRepoPath] = useState("");
   const [profile, setProfile] = useState("auto");
@@ -36,6 +36,16 @@ export function NewTask({ onStarted }: { onStarted: (taskId: string) => void }) 
     }
   };
 
+  // Arriving from the command bar: the operator already asked to route it.
+  // The ref guards StrictMode's double effect so only one task is created.
+  const autoRouted = useRef(false);
+  useEffect(() => {
+    if (initialGoal?.trim() && !autoRouted.current) {
+      autoRouted.current = true;
+      void previewRoute();
+    }
+  }, []);
+
   const eligible = explanation?.candidates.filter((c) => c.passedFilters) ?? [];
 
   const startParallel = async (mode: "compare" | "race") => {
@@ -67,9 +77,10 @@ export function NewTask({ onStarted }: { onStarted: (taskId: string) => void }) 
   };
 
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr)", gap: "1.5rem" }}>
+    <div className="new-task-layout">
       <Card>
-        <h2 style={{ marginTop: 0, fontSize: "1.05rem" }}>New task</h2>
+        <span className="eyebrow">Intake</span>
+        <h2 style={{ margin: "6px 0 16px", fontSize: "1.25rem", fontWeight: 500 }}>New mission</h2>
         <Field label="Goal">
           <textarea
             value={goal}
@@ -113,7 +124,8 @@ export function NewTask({ onStarted }: { onStarted: (taskId: string) => void }) 
       </Card>
 
       <Card>
-        <h2 style={{ marginTop: 0, fontSize: "1.05rem" }}>Routing recommendation</h2>
+        <span className="eyebrow">Decision</span>
+        <h2 style={{ margin: "6px 0 16px", fontSize: "1.25rem", fontWeight: 500 }}>Routing recommendation</h2>
         {!explanation && (
           <p style={{ color: tokens.muted, fontSize: "0.9rem" }}>
             Submit a goal to see which assistant the router picks — and exactly why.

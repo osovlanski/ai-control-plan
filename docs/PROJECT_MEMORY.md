@@ -40,3 +40,18 @@ This is not an independent product: it is the `docs/agentic-os-contract-lifecycl
 - Operator runbook: `docs/demo/demo-a.md` (prerequisites, Oracle start, SSH tunnel, deterministic run, optional real-Claude smoke, artefact locations, deliberately unimplemented functionality).
 - Defect found and fixed here: routing-side quota reads (`routeTask`, `Orchestrator.quotaPlan`) and `CooldownStore` used wall time while the scheduler ran on the injected kernel clock, so under a divergent clock fresh evidence read as stale and expired cooldowns read as live — a blocked assistant could be started at a wake. All of them now share the kernel clock, with a regression test in `apps/api/test/quota-probe.test.ts`.
 - An API credential minted before K1 lacks `schedules.read`, so `GET /api/scheduler/status` answers 403 until `pnpm --filter @agent-plane/api rotate`.
+
+## Orbital operator UI v2 (2026-09-07)
+
+Visual/product redesign of the operator console on top of the merged K1-K3
+semantics; no backend change. OS shell (rail: Orbital / Intake / Agents, system
+health pill from `/api/scheduler/status`), command bar that routes a goal through
+Intake, and an execution field whose rings are state groups and whose arcs are
+kernel truth (wake horizon for waits, blocker arc for quota, beacon for human
+input, drift for execution). Bodies ride the SVG orbit path via `offset-path`
+with arc-length phases; `layoutBodies` keeps labels from overlapping and is
+unit-tested. Inspector gained a decided / because / next strip derived by
+`nextStep()`; tabs and Demo A selectors unchanged. Fonts: IBM Plex via
+`@fontsource` (OFL). Reference captures: `pnpm --filter @agent-plane/web visual`.
+Docs: `docs/ui/orbital-operator.md`.
+

@@ -134,12 +134,11 @@ export function TaskDetail({ taskId, onBack }: { taskId: string; onBack: () => v
         <Button variant="secondary" onClick={onBack}>
           ← Board
         </Button>
-        <h2 style={{ margin: 0, fontSize: "1.05rem" }}>{detail.id}</h2>
+        <h2 style={{ margin: 0, fontSize: "1.05rem", whiteSpace: "nowrap", fontFamily: tokens.mono }}>{detail.id}</h2>
         <StateBadge state={state} />
-        {state === "WAITING_RESOURCE" && detail?.wait && <>
-          <WaitingSummary wait={detail.wait} enabled={detail.schedulerEnabled !== false} />
+        {state === "WAITING_RESOURCE" && detail?.wait && (
           <Button disabled={busy} onClick={() => { setBusy(true); void api.runNow(taskId, detail.wait!.generation).then(refresh).catch((e: Error) => setNotices(prev => [...prev, { level: "warn", text: e.message, at: new Date().toISOString() }])).finally(() => setBusy(false)); }}>Run now</Button>
-        </>}
+        )}
         <span style={{ marginLeft: "auto", display: "flex", gap: "0.4rem" }}>
           <Button
             variant="secondary"
@@ -178,6 +177,9 @@ export function TaskDetail({ taskId, onBack }: { taskId: string; onBack: () => v
         </span>
       </div>
       <p style={{ marginTop: 0, color: tokens.muted }}>{detail.goal}</p>
+      {state === "WAITING_RESOURCE" && detail?.wait && (
+        <WaitingSummary wait={detail.wait} enabled={detail.schedulerEnabled !== false} />
+      )}
 
       {detail.schedulerEvents && detail.schedulerEvents.length > 0 && (
         <details style={{ marginBottom: '1rem', color: tokens.muted }}>

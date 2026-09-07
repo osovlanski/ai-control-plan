@@ -7,7 +7,7 @@ export default defineConfig({
   projects: [
     {
       name: "chromium",
-      testIgnore: /demo-a\.spec\.ts/,
+      testIgnore: /(demo-a|visual)\.spec\.ts/,
       use: { browserName: "chromium" },
     },
     {
@@ -21,6 +21,12 @@ export default defineConfig({
         video: "on",
         screenshot: "on",
       },
+    },
+    {
+      // Visual reference captures for the operator console (docs + PR review).
+      name: "visual",
+      testMatch: /visual\.spec\.ts/,
+      use: { browserName: "chromium", viewport: { width: 1440, height: 1000 } },
     },
   ],
 });
