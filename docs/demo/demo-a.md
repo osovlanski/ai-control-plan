@@ -154,8 +154,9 @@ being unavailable does not fail Demo A.
 
 ## 7. Deliberately not implemented
 
-- K4 dependency waits, K5 recurring schedules and K6 Cockpit scheduling: the
-  Orbital UI renders these as `Planned`, never as working controls.
+- K4 dependency waits and K5 recurring schedules are implemented (see
+  [`demo-a5-scheduling.md`](demo-a5-scheduling.md)) but Demo A does not exercise
+  them; K6 Cockpit scheduling lives in the `cockpit` repo.
 - K7+ execution identity/catalog, K9+ context lifecycle, K13 model selection:
   the context panel stays `Planned · K9`.
 - A real Codex idle quota probe: its app-server RPC is unverified, so K3 answers

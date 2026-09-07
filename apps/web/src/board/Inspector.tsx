@@ -381,10 +381,6 @@ export function Inspector({
               <strong>Context pressure & intervention</strong>
               <span className="planned">Planned · K9 / M14</span>
             </li>
-            <li>
-              <strong>Dependency & recurring schedule state</strong>
-              <span className="planned">Planned · K4 / K5</span>
-            </li>
           </ul>
           <details>
             <summary>Context lifecycle</summary>
@@ -606,20 +602,21 @@ export function Inspector({
             </li>
             <li>
               <strong>After dependency</strong>
-              <span className="planned">Planned · K4</span>
+              <span className="tone-complete">Implemented · K4</span>
             </li>
             <li>
               <strong>Recurring schedule</strong>
-              <span className="planned">Planned · K5</span>
+              <span className="tone-complete">Implemented · K5</span>
             </li>
           </ul>
           <details>
-            <summary>Later schedule controls</summary>
+            <summary>Schedule controls</summary>
             <p>
-              Dependency waits (K4), recurring schedules and occurrence
-              outcomes (K5) and the Cockpit scheduler surface (K6) are not
-              implemented. Human approval, verification and comparison
-              decisions cannot be deferred around.
+              Dependency waits (K4) and recurring schedules with unique
+              occurrences (K5) are implemented and owned by the Control Plane
+              scheduler. Recurring schedules are created and listed from
+              Cockpit's Schedule tab (K6). Human approval, verification and
+              comparison decisions still cannot be deferred around.
             </p>
           </details>
         </div>
