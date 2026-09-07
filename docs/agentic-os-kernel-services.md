@@ -1,9 +1,10 @@
 # Agentic OS — Kernel Services (M12–M15)
 
-**Implementation update:** K1 durable dispatch, K2 quota retry and K3 optional quota probes are
-implemented and regression-verified; see the acceptance records for
+**Implementation update:** K1 durable dispatch, K2 quota retry, K3 optional quota probes and
+K4 dependency waits are implemented and regression-verified; see the acceptance records for
 [K1](agentic-os-k1-implementation.md) and [K3](agentic-os-k3-implementation.md).
-K4+ and the other proposed Agentic OS services are not implemented by those slices.
+K4b resource slots stay deferred, and K5+ and the other proposed Agentic OS services are not
+implemented by those slices.
 
 **Status:** Proposed — revision 2 (planning only; no production implementation in this pass).
 Revision 2 reconciles the adversarial review of revision 1 (2026-09-05): it makes the design

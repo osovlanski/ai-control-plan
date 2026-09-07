@@ -140,7 +140,7 @@ it('enforces open-dispatch uniqueness and stores no resolved choices on waits', 
   expect(columns.some(c => /^(assistant_id|model|composition)$/.test(c.name))).toBe(false);
 });
 
-it.each(['approval_pending','verification_failed','comparison_pending','handoff_requested'] as const)('never defers %s', async pause => {
+it.each(['approval_pending','verification_failed','comparison_pending','handoff_requested','dependency_failed'] as const)('never defers %s', async pause => {
   await boot(); expect(canTransition('WAITING_INPUT','WAITING_RESOURCE',pause)).toBe(false);
   const id = built.tasks.create({ goal: 'paused' }).taskId; built.tasks.transition(id,'ROUTING'); built.tasks.transition(id,'WAITING_INPUT',pause);
   expect(() => scheduler().attach(id,{kind:'time',notBefore:now().toISOString()})).toThrow(/operator decision/);
@@ -352,4 +352,158 @@ it('continuation uses the specified checkpoint snapshot, independent of trigger 
   await built.orchestrator.startTask(id,A,{trigger:'initial',continuation:{kind:'checkpoint',checkpointId:first.id}}); await done;
   expect(start.mock.calls[0]![0].prompt).toContain('anchored progress');
   expect(start.mock.calls[0]![0].prompt).not.toContain('newer unrelated progress');
+});
+
+describe('K4 dependency waits', () => {
+  /** Drives a task to a terminal state through the real transition chokepoint. */
+  function settle(id: string, to: 'COMPLETED' | 'FAILED' | 'CANCELLED') {
+    built.tasks.transition(id, 'ROUTING');
+    if (to === 'COMPLETED') built.tasks.transition(id, 'RUNNING');
+    built.tasks.transition(id, to);
+  }
+  function dependent(s: Scheduler, dependsOn: string[], onDependencyFailure?: 'cancel' | 'wake-anyway' | 'wait-input') {
+    const t = built.tasks.create({ goal: 'run the reviewer' });
+    s.attach(t.taskId, { kind: 'dependency', dependsOn, onDependencyFailure });
+    return t.taskId;
+  }
+  /** The terminal hook defers its wakes to a microtask; let it drain. */
+  const drain = () => new Promise<void>(resolve => setTimeout(resolve, 0));
+
+  it('wakes only when every required dependency is terminal', async () => {
+    await boot(); const s = scheduler();
+    const one = built.tasks.create({ goal: 'implement' }).taskId;
+    const two = built.tasks.create({ goal: 'document' }).taskId;
+    const id = dependent(s, [one, two]);
+    expect(built.tasks.get(id)?.state).toBe('WAITING_RESOURCE');
+
+    settle(one, 'COMPLETED'); await drain();
+    expect(built.tasks.get(id)?.state).toBe('WAITING_RESOURCE');
+    expect(s.dispatches(id)).toHaveLength(0);
+    expect(await s.wake(id, 1, 'timer')).toMatchObject({ outcome: 'stale', reason: /unfinished dependency/ });
+
+    const done = terminal(id); settle(two, 'COMPLETED'); await done;
+    expect(built.tasks.get(id)?.state).toBe('COMPLETED');
+    expect(s.dispatches(id)).toHaveLength(1);
+    expect(s.dispatches(id)[0]).toMatchObject({ origin: 'wake', condition_generation: 1, phase: 'started' });
+  });
+
+  it('the terminal event alone wakes the dependant; the timer never has to fire', async () => {
+    await boot(); const s = scheduler();
+    const dep = built.tasks.create({ goal: 'implement' }).taskId;
+    const id = dependent(s, [dep]);
+    const tick = vi.spyOn(s, 'tick'); const wake = vi.spyOn(s, 'wake');
+    const done = terminal(id); settle(dep, 'COMPLETED'); await done;
+    expect(tick).not.toHaveBeenCalled();
+    expect(wake).toHaveBeenCalledWith(id, 1, 'event');
+    expect(built.tasks.get(id)?.state).toBe('COMPLETED');
+  });
+
+  it.each([
+    ['wait-input' as const, 'WAITING_INPUT', 'expired'],
+    ['cancel' as const, 'CANCELLED', 'cancelled'],
+  ])('a failed dependency applies onDependencyFailure=%s', async (policy, state, conditionState) => {
+    await boot(); const s = scheduler();
+    const dep = built.tasks.create({ goal: 'implement' }).taskId;
+    const id = dependent(s, [dep], policy);
+    settle(dep, 'FAILED'); await drain();
+    expect(built.tasks.get(id)?.state).toBe(state);
+    expect(s.condition(id)).toMatchObject({ state: conditionState });
+    expect(s.dispatches(id)).toHaveLength(0);
+    expect(s.events(id).map(e => e.type)).toContain('dependency.failed');
+    if (policy === 'wait-input') expect(built.tasks.get(id)?.pause_kind).toBe('dependency_failed');
+  });
+
+  it('onDependencyFailure=wake-anyway dispatches despite the failure', async () => {
+    await boot(); const s = scheduler();
+    const dep = built.tasks.create({ goal: 'implement' }).taskId;
+    const id = dependent(s, [dep], 'wake-anyway');
+    const done = terminal(id); settle(dep, 'FAILED'); await done;
+    expect(built.tasks.get(id)?.state).toBe('COMPLETED');
+    expect(s.dispatches(id)[0]).toMatchObject({ phase: 'started' });
+  });
+
+  it('defaults to wait-input so a failure never bypasses a person', async () => {
+    await boot(); const s = scheduler();
+    const dep = built.tasks.create({ goal: 'implement' }).taskId;
+    const id = dependent(s, [dep]);
+    expect(s.condition(id)?.onDependencyFailure).toBe('wait-input');
+    settle(dep, 'CANCELLED'); await drain();
+    expect(built.tasks.get(id)?.state).toBe('WAITING_INPUT');
+    expect(built.tasks.get(id)?.pause_kind).toBe('dependency_failed');
+  });
+
+  it('rejects self-dependency and a three-task cycle at attach', async () => {
+    await boot(); const s = scheduler();
+    const a = built.tasks.create({ goal: 'a' }).taskId;
+    const b = built.tasks.create({ goal: 'b' }).taskId;
+    const c = built.tasks.create({ goal: 'c' }).taskId;
+    expect(() => s.attach(a, { kind: 'dependency', dependsOn: [a] })).toThrow(/cannot depend on itself/);
+    s.attach(a, { kind: 'dependency', dependsOn: [b] });
+    s.attach(b, { kind: 'dependency', dependsOn: [c] });
+    expect(() => s.attach(c, { kind: 'dependency', dependsOn: [a] })).toThrow(/cycle/);
+    // The rejected attach left no trace: c keeps no condition and stays CREATED.
+    expect(s.condition(c)).toBeUndefined();
+    expect(built.tasks.get(c)?.state).toBe('CREATED');
+  });
+
+  it('treats a dependency deleted after attach as FAILED', async () => {
+    await boot(); const s = scheduler();
+    const dep = built.tasks.create({ goal: 'implement' }).taskId;
+    const id = dependent(s, [dep], 'wait-input');
+    db.prepare('DELETE FROM tasks WHERE id = ?').run(dep);
+    await s.tick();
+    expect(built.tasks.get(id)?.state).toBe('WAITING_INPUT');
+    expect(built.tasks.get(id)?.pause_kind).toBe('dependency_failed');
+    expect(s.events(id).find(e => e.type === 'dependency.failed')?.payload.failed).toEqual([dep]);
+  });
+
+  it('reuses the generation-aware wake: a stale generation and a replaced condition are no-ops', async () => {
+    await boot(); const s = scheduler();
+    const dep = built.tasks.create({ goal: 'implement' }).taskId;
+    const other = built.tasks.create({ goal: 'other' }).taskId;
+    const id = dependent(s, [dep]);
+    settle(dep, 'COMPLETED');
+    // Replacing the condition before the deferred wake runs makes generation 1 stale.
+    s.attach(id, { kind: 'dependency', dependsOn: [other] });
+    await drain();
+    expect(s.condition(id)).toMatchObject({ generation: 2, state: 'active' });
+    expect(s.dispatches(id)).toHaveLength(0);
+    expect(await s.wake(id, 1, 'timer')).toMatchObject({ outcome: 'stale' });
+    const done = terminal(id); settle(other, 'COMPLETED'); await done;
+    expect(s.dispatches(id)[0]).toMatchObject({ condition_generation: 2, phase: 'started' });
+  });
+
+  it('operator run-now overrides an unmet dependency, as it overrides a time wait', async () => {
+    await boot(); const s = scheduler();
+    const dep = built.tasks.create({ goal: 'implement' }).taskId;
+    const id = dependent(s, [dep]);
+    const done = terminal(id); const result = await s.runNow(id); await done;
+    expect(result).toMatchObject({ outcome: 'dispatched' });
+    expect(s.dispatches(id)[0]).toMatchObject({ origin: 'run-now', phase: 'started' });
+    expect(built.tasks.get(dep)?.state).toBe('CREATED');
+  });
+
+  it('rejects a malformed dependency wait and keeps quota/time waits unchanged', async () => {
+    await boot(); const s = scheduler();
+    const id = built.tasks.create({ goal: 'x' }).taskId;
+    expect(() => s.attach(id, { kind: 'dependency', dependsOn: [] })).toThrow(/at least one dependency/);
+    expect(() => s.attach(id, { kind: 'dependency', dependsOn: ['a'], onDependencyFailure: 'explode' as never })).toThrow(/onDependencyFailure/);
+    expect(() => s.attach(id, { kind: 'nonsense' as never, notBefore: now().toISOString() })).toThrow(/time, quota or dependency/);
+    s.attach(id, { kind: 'time', notBefore: new Date(instant + 1000).toISOString() });
+    expect(s.condition(id)).toMatchObject({ kind: 'time', dependsOn: [] });
+  });
+
+  it('a dependency wait never sets the timer deadline, but the capped sweep still evaluates it', async () => {
+    await boot(); const s = scheduler();
+    const dep = built.tasks.create({ goal: 'implement' }).taskId;
+    const id = dependent(s, [dep]);
+    // The event hook is the wake path; a bare tick with the dependency unmet
+    // must leave the condition exactly as it was.
+    await s.tick();
+    expect(s.condition(id)).toMatchObject({ generation: 1, state: 'active' });
+    built.tasks.transition(dep, 'ROUTING'); built.tasks.transition(dep, 'RUNNING');
+    db.prepare("UPDATE tasks SET state = 'COMPLETED' WHERE id = ?").run(dep); // terminal without the event
+    const done = terminal(id); await s.tick(); await done;
+    expect(built.tasks.get(id)?.state).toBe('COMPLETED');
+  });
 });

@@ -1,5 +1,5 @@
 import type { PauseKind, TaskIntent, RoutingProfile, TaskEnvelope, TaskId, TaskMode, TaskState } from "@agent-plane/core";
-import { assertTransition, isTaskState, newTaskId, redactValue } from "@agent-plane/core";
+import { assertTransition, isTaskState, isTerminal, newTaskId, redactValue } from "@agent-plane/core";
 import type { Db } from "../db/index.js";
 
 export interface CreateTaskInput {
@@ -31,6 +31,14 @@ export interface TaskRow {
 
 export class TaskStore {
   constructor(private db: Db) {}
+
+  /**
+   * Set by the Scheduler. Fires after a task reaches a terminal state so K4
+   * dependency waits wake on the event rather than on the timer. The handler
+   * defers its own work to a microtask, which runs after the enclosing
+   * (synchronous) transaction has committed.
+   */
+  onTerminal?: (taskId: string) => void;
 
   create(input: CreateTaskInput): TaskEnvelope {
     input = redactValue(input);
@@ -111,6 +119,7 @@ export class TaskStore {
     this.db
       .prepare("UPDATE tasks SET state = ?, envelope = ?, pause_kind = ?, updated_at = ? WHERE id = ?")
       .run(to, JSON.stringify(envelope), to === "WAITING_INPUT" ? (pauseKind ?? "unknown") : null, new Date().toISOString(), taskId);
+    if (isTerminal(to)) this.onTerminal?.(taskId);
     return envelope;
   }
 

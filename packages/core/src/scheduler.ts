@@ -13,7 +13,7 @@ export interface TaskIntent {
 export type Continuation = { kind: 'fresh' } | { kind: 'checkpoint'; checkpointId: string };
 export type PauseKind = 'limit' | 'provider_unavailable' | 'no_candidate' | 'harness_error'
   | 'approval_pending' | 'verification_failed' | 'comparison_pending' | 'handoff_requested'
-  | 'intervention_required' | 'unknown';
+  | 'intervention_required' | 'dependency_failed' | 'unknown';
 export interface QuotaBlocker {
   kind: 'provider-reset' | 'inferred-backoff' | 'transient-unavailable' | 'unknown-recovery' | 'intervention-required';
   assistantId: AssistantId;
@@ -28,15 +28,23 @@ export interface QuotaObservation {
   assistantId: AssistantId; scope: QuotaBlocker['scope'];
   usedPercent?: number; resetsAt?: string; source: EvidenceSource; observedAt: string;
 }
-export type WaitInput = TimeWaitInput | { kind: 'quota'; notBefore: string; reason?: string; assistants?: AssistantId[] };
+export type OnDependencyFailure = 'cancel' | 'wake-anyway' | 'wait-input';
+export type WaitInput = TimeWaitInput
+  | { kind: 'quota'; notBefore: string; reason?: string; assistants?: AssistantId[] }
+  /** K4. `notBefore` is the earliest re-check, not the wake instant: dependency wakes are
+   *  event-driven and every wake re-reads the dependency states. Defaults to now. */
+  | { kind: 'dependency'; notBefore?: string; reason?: string; dependsOn: string[]; onDependencyFailure?: OnDependencyFailure };
 export interface TimeWaitInput { kind: 'time'; notBefore: string; reason?: string }
 export interface WaitCondition {
   schemaVersion: 1;
   taskId: string;
   generation: number;
   state: 'active' | 'consumed' | 'replaced' | 'cancelled' | 'expired';
-  kind: 'time' | 'quota';
+  kind: 'time' | 'quota' | 'dependency';
   checkpointId?: string;
+  /** kind=dependency: every listed task must be terminal before a wake dispatches. */
+  dependsOn?: string[];
+  onDependencyFailure?: OnDependencyFailure;
   blockers?: QuotaBlocker[];
   assistants?: AssistantId[];
   notBefore: string;
@@ -68,7 +76,8 @@ export interface SchedulerEvent {
   generation?: number;
   dispatchId?: string;
   type: 'wait.attached' | 'wait.replaced' | 'dispatch.reserved' | 'dispatch.start_attempted'
-    | 'dispatch.started' | 'dispatch.ambiguous' | 'dispatch.reparked' | 'dispatch.aborted' | 'wait.cancelled';
+    | 'dispatch.started' | 'dispatch.ambiguous' | 'dispatch.reparked' | 'dispatch.aborted' | 'wait.cancelled'
+    | 'dependency.failed';
   at: string;
   payload: Record<string, unknown>;
 }

@@ -403,7 +403,7 @@ export function Inspector({
       {snapshot && tab === "schedule" && (
         <div className="inspector-content">
           <div className="section-label">
-            Durable wait condition <span>K1 / K2 · Implemented</span>
+            Durable wait condition <span>K1 / K2 / K4 · Implemented</span>
           </div>
           {wait ? (
             <>
@@ -439,8 +439,12 @@ export function Inspector({
                   </dd>
                 </div>
                 <div>
-                  <dt>Quota subjects</dt>
-                  <dd>{wait.assistants?.join(", ") || "—"}</dd>
+                  <dt>Wait subjects</dt>
+                  <dd>
+                    {wait.kind === "dependency"
+                      ? `${wait.dependsOn?.join(", ") || "—"} · on failure: ${wait.onDependencyFailure ?? "wait-input"}`
+                      : wait.assistants?.join(", ") || "—"}
+                  </dd>
                 </div>
               </dl>
               <p className="fine-print">

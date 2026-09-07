@@ -95,7 +95,9 @@ export function waitKindLabel(wait: Pick<TaskWait, "kind">): string {
     ? "Quota wait · K2"
     : wait.kind === "time"
       ? "Time wait · K1"
-      : `Wait · ${wait.kind}`;
+      : wait.kind === "dependency"
+        ? "Dependency wait · K4"
+        : `Wait · ${wait.kind}`;
 }
 
 /** Coarse freshness bucket for an idle quota probe attempt age (K3). */
