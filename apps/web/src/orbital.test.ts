@@ -47,6 +47,7 @@ describe("operator presentation boundaries", () => {
   it("labels a durable wait by kind", () => {
     expect(waitKindLabel({ kind: "time" })).toBe("Time wait · K1");
     expect(waitKindLabel({ kind: "quota" })).toBe("Quota wait · K2");
+    expect(waitKindLabel({ kind: "dependency" })).toBe("Dependency wait · K4");
   });
 
   it("buckets idle-probe attempt age into freshness", () => {

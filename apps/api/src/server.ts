@@ -12,6 +12,7 @@ import {
   redactValue,
   type AssistantId,
   type RoutingProfile,
+  type ScheduleInput,
   type TaskIntent,
   type WaitInput,
 } from "@agent-plane/core";
@@ -285,6 +286,27 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     try { return scheduler.attach(req.params.id, req.body); }
     catch (err) { return reply.status(409).send({ error: message(err) }); }
   });
+  // K5 recurring schedules. Reads need `schedules.read`; every mutation is a command.
+  app.get('/api/schedules', schedulerRead, () => scheduler.schedules.list());
+  app.get<{ Params: { id: string } }>('/api/schedules/:id', schedulerRead, (req, reply) => {
+    const schedule = scheduler.schedules.get(req.params.id);
+    if (!schedule) return reply.status(404).send({ error: 'not found' });
+    return { ...schedule, occurrences: scheduler.schedules.occurrences(req.params.id) };
+  });
+  app.post<{ Body: ScheduleInput }>('/api/schedules', write, (req, reply) => {
+    try { return reply.status(201).send(scheduler.schedules.create(req.body)); }
+    catch (err) { return reply.status(400).send({ error: message(err) }); }
+  });
+  app.patch<{ Params: { id: string }; Body: Partial<ScheduleInput> }>('/api/schedules/:id', write, (req, reply) => {
+    if (!scheduler.schedules.get(req.params.id)) return reply.status(404).send({ error: 'not found' });
+    try { return scheduler.schedules.update(req.params.id, req.body ?? {}); }
+    catch (err) { return reply.status(400).send({ error: message(err) }); }
+  });
+  app.delete<{ Params: { id: string } }>('/api/schedules/:id', write, (req, reply) => {
+    if (!scheduler.schedules.remove(req.params.id)) return reply.status(404).send({ error: 'not found' });
+    return reply.status(204).send();
+  });
+
   app.post<{ Params: { id: string }; Body: { generation?: number; confirmNoLiveOwner?: boolean } }>('/api/tasks/:id/run-now', write, async (req, reply) => {
     if (!tasks.get(req.params.id)) return reply.status(404).send({ error: 'not found' });
     const result = await scheduler.runNow(req.params.id, req.body?.generation, req.body?.confirmNoLiveOwner === true);

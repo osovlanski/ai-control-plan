@@ -34,12 +34,15 @@ export interface WaitHistoryEntry { at: string; actor: string; outcome: string; 
 export interface TaskWait {
   generation: number;
   state: string;
-  kind: "time" | "quota";
+  kind: "time" | "quota" | "dependency";
   reason: string;
   notBefore: string;
   checkpointId?: string;
   autoWakes?: number;
   assistants?: string[];
+  /** K4 dependency subjects — the tasks that must be terminal before a wake. */
+  dependsOn?: string[];
+  onDependencyFailure?: "cancel" | "wake-anyway" | "wait-input";
   history?: WaitHistoryEntry[];
   blockers?: QuotaBlocker[];
 }
