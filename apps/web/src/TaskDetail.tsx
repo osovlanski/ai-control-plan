@@ -53,6 +53,8 @@ export function TaskDetail({ taskId, onBack }: { taskId: string; onBack: () => v
   const [comparison, setComparison] = useState<Comparison | null>(null);
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [session, setSession] = useState<SessionDetail | null>(null);
+  const selectedSessionId = useRef<string | null>(null);
+  const [sessionActionError, setSessionActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [tab, setTab] = useState<Tab>("activity");
   const timelineRef = useRef<HTMLDivElement>(null);
@@ -67,9 +69,12 @@ export function TaskDetail({ taskId, onBack }: { taskId: string; onBack: () => v
     void api.checkpoints(taskId).then(setCheckpoints);
     void api.comparison(taskId).then(setComparison).catch(() => setComparison(null));
     void api.sessions(taskId).then(setSessions).catch(() => setSessions([]));
+    if (selectedSessionId.current) void api.session(selectedSessionId.current).then(setSession).catch(() => setSession(null));
   };
 
   const openSession = (id: string) => {
+    selectedSessionId.current = id;
+    setSessionActionError(null);
     setSession(null);
     void api.session(id).then(setSession).catch(() => setSession(null));
   };
@@ -78,6 +83,7 @@ export function TaskDetail({ taskId, onBack }: { taskId: string; onBack: () => v
     // A new task: drop anything shown for the previous one before refetching.
     setSession(null);
     setSessions([]);
+    selectedSessionId.current = null;
     void api.events(taskId).then(setEvents);
     refresh();
 
@@ -129,17 +135,16 @@ export function TaskDetail({ taskId, onBack }: { taskId: string; onBack: () => v
     | undefined;
 
   return (
-    <div>
-      <div style={{ display: "flex", alignItems: "center", gap: "0.8rem", marginBottom: "1rem" }}>
+    <div className="task-detail">
+      <div className="task-detail-toolbar" style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: "0.8rem", marginBottom: "1rem" }}>
         <Button variant="secondary" onClick={onBack}>
           ← Board
         </Button>
-        <h2 style={{ margin: 0, fontSize: "1.05rem" }}>{detail.id}</h2>
+        <h2 style={{ margin: 0, fontSize: "1.05rem", whiteSpace: "nowrap", fontFamily: tokens.mono }}>{detail.id}</h2>
         <StateBadge state={state} />
-        {state === "WAITING_RESOURCE" && detail?.wait && <>
-          <WaitingSummary wait={detail.wait} enabled={detail.schedulerEnabled !== false} />
+        {state === "WAITING_RESOURCE" && detail?.wait && (
           <Button disabled={busy} onClick={() => { setBusy(true); void api.runNow(taskId, detail.wait!.generation).then(refresh).catch((e: Error) => setNotices(prev => [...prev, { level: "warn", text: e.message, at: new Date().toISOString() }])).finally(() => setBusy(false)); }}>Run now</Button>
-        </>}
+        )}
         <span style={{ marginLeft: "auto", display: "flex", gap: "0.4rem" }}>
           <Button
             variant="secondary"
@@ -178,6 +183,9 @@ export function TaskDetail({ taskId, onBack }: { taskId: string; onBack: () => v
         </span>
       </div>
       <p style={{ marginTop: 0, color: tokens.muted }}>{detail.goal}</p>
+      {state === "WAITING_RESOURCE" && detail?.wait && (
+        <WaitingSummary wait={detail.wait} enabled={detail.schedulerEnabled !== false} />
+      )}
 
       {detail.schedulerEvents && detail.schedulerEvents.length > 0 && (
         <details style={{ marginBottom: '1rem', color: tokens.muted }}>
@@ -217,7 +225,7 @@ export function TaskDetail({ taskId, onBack }: { taskId: string; onBack: () => v
         </Card>
       )}
 
-      <div style={{ display: "flex", gap: "0.4rem", marginBottom: "0.9rem" }}>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: "0.4rem", marginBottom: "0.9rem" }}>
         {(["activity", "usage", "routing", "progress", "handoff", "compare", "sessions"] as Tab[]).map((t) => (
           <Button key={t} variant={tab === t ? "primary" : "secondary"} onClick={() => setTab(t)}>
             {t[0]!.toUpperCase() + t.slice(1)}
@@ -483,6 +491,24 @@ export function TaskDetail({ taskId, onBack }: { taskId: string; onBack: () => v
                 {session.sessionId} — {session.sessionState}
                 <span style={{ color: tokens.muted, fontWeight: 400 }}> / legacy {session.state}</span>
               </h4>
+              {session.approvals.filter(a => a.state === "pending").map(a => (
+                <div key={a.id} role="group" aria-label="Pending session approval" style={{ margin: "12px 0" }}>
+                  <p>Approval requested: <code>{a.providerRequestId}</code>. Review the recorded request below.</p>
+                  <div className="controls">
+                    {[true, false].map(approved => (
+                      <Button key={String(approved)} disabled={busy} variant={approved ? "primary" : "danger"} onClick={() => {
+                        setBusy(true);
+                        setSessionActionError(null);
+                        void api.approve(taskId, a.providerRequestId, approved)
+                          .then(() => { setApproval(null); refresh(); })
+                          .catch((e: Error) => setSessionActionError(e.message))
+                          .finally(() => setBusy(false));
+                      }}>{approved ? "Approve" : "Deny"}</Button>
+                    ))}
+                  </div>
+                </div>
+              ))}
+              {sessionActionError && <p role="alert" className="error">{sessionActionError}</p>}
               {session.correlation?.parentTaskId && (
                 <p style={{ fontSize: "0.82rem", margin: "0 0 0.4rem", color: tokens.muted }}>
                   parent {session.correlation.parentTaskId}

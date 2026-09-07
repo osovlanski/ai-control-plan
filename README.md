@@ -63,6 +63,8 @@ normalized-event contract version is `1.0`.
 `pnpm demo:a` runs the whole walkthrough against an in-process API and the
 deterministic FakeAdapter: no provider credentials, no wall-clock waits, no real
 quota exhaustion. Full operator runbook: [`docs/demo/demo-a.md`](docs/demo/demo-a.md).
+The operator console it runs through is the Orbital UI v2; its visual language
+and semantic mapping are in [`docs/ui/orbital-operator.md`](docs/ui/orbital-operator.md).
 
 ![Demo A: a durable time wait, a quota wait with blocker evidence, and an idle quota observation](docs/demo/assets/demo-a-walkthrough.gif)
 

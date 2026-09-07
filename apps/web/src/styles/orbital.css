@@ -1,0 +1,752 @@
+/* Orbital board: command bar, field, register. */
+.board-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 18px;
+}
+.board-head h1 {
+  font-size: 30px;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+  margin-top: 6px;
+}
+.board-head h1 em {
+  font-style: normal;
+  color: var(--accent);
+}
+.board-head p {
+  color: var(--text-2);
+  margin-top: 8px;
+  max-width: 52ch;
+}
+
+/* Command bar: the one obvious way to issue work. */
+.command-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 8px 8px 18px;
+  border-radius: var(--r-3);
+  border: 1px solid var(--line-strong);
+  background:
+    linear-gradient(90deg, rgba(127, 227, 220, 0.06), transparent 40%),
+    rgba(8, 13, 19, 0.7);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.04),
+    0 0 0 1px rgba(127, 227, 220, 0.05),
+    0 18px 50px rgba(0, 0, 0, 0.35);
+  margin-bottom: 8px;
+  transition: border-color var(--t-fast), box-shadow var(--t-med);
+}
+.command-bar:focus-within {
+  border-color: rgba(127, 227, 220, 0.55);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.04),
+    0 0 0 4px rgba(127, 227, 220, 0.1),
+    0 18px 50px rgba(0, 0, 0, 0.35);
+}
+.command-bar .cb-mark {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 14px var(--accent-glow);
+  flex-shrink: 0;
+}
+.command-bar input {
+  flex: 1;
+  min-width: 0;
+  background: none;
+  border: 0;
+  padding: 12px 0;
+  font-size: 16px;
+  color: var(--text);
+}
+.command-bar input::placeholder {
+  color: var(--text-3);
+}
+.command-bar input:focus {
+  outline: none;
+}
+.command-bar kbd {
+  color: var(--text-3);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.command-help {
+  color: var(--text-2);
+  font-size: 12px;
+  margin-bottom: 20px;
+}
+
+.workspace-status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 22px;
+  font-size: 12px;
+  color: var(--text-2);
+  margin-bottom: 8px;
+}
+.workspace-status .stat {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+.stat-action {
+  font: inherit;
+  padding: 0;
+  background: transparent;
+  border: 0;
+}
+.stat-action:hover { text-decoration: underline; }
+.workspace-status .stat b {
+  font-weight: 600;
+  font-family: var(--font-mono);
+  color: var(--text);
+}
+.workspace-status .stat i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--tone);
+  box-shadow: 0 0 8px var(--tone);
+}
+.read-status {
+  margin-left: auto;
+  color: var(--text-3);
+}
+
+/* Layout: field left (~46%), inspector right. */
+.orbital-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 0 30px;
+  align-items: start;
+  margin-bottom: 30px;
+}
+.orbital-map {
+  min-width: 0;
+  position: sticky;
+  top: 18px;
+  display: flex;
+  flex-direction: column;
+}
+.map-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-size: 12px;
+  color: var(--text-3);
+}
+.map-heading strong {
+  color: var(--text-2);
+  font-weight: 500;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  font-size: 11px;
+}
+
+/* The scene */
+.sphere-scene {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 1;
+  max-width: 700px;
+  margin: 4px auto 0;
+  isolation: isolate;
+}
+.sphere-svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+.sph-atmos {
+  transform-origin: center;
+  transition: opacity var(--t-med);
+}
+.is-executing .sph-atmos,
+.is-executing .sph-energy {
+  animation: breathe 5s ease-in-out infinite;
+}
+.sph-energy {
+  opacity: 0.35;
+}
+.is-executing .sph-energy {
+  opacity: 0.9;
+}
+.sph-grid ellipse {
+  fill: none;
+  stroke: rgba(180, 225, 235, 0.13);
+  stroke-width: 1;
+}
+.orbit {
+  fill: none;
+  stroke-width: 1;
+}
+.orbit-back {
+  stroke: rgba(146, 178, 200, 0.16);
+}
+.orbit-front {
+  stroke: rgba(180, 225, 235, 0.36);
+}
+.orbit-2 {
+  stroke-dasharray: 2 7;
+}
+.core-track {
+  fill: none;
+  stroke: rgba(146, 178, 200, 0.12);
+  stroke-width: 3;
+}
+.core-seg {
+  fill: none;
+  stroke-width: 3;
+  stroke-linecap: butt;
+  transform: rotate(-90deg);
+  transform-origin: center;
+  transition: stroke-dasharray var(--t-med) var(--ease);
+}
+.arc-horizon {
+  fill: none;
+  stroke: var(--tone-resource);
+  stroke-width: 2;
+  stroke-dasharray: 3 6;
+  stroke-linecap: round;
+  opacity: 0.85;
+}
+.arc-blocker {
+  fill: none;
+  stroke: var(--tone-limit);
+  stroke-width: 3;
+  stroke-dasharray: 2 5;
+  stroke-linecap: round;
+}
+.constellation-track {
+  fill: none;
+  stroke: rgba(146, 178, 200, 0.07);
+  stroke-dasharray: 1 6;
+}
+
+.sphere-core {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  text-align: center;
+  display: grid;
+  gap: 3px;
+  pointer-events: none;
+  z-index: 1;
+}
+.core-eyebrow {
+  font-size: 10px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--accent);
+  opacity: 0.85;
+}
+.sphere-core strong {
+  font-size: 58px;
+  line-height: 1;
+  letter-spacing: -0.05em;
+  font-weight: 300;
+  font-variant-numeric: tabular-nums;
+  color: #eafffd;
+  text-shadow: 0 0 40px rgba(127, 227, 220, 0.35);
+}
+.core-sub {
+  font-size: 11px;
+  color: var(--text-2);
+  letter-spacing: 0.04em;
+}
+
+/* Bodies ride the same path the SVG draws; `--phase` is arc-length. */
+.orbital-body {
+  position: absolute;
+  left: 0;
+  top: 0;
+  offset-rotate: 0deg;
+  offset-anchor: 7px 50%; /* the dot, not the dot+label box, rides the path */
+  offset-distance: calc(var(--phase) * 100%);
+  background: none;
+  border: 0;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--tone);
+  z-index: 2;
+  text-align: left;
+  transform: translate(0, 0);
+}
+.orbital-body.flip {
+  flex-direction: row-reverse;
+  text-align: right;
+  offset-anchor: calc(100% - 7px) 50%;
+}
+.orbital-body.moving {
+  animation: orbit-drift 16s ease-in-out infinite alternate;
+  animation-delay: calc(var(--phase) * -16s);
+}
+.orbital-body .body-dot {
+  position: relative;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: radial-gradient(circle at 35% 30%, #fff 0, var(--tone) 40%, color-mix(in srgb, var(--tone) 55%, #000) 100%);
+  box-shadow:
+    0 0 0 4px rgba(4, 7, 11, 0.85),
+    0 0 18px color-mix(in srgb, var(--tone) 55%, transparent);
+  transition: transform var(--t-med) var(--ease), box-shadow var(--t-med);
+}
+.orbital-body .body-dot::after {
+  content: "";
+  position: absolute;
+  inset: -7px;
+  border-radius: 50%;
+  border: 1px solid var(--tone);
+  opacity: 0;
+}
+.orbital-body.selected .body-dot {
+  transform: scale(1.35);
+  box-shadow:
+    0 0 0 4px rgba(4, 7, 11, 0.85),
+    0 0 0 5px color-mix(in srgb, var(--tone) 45%, transparent),
+    0 0 34px color-mix(in srgb, var(--tone) 65%, transparent);
+}
+.orbital-body.selected .body-dot::after {
+  opacity: 0.9;
+  inset: -10px;
+}
+.body-label {
+  display: grid;
+  gap: 1px;
+  width: 122px;
+  padding: 6px 9px;
+  border-radius: var(--r-2);
+  background: rgba(6, 10, 15, 0.78);
+  border: 1px solid var(--line);
+  backdrop-filter: blur(8px);
+  transition: border-color var(--t-fast), background var(--t-fast);
+}
+.orbital-body:hover .body-label,
+.orbital-body.selected .body-label {
+  border-color: color-mix(in srgb, var(--tone) 45%, transparent);
+  background: rgba(8, 13, 19, 0.92);
+}
+.body-label strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text);
+}
+.body-label small {
+  font-size: 10.5px;
+  letter-spacing: 0.03em;
+  color: var(--tone);
+}
+
+/* State semantics on the body itself */
+.state-RUNNING .body-dot::after,
+.state-ROUTING .body-dot::after {
+  opacity: 0.7;
+  animation: pulse-ring 2.2s var(--ease) infinite;
+}
+.state-AWAITING_APPROVAL .body-dot,
+.state-WAITING_INPUT .body-dot {
+  animation: beacon 1.8s ease-in-out infinite;
+}
+.state-AWAITING_APPROVAL .body-dot::after,
+.state-WAITING_INPUT .body-dot::after {
+  opacity: 0.8;
+  border-style: dashed;
+}
+.state-WAITING_RESOURCE .body-dot {
+  background: radial-gradient(circle at 50% 50%, #0c141c 0 38%, var(--tone) 42%, color-mix(in srgb, var(--tone) 55%, #000) 100%);
+  box-shadow: 0 0 0 4px rgba(4, 7, 11, 0.85);
+}
+.state-LIMIT_PAUSED .body-dot::after {
+  opacity: 0.9;
+  border: 1.5px dashed var(--tone);
+}
+.state-HANDING_OFF .body-dot {
+  box-shadow:
+    0 0 0 4px rgba(4, 7, 11, 0.85),
+    -14px 0 18px -6px color-mix(in srgb, var(--tone) 70%, transparent);
+}
+.state-COMPLETED,
+.state-CANCELLED,
+.state-FAILED {
+  opacity: 0.62;
+}
+.state-COMPLETED .body-dot,
+.state-CANCELLED .body-dot,
+.state-FAILED .body-dot {
+  width: 10px;
+  height: 10px;
+  box-shadow: 0 0 0 3px rgba(4, 7, 11, 0.85);
+}
+.state-COMPLETED.selected,
+.state-CANCELLED.selected,
+.state-FAILED.selected {
+  opacity: 1;
+}
+.state-COMPLETED .body-label,
+.state-CANCELLED .body-label,
+.state-FAILED .body-label {
+  width: 108px;
+  opacity: 0;
+  transition: opacity var(--t-fast);
+}
+.state-COMPLETED:is(:hover, :focus-visible, .selected) .body-label,
+.state-CANCELLED:is(:hover, :focus-visible, .selected) .body-label,
+.state-FAILED:is(:hover, :focus-visible, .selected) .body-label {
+  opacity: 1;
+}
+
+/* Provider constellation */
+.satellite {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text-3);
+  z-index: 1;
+}
+.satellite i {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 1px solid var(--line-strong);
+  background: radial-gradient(circle at 40% 35%, rgba(146, 178, 200, 0.28), rgba(6, 10, 15, 0.9) 70%);
+  box-shadow: 0 0 0 4px rgba(4, 7, 11, 0.85);
+  flex-shrink: 0;
+}
+.satellite span {
+  display: grid;
+  line-height: 1.25;
+}
+.satellite strong {
+  font-weight: 500;
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.satellite small {
+  font-size: 10px;
+}
+.satellite.executing {
+  color: var(--accent);
+}
+.satellite.executing i {
+  border-color: var(--accent);
+  background: radial-gradient(circle at 40% 35%, #cffaf6, var(--accent) 45%, #0f3a3a 100%);
+  box-shadow:
+    0 0 0 4px rgba(4, 7, 11, 0.85),
+    0 0 24px var(--accent-glow);
+}
+.satellite.executing strong {
+  color: var(--text);
+}
+.satellite.cooling {
+  color: var(--tone-limit);
+}
+.satellite.cooling i {
+  border-color: var(--tone-limit);
+  border-style: dashed;
+}
+.satellite.unavailable {
+  color: var(--tone-limit);
+}
+.satellite.unavailable i {
+  border-style: dotted;
+  border-color: var(--tone-limit);
+}
+.map-caption {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  font-size: 11px;
+  color: var(--text-3);
+  margin-top: 8px;
+}
+.map-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  font-size: 11px;
+  margin-top: 10px;
+}
+.map-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.map-legend i {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--tone);
+  box-shadow: 0 0 8px var(--tone);
+}
+.map-legend .hollow i {
+  background: transparent;
+  border: 1.5px solid var(--tone);
+  box-shadow: none;
+}
+.map-legend .dashed i {
+  background: transparent;
+  border: 1.5px dashed var(--tone);
+  box-shadow: none;
+}
+
+@keyframes orbit-drift {
+  from {
+    offset-distance: calc((var(--phase) - 0.025) * 100%);
+  }
+  to {
+    offset-distance: calc((var(--phase) + 0.025) * 100%);
+  }
+}
+@keyframes pulse-ring {
+  0% {
+    transform: scale(0.6);
+    opacity: 0.9;
+  }
+  100% {
+    transform: scale(1.9);
+    opacity: 0;
+  }
+}
+@keyframes beacon {
+  0%,
+  100% {
+    box-shadow:
+      0 0 0 4px rgba(4, 7, 11, 0.85),
+      0 0 12px color-mix(in srgb, var(--tone) 40%, transparent);
+  }
+  50% {
+    box-shadow:
+      0 0 0 4px rgba(4, 7, 11, 0.85),
+      0 0 30px color-mix(in srgb, var(--tone) 90%, transparent);
+  }
+}
+@keyframes breathe {
+  0%,
+  100% {
+    opacity: 0.8;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+/* Register */
+.task-register {
+  border-top: 1px solid var(--line);
+  padding-top: 20px;
+}
+.register-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  margin-bottom: 8px;
+}
+.register-toolbar h2 {
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-2);
+  white-space: nowrap;
+}
+.register-toolbar h2 span {
+  margin-left: 8px;
+  font-family: var(--font-mono);
+  color: var(--text-3);
+  letter-spacing: 0;
+}
+.filters {
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  border-radius: var(--r-2);
+  background: var(--surface);
+  border: 1px solid var(--line);
+}
+.filters button {
+  border: 0;
+  background: transparent;
+  color: var(--text-2);
+  padding: 6px 12px;
+  font-size: 12px;
+  border-radius: 7px;
+  transition: background var(--t-fast), color var(--t-fast);
+}
+.filters button[aria-pressed="true"] {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.register-toolbar .input {
+  margin-left: auto;
+  width: 240px;
+  padding: 8px 12px;
+  font-size: 13px;
+}
+.task-rows {
+  max-height: 440px;
+  overflow: auto;
+}
+.task-row {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr) 170px 64px 20px;
+  gap: 16px;
+  width: 100%;
+  align-items: center;
+  text-align: left;
+  padding: 13px 12px;
+  background: transparent;
+  border: 0;
+  border-top: 1px solid var(--line);
+  border-left: 2px solid transparent;
+  color: var(--text);
+  transition: background var(--t-fast), border-color var(--t-fast);
+}
+.task-row:hover {
+  background: var(--surface);
+}
+.task-row.selected {
+  background: rgba(127, 227, 220, 0.05);
+  border-left-color: var(--accent);
+}
+.row-index {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-3);
+}
+.row-goal strong {
+  font-size: 13.5px;
+  font-weight: 500;
+  display: block;
+}
+.row-goal small,
+.state-text small {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-3);
+  margin-top: 3px;
+}
+.state-text {
+  font-size: 12px;
+  display: inline-flex;
+  flex-direction: column;
+}
+.state-text::before {
+  content: none;
+}
+.task-row time {
+  font-size: 11px;
+  color: var(--text-3);
+}
+.task-row > span:last-child {
+  color: var(--text-3);
+}
+.empty-register {
+  padding: 26px 12px;
+  color: var(--text-3);
+  font-size: 13px;
+  border-top: 1px solid var(--line);
+}
+
+@media (max-width: 1100px) {
+  .orbital-layout {
+    grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+    gap: 0 22px;
+  }
+  .body-label {
+    width: 104px;
+  }
+  .sphere-core strong {
+    font-size: 52px;
+  }
+  .satellite { max-width: 125px; }
+}
+@media (max-width: 760px) {
+  .board-head {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+  }
+  .board-head h1 {
+    font-size: 24px;
+  }
+  .command-bar {
+    padding-left: 14px;
+    flex-wrap: wrap;
+  }
+  .command-bar input {
+    flex-basis: calc(100% - 36px);
+  }
+  .command-bar .btn {
+    margin-left: auto;
+  }
+  .command-bar kbd {
+    display: none;
+  }
+  .orbital-layout {
+    grid-template-columns: 1fr;
+    gap: 22px;
+  }
+  .orbital-map {
+    position: static;
+  }
+  .sphere-scene {
+    max-width: 360px;
+  }
+  .sphere-core strong {
+    font-size: 40px;
+  }
+  /* Mobile: dots only. The selected body is highlighted and the inspector
+     directly below names it, so labels would only cover the core. */
+  .body-label {
+    display: none;
+  }
+  .satellite {
+    display: none;
+  }
+  .command-bar .btn {
+    padding: 9px 12px;
+  }
+  .board-head .btn {
+    align-self: flex-start;
+  }
+  .register-toolbar {
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+  .register-toolbar .input {
+    margin-left: 0;
+    width: 100%;
+  }
+  .task-row {
+    grid-template-columns: 24px minmax(0, 1fr) 110px;
+    gap: 10px;
+  }
+  .task-row time,
+  .task-row > span:last-child {
+    display: none;
+  }
+  .task-rows {
+    max-height: none;
+  }
+}

@@ -18,7 +18,9 @@ integration and validation artefact: it adds no kernel semantics of its own.
 
 The Orbital positions are an operator index, not a forecast: nothing in the UI
 implies a predicted execution time, because the backend supplies no such
-semantics.
+semantics. Since UI v2 the ring a body sits on is its state group (in motion,
+held, settled) and the angle is its list index; the visual vocabulary is
+documented in [`docs/ui/orbital-operator.md`](../ui/orbital-operator.md).
 
 ## 2. Prerequisites
 
@@ -48,6 +50,9 @@ That builds the web app and runs `apps/web/e2e/demo-a.spec.ts` under the
 Playwright `demo-a` project, which keeps trace, video and screenshots. The spec
 boots a real API in-process against a temporary workspace, with an injected clock
 and an injected probe transport, so the whole walkthrough is deterministic.
+The same boot lives in `apps/web/e2e/harness.ts` and also drives the visual
+reference captures (`pnpm --filter @agent-plane/web visual`, see
+[`docs/ui/orbital-operator.md`](../ui/orbital-operator.md)).
 
 Artefacts land in
 `apps/web/test-results/demo-a-*-demo-a/` (git-ignored):

@@ -7,12 +7,13 @@ else; the repo has no runtime dependency on it.
 from PIL import Image
 import os
 src = os.path.dirname(os.path.abspath(__file__)) + "/assets"
-BG = (9, 14, 20)
+BG = (4, 7, 11)
 # (still, bottom of its own content in cropped coordinates, hold ms)
-plan = [("demo-a-1-k1-waiting.png", 821, 3500),
-        ("demo-a-2-k2-quota-wait.png", 821, 4500),
-        ("demo-a-3-k3-idle-probe.png", 600, 3500)]
-LEFT, TOP, RIGHT = 700, 275, 1440
+plan = [("demo-a-1-k1-waiting.png", 900, 3500),
+        ("demo-a-2-k2-quota-wait.png", 960, 4500),
+        ("demo-a-3-k3-idle-probe.png", 760, 3500)]
+# UI v2: the inspector column of the 1440px full-page still.
+LEFT, TOP, RIGHT = 760, 318, 1420
 H = max(p[1] for p in plan)
 frames, durations = [], []
 for name, bottom, hold in plan:

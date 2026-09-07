@@ -1,9 +1,17 @@
 import { describe, it, expect } from "vitest";
 import {
+  arcPath,
+  bodiesCollide,
   contextPercent,
   describeState,
+  fieldPulse,
+  layoutBodies,
+  nextStep,
   observedModel,
+  pointAt,
   probeFreshness,
+  ringOf,
+  ringPath,
   waitKindLabel,
 } from "./orbital.js";
 import type { TaskEvent } from "./api.js";
@@ -92,5 +100,77 @@ describe("operator presentation boundaries", () => {
       contextPercent({ ...base, occupancySource: "unavailable" }),
     ).toBeUndefined();
     expect(contextPercent({ ...base, occupancyTokens: NaN })).toBeUndefined();
+  });
+});
+
+describe("orbital field geometry", () => {
+  const mk = (state: string, n: number) =>
+    Array.from({ length: n }, (_, i) => ({ id: `${state}-${i}`, state }));
+
+  it("groups bodies onto rings by state, never by time", () => {
+    expect(ringOf("RUNNING")).toBe(0);
+    expect(ringOf("WAITING_RESOURCE")).toBe(1);
+    expect(ringOf("WAITING_INPUT")).toBe(1);
+    expect(ringOf("COMPLETED")).toBe(2);
+    expect(ringOf("SOMETHING_NEW")).toBe(0);
+  });
+
+  it("maps arc-length fractions onto the same closed path the SVG draws", () => {
+    const start = pointAt(1, 0);
+    const wrap = pointAt(1, 1);
+    expect(Math.hypot(start.x - wrap.x, start.y - wrap.y)).toBeLessThan(1);
+    expect(ringPath(1)).toMatch(/^M .* A .* A .*$/);
+    expect(arcPath(1, 0.1, 0.1).split("L")).toHaveLength(25);
+  });
+
+  it("keeps a full workspace's labels from overlapping", () => {
+    const bodies = layoutBodies([
+      ...mk("RUNNING", 3),
+      ...mk("WAITING_RESOURCE", 2),
+      ...mk("WAITING_INPUT", 1),
+      ...mk("COMPLETED", 1),
+      ...mk("FAILED", 1),
+    ]);
+    for (let i = 0; i < bodies.length; i++)
+      for (let j = i + 1; j < bodies.length; j++)
+        expect(bodiesCollide(bodies[i]!, bodies[j]!)).toBe(false);
+    // deterministic: same input, same layout
+    expect(layoutBodies(mk("RUNNING", 2))).toEqual(layoutBodies(mk("RUNNING", 2)));
+  });
+
+  it("summarises the workload the way the core ring and status row show it", () => {
+    expect(
+      fieldPulse([
+        { state: "RUNNING" },
+        { state: "ROUTING" },
+        { state: "WAITING_INPUT" },
+        { state: "LIMIT_PAUSED" },
+        { state: "WAITING_RESOURCE" },
+        { state: "COMPLETED" },
+        { state: "CANCELLED" },
+      ]),
+    ).toEqual({ running: 2, attention: 2, waiting: 1, ready: 0, unknown: 0, settled: 2, total: 7 });
+  });
+
+  it("derives 'what happens next' only from persisted K1-K3 truth", () => {
+    const wait = { kind: "time" as const, notBefore: "2026-09-06T13:00:00.000Z" };
+    expect(nextStep({ state: "WAITING_RESOURCE", wait })).toMatch(/Scheduler wakes it at .* and dispatches once/);
+    expect(nextStep({ state: "WAITING_RESOURCE", wait: { ...wait, kind: "quota" } })).toMatch(/revalidates quota evidence/);
+    expect(nextStep({ state: "WAITING_RESOURCE", wait, schedulerEnabled: false })).toMatch(/disabled/);
+    expect(nextStep({ state: "WAITING_INPUT" })).toMatch(/will not wake it/);
+    expect(nextStep({ state: "RUNNING", assistant: "fake-a" })).toMatch(/fake-a/);
+    expect(nextStep({ state: "MYSTERY" })).toMatch(/Unknown state/);
+  });
+});
+
+describe("execution evidence", () => {
+  it("counts an approval-paused session as attention and an unstarted draft as ready", () => {
+    const tasks = [
+      { id: "approval", state: "RUNNING", execution: { awaitingApproval: true, assistants: [] } },
+      { id: "draft", state: "CREATED" },
+    ];
+    expect(fieldPulse(tasks)).toEqual({ running: 0, attention: 1, waiting: 0, ready: 1, unknown: 0, settled: 0, total: 2 });
+    expect(layoutBodies(tasks).every(body => body.ring === 1)).toBe(true);
+    expect(nextStep({ state: "LIMIT_PAUSED" })).not.toMatch(/budget exhausted/i);
   });
 });

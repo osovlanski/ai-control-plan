@@ -1,9 +1,9 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, type RoutingExplanation } from "./api.js";
 import { Button, Card, Field, inputStyle, QuotaBar, tokens } from "./ui.jsx";
 
-export function NewTask({ onStarted }: { onStarted: (taskId: string) => void }) {
-  const [goal, setGoal] = useState("");
+export function NewTask({ onStarted, initialGoal }: { onStarted: (taskId: string) => void; initialGoal?: string }) {
+  const [goal, setGoal] = useState(initialGoal ?? "");
   const [constraints, setConstraints] = useState("");
   const [repoPath, setRepoPath] = useState("");
   const [profile, setProfile] = useState("auto");
@@ -11,6 +11,10 @@ export function NewTask({ onStarted }: { onStarted: (taskId: string) => void }) 
   const [explanation, setExplanation] = useState<RoutingExplanation | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const invalidatePreview = () => {
+    setTaskId(null);
+    setExplanation(null);
+  };
 
   const previewRoute = async () => {
     setError(null);
@@ -35,6 +39,16 @@ export function NewTask({ onStarted }: { onStarted: (taskId: string) => void }) 
       setBusy(false);
     }
   };
+
+  // Arriving from the command bar: the operator already asked to route it.
+  // The ref guards StrictMode's double effect so only one task is created.
+  const autoRouted = useRef(false);
+  useEffect(() => {
+    if (initialGoal?.trim() && !autoRouted.current) {
+      autoRouted.current = true;
+      void previewRoute();
+    }
+  }, []);
 
   const eligible = explanation?.candidates.filter((c) => c.passedFilters) ?? [];
 
@@ -67,13 +81,15 @@ export function NewTask({ onStarted }: { onStarted: (taskId: string) => void }) 
   };
 
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr)", gap: "1.5rem" }}>
+    <div className="new-task-layout">
       <Card>
-        <h2 style={{ marginTop: 0, fontSize: "1.05rem" }}>New task</h2>
+        <span className="eyebrow">Intake</span>
+        <h2 style={{ margin: "6px 0 16px", fontSize: "1.25rem", fontWeight: 500 }}>New mission</h2>
         <Field label="Goal">
           <textarea
+            disabled={busy}
             value={goal}
-            onChange={(e) => setGoal(e.target.value)}
+            onChange={(e) => { setGoal(e.target.value); invalidatePreview(); }}
             rows={4}
             placeholder="Fix the authentication refresh-token race and raise coverage"
             style={{ ...inputStyle, resize: "vertical" }}
@@ -81,18 +97,19 @@ export function NewTask({ onStarted }: { onStarted: (taskId: string) => void }) 
         </Field>
         <Field label="Constraints (one per line — recorded as user decisions, inviolable on handoff)">
           <textarea
+            disabled={busy}
             value={constraints}
-            onChange={(e) => setConstraints(e.target.value)}
+            onChange={(e) => { setConstraints(e.target.value); invalidatePreview(); }}
             rows={2}
             placeholder="no breaking changes"
             style={{ ...inputStyle, resize: "vertical" }}
           />
         </Field>
         <Field label="Repository path (must be in the workspace allowlist)">
-          <input value={repoPath} onChange={(e) => setRepoPath(e.target.value)} style={inputStyle} />
+          <input disabled={busy} value={repoPath} onChange={(e) => { setRepoPath(e.target.value); invalidatePreview(); }} style={inputStyle} />
         </Field>
         <Field label="Routing profile">
-          <select value={profile} onChange={(e) => setProfile(e.target.value)} style={inputStyle}>
+          <select disabled={busy} value={profile} onChange={(e) => { setProfile(e.target.value); invalidatePreview(); }} style={inputStyle}>
             <option value="auto">Auto</option>
             <option value="preserve-quota">Preserve Quota</option>
             <option value="fastest">Fastest (measured)</option>
@@ -103,6 +120,9 @@ export function NewTask({ onStarted }: { onStarted: (taskId: string) => void }) 
         <Button onClick={previewRoute} disabled={busy || goal.trim().length === 0}>
           {taskId ? "Re-route" : "Preview routing"}
         </Button>
+        <p className="fine-print" role="status" style={{ marginTop: 12 }}>
+          {busy ? "Preparing mission…" : "Preview creates an unstarted mission. Editing requires a new preview; earlier previews remain unstarted in the register. Choose Run to begin execution."}
+        </p>
         {explanation && explanation.candidates.filter((c) => c.passedFilters).length > 1 && (
           <p style={{ fontSize: "0.8rem", color: tokens.muted, marginTop: "0.8rem" }}>
             Running in parallel multiplies quota and token spend, so it is never automatic — use the buttons
@@ -113,7 +133,8 @@ export function NewTask({ onStarted }: { onStarted: (taskId: string) => void }) 
       </Card>
 
       <Card>
-        <h2 style={{ marginTop: 0, fontSize: "1.05rem" }}>Routing recommendation</h2>
+        <span className="eyebrow">Decision</span>
+        <h2 style={{ margin: "6px 0 16px", fontSize: "1.25rem", fontWeight: 500 }}>Routing recommendation</h2>
         {!explanation && (
           <p style={{ color: tokens.muted, fontSize: "0.9rem" }}>
             Submit a goal to see which assistant the router picks — and exactly why.

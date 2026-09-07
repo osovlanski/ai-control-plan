@@ -7,19 +7,22 @@
     "dev": "vite",
     "build": "vite build",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
-    ,"test:e2e": "pnpm build && playwright test --project=chromium"
-    ,"demo:a": "pnpm build && playwright test --project=demo-a"
+    "test": "vitest run",
+    "test:e2e": "pnpm build && playwright test --project=chromium",
+    "demo:a": "pnpm build && playwright test --project=demo-a"
   },
   "dependencies": {
+    "@fontsource-variable/ibm-plex-sans": "^5.3.0",
+    "@fontsource/ibm-plex-mono": "^5.3.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0"
   },
   "devDependencies": {
+    "@agent-plane/adapters": "workspace:*",
     "@agent-plane/core": "workspace:*",
+    "@playwright/test": "^1.55.0",
     "@types/react": "^19.1.0",
     "@types/react-dom": "^19.1.0",
-    "@playwright/test": "^1.55.0",
     "@vitejs/plugin-react": "^5.0.0",
     "typescript": "^5.9.2",
     "vite": "^7.1.0",

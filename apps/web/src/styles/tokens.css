@@ -1,0 +1,81 @@
+/* Agentic OS design tokens. Every colour, font and motion value the UI uses
+   lives here; components reference tokens, never raw values. */
+:root {
+  color-scheme: dark;
+
+  /* Environment — near-black, cool, slightly blue so glows read as light. */
+  --bg-0: #04070b;
+  --bg-1: #080d13;
+  --bg-2: #0c141c;
+  --surface: rgba(146, 178, 200, 0.045);
+  --surface-2: rgba(146, 178, 200, 0.08);
+  --surface-solid: #0e161f;
+  --line: rgba(146, 178, 200, 0.13);
+  --line-strong: rgba(146, 178, 200, 0.26);
+
+  /* Type */
+  --text: #e8eef4;
+  --text-2: #a3b1be;
+  --text-3: #74828e;
+  --font-ui:
+    "IBM Plex Sans Variable", "IBM Plex Sans", system-ui, -apple-system,
+    "Segoe UI", sans-serif;
+  --font-mono:
+    "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  /* One luminous accent: ion teal. It marks execution and selection only. */
+  --accent: #7fe3dc;
+  --accent-ink: #062120;
+  --accent-glow: rgba(127, 227, 220, 0.35);
+
+  /* Semantic state tones — the visual vocabulary of the kernel state machine. */
+  --tone-active: #7fe3dc; /* RUNNING / ROUTING */
+  --tone-human: #f3b565; /* WAITING_INPUT — needs a person */
+  --tone-resource: #8ea4c9; /* WAITING_RESOURCE — scheduler owns it */
+  --tone-limit: #f0895c; /* LIMIT_PAUSED / quota blocker */
+  --tone-handoff: #c9bdf5; /* HANDING_OFF */
+  --tone-complete: #8fd3a8; /* COMPLETED */
+  --tone-failed: #f07c7c; /* FAILED */
+  --tone-neutral: #7d8b98; /* CREATED / CANCELLED / unknown */
+
+  /* Geometry */
+  --r-1: 6px;
+  --r-2: 10px;
+  --r-3: 16px;
+  --r-pill: 999px;
+  --rail-w: 76px;
+
+  /* Motion */
+  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --t-fast: 140ms;
+  --t-med: 320ms;
+  --orbit-period: 48s;
+}
+
+.tone-active {
+  --tone: var(--tone-active);
+}
+.tone-human {
+  --tone: var(--tone-human);
+}
+.tone-resource {
+  --tone: var(--tone-resource);
+}
+.tone-limit {
+  --tone: var(--tone-limit);
+}
+.tone-handoff {
+  --tone: var(--tone-handoff);
+}
+.tone-complete {
+  --tone: var(--tone-complete);
+}
+.tone-failed {
+  --tone: var(--tone-failed);
+}
+.tone-neutral {
+  --tone: var(--tone-neutral);
+}
+[class*="tone-"] {
+  color: var(--tone);
+}

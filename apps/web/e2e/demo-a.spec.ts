@@ -118,7 +118,7 @@ async function openApp(context: BrowserContext) {
   const page = await context.newPage();
   await page.goto(l.url);
   await expect(page.getByText("Agent Control Plane")).toBeVisible();
-  await expect(page.getByRole("heading", { name: /Work in orbit/ })).toBeVisible();
+  await expect(page.getByRole("heading", { name: /Missions in orbit/ })).toBeVisible();
   return page;
 }
 
@@ -179,6 +179,7 @@ test("Demo A: K1 durable time wait, K2 quota wait + resume, K3 idle probe — th
     page.getByText("Deferred execution is unavailable in this backend"),
   ).toHaveCount(0);
   await page.setViewportSize({ width: 1440, height: 1024 });
+  await page.evaluate(() => window.scrollTo(0, 0)); // sticky rail/field render at the top of full-page stills
   await page.screenshot({
     path: testInfo.outputPath("demo-a-1-k1-waiting.png"),
     fullPage: true,
@@ -264,6 +265,7 @@ test("Demo A: K1 durable time wait, K2 quota wait + resume, K3 idle probe — th
     inspector.getByText(/provenance provider-reported/).first(),
   ).toBeVisible();
   await expect(inspector.getByText("Implemented · K2")).toBeVisible();
+  await page.evaluate(() => window.scrollTo(0, 0)); // sticky rail/field render at the top of full-page stills
   await page.screenshot({
     path: testInfo.outputPath("demo-a-2-k2-quota-wait.png"),
     fullPage: true,
@@ -311,6 +313,7 @@ test("Demo A: K1 durable time wait, K2 quota wait + resume, K3 idle probe — th
   await expect(
     fakeBRow.getByText(/no verified idle endpoint/),
   ).toBeVisible();
+  await page.evaluate(() => window.scrollTo(0, 0)); // sticky rail/field render at the top of full-page stills
   await page.screenshot({
     path: testInfo.outputPath("demo-a-3-k3-idle-probe.png"),
     fullPage: true,
@@ -320,6 +323,7 @@ test("Demo A: K1 durable time wait, K2 quota wait + resume, K3 idle probe — th
   // Responsive check — laptop + mobile, no horizontal overflow.
   // ---------------------------------------------------------------------------
   await page.setViewportSize({ width: 1100, height: 800 });
+  await page.evaluate(() => window.scrollTo(0, 0)); // sticky rail/field render at the top of full-page stills
   await page.screenshot({
     path: testInfo.outputPath("demo-a-4-laptop.png"),
     fullPage: true,
@@ -328,6 +332,7 @@ test("Demo A: K1 durable time wait, K2 quota wait + resume, K3 idle probe — th
     await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
   ).toBe(true);
   await page.setViewportSize({ width: 390, height: 844 });
+  await page.evaluate(() => window.scrollTo(0, 0)); // sticky rail/field render at the top of full-page stills
   await page.screenshot({
     path: testInfo.outputPath("demo-a-5-mobile.png"),
     fullPage: true,
