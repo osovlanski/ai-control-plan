@@ -94,3 +94,42 @@ seeds one mission per state, and writes to
 `1-desktop-active`, `2-desktop-quota-wait`, `3-desktop-needs-you`, `4-laptop`,
 `5-mobile`, `6-desktop-reduced-motion`, `7-intake` (plus `-full` page variants).
 The Demo A stills in `docs/demo/assets/` come from `pnpm demo:a`.
+
+## PR #26 independent review corrections
+
+The command entry describes its preview-before-run boundary. Intake invalidates
+its recommendation after any goal, constraint, repository or profile edit;
+starting always uses the currently previewed immutable intent. Earlier previews
+remain unstarted missions in the register.
+
+Task state and runtime state are separate. For RUNNING missions, the board reads
+existing task detail and session endpoints in batches of at most six missions.
+An effective AWAITING_APPROVAL run becomes a stationary amber attention body,
+while the inspector retains the explanation that task state is RUNNING. Legacy
+runs without durable sessions, and failed runtime reads, display Runtime unknown
+without execution motion; they do not imply that approval is safe or absent.
+CREATED missions count as ready to start, not as scheduler-owned waits. Only
+WAITING_RESOURCE contributes to the scheduler-wait count. LIMIT_PAUSED alone does
+not prove that the automatic wake budget was exhausted.
+
+Provider highlights are tied to the selected task ID and every currently
+running, unended session. Disabled/auth-unavailable/unknown providers and cooldowns
+have explicit labels. No model catalog or model intelligence is inferred.
+
+The field admits at most eight bodies, further limited by label footprints at
+the actual scene scale. Selection has priority; the count links to the complete
+register. Attention and unfinished missions precede history. The desktop shell,
+state colours, sphere and motion vocabulary are retained. Mobile command entry
+and full task toolbars/tabs wrap within the viewport.
+
+The browser harness now uses the server's existing Registry dependency injection
+and public adapter method, without accessing its private map. The visual approval
+is produced by the real Execution Harness using FakeAdapter, not a fabricated
+session row. Browser time matches the injected kernel clock. Additional review
+coverage lives in `apps/web/e2e/review.spec.ts`.
+
+Session detail renders durable pending approvals with the existing Approve/Deny
+command, including when the task was opened after the request arrived. This
+closes the board → inspector → full controls → Sessions path without depending
+on a live-only SSE approval event. Approval authorization and provider delivery
+remain backend-owned and unchanged.

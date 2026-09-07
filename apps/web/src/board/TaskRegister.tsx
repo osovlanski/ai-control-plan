@@ -1,5 +1,5 @@
-import type { TaskSummary } from "../api.js";
 import { describeState } from "../orbital.js";
+import { missionState, type Mission } from "./execution.js";
 
 export const FILTERS = [
   ["all", "All"],
@@ -17,7 +17,7 @@ export function TaskRegister({
   query,
   onQuery,
 }: {
-  tasks: TaskSummary[];
+  tasks: Mission[];
   selectedId: string | null;
   onSelect: (id: string) => void;
   filter: Filter;
@@ -26,7 +26,7 @@ export function TaskRegister({
   onQuery: (q: string) => void;
 }) {
   return (
-    <section className="task-register" aria-label="Task register">
+    <section id="mission-register" className="task-register" aria-label="Task register">
       <div className="register-toolbar">
         <h2>
           Mission register <span>{tasks.length}</span>
@@ -48,7 +48,7 @@ export function TaskRegister({
       </div>
       <div className="task-rows">
         {tasks.map((t, i) => {
-          const s = describeState(t.state);
+          const s = describeState(missionState(t));
           return (
             <button
               className={`task-row ${selectedId === t.id ? "selected" : ""}`}

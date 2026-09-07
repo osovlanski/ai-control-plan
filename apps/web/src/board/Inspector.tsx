@@ -2,7 +2,6 @@ import { useCallback, useEffect, useState } from "react";
 import {
   api,
   type Assistant,
-  type TaskSummary,
   type TaskDetail,
   type TaskEvent,
   type RoutingExplanation,
@@ -11,6 +10,7 @@ import {
 } from "../api.js";
 import { describeState, nextStep, observedModel, waitKindLabel } from "../orbital.js";
 import { QuotaReadout, ContextReadout } from "./readouts.js";
+import { executionRead, missionState, type Mission } from "./execution.js";
 
 export type Snapshot = {
   detail: TaskDetail;
@@ -31,7 +31,7 @@ export function Inspector({
   onOpen,
   onSnapshot,
 }: {
-  task: TaskSummary;
+  task: Mission;
   onOpen: () => void;
   /** Lets the field light the assistant that is executing this mission. */
   onSnapshot?: (s: Snapshot) => void;
@@ -97,14 +97,17 @@ export function Inspector({
   const run =
     snapshot?.detail.runs.find((r) => r.id === runId) ??
     snapshot?.detail.runs.at(-1);
+  const effectiveState = snapshot ? missionState({ state: snapshot.detail.state, execution: executionRead(snapshot.detail, snapshot.sessions) }) : missionState(task);
   const state = describeState(
-    snapshot?.detail.state ?? task.state,
+    effectiveState,
     (snapshot?.detail as { pause_kind?: string | null } | undefined)?.pause_kind,
   );
   const session = snapshot?.sessions.find((s) => s.sessionId === run?.id);
   const assistant = snapshot?.assistants.find(
     (a) => a.id === run?.assistant_id,
   );
+  const latestRun = snapshot?.detail.runs.at(-1);
+  const currentExecution = snapshot ? executionRead(snapshot.detail, snapshot.sessions) : undefined;
   const routing = snapshot?.routing.at(-1);
   const wait = snapshot?.detail.wait;
   const schedulerEnabled = snapshot?.detail.schedulerEnabled !== false;
@@ -135,9 +138,9 @@ export function Inspector({
         <div>
           <dt>Decided</dt>
           <dd>
-            {run ? (
+            {latestRun ? (
               <>
-                Run on <span className="mono">{run.assistant_id}</span>
+                Last run on <span className="mono">{latestRun.assistant_id}</span>
               </>
             ) : routing?.chosen ? (
               <>
@@ -169,10 +172,10 @@ export function Inspector({
           <dt>Next</dt>
           <dd>
             {nextStep({
-              state: snapshot?.detail.state ?? task.state,
+              state: effectiveState,
               wait,
               schedulerEnabled,
-              assistant: run?.assistant_id,
+              assistant: currentExecution?.assistants.join(", ") || undefined,
               pauseKind: (snapshot?.detail as { pause_kind?: string | null } | undefined)?.pause_kind,
             })}
           </dd>
@@ -626,4 +629,3 @@ export function Inspector({
     </section>
   );
 }
-

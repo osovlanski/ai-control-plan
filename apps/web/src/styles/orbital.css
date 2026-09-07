@@ -38,7 +38,7 @@
     inset 0 1px 0 rgba(255, 255, 255, 0.04),
     0 0 0 1px rgba(127, 227, 220, 0.05),
     0 18px 50px rgba(0, 0, 0, 0.35);
-  margin-bottom: 26px;
+  margin-bottom: 8px;
   transition: border-color var(--t-fast), box-shadow var(--t-med);
 }
 .command-bar:focus-within {
@@ -76,6 +76,11 @@
   font-size: 11px;
   white-space: nowrap;
 }
+.command-help {
+  color: var(--text-2);
+  font-size: 12px;
+  margin-bottom: 20px;
+}
 
 .workspace-status {
   display: flex;
@@ -90,6 +95,13 @@
   align-items: center;
   gap: 7px;
 }
+.stat-action {
+  font: inherit;
+  padding: 0;
+  background: transparent;
+  border: 0;
+}
+.stat-action:hover { text-decoration: underline; }
 .workspace-status .stat b {
   font-weight: 600;
   font-family: var(--font-mono);
@@ -347,9 +359,11 @@
   opacity: 0.7;
   animation: pulse-ring 2.2s var(--ease) infinite;
 }
+.state-AWAITING_APPROVAL .body-dot,
 .state-WAITING_INPUT .body-dot {
   animation: beacon 1.8s ease-in-out infinite;
 }
+.state-AWAITING_APPROVAL .body-dot::after,
 .state-WAITING_INPUT .body-dot::after {
   opacity: 0.8;
   border-style: dashed;
@@ -449,6 +463,13 @@
 .satellite.cooling i {
   border-color: var(--tone-limit);
   border-style: dashed;
+}
+.satellite.unavailable {
+  color: var(--tone-limit);
+}
+.satellite.unavailable i {
+  border-style: dotted;
+  border-color: var(--tone-limit);
 }
 .map-caption {
   display: flex;
@@ -658,9 +679,7 @@
   .sphere-core strong {
     font-size: 52px;
   }
-  .satellite small {
-    display: none;
-  }
+  .satellite { max-width: 125px; }
 }
 @media (max-width: 760px) {
   .board-head {
@@ -673,6 +692,13 @@
   }
   .command-bar {
     padding-left: 14px;
+    flex-wrap: wrap;
+  }
+  .command-bar input {
+    flex-basis: calc(100% - 36px);
+  }
+  .command-bar .btn {
+    margin-left: auto;
   }
   .command-bar kbd {
     display: none;

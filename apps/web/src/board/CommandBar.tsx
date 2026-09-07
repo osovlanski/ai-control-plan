@@ -5,10 +5,11 @@ import { useState } from "react";
 export function CommandBar({ onSubmit }: { onSubmit: (goal: string) => void }) {
   const [goal, setGoal] = useState("");
   return (
+    <div>
     <form
       className="command-bar"
-      role="search"
       aria-label="Command"
+      aria-describedby="command-help"
       onSubmit={(e) => {
         e.preventDefault();
         if (goal.trim()) onSubmit(goal.trim());
@@ -16,6 +17,7 @@ export function CommandBar({ onSubmit }: { onSubmit: (goal: string) => void }) {
     >
       <span className="cb-mark" aria-hidden="true" />
       <input
+        aria-describedby="command-help"
         aria-label="What should Agentic OS do?"
         placeholder="What should Agentic OS do? Describe the mission…"
         value={goal}
@@ -26,5 +28,7 @@ export function CommandBar({ onSubmit }: { onSubmit: (goal: string) => void }) {
         Route mission
       </button>
     </form>
+    <p id="command-help" className="command-help">Preview the assistant and routing reason in Intake. You choose when to run.</p>
+    </div>
   );
 }

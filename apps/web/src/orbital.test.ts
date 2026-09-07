@@ -149,7 +149,7 @@ describe("orbital field geometry", () => {
         { state: "COMPLETED" },
         { state: "CANCELLED" },
       ]),
-    ).toEqual({ running: 2, attention: 2, waiting: 1, settled: 2, total: 7 });
+    ).toEqual({ running: 2, attention: 2, waiting: 1, ready: 0, unknown: 0, settled: 2, total: 7 });
   });
 
   it("derives 'what happens next' only from persisted K1-K3 truth", () => {
@@ -160,5 +160,17 @@ describe("orbital field geometry", () => {
     expect(nextStep({ state: "WAITING_INPUT" })).toMatch(/will not wake it/);
     expect(nextStep({ state: "RUNNING", assistant: "fake-a" })).toMatch(/fake-a/);
     expect(nextStep({ state: "MYSTERY" })).toMatch(/Unknown state/);
+  });
+});
+
+describe("execution evidence", () => {
+  it("counts an approval-paused session as attention and an unstarted draft as ready", () => {
+    const tasks = [
+      { id: "approval", state: "RUNNING", execution: { awaitingApproval: true, assistants: [] } },
+      { id: "draft", state: "CREATED" },
+    ];
+    expect(fieldPulse(tasks)).toEqual({ running: 0, attention: 1, waiting: 0, ready: 1, unknown: 0, settled: 0, total: 2 });
+    expect(layoutBodies(tasks).every(body => body.ring === 1)).toBe(true);
+    expect(nextStep({ state: "LIMIT_PAUSED" })).not.toMatch(/budget exhausted/i);
   });
 });

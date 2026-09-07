@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
-import { api, type Assistant, type TaskSummary } from "./api.js";
+import { api, type Assistant } from "./api.js";
 import { fieldPulse } from "./orbital.js";
 import { CommandBar } from "./board/CommandBar.js";
 import { Inspector, type Snapshot } from "./board/Inspector.js";
 import { OrbitalField, type Satellite } from "./board/OrbitalField.js";
 import { TaskRegister, type Filter } from "./board/TaskRegister.js";
+import { executionRead, missionState, type Mission } from "./board/execution.js";
 
 const terminal = new Set(["COMPLETED", "FAILED", "CANCELLED"]);
 const MAX_BODIES = 8;
@@ -12,7 +13,8 @@ type Cooldown = { assistantId: string; reason: string; until: string };
 
 /** Board data: tasks + the provider constellation, refreshed every 4s. */
 function useBoard() {
-  const [tasks, setTasks] = useState<TaskSummary[]>([]);
+  const [tasks, setTasks] = useState<Mission[]>([]);
+  const [unavailable, setUnavailable] = useState<string[]>([]);
   const [assistants, setAssistants] = useState<Assistant[]>([]);
   const [cooldowns, setCooldowns] = useState<Cooldown[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -23,12 +25,35 @@ function useBoard() {
     const load = async () => {
       const [rows, a, c] = await Promise.allSettled([api.tasks(), api.assistants(), api.cooldowns()]);
       if (disposed) return;
+      const missing = [a.status === "rejected" ? "Provider discovery" : "", c.status === "rejected" ? "Cooldowns" : ""].filter(Boolean);
       if (rows.status === "fulfilled") {
-        setTasks(rows.value);
+        const missions: Mission[] = [...rows.value];
+        // Read only RUNNING missions, in bounded batches. This existing endpoint
+        // includes effective session states and all parallel runs, not just the last.
+        const active = missions.filter(t => t.state === "RUNNING");
+        for (let i = 0; i < active.length && !disposed; i += 6) {
+          const batch = active.slice(i, i + 6);
+          const details = await Promise.allSettled(batch.map(async t => {
+            const [detail, sessions] = await Promise.all([api.task(t.id), api.sessions(t.id)]);
+            return executionRead(detail, sessions);
+          }));
+          details.forEach((result, j) => {
+            if (result.status === "fulfilled") batch[j]!.execution = result.value;
+            else {
+              batch[j]!.execution = { awaitingApproval: false, assistants: [], verified: false };
+              missing.push(`Execution / approval state for ${batch[j]!.id}`);
+            }
+          });
+        }
+        if (disposed) return;
+        setTasks(missions);
         setError(null);
       } else setError((rows.reason as Error).message);
+      setUnavailable(missing);
       if (a.status === "fulfilled") setAssistants(a.value);
+      else setAssistants([]);
       if (c.status === "fulfilled") setCooldowns(c.value);
+      else setCooldowns([]);
       setLoading(false);
       timer = setTimeout(() => void load(), 4000);
     };
@@ -38,7 +63,7 @@ function useBoard() {
       clearTimeout(timer);
     };
   }, []);
-  return { tasks, assistants, cooldowns, error, loading };
+  return { tasks, assistants, cooldowns, error, loading, unavailable };
 }
 
 export function OrbitalBoard({
@@ -48,32 +73,36 @@ export function OrbitalBoard({
   onOpen: (id: string) => void;
   onNew: (goal?: string) => void;
 }) {
-  const { tasks, assistants, cooldowns, error, loading } = useBoard();
+  const { tasks, assistants, cooldowns, error, loading, unavailable } = useBoard();
   const [selected, setSelected] = useState<string | null>(null);
   const [filter, setFilter] = useState<Filter>("all");
   const [query, setQuery] = useState("");
-  const [executing, setExecuting] = useState<string | null>(null);
+  const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const onSnapshot = useCallback((s: Snapshot) => {
-    const run = s.detail.runs.at(-1);
-    setExecuting(run && s.detail.state === "RUNNING" ? run.assistant_id : null);
+    setSnapshot(s);
   }, []);
 
   const visible = tasks.filter(
     (t) =>
       (filter === "all" ||
         (filter === "attention"
-          ? t.state === "WAITING_INPUT" || t.state === "LIMIT_PAUSED"
+          ? ["WAITING_INPUT", "LIMIT_PAUSED", "AWAITING_APPROVAL"].includes(missionState(t))
           : !terminal.has(t.state))) &&
       `${t.goal} ${t.id}`.toLowerCase().includes(query.toLowerCase()),
-  );
+  ).sort((a, b) => {
+    const rank = (t: Mission) => ["WAITING_INPUT", "LIMIT_PAUSED", "AWAITING_APPROVAL"].includes(missionState(t)) ? 0 : terminal.has(t.state) ? 2 : 1;
+    return rank(a) - rank(b);
+  });
   const current = visible.find((t) => t.id === selected) ?? visible[0];
   const bodies = visible.slice(0, MAX_BODIES);
   if (current && !bodies.some((t) => t.id === current.id)) bodies[bodies.length - 1] = current;
   const pulse = fieldPulse(tasks);
   const now = Date.now();
+  const executing = current?.state === "RUNNING" && snapshot?.detail.id === current.id
+    ? executionRead(snapshot.detail, snapshot.sessions).assistants : [];
   const satellites: Satellite[] = assistants.map((a) => ({
     assistant: a,
-    executing: executing === a.id,
+    executing: executing.includes(a.id),
     cooling: cooldowns.some((c) => c.assistantId === a.id && Date.parse(c.until) > now),
   }));
 
@@ -96,12 +125,16 @@ export function OrbitalBoard({
         <span className="stat tone-active">
           <i /> <b>{pulse.running}</b> running
         </span>
-        <span className="stat tone-human">
+        <button className="stat stat-action tone-human" onClick={() => setFilter(filter === "attention" ? "all" : "attention")} aria-pressed={filter === "attention"}>
           <i /> <b>{pulse.attention}</b> need you
-        </span>
+        </button>
         <span className="stat tone-resource">
           <i /> <b>{pulse.waiting}</b> waiting for the scheduler
         </span>
+        <span className="stat tone-neutral">
+          <i /> <b>{pulse.ready}</b> ready to start
+        </span>
+        {pulse.unknown > 0 && <span className="stat tone-neutral"><i /> <b>{pulse.unknown}</b> runtime unknown</span>}
         <span className="stat tone-neutral">
           <i /> <b>{pulse.settled}</b> settled
         </span>
@@ -114,16 +147,12 @@ export function OrbitalBoard({
           Task refresh failed: {error}. {tasks.length ? "Showing the last successful snapshot." : "No task data available."}
         </p>
       )}
+      {!!unavailable.length && <p role="status" className="error">Unavailable reads: {unavailable.join(", ")}. Provider and approval visibility may be incomplete.</p>}
       <div className="orbital-layout">
         <section className="orbital-map" aria-label="Task orbital map">
-          <div className="map-heading">
-            <strong>Execution field</strong>
-            <span>
-              {bodies.length} of {visible.length} shown
-            </span>
-          </div>
           <OrbitalField
             tasks={bodies}
+            totalTasks={visible.length}
             selectedId={current?.id ?? null}
             onSelect={setSelected}
             pulse={pulse}

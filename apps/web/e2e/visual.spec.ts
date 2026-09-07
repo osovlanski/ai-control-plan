@@ -22,17 +22,13 @@ test.beforeAll(async () => {
   }, undefined, (config) => {
     // Approvals pause the session for a human instead of auto-answering.
     config.policy.approvalMode = "prompt-on-escalation";
-  });
-  // The registry builds fake adapters with the default script; swap in one that
-  // stays RUNNING for the whole capture (test seam only; production is untouched).
-  (h.built.registry as unknown as { adapters: Map<string, unknown> }).adapters.set(
-    SLOW,
-    new FakeAdapter(SLOW, {
-      ok: true,
-      delayMs: 600_000,
-      events: [{ type: "message", summary: "Reconciling ledger partitions", phase: "editing", payload: { text: "…" } }],
-    }),
-  );
+    config.execution = { harnessModes: { single: true } };
+  }, new Map([[SLOW, new FakeAdapter(SLOW, {
+    ok: true,
+    delayMs: 600_000,
+    events: [{ type: "message", summary: "Reconciling ledger partitions", phase: "editing", payload: { text: "…" } }],
+  })]]));
+
 });
 test.afterAll(async () => h.close());
 
@@ -97,10 +93,12 @@ test("reference screenshots: active workspace, quota wait, laptop, mobile", asyn
   clock.advance(20 * 60_000);
   await built.quotaProbes.refresh();
 
-  const page = await h.openApp(context);
   const consoleErrors: string[] = [];
-  page.on("console", (m) => m.type() === "error" && consoleErrors.push(m.text()));
-  page.on("pageerror", (e) => consoleErrors.push(e.message));
+  context.on("page", page => {
+    page.on("console", (m) => m.type() === "error" && consoleErrors.push(m.text()));
+    page.on("pageerror", (e) => consoleErrors.push(e.message));
+  });
+  const page = await h.openApp(context);
   const inspector = page.getByRole("region", { name: "Selected task inspector" });
   const select = async (id: string) => {
     await page.getByRole("button", { name: new RegExp(id) }).first().click();
@@ -128,6 +126,12 @@ test("reference screenshots: active workspace, quota wait, laptop, mobile", asyn
   await expect(inspector.getByText("Verification decision")).toBeVisible();
   await shot("3-desktop-needs-you", page);
 
+  await select(approval);
+  await expect(inspector.locator(".badge")).toHaveText("Approval required");
+  await expect(page.locator(".orbital-body.state-AWAITING_APPROVAL")).not.toHaveClass(/moving/);
+  await expect(page.locator(".satellite.executing")).toHaveCount(0);
+  await shot("3b-desktop-approval", page);
+
   // 4. Laptop and 5. mobile — asserted free of horizontal overflow.
   await select(quota);
   await page.setViewportSize({ width: 1100, height: 800 });
@@ -141,7 +145,9 @@ test("reference screenshots: active workspace, quota wait, laptop, mobile", asyn
 
   // 6. Reduced motion: the field must still read correctly without animation.
   await page.setViewportSize({ width: 1440, height: 1000 });
+  expect(await page.evaluate(() => document.getAnimations().some(a => a.effect?.getTiming().iterations === Infinity))).toBe(true);
   await page.emulateMedia({ reducedMotion: "reduce" });
+  await expect.poll(() => page.evaluate(() => document.getAnimations().filter(a => a.playState === "running" && a.effect?.getTiming().iterations === Infinity).length)).toBe(0);
   await select(running);
   await shot("6-desktop-reduced-motion", page);
 

@@ -1,4 +1,5 @@
 import type { TaskEvent, TaskWait } from "./api.js";
+import { missionState, type ExecutionRead } from "./board/execution.js";
 
 /** Presentation vocabulary only; this does not extend the kernel state machine. */
 export function describeState(state: string, pauseKind?: string | null) {
@@ -20,6 +21,16 @@ export function describeState(state: string, pauseKind?: string | null) {
       label: "Running",
       reason: "Execution is in progress.",
       tone: "active",
+    },
+    AWAITING_APPROVAL: {
+      label: "Approval required",
+      reason: "A session is waiting for your approval. The task remains RUNNING; the paused session is not executing.",
+      tone: "human",
+    },
+    RUNTIME_UNKNOWN: {
+      label: "Runtime unknown",
+      reason: "Task state is RUNNING, but session-level execution and approval visibility is unavailable on this read or execution path. Inspect recorded events and full controls.",
+      tone: "neutral",
     },
     WAITING_RESOURCE: {
       label: "Scheduler wait",
@@ -150,7 +161,7 @@ export const RINGS: ReadonlyArray<{ rx: number; ry: number; rot: number }> = [
   { rx: 385, ry: 158, rot: -9 }, // held: WAITING_RESOURCE / WAITING_INPUT / LIMIT_PAUSED / CREATED
   { rx: 462, ry: 262, rot: 19 }, // settled: COMPLETED / FAILED / CANCELLED
 ];
-const HELD = new Set(["WAITING_RESOURCE", "WAITING_INPUT", "LIMIT_PAUSED", "CREATED"]);
+const HELD = new Set(["WAITING_RESOURCE", "WAITING_INPUT", "AWAITING_APPROVAL", "RUNTIME_UNKNOWN", "LIMIT_PAUSED", "CREATED"]);
 const SETTLED = new Set(["COMPLETED", "FAILED", "CANCELLED"]);
 export function ringOf(state: string): Ring {
   return SETTLED.has(state) ? 2 : HELD.has(state) ? 1 : 0;
@@ -216,34 +227,35 @@ export interface Body<T extends { id: string; state: string }> {
 const LABEL_W = 150; // scene units: label box reach from the dot, on its label side
 const LABEL_H = 26;
 /** Labels point away from the sphere unless that would leave the scene. */
-function flipFor(x: number): boolean {
-  return x < SCENE / 2 ? x > 200 : x > 800;
+function flipFor(x: number, reach = LABEL_W): boolean {
+  return x < SCENE / 2 ? x > reach + 28 : x > SCENE - reach - 28;
 }
 /** Executing bodies drift ±DRIFT of the ring around their slot (see `orbit-drift`). */
 export const DRIFT = 0.025;
 const MOVING = new Set(["RUNNING", "ROUTING", "HANDING_OFF"]);
-function box(b: { ring: Ring; phase: number; task: { state: string } }) {
+function box(b: { ring: Ring; phase: number; task: { state: string } }, scale = 1) {
   const { x, y } = pointAt(b.ring, b.phase);
-  const flip = flipFor(x);
+  const reach = LABEL_W / scale;
+  const flip = flipFor(x, reach);
   const pad = MOVING.has(b.task.state) ? 60 : 0;
   return {
-    x0: (flip ? x - LABEL_W : x - 14) - pad,
-    x1: (flip ? x + 14 : x + LABEL_W) + pad,
-    y0: y - LABEL_H - pad / 2,
-    y1: y + LABEL_H + pad / 2,
+    x0: (flip ? x - reach : x - 14) - pad,
+    x1: (flip ? x + 14 : x + reach) + pad,
+    y0: y - LABEL_H / scale - pad / 2,
+    y1: y + LABEL_H / scale + pad / 2,
   };
 }
 /** True when two placed bodies' label boxes intersect (exported for tests). */
-export function bodiesCollide(a: Body<{ id: string; state: string }>, b: Body<{ id: string; state: string }>): boolean {
-  const p = box(a);
-  const q = box(b);
+export function bodiesCollide(a: Body<{ id: string; state: string }>, b: Body<{ id: string; state: string }>, scale = 1): boolean {
+  const p = box(a, scale);
+  const q = box(b, scale);
   return p.x0 < q.x1 && q.x0 < p.x1 && p.y0 < q.y1 && q.y0 < p.y1;
 }
 /** Deterministic placement: tasks share a ring by state group and are spaced
  * evenly along it in list order, then nudged apart where label boxes collide. */
-export function layoutBodies<T extends { id: string; state: string }>(tasks: T[]): Body<T>[] {
+export function layoutBodies<T extends { id: string; state: string }>(tasks: T[], scale = 1): Body<T>[] {
   const byRing: T[][] = [[], [], []];
-  for (const t of tasks) byRing[ringOf(t.state)]!.push(t);
+  for (const t of tasks) byRing[ringOf(missionState(t))]!.push(t);
   const out: Body<T>[] = [];
   byRing.forEach((group, ring) => {
     const start = [0.86, 0.2, 0.55][ring]!;
@@ -256,31 +268,47 @@ export function layoutBodies<T extends { id: string; state: string }>(tasks: T[]
     let moved = false;
     for (let i = 0; i < out.length; i++)
       for (let j = i + 1; j < out.length; j++) {
-        if (bodiesCollide(out[i]!, out[j]!)) {
+        if (bodiesCollide(out[i]!, out[j]!, scale)) {
           out[j]!.phase = (out[j]!.phase + 0.03) % 1;
           moved = true;
         }
       }
     if (!moved) break;
   }
-  for (const b of out) b.flip = flipFor(pointAt(b.ring, b.phase).x);
+  for (const b of out) b.flip = flipFor(pointAt(b.ring, b.phase).x, LABEL_W / scale);
   return out;
+}
+
+/** Bound density using the rendered label footprint, keeping selection first.
+ * Missions that do not fit remain accessible in the register. */
+export function visibleBodies<T extends { id: string; state: string }>(tasks: T[], selectedId: string | null, scale: number): Body<T>[] {
+  const placed: Body<T>[] = [];
+  const candidates = layoutBodies(tasks, scale).sort((a, b) => Number(b.task.id === selectedId) - Number(a.task.id === selectedId));
+  for (const body of candidates) {
+    if (placed.every(other => !bodiesCollide(body, other, scale))) placed.push(body);
+  }
+  return placed;
 }
 
 export interface FieldPulse {
   running: number;
   attention: number;
   waiting: number;
+  ready: number;
+  unknown: number;
   settled: number;
   total: number;
 }
 /** Workload summary that drives the core ring and the system health pill. */
-export function fieldPulse(tasks: Array<{ state: string }>): FieldPulse {
-  const pulse = { running: 0, attention: 0, waiting: 0, settled: 0, total: tasks.length };
-  for (const { state } of tasks) {
+export function fieldPulse(tasks: Array<{ state: string; execution?: ExecutionRead }>): FieldPulse {
+  const pulse = { running: 0, attention: 0, waiting: 0, ready: 0, unknown: 0, settled: 0, total: tasks.length };
+  for (const task of tasks) {
+    const state = missionState(task);
     if (state === "RUNNING" || state === "ROUTING" || state === "HANDING_OFF") pulse.running++;
-    else if (state === "WAITING_INPUT" || state === "LIMIT_PAUSED") pulse.attention++;
-    else if (state === "WAITING_RESOURCE" || state === "CREATED") pulse.waiting++;
+    else if (state === "WAITING_INPUT" || state === "LIMIT_PAUSED" || state === "AWAITING_APPROVAL") pulse.attention++;
+    else if (state === "WAITING_RESOURCE") pulse.waiting++;
+    else if (state === "CREATED") pulse.ready++;
+    else if (state === "RUNTIME_UNKNOWN") pulse.unknown++;
     else pulse.settled++;
   }
   return pulse;
@@ -295,6 +323,8 @@ export function nextStep(input: {
   pauseKind?: string | null;
 }): string {
   const { state, wait } = input;
+  if (state === "AWAITING_APPROVAL") return "Waits for your approval; open full controls, then Sessions to review the pending request.";
+  if (state === "RUNTIME_UNKNOWN") return "Inspect full controls and recorded events; the next runtime action cannot be confirmed.";
   if (state === "WAITING_RESOURCE" && wait) {
     if (input.schedulerEnabled === false) return "Scheduling is disabled; waits until an operator runs it now.";
     const at = new Date(wait.notBefore).toLocaleString();
@@ -306,7 +336,7 @@ export function nextStep(input: {
     return input.pauseKind === "approval_pending"
       ? "Waits for your approval; nothing runs until you decide."
       : "Waits for your decision; the scheduler will not wake it.";
-  if (state === "LIMIT_PAUSED") return "Wake budget exhausted; an operator must decide.";
+  if (state === "LIMIT_PAUSED") return "Paused at a limit; inspect quota and recovery evidence for the next action.";
   if (state === "RUNNING") return `Executing on ${input.assistant ?? "the routed assistant"}; events stream in below.`;
   if (state === "ROUTING") return "The router is evaluating eligible assistants.";
   if (state === "HANDING_OFF") return "Control transfers to another execution environment.";

@@ -9,7 +9,8 @@ import { createServer, type Server } from "node:http";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AssistantId } from "@agent-plane/core";
+import type { AgentAdapter, AssistantId } from "@agent-plane/core";
+import { Registry } from "../../api/src/modules/registry.js";
 import { loadConfig, type ResolvedConfig } from "../../api/src/config.js";
 import { openDb, type Db } from "../../api/src/db/index.js";
 import { buildServer, type BuiltServer } from "../../api/src/server.js";
@@ -66,6 +67,7 @@ export async function boot(
   assistants: ResolvedConfig["assistants"],
   clock = new Clock(),
   configure?: (config: ResolvedConfig) => void,
+  adapters: ReadonlyMap<string, AgentAdapter> = new Map(),
 ): Promise<Harness> {
   const home = mkdtempSync(join(tmpdir(), `${prefix}-`));
   const config = loadConfig({ AGENT_PLANE_HOME: home });
@@ -74,11 +76,19 @@ export async function boot(
   config.scheduler = { ...config.scheduler!, enabled: true, quotaProbe: true };
   configure?.(config);
   const db = openDb(config.dbPath);
-  const built = buildServer({ config, db, now: clock.now, quotaProbeFn: demoProbe(clock) });
+  // Use the server's supported dependency injection and the public adapter read.
+  class TestRegistry extends Registry {
+    override adapter(id: string): AgentAdapter {
+      return adapters.get(id) ?? super.adapter(id);
+    }
+  }
+  const registry = new TestRegistry(db, config);
+  const built = buildServer({ config, db, registry, now: clock.now, quotaProbeFn: demoProbe(clock) });
   built.registry.init();
   await built.registry.syncAll();
   await built.app.listen({ host: "127.0.0.1", port });
   const origin = `http://127.0.0.1:${port}`;
+  const pages = new Set<Page>();
   const currentSecret = () =>
     readCredential(credentialPath(loadConfig({ AGENT_PLANE_HOME: home }).dir)).secrets.at(-1)!;
 
@@ -117,6 +127,14 @@ export async function boot(
     clock,
     origin,
     async close() {
+      await Promise.all([...pages].map(page => page.close()));
+      // Settle scripted sessions while their durable store is still open.
+      for (const task of built.tasks.list()) {
+        if (built.orchestrator.isActive(task.id)) {
+          await built.orchestrator.cancelTask(task.id);
+          await expect.poll(() => built.orchestrator.isActive(task.id), { timeout: 10000 }).toBe(false);
+        }
+      }
       await built.app.close();
       if (db.open) db.close();
       rmSync(home, { recursive: true, force: true });
@@ -124,6 +142,8 @@ export async function boot(
     async openApp(context) {
       const l = await launcher();
       const page = await context.newPage();
+      pages.add(page);
+      await page.clock.setFixedTime(clock.current);
       await page.goto(l.url);
       await expect(page.getByText("Agent Control Plane")).toBeVisible();
       await expect(page.getByRole("heading", { name: /Missions in orbit/ })).toBeVisible();

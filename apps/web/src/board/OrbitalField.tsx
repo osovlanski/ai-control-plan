@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState, type CSSProperties } from "react";
-import type { Assistant, TaskSummary } from "../api.js";
+import type { Assistant } from "../api.js";
+import { missionState, type Mission } from "./execution.js";
 import {
   arcPath,
   describeState,
-  layoutBodies,
+  visibleBodies,
   ringPath,
   SCENE,
   SPHERE_R,
@@ -35,29 +36,37 @@ export function OrbitalField({
   onSelect,
   pulse,
   satellites,
+  totalTasks,
 }: {
-  tasks: TaskSummary[];
+  tasks: Mission[];
   selectedId: string | null;
   onSelect: (id: string) => void;
   pulse: FieldPulse;
   satellites: Satellite[];
+  totalTasks: number;
 }) {
   const sceneRef = useRef<HTMLDivElement>(null);
   const size = useSize(sceneRef);
   const scale = size / SCENE;
-  const bodies = layoutBodies(tasks);
-  const live = pulse.running + pulse.attention + pulse.waiting;
+  const bodies = visibleBodies(tasks, selectedId, scale || 1);
+  const live = pulse.running + pulse.attention + pulse.waiting + pulse.ready + pulse.unknown;
   const ringLen = 2 * Math.PI * (SPHERE_R + 14);
   const seg = (n: number) => (pulse.total ? (n / pulse.total) * ringLen : 0);
   const segments: Array<[number, string]> = [
     [seg(pulse.running), "var(--tone-active)"],
     [seg(pulse.attention), "var(--tone-human)"],
     [seg(pulse.waiting), "var(--tone-resource)"],
+    [seg(pulse.ready + pulse.unknown), "var(--tone-neutral)"],
     [seg(pulse.settled), "var(--line-strong)"],
   ];
   let offset = 0;
 
   return (
+    <>
+    <div className="map-heading">
+      <strong>Execution field</strong>
+      <a href="#mission-register">{bodies.length} of {totalTasks} shown · register ↓</a>
+    </div>
     <div
       ref={sceneRef}
       className={`sphere-scene ${pulse.running ? "is-executing" : ""}`}
@@ -172,12 +181,13 @@ export function OrbitalField({
 
       {scale > 0 &&
         bodies.map(({ task, ring, phase, flip }) => {
-          const s = describeState(task.state);
-          const moving = task.state === "RUNNING" || task.state === "ROUTING" || task.state === "HANDING_OFF";
+          const state = missionState(task);
+          const s = describeState(state);
+          const moving = state === "RUNNING" || state === "ROUTING" || state === "HANDING_OFF";
           return (
             <button
               key={task.id}
-              className={`orbital-body tone-${s.tone} state-${task.state} ${moving ? "moving" : ""} ${flip ? "flip" : ""} ${selectedId === task.id ? "selected" : ""}`}
+              className={`orbital-body tone-${s.tone} state-${state} ${moving ? "moving" : ""} ${flip ? "flip" : ""} ${selectedId === task.id ? "selected" : ""}`}
               style={
                 {
                   offsetPath: `path("${ringPath(ring, scale)}")`,
@@ -185,7 +195,7 @@ export function OrbitalField({
                   "--ring": ring,
                 } as CSSProperties
               }
-              aria-label={`Select task: ${task.goal}`}
+              aria-label={`Select task: ${task.goal} · ${s.label}`}
               aria-pressed={selectedId === task.id}
               onClick={() => onSelect(task.id)}
             >
@@ -199,24 +209,26 @@ export function OrbitalField({
         })}
 
       {satellites.map(({ assistant, executing, cooling }, i) => {
+        const availability = !assistant.enabled ? "disabled" : !assistant.manifest ? "availability unknown" : assistant.manifest.core.auth.state !== "ok" ? `auth ${assistant.manifest.core.auth.state}` : null;
         const a = ((-150 + (120 * (i + 0.5)) / satellites.length) * Math.PI) / 180;
         const x = 50 + ((SPHERE_R + 250) * Math.cos(a) * 100) / SCENE;
         const y = 50 + ((SPHERE_R + 250) * Math.sin(a) * 100) / SCENE;
         return (
           <div
             key={assistant.id}
-            className={`satellite ${executing ? "executing" : ""} ${cooling ? "cooling" : ""}`}
+            className={`satellite ${executing ? "executing" : ""} ${cooling ? "cooling" : ""} ${availability ? "unavailable" : ""}`}
             style={{ left: `${x}%`, top: `${y}%` }}
-            title={`${assistant.id} · ${assistant.provider}${cooling ? " · cooling down" : ""}${executing ? " · executing selected mission" : ""}`}
+            title={`${assistant.id} · ${assistant.provider}${availability ? ` · ${availability}` : ""}${cooling ? " · cooling down" : ""}${executing ? " · executing selected mission" : ""}`}
           >
             <i />
             <span>
               <strong>{assistant.id}</strong>
-              <small>{executing ? "executing" : cooling ? "cooling down" : assistant.provider}</small>
+              <small>{[executing ? "executing" : "", cooling ? "cooling down" : "", availability].filter(Boolean).join(" · ") || assistant.provider}</small>
             </span>
           </div>
         );
       })}
     </div>
+    </>
   );
 }
