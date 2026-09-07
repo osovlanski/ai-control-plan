@@ -40,7 +40,7 @@ test("Intake never starts a stale goal or constraints after editing a preview", 
   expect(h.built.tasks.envelope(task.id).constraints).toContain("Do not modify production");
 });
 
-test("real Harness approval is visible before selecting the task, without execution motion", async ({ context }, info) => {
+for (const decision of ["Approve", "Deny"] as const) test(`real Harness approval survives reload with durable ${decision} controls, without execution motion`, async ({ context }, info) => {
   const api = await h.privileged();
   const id = (await (await api.post("/api/tasks", { data: { goal: "Review deployment [FAKE:APPROVAL]" } })).json()).taskId;
   await api.post(`/api/tasks/${id}/start`, { data: { assistantId: A } });
@@ -65,9 +65,22 @@ test("real Harness approval is visible before selecting the task, without execut
   await page.getByRole("button", { name: /es_/ }).click();
   const pending = page.getByRole("group", { name: "Pending session approval" });
   await expect(pending).toBeVisible();
+  await expect(pending.getByRole("button", { name: "Approve", exact: true })).toBeEnabled();
+  await expect(pending.getByRole("button", { name: "Deny", exact: true })).toBeEnabled();
+  // Reload discards all transient SSE/UI state; recover the pending request from storage.
+  await page.reload();
+  await expect(page.locator(".workspace-status .tone-human")).toContainText("1 need you");
+  await page.getByRole("button", { name: /Select task: Review deployment/ }).click();
+  await expect(inspector.locator(".badge")).toHaveText("Approval required");
+  await expect(page.locator(".orbital-body.moving")).toHaveCount(0);
+  await expect(page.locator(".satellite.executing")).toHaveCount(0);
+  await page.getByRole("button", { name: /Open full controls/ }).click();
+  await page.getByRole("button", { name: "Sessions", exact: true }).click();
+  await page.getByRole("button", { name: /es_/ }).click();
+  await expect(pending).toBeVisible();
   await page.screenshot({ path: info.outputPath("approval-controls.png"), fullPage: true });
-  await pending.getByRole("button", { name: "Approve", exact: true }).click();
-  await h.waitForState(id, "COMPLETED");
+  await pending.getByRole("button", { name: decision, exact: true }).click();
+  await h.waitForState(id, decision === "Approve" ? "COMPLETED" : "FAILED");
   await expect(pending).toHaveCount(0);
   await api.dispose();
 });
@@ -119,6 +132,7 @@ test("runtime geometry and selection remain readable across eight active mission
     });
     evidence.push({ width, overlaps });
     expect(overlaps).toEqual([]);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
     await page.screenshot({ path: info.outputPath(`eight-running-${width}.png`) });
   }
   writeFileSync(info.outputPath("geometry.json"), JSON.stringify(evidence, null, 2));

@@ -225,3 +225,28 @@ assert zero console errors/page exceptions from before navigation.
 
 No files under `apps/api` or `packages` were modified. No K4+ implementation,
 credentials, production provider transcripts or generated browser traces were committed.
+
+## Final merge gate — 2026-09-07
+
+Preserved review-fix commit `3f7d22c37378e316cdc1331166e03dd2d8aaf3bf`.
+The final verification adds browser reload before both durable Approve and Deny
+decisions, verifying completion and failure respectively, and explicitly checks
+horizontal overflow in the dense 1440/1100 scene. No production code, backend
+semantics, K4+ implementation or P2 design work was added in this final pass.
+
+- Typecheck, lint and build: passed.
+- Unit/integration tests: **615 passed** (core 70, adapters 8, API 518, web 19).
+- Browser auth: **6 passed**; review regressions: **8 passed**; visual suite:
+  **1 passed** — **15 passed** together (1.3m), with zero unexpected console/page errors.
+- `pnpm demo:a`: **1 passed** (29.9s), run separately after the browser suites.
+- Fresh 1440 active, WAITING_RESOURCE, needs-attention/approval, 1100 and 390
+  captures manually inspected. Dense labels have zero measured overlaps at
+  1440/1100; laptop, mobile board and 390 task detail have no horizontal overflow.
+- Secret/debug/fixture scan: clean; token-pattern matches were public commit IDs
+  and documentation paths. Scripted provider fixtures remain confined to tests.
+
+Final local evidence: `/tmp/pr26-final/artifact-index.html` (35 screenshots),
+`/tmp/pr26-final/browser/`, `/tmp/pr26-final/demo/`, and
+`/tmp/pr26-final/{typecheck,lint,test,build,browser,demo-a}.log`.
+These generated files are not committed. The five P2 follow-ups above remain
+backlog. No P0/P1 remains: **APPROVE WITH MINOR NOTES — PR #26 is merge-ready**.
