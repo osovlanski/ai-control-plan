@@ -15,7 +15,8 @@
  * Run: `pnpm demo:a5` (from repo root) or
  *      `pnpm --filter @agent-plane/web exec playwright test e2e/demo-a5.spec.ts --project=demo-a5`
  */
-import { test, expect, request, type BrowserContext } from "@playwright/test";
+import { test, expect, type BrowserContext } from "@playwright/test";
+import { privilegedApi } from "./privileged-api.js";
 import { createServer, type Server } from "node:http";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -102,10 +103,7 @@ async function openApp(context: BrowserContext) {
 }
 
 function privileged() {
-  return request.newContext({
-    baseURL: apiOrigin,
-    extraHTTPHeaders: { Authorization: `Bearer ${currentSecret().secret}` },
-  });
+  return privilegedApi(apiOrigin, currentSecret().secret);
 }
 
 const waitForState = async (id: string, expected: string) =>
@@ -311,5 +309,4 @@ test("Demo A.5: K4 dependency wait + wake, K5 recurring schedule occurrence — 
   });
 
   expect(consoleErrors, `console errors: ${consoleErrors.join("\n")}`).toEqual([]);
-  await api.dispose();
 });

@@ -8,7 +8,8 @@
  * Run: `pnpm demo:a` (from repo root) or
  *      `pnpm --filter @agent-plane/web exec playwright test e2e/demo-a.spec.ts --project=demo-a`
  */
-import { test, expect, request, type BrowserContext } from "@playwright/test";
+import { test, expect, type BrowserContext } from "@playwright/test";
+import { privilegedApi } from "./privileged-api.js";
 import { createServer, type Server } from "node:http";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -123,10 +124,7 @@ async function openApp(context: BrowserContext) {
 }
 
 function privileged() {
-  return request.newContext({
-    baseURL: apiOrigin,
-    extraHTTPHeaders: { Authorization: `Bearer ${currentSecret().secret}` },
-  });
+  return privilegedApi(apiOrigin, currentSecret().secret);
 }
 
 const waitForState = async (id: string, expected: string) =>
@@ -341,5 +339,4 @@ test("Demo A: K1 durable time wait, K2 quota wait + resume, K3 idle probe — th
     await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
   ).toBe(true);
 
-  await api.dispose();
 });
