@@ -1279,6 +1279,14 @@ clock, generation CAS, dispatch phases); `apps/api/test/harness/boot-recovery` d
 
 **K10 — provider-command compaction (after conformance).**
 
+> **Conformance failed on the installed stack (Agent SDK 0.3.238, CLI 2.1.263) — K10 is not
+> implemented.** `/compact` is real and correlatable (`compact_boundary` with
+> `trigger: "manual"`, same session, explicit `compact_result`), but it is reachable only as a
+> user message at a turn boundary: injected mid-turn it is appended to the conversation as
+> literal text, and in this Harness a session is one turn, so the only boundary is the end of
+> the run. No adapter declares `compact: "provider-command"`. Evidence, rejected workarounds
+> and the smallest future seam: `docs/agentic-os-k10-blocker.md`.
+
 11. With `compact = provider-command` and pressure ≥ `actRatio`, the guard requests compaction
     while the event pump keeps running, then observes; relief below `actRatio` ends escalation
     regardless of the fraction freed; pressure still ≥ `criticalRatio` escalates to K11.
