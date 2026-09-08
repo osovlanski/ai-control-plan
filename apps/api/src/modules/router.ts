@@ -6,6 +6,7 @@ import type { CooldownStore } from './cooldown.js';
 import type { AssistantId, CapabilityManifest, RoutingExplanation, RoutingProfile, TaskIntent } from "@agent-plane/core";
 import type { Db } from "../db/index.js";
 import { TelemetryService, classifyGoal, type AssistantScore } from "./telemetry.js";
+import { continuationProvenance } from "./context-continuation.js";
 
 export interface RouteCandidate {
   id: AssistantId;
@@ -21,6 +22,15 @@ export interface RouteRequest {
   /** Assistants excluded by cooldown (failed/limited recently), with reason. */
   cooldowns: Map<string, string>;
   userOverride?: AssistantId;
+  /**
+   * K11 continuation preference: keep the work on the assistant that built the
+   * checkpoint when it is still eligible. A PREFERENCE, never a bypass — it is
+   * applied only among candidates that already passed every hard filter (auth,
+   * capabilities, workspace allowlist, cooldown, quota), and a user override
+   * still wins. A healthy context yield adds no cooldown penalty of its own, so
+   * the previous assistant is normally still eligible.
+   */
+  preferSame?: AssistantId;
   projections?: Map<string, ReturnType<QuotaProjection['for']>>;
   /**
    * Rolling telemetry from the user's own runs. Absent until enough runs
@@ -70,6 +80,14 @@ export function route(req: RouteRequest, candidates: RouteCandidate[]): RoutingE
 
   if (eligible.length === 0) {
     return { candidates: evaluated, ruleFired: "no-eligible-candidate" };
+  }
+
+  if (req.preferSame && eligible.some((e) => e.assistantId === req.preferSame)) {
+    return {
+      candidates: evaluated,
+      ruleFired: `prefer-same: continuing on ${req.preferSame}, which still passes every filter`,
+      chosen: req.preferSame,
+    };
   }
 
   switch (req.profile) {
@@ -212,11 +230,28 @@ export function routeTask(
   for (const [id, score] of telemetry.scores(classifyGoal(intent.goal))) scores.set(id, score);
   const candidates = deps.registry.list().map(a => ({ id: a.id as AssistantId, enabled: a.enabled === 1 && a.id !== options.exclude, manifest: a.manifestParsed }));
   const dispatch = options.dispatchId ? deps.db.prepare('SELECT checkpoint_id FROM dispatches WHERE dispatch_id = ? AND task_id = ?').get(options.dispatchId, taskId) as { checkpoint_id: string | null } | undefined : undefined;
-  const explanation: RoutingExplanation & { origin: string } = { ...route({
+  // K11 provenance: read back from the checkpoint anchor, never from a second
+  // continuation-history store. Absent for every other origin.
+  const continuation = origin === 'context-yield' && dispatch?.checkpoint_id
+    ? continuationProvenance(deps.db, taskId, dispatch.checkpoint_id)
+    : undefined;
+  const base = route({
     taskId, profile: intent.profile, needsRepo: !!intent.repository,
     repoPathAllowed: !intent.repository || deps.config.repoAllowlist.some(p => intent.repository!.path === p || intent.repository!.path.startsWith(`${p}/`)),
     cooldowns: new Map(), scores, projections: new Map(deps.registry.list().map(a => [a.id, new QuotaProjection(deps.db, deps.now).for(a.id, a.manifestParsed)])), userOverride: options.override ?? intent.overrides?.assistantId,
-  }, candidates), origin,
-    ...(dispatch ? { dispatchId: options.dispatchId, continuation: dispatch.checkpoint_id ? { kind: 'checkpoint', checkpointId: dispatch.checkpoint_id } : { kind: 'fresh' } } : {}) };
+    preferSame: continuation?.previousAssistantId as AssistantId | undefined,
+  }, candidates);
+  const explanation: RoutingExplanation & { origin: string } = { ...base, origin,
+    ...(dispatch ? { dispatchId: options.dispatchId, continuation: dispatch.checkpoint_id ? { kind: 'checkpoint', checkpointId: dispatch.checkpoint_id } : { kind: 'fresh' } } : {}),
+    ...(continuation ? { contextContinuation: {
+      ...continuation,
+      // The requested model selector rides on the task's durable intent, so a
+      // continuation asks for exactly what the predecessor asked for.
+      requestedModel: intent.overrides?.model,
+      preferSameSatisfied: base.chosen !== undefined && base.chosen === continuation.previousAssistantId,
+      changedBecause: base.chosen === continuation.previousAssistantId ? undefined
+        : base.candidates.find(c => c.assistantId === continuation.previousAssistantId)?.filterFailures.join('; ')
+          ?? 'the previous assistant is no longer a configured candidate',
+    } } : {}) };
   return { explanation, routingDecisionId: persistRoutingDecision(deps.db, taskId, explanation) };
 }

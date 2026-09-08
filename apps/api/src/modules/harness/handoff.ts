@@ -24,7 +24,7 @@ import type {
   TaskEnvelope,
   TaskId,
 } from "@agent-plane/core";
-import { newHandoffId, redactValue } from "@agent-plane/core";
+import { continuationNextAction, newHandoffId, redactValue } from "@agent-plane/core";
 import type { Db } from "../../db/index.js";
 import { renderCommittedHandoff } from "../../render/handoff.js";
 
@@ -68,7 +68,19 @@ export class HandoffService {
    */
   deriveEnvelope(
     checkpointId: string,
-    opts: { reason: string; fromAssistantId: string; verificationStatus?: EvaluationResult; contextRefs?: string[] },
+    opts: {
+      reason: string;
+      fromAssistantId: string;
+      verificationStatus?: EvaluationResult;
+      contextRefs?: string[];
+      /**
+       * K11: fill `currentSubtask` from the snapshot when the task envelope has
+       * no explicit `nextAction`, so the continuation's adequacy gate and the
+       * rendered successor prompt read the SAME text. Off for handoff/reroute,
+       * whose envelopes keep today's semantics.
+       */
+      deriveNextAction?: boolean;
+    },
   ): { envelope: HandoffEnvelope; sourceSessionId: string | null } {
     const cp = this.db
       .prepare(
@@ -85,7 +97,7 @@ export class HandoffService {
       checkpointId: cp.id,
       objective: snap.goal,
       constraints: snap.constraints,
-      currentSubtask: snap.nextAction,
+      currentSubtask: opts.deriveNextAction ? continuationNextAction(snap) : snap.nextAction,
       completedActions: snap.completed ?? [],
       outstanding: snap.remaining ?? [],
       decisions: (snap.decisions ?? []).map((d) => ({ text: d.text, madeBy: d.madeBy, at: d.at })),

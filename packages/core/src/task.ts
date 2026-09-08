@@ -66,6 +66,28 @@ export interface TaskEnvelope {
   nextAction?: string;
 }
 
+/**
+ * The next action a K11 clean-session continuation can honestly hand its
+ * successor, derived from the checkpoint's immutable envelope snapshot.
+ *
+ * `undefined` means the checkpoint holds nothing to continue FROM — no planned
+ * next action, no outstanding list, no recorded progress and no touched files.
+ * Restarting from that is a fresh run, not a continuation, so the Control Plane
+ * parks the task instead of spending another session on it (§4.3.3 item 2).
+ * Nothing here invents work: every branch quotes state the envelope already has.
+ */
+export function continuationNextAction(envelope: TaskEnvelope): string | undefined {
+  const explicit = envelope.nextAction?.trim();
+  if (explicit) return explicit;
+  const outstanding = envelope.remaining.map((r) => r.trim()).filter(Boolean);
+  if (outstanding.length > 0) return `Continue the outstanding work, starting with: ${outstanding[0]}`;
+  const progressed =
+    envelope.completed.some((c) => c.trim()) || envelope.artifacts.changedFiles.length > 0;
+  return progressed
+    ? "Continue from the checkpoint commit — review the completed work above, then finish the goal."
+    : undefined;
+}
+
 export interface RoutingExplanation {
   /** Durable wake provenance; absent for non-scheduler routing. */
   dispatchId?: string;
@@ -80,4 +102,30 @@ export interface RoutingExplanation {
   chosen?: AssistantId;
   tieBreaker?: string;
   userOverride?: AssistantId;
+  /**
+   * K11 continuation provenance (§4.3.3 item 5). Present only when
+   * `origin === 'context-yield'`; it extends this existing routing record rather
+   * than opening a second continuation-history subsystem.
+   */
+  contextContinuation?: ContextContinuationProvenance;
+}
+
+/** Everything needed to explain one context continuation after the fact. */
+export interface ContextContinuationProvenance {
+  continuationNumber: number;
+  maxContinuationsPerTask: number;
+  checkpointId: string;
+  predecessorSessionId?: string;
+  previousAssistantId?: string;
+  previousModelRequested?: string;
+  previousModelResolved?: string;
+  /** The selector the task intent still asks for — unchanged by a continuation. */
+  requestedModel?: string;
+  reason: string;
+  criticalPressure?: number;
+  observedAt?: string;
+  /** Did the successor land on the predecessor's assistant? */
+  preferSameSatisfied?: boolean;
+  /** When it did not: the hard filters the previous assistant failed. */
+  changedBecause?: string;
 }

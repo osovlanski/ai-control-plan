@@ -10,6 +10,7 @@
 import { quotaWaitAndResume } from './scenarios/quota-wait-and-resume.js';
 import { adapterErrorMidRun } from "./scenarios/adapter-error-mid-run.js";
 import { bootCrashRecovery } from "./scenarios/boot-crash-recovery.js";
+import { contextPressure } from "./scenarios/context-pressure.js";
 import { crossProviderReroute } from "./scenarios/cross-provider-reroute.js";
 import { happyPath } from "./scenarios/happy-path.js";
 import { hitsTokenCap } from "./scenarios/hits-token-cap.js";
@@ -50,6 +51,7 @@ async function main(): Promise<void> {
 
   results.push(await attempt('quota-wait-and-resume-harness', 'fake', () => quotaWaitAndResume(true)));
   results.push(await attempt('quota-wait-and-resume-legacy', 'fake', () => quotaWaitAndResume(false)));
+  results.push(await attempt("context-pressure", "fake", contextPressure));
 
   // REAL — only with AGENT_PLANE_EVAL=1 and the relevant provider's creds.
   if (REAL_ENABLED && HAS_ANTHROPIC) {

@@ -6,6 +6,8 @@ import { QuotaProjection, controllingRetry } from './quota.js';
 import type { Scheduler } from './scheduler.js';
 import { join } from "node:path";
 import type {
+  ContextPolicy,
+  ContextYieldRequest,
   Continuation,
   QuotaBlocker,
   TaskIntent,
@@ -22,6 +24,7 @@ import type {
   TaskState,
 } from "@agent-plane/core";
 import {
+  DEFAULT_CONTEXT_POLICY,
   DEFAULT_REDACTION_RULES,
   isSessionTerminal,
   isTaskState,
@@ -50,6 +53,7 @@ import { effectiveStateSql, effectiveUsageJoin, effectiveUsageSql } from "./harn
 import type { CooldownStore } from "./cooldown.js";
 import type { Registry } from "./registry.js";
 import { persistRoutingDecision, routeTask } from "./router.js";
+import { decideContextContinuation } from "./context-continuation.js";
 import type { TaskEventBus } from "./sse.js";
 import type { TaskStore } from "./tasks.js";
 import type { ProjectVerificationDiscovery } from "./project-verification.js";
@@ -116,6 +120,8 @@ export class Orchestrator {
    */
   private active = new Map<string, ActiveRun>();
   scheduler?: Scheduler;
+  /** K11 thresholds and task-level bounds; injectable for deterministic tests. */
+  contextPolicy?: ContextPolicy;
   /**
    * The requested model SELECTOR for a task — the operator's immutable intent,
    * never re-derived from today's catalog (I-M5). A recovery / scheduler wake of
@@ -411,7 +417,7 @@ export class Orchestrator {
         target: executionTarget, approvalMode: this.config.policy.approvalMode, maxRuntimeMs: this.maxRuntimeMs,
         routingDecisionRef: options.routingDecisionRef!, verificationPlan: project?.plan });
       this.db.transaction(() => {
-        const d = this.db.prepare('SELECT phase FROM dispatches WHERE dispatch_id = ?').get(options.dispatchId) as { phase: string };
+        const d = this.db.prepare('SELECT phase, origin FROM dispatches WHERE dispatch_id = ?').get(options.dispatchId) as { phase: string; origin: string };
         if (d.phase !== 'reserved' || this.tasks.get(taskId)?.state !== 'ROUTING') throw new Error('Dispatch no longer owns materialization');
         const store = new SessionStore(this.db);
         const insert = () => {
@@ -421,7 +427,8 @@ export class Orchestrator {
         if (options.continuation?.kind === 'checkpoint' && this.harnessRouting(taskId, options)) {
           // The checkpoint snapshot is the same immutable source the envelope is derived from.
           new HandoffService(this.db).bindSuccessor(options.continuation.checkpointId, request,
-            { reason: 'quota wake', fromAssistantId: this.lastAssistant(taskId) ?? assistantId, insertRequest: insert });
+            { reason: d.origin === 'context-yield' ? 'context continuation' : 'quota wake',
+              fromAssistantId: this.lastAssistant(taskId) ?? assistantId, insertRequest: insert });
         } else { request.runSpec.prompt = this.dispatchPrompt(request, options); insert(); }
       })();
       return this.executeDispatch(request, options);
@@ -556,18 +563,22 @@ export class Orchestrator {
   private async executeDispatch(request: ExecutionRequest, options: StartOptions): Promise<{ runId: string }> {
     await options.beforeStart?.();
     const taskId = request.taskId;
-    const d = this.db.prepare('SELECT phase, execution_path FROM dispatches WHERE dispatch_id = ?').get(request.executionRequestId) as { phase: string; execution_path: string };
+    const d = this.db.prepare('SELECT phase, execution_path, origin FROM dispatches WHERE dispatch_id = ?').get(request.executionRequestId) as { phase: string; execution_path: string; origin: string };
     if (d.phase !== 'start_attempted' || this.tasks.get(taskId)?.state !== 'ROUTING') throw new Error('Dispatch cancelled before provider start');
+    // CR-31: `trigger` is an audit label only. A context continuation is recorded
+    // as `context` so reliability aggregates can tell it apart from a rescue
+    // handoff — the predecessor did not fail (I-M4).
+    const trigger = d.origin === 'context-yield' ? 'context' : 'wake';
     if (options.continuation?.kind === 'checkpoint') {
-      this.db.prepare("UPDATE handoffs SET trigger = 'wake' WHERE task_id = ? AND checkpoint_id = ? AND trigger = 'harness' AND to_run_id IS NULL").run(taskId, options.continuation.checkpointId);
+      this.db.prepare("UPDATE handoffs SET trigger = ? WHERE task_id = ? AND checkpoint_id = ? AND trigger = 'harness' AND to_run_id IS NULL").run(trigger, taskId, options.continuation.checkpointId);
       this.db.prepare(`INSERT INTO handoffs(id,task_id,from_run_id,checkpoint_id,trigger,at)
-        SELECT ?,?,?,?,'wake',? WHERE NOT EXISTS (SELECT 1 FROM handoffs WHERE task_id = ? AND checkpoint_id = ? AND trigger = 'wake')`)
-        .run(newHandoffId(), taskId, this.checkpoints.latest(taskId, options.continuation.checkpointId)?.runId ?? null, options.continuation.checkpointId, new Date().toISOString(), taskId, options.continuation.checkpointId);
+        SELECT ?,?,?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM handoffs WHERE task_id = ? AND checkpoint_id = ? AND trigger = ?)`)
+        .run(newHandoffId(), taskId, this.checkpoints.latest(taskId, options.continuation.checkpointId)?.runId ?? null, options.continuation.checkpointId, trigger, new Date().toISOString(), taskId, options.continuation.checkpointId, trigger);
     }
     if (d.execution_path === 'harness') {
       const result = this.harnessBridge!.startRequest(request, (result, sid) => this.settleFromResult(taskId, request.assistantId, sid, result));
       if (this.tasks.get(taskId)?.state === 'ROUTING') this.tasks.transition(taskId, 'RUNNING');
-      this.db.prepare("UPDATE handoffs SET to_run_id = ? WHERE task_id = ? AND trigger = 'wake' AND to_run_id IS NULL").run(result.runId, taskId);
+      this.db.prepare("UPDATE handoffs SET to_run_id = ? WHERE task_id = ? AND trigger = ? AND to_run_id IS NULL").run(result.runId, taskId, trigger);
       return result;
     }
     const adapter = this.registry.adapter(request.assistantId);
@@ -578,7 +589,7 @@ export class Orchestrator {
     if (this.tasks.get(taskId)?.state === 'ROUTING') this.tasks.transition(taskId, 'RUNNING');
     const run: ActiveRun = { runId: handle.runId, taskId, assistantId: request.assistantId, adapter, handle,
       timeout: setTimeout(() => { void adapter.cancel(handle); }, request.runSpec.env?.maxRuntimeMs ?? this.maxRuntimeMs) };
-    this.db.prepare("UPDATE handoffs SET to_run_id = ? WHERE task_id = ? AND trigger = 'wake' AND to_run_id IS NULL").run(handle.runId, taskId);
+    this.db.prepare("UPDATE handoffs SET to_run_id = ? WHERE task_id = ? AND trigger = ? AND to_run_id IS NULL").run(handle.runId, taskId, trigger);
     this.active.set(handle.runId, run);
     void this.consume(run);
     return { runId: handle.runId };
@@ -925,6 +936,8 @@ export class Orchestrator {
           } else {
             tx("WAITING_INPUT", `${reasonText}; automatic failover is off.`, "provider_unavailable");
           }
+        } else if (kind === "context") {
+          await this.continueFromContextYield(taskId, assistantId, result, tx);
         } else {
           // handoff yield — no automatic Harness-side target (§8)
           tx("WAITING_INPUT", `${assistantId} requested a handoff — waiting for your call.`, "handoff_requested");
@@ -979,6 +992,64 @@ export class Orchestrator {
       await new Promise((r) => setTimeout(r, 10));
     }
     return false;
+  }
+
+  /**
+   * K11 — the Control Plane half of a context yield (kernel-services §4.3.3).
+   *
+   * The Harness has already settled the predecessor `YIELDED(context)` with its
+   * `ExecutionResult` persisted, so there is no live owner. This decides whether
+   * a successor may start at all and, when it may, parks the task on the normal
+   * scheduler dispatch path — which owns routing (`routeTask(taskId,
+   * "context-yield")`), materialization and every crash boundary. Nothing here
+   * starts a provider session directly and nothing here penalizes the
+   * predecessor: a healthy context yield is not a reliability failure.
+   */
+  private async continueFromContextYield(
+    taskId: string,
+    assistantId: string,
+    result: ExecutionResult,
+    tx: (to: TaskState, note?: string, pauseKind?: PauseKind) => void,
+  ): Promise<void> {
+    const detail = result.yield!.detail as ContextYieldRequest;
+    const decision = decideContextContinuation(this.db, detail, result, this.contextPolicy);
+
+    if (!decision.allowed) {
+      tx(
+        "WAITING_INPUT",
+        `${assistantId} yielded on context pressure; no automatic continuation — ${decision.reason}.`,
+        decision.block,
+      );
+      return;
+    }
+
+    // A cancellation committed while the yield was settling wins outright (CR-32
+    // territory: human decisions are never bypassed). The scheduler re-checks
+    // ownership and terminal state inside its own transaction too.
+    if (isTerminal(this.tasks.get(taskId)?.state ?? "")) return;
+
+    const parked = this.scheduler?.parkContextContinuation(
+      taskId,
+      decision.checkpointId!,
+      `Context continuation ${decision.continuationNumber} of ${(this.contextPolicy ?? DEFAULT_CONTEXT_POLICY).maxContinuationsPerTask}: critical context pressure`,
+    );
+    if (!parked) {
+      // No scheduler, or it refused (disabled, already owned, or the task moved
+      // under us). The evidence was fine — say so, and leave the task in a state
+      // an operator can defer once the scheduler can take it again (CR-32).
+      tx(
+        "WAITING_INPUT",
+        `${assistantId} checkpointed at critical context pressure, but no scheduler could take the continuation.`,
+        "no_candidate",
+      );
+      return;
+    }
+    this.notice(
+      taskId,
+      "info",
+      `Context continuation ${decision.continuationNumber}: ${assistantId} checkpointed at critical context pressure; a clean session will continue from ${decision.checkpointId}.`,
+    );
+    await this.scheduler!.runNow(taskId).catch(() => undefined);
   }
 
   /** Manual handoff: checkpoint, then move the task to another assistant. */

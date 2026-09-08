@@ -1,6 +1,6 @@
 import { HandoffService } from './harness/handoff.js';
 import { randomUUID } from 'node:crypto';
-import { isTerminal, redactValue, type Dispatch, type OnDependencyFailure, type RoutingExplanation, type SchedulerEvent, type WaitInput, type WaitCondition } from '@agent-plane/core';
+import { canTransition, isTerminal, redactValue, type Dispatch, type DispatchOrigin, type TaskState, type OnDependencyFailure, type RoutingExplanation, type SchedulerEvent, type WaitInput, type WaitCondition } from '@agent-plane/core';
 import type { Db } from '../db/index.js';
 import type { ResolvedConfig } from '../config.js';
 import type { TaskStore } from './tasks.js';
@@ -76,7 +76,7 @@ export class Scheduler {
 
   condition(taskId: string): WaitCondition | undefined {
     const r = this.d.db.prepare('SELECT * FROM wait_conditions WHERE task_id = ? ORDER BY generation DESC LIMIT 1').get(taskId) as Record<string, unknown> | undefined;
-    return r ? { schemaVersion: 1, taskId, generation: r.generation as number, state: r.state as WaitCondition['state'], kind: r.kind as WaitCondition['kind'], checkpointId: (r.checkpoint_id ?? undefined) as string | undefined, blockers: JSON.parse(r.blockers as string), assistants: JSON.parse(r.assistants as string),
+    return r ? { schemaVersion: 1, taskId, generation: r.generation as number, state: r.state as WaitCondition['state'], kind: r.kind as WaitCondition['kind'], checkpointId: (r.checkpoint_id ?? undefined) as string | undefined, origin: (r.origin ?? undefined) as WaitCondition['origin'], blockers: JSON.parse(r.blockers as string), assistants: JSON.parse(r.assistants as string),
       dependsOn: JSON.parse(r.depends_on as string) as string[], onDependencyFailure: (r.on_dependency_failure ?? undefined) as OnDependencyFailure | undefined,
       notBefore: r.not_before as string, createdBy: r.created_by as string, createdAt: r.created_at as string,
       autoWakes: r.auto_wakes as number, history: JSON.parse(r.history as string) as WaitCondition['history'],
@@ -106,11 +106,11 @@ export class Scheduler {
        NOT EXISTS (SELECT 1 FROM execution_results er WHERE er.session_id = r.id))))`).get(taskId) ||
       !!this.d.db.prepare("SELECT 1 FROM dispatches WHERE task_id = ? AND phase IN ('reserved','start_attempted')").get(taskId);
   }
-  private insert(taskId: string, input: WaitInput, actor: string, autoWakes = 0, history: WaitCondition['history'] = [], checkpointId?: string, blockers: WaitCondition['blockers'] = []): void {
+  private insert(taskId: string, input: WaitInput, actor: string, autoWakes = 0, history: WaitCondition['history'] = [], checkpointId?: string, blockers: WaitCondition['blockers'] = [], origin?: DispatchOrigin): void {
     const generation = (this.condition(taskId)?.generation ?? 0) + 1;
-    this.d.db.prepare(`INSERT INTO wait_conditions(task_id,generation,state,kind,not_before,created_by,created_at,auto_wakes,history,reason,checkpoint_id,blockers,assistants,depends_on,on_dependency_failure)
-      VALUES(?,?,'active',?,?,?,?,?,?,?,?,?,?,?,?)`).run(taskId, generation, input.kind, input.notBefore!, actor, this.iso(), autoWakes, JSON.stringify(history.slice(-10)), redactValue(input.reason ?? 'Scheduled wait'), checkpointId ?? null, JSON.stringify(redactValue(blockers)), JSON.stringify(redactValue(input.kind === 'quota' ? input.assistants ?? [] : [])),
-      JSON.stringify(input.kind === 'dependency' ? input.dependsOn : []), input.kind === 'dependency' ? (input.onDependencyFailure ?? DEFAULT_ON_DEPENDENCY_FAILURE) : null);
+    this.d.db.prepare(`INSERT INTO wait_conditions(task_id,generation,state,kind,not_before,created_by,created_at,auto_wakes,history,reason,checkpoint_id,blockers,assistants,depends_on,on_dependency_failure,origin)
+      VALUES(?,?,'active',?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(taskId, generation, input.kind, input.notBefore!, actor, this.iso(), autoWakes, JSON.stringify(history.slice(-10)), redactValue(input.reason ?? 'Scheduled wait'), checkpointId ?? null, JSON.stringify(redactValue(blockers)), JSON.stringify(redactValue(input.kind === 'quota' ? input.assistants ?? [] : [])),
+      JSON.stringify(input.kind === 'dependency' ? input.dependsOn : []), input.kind === 'dependency' ? (input.onDependencyFailure ?? DEFAULT_ON_DEPENDENCY_FAILURE) : null, origin ?? null);
   }
   attach(taskId: string, input: WaitInput): WaitCondition {
     input = this.validate(input);
@@ -150,6 +150,34 @@ export class Scheduler {
       this.insert(taskId, { kind: 'quota', notBefore: plan.notBefore!, reason: 'Quota retry; revalidation required' }, 'failover', count, history, checkpointId, plan.blockers);
       this.d.tasks.transition(taskId, 'WAITING_RESOURCE');
       this.record(taskId, 'wait.attached', this.condition(taskId)!.generation, undefined, { blockers: plan.blockers });
+      return true;
+    })();
+    if (parked) { this.publish(taskId); this.arm(); }
+    return parked;
+  }
+
+  /**
+   * K11: a settled `YIELDED(context)` parks the task on an immediately-due wait
+   * anchored to the yield checkpoint, so the ORDINARY K1 dispatch path owns the
+   * successor — same reservation, same routing entry point, same crash
+   * boundaries, same `uq_dispatch_open` / `uq_live_successor` guarantees. No
+   * second continuation queue exists.
+   *
+   * The predecessor is already terminal with its result persisted by the time
+   * the orchestrator calls this, and `hasOwner` re-checks it inside the
+   * transaction: there is never a live predecessor and a live successor.
+   */
+  parkContextContinuation(taskId: string, checkpointId: string, reason: string): boolean {
+    const parked = this.d.db.transaction(() => {
+      if (!this.enabled || this.hasOwner(taskId)) return false;
+      const row = this.d.tasks.get(taskId);
+      // A cancellation or another settler may have moved the task since the
+      // yield; parking is never worth forcing an illegal transition for.
+      if (!row || row.mode !== 'single' || !canTransition(row.state as TaskState, 'WAITING_RESOURCE', row.pause_kind ?? undefined)) return false;
+      this.d.db.prepare("UPDATE wait_conditions SET state = 'replaced' WHERE task_id = ? AND state = 'active'").run(taskId);
+      this.insert(taskId, { kind: 'time', notBefore: this.iso(), reason }, 'context-yield', 0, [], checkpointId, [], 'context-yield');
+      this.d.tasks.transition(taskId, 'WAITING_RESOURCE');
+      this.record(taskId, 'wait.attached', this.condition(taskId)!.generation, undefined, { origin: 'context-yield', checkpointId, reason });
       return true;
     })();
     if (parked) { this.publish(taskId); this.arm(); }
@@ -238,7 +266,7 @@ export class Scheduler {
       const id = `dispatch_${randomUUID()}`;
       this.d.db.prepare("UPDATE wait_conditions SET state = 'consumed', consumed_at = ?, consumed_by = ? WHERE task_id = ? AND generation = ?").run(this.iso(), actor, taskId, expectedGeneration);
       this.d.db.prepare(`INSERT INTO dispatches(dispatch_id,task_id,condition_generation,origin,execution_path,phase,created_at,updated_at,checkpoint_id)
-        VALUES(?,?,?,?,?,'reserved',?,?,?)`).run(id, taskId, expectedGeneration, actor === 'operator' ? 'run-now' : 'wake', this.d.config.execution.harnessModes.single ? 'harness' : 'legacy', this.iso(), this.iso(), c.checkpointId ?? null);
+        VALUES(?,?,?,?,?,'reserved',?,?,?)`).run(id, taskId, expectedGeneration, c.origin ?? (actor === 'operator' ? 'run-now' : 'wake'), this.d.config.execution.harnessModes.single ? 'harness' : 'legacy', this.iso(), this.iso(), c.checkpointId ?? null);
       this.d.tasks.transition(taskId, 'ROUTING');
       this.record(taskId, 'dispatch.reserved', c.generation, id, { actor });
       return { outcome: 'dispatched', dispatchId: id };
@@ -370,7 +398,7 @@ export class Scheduler {
         // is the dispatch, so the re-park is a bounded time retry, not a second
         // dependency wait (which would re-decide an already settled dependency set).
         const kind = old.kind === 'dependency' ? 'time' : old.kind;
-        this.insert(dispatch.task_id, { kind, notBefore: plan.notBefore ?? new Date(this.now().getTime() + RECHECK_MS).toISOString(), reason }, 'scheduler', count, history, old.checkpointId, plan.blockers);
+        this.insert(dispatch.task_id, { kind, notBefore: plan.notBefore ?? new Date(this.now().getTime() + RECHECK_MS).toISOString(), reason }, 'scheduler', count, history, old.checkpointId, plan.blockers, old.origin);
         this.d.tasks.transition(dispatch.task_id, 'WAITING_RESOURCE');
       }
       this.record(dispatch.task_id, 'dispatch.reparked', dispatch.condition_generation, dispatch.dispatch_id, { reason, autoWakes: count, history });

@@ -79,6 +79,57 @@ const kTok = (n: number) => (n >= 1000 ? `${Math.round(n / 1000)}k` : String(n))
  * the advertised maximum. Provider auto-compaction shows as "Observed", never as
  * an Agentic OS action.
  */
+
+/** K11 — truthful continuation state. Renders nothing until a context yield happened. */
+const CONTINUATION_STOPS: Record<string, string> = {
+  continuation_evidence_missing: "Continuation evidence missing",
+  continuation_limit_reached: "Continuation limit reached",
+  continuation_no_progress: "No progress between continuations",
+  successor_immediately_critical: "Successor immediately critical",
+};
+
+function ContinuationReadout({ continuation }: { continuation: NonNullable<TaskContext["continuation"]> }) {
+  const stop = continuation.waitingReason ? CONTINUATION_STOPS[continuation.waitingReason] : undefined;
+  return (
+    <dl className="identity-grid">
+      <div>
+        <dt>Context continuation</dt>
+        <dd>
+          {continuation.number} of {continuation.limit}
+        </dd>
+      </div>
+      <div>
+        <dt>Reason</dt>
+        <dd>{continuation.reason}</dd>
+      </div>
+      {continuation.checkpointId && (
+        <div>
+          <dt>Checkpoint</dt>
+          <dd className="mono">{continuation.checkpointId}</dd>
+        </div>
+      )}
+      {continuation.predecessorSessionId && (
+        <div>
+          <dt>Predecessor</dt>
+          <dd className="mono">{continuation.predecessorSessionId}</dd>
+        </div>
+      )}
+      <div>
+        <dt>Successor</dt>
+        <dd className={continuation.successorSessionId ? "mono" : "muted"}>
+          {continuation.successorSessionId ?? "pending"}
+        </dd>
+      </div>
+      {stop && (
+        <div>
+          <dt>Waiting for you</dt>
+          <dd className="tone-limit">{stop}</dd>
+        </div>
+      )}
+    </dl>
+  );
+}
+
 export function ContextReadout({ context }: { context: TaskContext | null }) {
   if (!context) {
     return (
@@ -87,6 +138,10 @@ export function ContextReadout({ context }: { context: TaskContext | null }) {
       </p>
     );
   }
+
+  const continuation = context.continuation ? (
+    <ContinuationReadout continuation={context.continuation} />
+  ) : null;
 
   const auto = context.autoCompaction?.observed ? (
     <p className="fine-print">
@@ -120,6 +175,7 @@ export function ContextReadout({ context }: { context: TaskContext | null }) {
           <p className="fine-print">{context.capability.autoManagementDetail}</p>
         )}
         {auto}
+        {continuation}
       </>
     );
   }
@@ -192,6 +248,7 @@ export function ContextReadout({ context }: { context: TaskContext | null }) {
         </p>
       )}
       {auto}
+      {continuation}
     </>
   );
 }

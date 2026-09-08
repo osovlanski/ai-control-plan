@@ -12,6 +12,7 @@
 
 import type { RunSpec, PermissionPolicy } from "./adapter.js";
 import type { ModelRef } from "./capabilities.js";
+import type { ContextYieldRequest } from "./context.js";
 import type {
   AssistantId,
   ExecutionSessionId,
@@ -211,7 +212,14 @@ export interface ExecutionResult {
    * decides the task verdict (H-I6).
    */
   outcome: "completed" | "failed" | "cancelled" | "timed_out" | "yielded";
-  yield?: { kind: "reroute" | "handoff" | "limit"; detail: RerouteRequest | HandoffRequest };
+  /**
+   * `context` is a HEALTHY lifecycle outcome (K11) and is deliberately distinct
+   * from `limit`, `handoff` and `reroute` — see {@link isReliabilityFailure}.
+   */
+  yield?: {
+    kind: "reroute" | "handoff" | "limit" | "context";
+    detail: RerouteRequest | HandoffRequest | ContextYieldRequest;
+  };
   /** Present iff outcome is failed/timed_out. */
   failure?: ExecutionFailure;
   /** Present iff cancelled. */
@@ -405,4 +413,31 @@ export interface RerouteRequest {
   checkpointId?: string;
   /** The Harness proposes no target — typed boundary (H-I1). */
   suggestion?: never;
+}
+
+// ---------------------------------------------------------------------------
+// Reliability predicate (I-M4)
+// ---------------------------------------------------------------------------
+
+/**
+ * The ONE shared answer to "did this session reflect badly on the provider?".
+ *
+ * A `context` yield is a healthy, plane-initiated lifecycle event: the session
+ * hit its context ceiling, checkpointed and handed the work to a clean
+ * successor. Counting it as a provider fault would make every long task look
+ * like an unreliable model. Cancellation is a human/plane decision, not a
+ * provider fault either. Everything else — failed, timed out, and the
+ * limit/handoff/reroute yields that DO say something about the route — keeps
+ * today's meaning.
+ */
+export function isReliabilityFailure(result: Pick<ExecutionResult, "outcome" | "yield">): boolean {
+  switch (result.outcome) {
+    case "completed":
+    case "cancelled":
+      return false;
+    case "yielded":
+      return result.yield?.kind !== "context";
+    default:
+      return true;
+  }
 }

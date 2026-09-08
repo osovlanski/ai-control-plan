@@ -48,8 +48,8 @@ export interface GuardDirective {
   reason: string;
   /** Present for `cancel`. */
   failure?: { kind: FailureKind; retryable: boolean };
-  /** Present for `yield`. */
-  yieldKind?: "reroute" | "handoff" | "limit";
+  /** Present for `yield`. `context` is raised by the ContextGuard (K11), not here. */
+  yieldKind?: "reroute" | "handoff" | "limit" | "context";
   quota?: HandoffRequest['quota'];
 }
 
