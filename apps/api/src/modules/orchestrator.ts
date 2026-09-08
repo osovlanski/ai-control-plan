@@ -116,6 +116,16 @@ export class Orchestrator {
    */
   private active = new Map<string, ActiveRun>();
   scheduler?: Scheduler;
+  /**
+   * The requested model SELECTOR for a task — the operator's immutable intent,
+   * never re-derived from today's catalog (I-M5). A recovery / scheduler wake of
+   * the same dispatch reuses the committed request instead of calling this.
+   */
+  private requestedModel(taskId: string): string | undefined {
+    const row = this.tasks.get(taskId);
+    return row ? (JSON.parse(row.intent_json) as TaskIntent).overrides?.model : undefined;
+  }
+
   quotaPlan(taskId: string, attempt = 0) {
     const intent = JSON.parse(this.tasks.get(taskId)!.intent_json) as TaskIntent;
     const candidates = this.registry.list().filter(a => a.enabled && a.manifestParsed &&
@@ -396,7 +406,7 @@ export class Orchestrator {
       const taskRow = this.tasks.get(taskId)!;
       const attempt = ((this.db.prepare('SELECT MAX(attempt) m FROM execution_requests WHERE task_id = ?').get(taskId) as { m: number | null }).m ?? 0) + 1;
       const project = envelope.repository && this.projectVerification ? this.projectVerification(workdir) : undefined;
-      const request = buildExecutionRequest({ taskId, dispatchId: options.dispatchId, assistantId, attempt, prompt, workdir,
+      const request = buildExecutionRequest({ taskId, dispatchId: options.dispatchId, assistantId, attempt, prompt, workdir, model: this.requestedModel(taskId),
         worktree: envelope.repository ? { repoPath: envelope.repository.path, branch: taskRow.branch ?? envelope.repository.branch, worktreePath: workdir, baseRef: taskRow.base_ref ?? 'HEAD' } : undefined,
         target: executionTarget, approvalMode: this.config.policy.approvalMode, maxRuntimeMs: this.maxRuntimeMs,
         routingDecisionRef: options.routingDecisionRef!, verificationPlan: project?.plan });
@@ -444,6 +454,7 @@ export class Orchestrator {
         {
           taskId,
           assistantId,
+          model: this.requestedModel(taskId),
           dispatchId: options.dispatchId,
           checkpointId: options.continuation?.kind === "checkpoint" ? options.continuation.checkpointId : undefined,
           attempt,
@@ -473,10 +484,14 @@ export class Orchestrator {
     // Same-provider continuation resumes the provider session; cross-provider
     // handoff always starts fresh from the rendered package (arch §7).
     const priorRef = options.continuation?.kind === "checkpoint" ? this.resumableRef(taskId, assistantId) : undefined;
+    const requestedModel = this.requestedModel(taskId);
     const runSpec = {
       taskId: envelope.taskId,
       prompt,
       workdir,
+      // Same requested selector the harness path carries; the legacy path has no
+      // ExecutionRequest, so this projection is its equivalent of CR-33.
+      ...(requestedModel ? { model: { id: requestedModel } } : {}),
       // Instance policy, not a hardcoded default: a work workspace can demand
       // approval on escalation while a personal one runs broadly auto-approved.
       permissionPolicy: { mode: this.config.policy.approvalMode },
@@ -493,8 +508,8 @@ export class Orchestrator {
     const startedAt = new Date().toISOString();
     this.db
       .prepare(
-        `INSERT INTO runs (id, task_id, assistant_id, provider_session_ref, state, started_at, worktree_path, branch, dispatch_id)
-         VALUES (?, ?, ?, ?, 'ACTIVE', ?, ?, ?, ?)`,
+        `INSERT INTO runs (id, task_id, assistant_id, provider_session_ref, state, started_at, worktree_path, branch, dispatch_id, model_requested)
+         VALUES (?, ?, ?, ?, 'ACTIVE', ?, ?, ?, ?, ?)`,
       )
       .run(
         handle.runId,
@@ -505,6 +520,7 @@ export class Orchestrator {
         options.worktree?.worktreePath ?? null,
         options.worktree?.branch ?? null,
         options.dispatchId ?? null,
+        requestedModel ?? null,
       );
 
     if (options.dispatchId && this.tasks.get(taskId)?.state === "ROUTING") this.tasks.transition(taskId, "RUNNING");
@@ -654,9 +670,15 @@ export class Orchestrator {
     // Run / adapter / DB side effects stay here for the legacy path.
     switch (event.type) {
       case "run.started": {
-        const ref = (event.payload as { providerSessionRef?: string } | undefined)?.providerSessionRef;
-        if (ref) {
-          this.db.prepare("UPDATE runs SET provider_session_ref = ? WHERE id = ?").run(ref, run.runId);
+        const payload = event.payload as { providerSessionRef?: string; model?: string } | undefined;
+        if (payload?.providerSessionRef) {
+          this.db.prepare("UPDATE runs SET provider_session_ref = ? WHERE id = ?").run(payload.providerSessionRef, run.runId);
+        }
+        // Resolved identity is provider evidence only: no model in the payload
+        // stays unknown (NULL), it is never inferred from the request (I-M5).
+        if (payload?.model) {
+          this.db.prepare("UPDATE runs SET model_resolved = ?, model_resolved_source = 'run.started' WHERE id = ? AND model_resolved IS NULL")
+            .run(payload.model, run.runId);
         }
         break;
       }

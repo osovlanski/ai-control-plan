@@ -55,3 +55,25 @@ unit-tested. Inspector gained a decided / because / next strip derived by
 `@fontsource` (OFL). Reference captures: `pnpm --filter @agent-plane/web visual`.
 Docs: `docs/ui/orbital-operator.md`.
 
+
+## K7 model identity and catalog (2026-09-08)
+
+- Requested vs served model identity are now two separate persisted facts:
+  `runs.model_requested` (from `TaskIntent.overrides.model` via
+  `ExecutionRequest.model`, CR-33) and `runs.model_resolved` /
+  `model_resolved_source` (provider evidence only). Unknown is a valid answer and
+  is never back-filled from the request, an alias, or the catalog.
+- Only Claude reports a resolved model today (`system/init`); Codex, Cursor,
+  Bedrock and OpenRouter report none, and the per-adapter evidence matrix is a
+  test (`packages/adapters/test/model-evidence.test.ts`), not a sentence.
+- `ModelCatalogService` merges provider-discovery, observed-run and manual price
+  evidence by `EVIDENCE_PRIORITY`; availability is a JOIN onto provider discovery,
+  never a second availability system. Refresh never throws and never blocks
+  routing; external sources exist only as the `CatalogSource` seam for K8.
+- `models.read` is new in `OBSERVABILITY_CAPABILITIES`, so credentials minted
+  before this change get a fail-closed 403 on `/api/models` until
+  `pnpm --filter @agent-plane/api rotate`.
+- Catalog price evidence did NOT close standing deferral #3: bounded `maxCostUsd`
+  is still rejected, with the five §4.4.5 gates named in the code and a negative
+  test that grants proven usage reporting and still expects rejection.
+- Evidence: `docs/agentic-os-k7-model-identity.md`.

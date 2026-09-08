@@ -30,6 +30,7 @@ import { routingHistory } from "./modules/router.js";
 import { TaskEventBus } from "./modules/sse.js";
 import { Scheduler } from "./modules/scheduler.js";
 import { QuotaProbeService, type QuotaProbeFn } from "./modules/quota-probe.js";
+import { ModelCatalogService, CATALOG_REVISION, type CatalogSource } from "./modules/model-catalog.js";
 import { QuotaProjection } from "./modules/quota.js";
 import { TaskStore } from "./modules/tasks.js";
 import { TelemetryService } from "./modules/telemetry.js";
@@ -52,6 +53,11 @@ export interface ServerDeps {
   quotaProbes?: QuotaProbeService;
   /** Overrides the idle quota probe transport (K3) when `quotaProbes` is not supplied. Test/demo only. */
   quotaProbeFn?: QuotaProbeFn;
+  modelCatalog?: ModelCatalogService;
+  /** External catalog sources (K7 seam for K8). Empty in production. */
+  modelCatalogSources?: CatalogSource[];
+  /** Transport handed to those sources. Test/demo only. */
+  modelCatalogFetch?: typeof globalThis.fetch;
   registerExtraRoutes?: (app: FastifyInstance) => void;
 }
 
@@ -66,6 +72,7 @@ export interface BuiltServer {
   telemetry: TelemetryService;
   scheduler: Scheduler;
   quotaProbes: QuotaProbeService;
+  modelCatalog: ModelCatalogService;
 }
 
 export function buildServer(deps: ServerDeps): BuiltServer {
@@ -90,6 +97,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     sessions: { config: { auth: { require: "sessions.read" } } }, verification: { config: { auth: { require: "verification.read" } } },
   } as const;
   const schedulerRead = { config: { auth: { require: "schedules.read" } } } as const;
+  const modelsRead = { config: { auth: { require: "models.read" } } } as const;
   const write = { config: { auth: { require: "commands.write" } } } as const;
 
   // The internal bridge + recovery are wired for every real composition root
@@ -143,6 +151,9 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     !repoPath || config.repoAllowlist.some((allowed) => repoPath === allowed || repoPath.startsWith(`${allowed}/`));
 
   const probes = deps.quotaProbes ?? new QuotaProbeService(db, config, registry, deps.quotaProbeFn, now);
+  // K7 (M12). Catalog reads never sit on the routing path: routing reads the
+  // registry, and a stale or failed catalog refresh only affects these routes.
+  const modelCatalog = deps.modelCatalog ?? new ModelCatalogService(db, registry, now, deps.modelCatalogSources, deps.modelCatalogFetch);
   const scheduler = new Scheduler({ db, tasks, orchestrator, bus, config, probes, now, onError: error => app.log.error(error) });
   const computeRoute = (taskId: string, userOverride?: AssistantId) => tasks.get(taskId)
     ? orchestrator.routeTask(taskId, 'intake', { override: userOverride }) : undefined;
@@ -201,6 +212,24 @@ export function buildServer(deps: ServerDeps): BuiltServer {
 
   app.get("/api/cooldowns", read.tasks, () => cooldowns.list());
 
+  // ---- Models (K7 / M12) ----
+  // Identity + evidence only. Nothing here selects a model: benchmark ingestion
+  // (K8) and model scoring (K13) are not implemented.
+
+  app.get("/api/models", modelsRead, () => ({
+    catalogRevision: CATALOG_REVISION,
+    models: modelCatalog.list(),
+    refreshes: modelCatalog.refreshes(10),
+  }));
+
+  app.get<{ Params: { id: string } }>("/api/models/:id", modelsRead, (req, reply) => {
+    const model = modelCatalog.get(req.params.id);
+    if (!model) return reply.status(404).send({ error: "not found" });
+    return model;
+  });
+
+  app.post("/api/models/refresh", write, async () => ({ attempts: await modelCatalog.refresh() }));
+
   // ---- Tasks ----
 
   app.post<{
@@ -214,8 +243,11 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     }
     try {
       if (wait && mode && mode !== 'single') throw new Error('K1 waits require single mode');
-      if (overrides && (typeof overrides !== 'object' || Object.keys(overrides).some(k => k !== 'assistantId') ||
-          (overrides.assistantId !== undefined && typeof overrides.assistantId !== 'string'))) throw new Error('K1 accepts only assistantId overrides');
+      // K7 widens overrides by exactly one field: `model`, the requested
+      // SELECTOR. It is recorded as intent and never resolved here.
+      if (overrides && (typeof overrides !== 'object' || Object.keys(overrides).some(k => k !== 'assistantId' && k !== 'model') ||
+          (overrides.assistantId !== undefined && typeof overrides.assistantId !== 'string') ||
+          (overrides.model !== undefined && (typeof overrides.model !== 'string' || !overrides.model.trim())))) throw new Error('overrides accept only assistantId and model');
       if (constraints && (!Array.isArray(constraints) || constraints.some(c => typeof c !== 'string'))) throw new Error('constraints must be strings');
       if (profile && !['auto','preserve-quota','fastest','best-quality','lowest-tokens'].includes(profile)) throw new Error('Invalid routing profile');
       if (wait) scheduler.validate(wait);
@@ -255,15 +287,29 @@ export function buildServer(deps: ServerDeps): BuiltServer {
         `SELECT r.id, r.assistant_id, r.provider_session_ref,
            ${effectiveStateSql("r")} AS state,
            ${effectiveUsageSql("r")} AS usage,
-           r.started_at, r.ended_at
+           r.started_at, r.ended_at,
+           -- K7: requested and served identity are separate facts; NULL resolved
+           -- means the provider reported none, not that it matched the request.
+           r.model_requested, r.model_resolved, r.model_resolved_source,
+           a.provider AS serving_provider
          FROM runs r ${effectiveUsageJoin("r")}
+         LEFT JOIN assistants a ON a.id = r.assistant_id
          WHERE r.task_id = ? ORDER BY r.started_at`,
       )
       .all(req.params.id) as Array<Record<string, unknown> & { usage: string | null }>;
     return {
       ...row,
       envelope: JSON.parse(row.envelope) as unknown,
-      runs: runs.map((r) => ({ ...r, usage: r.usage ? (JSON.parse(r.usage) as unknown) : null })),
+      runs: runs.map(({ model_requested, model_resolved, model_resolved_source, serving_provider, ...r }) => ({
+        ...r,
+        usage: r.usage ? (JSON.parse(r.usage as string) as unknown) : null,
+        modelIdentity: {
+          requestedSelector: model_requested ?? null,
+          resolvedModelId: model_resolved ?? null,
+          resolvedSource: model_resolved_source ?? "unknown",
+          servingProvider: serving_provider ?? null,
+        },
+      })),
       active: orchestrator.isActive(req.params.id),
       wait: scheduler.condition(req.params.id),
       dispatches: scheduler.dispatches(req.params.id),
@@ -691,6 +737,13 @@ export function buildServer(deps: ServerDeps): BuiltServer {
       lease: run.lease_token ? { expiresAt: run.lease_expires_at } : null,
       startedAt: run.started_at,
       endedAt: run.ended_at,
+      // K7: what we asked for vs what the provider said it served. A null
+      // `resolvedModelId` is an honest unknown, never back-filled from the request.
+      modelIdentity: {
+        requestedSelector: run.model_requested ?? null,
+        resolvedModelId: run.model_resolved ?? null,
+        resolvedSource: run.model_resolved_source ?? "unknown",
+      },
       // Opaque observability join keys (§2) — carried for navigation, never read by logic.
       correlation: requestRow
         ? { parentTaskId: requestRow.parent_task_id ?? null, groupId: requestRow.group_id ?? null }
@@ -795,7 +848,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     });
   }
 
-  return { app, registry, orchestrator, tasks, bus, checkpoints, cooldowns, telemetry, scheduler, quotaProbes: probes };
+  return { app, registry, orchestrator, tasks, bus, checkpoints, cooldowns, telemetry, scheduler, quotaProbes: probes, modelCatalog };
 }
 
 function sseHeaders(reply: FastifyReply): void {

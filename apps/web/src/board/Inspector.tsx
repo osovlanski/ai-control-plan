@@ -8,7 +8,7 @@ import {
   type SessionSummary,
   type SchedulerStatus,
 } from "../api.js";
-import { describeState, nextStep, observedModel, waitKindLabel } from "../orbital.js";
+import { describeState, modelIdentityView, nextStep, observedModel, waitKindLabel } from "../orbital.js";
 import { QuotaReadout, ContextReadout } from "./readouts.js";
 import { executionRead, missionState, type Mission } from "./execution.js";
 
@@ -106,6 +106,9 @@ export function Inspector({
   const assistant = snapshot?.assistants.find(
     (a) => a.id === run?.assistant_id,
   );
+  // Persisted provider evidence, falling back to this run's own start event for
+  // rows written before K7. Never the requested selector.
+  const identity = modelIdentityView(run?.modelIdentity, observedModel(snapshot?.events ?? [], run?.id));
   const latestRun = snapshot?.detail.runs.at(-1);
   const currentExecution = snapshot ? executionRead(snapshot.detail, snapshot.sessions) : undefined;
   const routing = snapshot?.routing.at(-1);
@@ -234,6 +237,8 @@ export function Inspector({
               </select>
             </label>
           )}
+          {/* Persisted provider evidence first; the event stream is the
+              fallback for runs recorded before the identity columns existed. */}
           <dl className="identity-grid">
             <div>
               <dt>Harness / assistant</dt>
@@ -245,16 +250,23 @@ export function Inspector({
             </div>
             <div>
               <dt>Requested model</dt>
-              <dd>Not exposed by run API</dd>
+              <dd className="mono">{identity.requested}</dd>
             </div>
             <div>
-              <dt>Resolved model</dt>
-              <dd className="mono">{observedModel(snapshot.events, run?.id)}</dd>
+              <dt>Served model</dt>
+              {/* Unknown is a legitimate answer, not a failure: it is muted, not
+                  styled as an error. */}
+              <dd className={identity.servedKnown ? "mono" : "muted"}>{identity.served}</dd>
+            </div>
+            <div>
+              <dt>Serving provider</dt>
+              <dd>{identity.servingProvider ?? assistant?.provider ?? "Unknown"}</dd>
             </div>
           </dl>
           <p className="fine-print">
-            Resolved identity uses this run’s provider start evidence only.
-            Serving-provider identity awaits K7.
+            Requested and served identity are separate facts. Served identity comes
+            only from this run’s own provider evidence — never from today’s aliases
+            or catalog.
           </p>
           <div className="section-label">
             Recent run activity <span>Recorded events</span>
@@ -403,7 +415,9 @@ export function Inspector({
           </div>
           {wait ? (
             <>
-              <dl className="identity-grid">
+              {/* Persisted provider evidence first; the event stream is the
+              fallback for runs recorded before the identity columns existed. */}
+          <dl className="identity-grid">
                 <div>
                   <dt>Wait kind</dt>
                   <dd>{waitKindLabel(wait)}</dd>

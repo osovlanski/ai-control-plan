@@ -147,8 +147,38 @@ export interface TaskDetail {
     usage: Record<string, unknown> | null;
     started_at: string;
     ended_at: string | null;
+    /** K7. `resolvedModelId: null` = the provider reported no model identity. */
+    modelIdentity?: {
+      requestedSelector: string | null;
+      resolvedModelId: string | null;
+      resolvedSource: string;
+      servingProvider: string | null;
+    };
   }>;
   active: boolean;
+}
+
+/** K7 catalog entry as served by `GET /api/models`. Evidence, never a score. */
+export interface CatalogModel {
+  modelId: string;
+  provider: string;
+  displayName?: string;
+  aliases: string[];
+  contextWindowTokens?: number;
+  maxOutputTokens?: number;
+  availableVia: string[];
+  status: string;
+  freshness: string;
+  catalogRevision: string;
+  provenance: { source: string; tier: string; observedAt: string; attribution?: string };
+  pricing: Array<{
+    inputPerMtok: number;
+    outputPerMtok: number;
+    currency: string;
+    pricingVersion: string;
+    appliesTo?: { servingProvider: string; accountKind?: string };
+    provenance: { source: string; tier: string; observedAt: string; attribution?: string };
+  }>;
 }
 
 async function req<T>(url: string, init?: RequestInit): Promise<T> {
@@ -223,6 +253,11 @@ export const api = {
         to_assistant: string | null;
       }>
     >(`/api/tasks/${id}/handoffs`),
+  models: () =>
+    req<{ catalogRevision: string; models: CatalogModel[]; refreshes: Array<{ source: string; status: string; detail: string | null; finishedAt: string }> }>(
+      "/api/models",
+    ),
+  refreshModels: () => req<{ attempts: Array<{ source: string; status: string; entries: number; detail?: string }> }>("/api/models/refresh", { method: "POST" }),
   cooldowns: () =>
     req<Array<{ assistantId: string; reason: string; until: string }>>("/api/cooldowns"),
   startParallel: (id: string, assistants: string[], mode: "compare" | "race") =>

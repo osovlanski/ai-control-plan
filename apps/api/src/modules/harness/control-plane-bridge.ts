@@ -28,6 +28,12 @@ export interface BridgeStartInput {
   dispatchId?: string;
   checkpointId?: string;
   assistantId: string;
+  /**
+   * The REQUESTED model selector (CR-33). `ExecutionRequest.model` is the sole
+   * authority for it; this bridge is the only place it becomes `RunSpec.model`.
+   * Absent = the operator named no model — never a fabricated provider default.
+   */
+  model?: string;
   /** Harness attempt number — `MAX(execution_requests.attempt)+1` for this task. */
   attempt: number;
   prompt: string;
@@ -50,6 +56,8 @@ export interface BridgeStartInput {
  * render its prompt before accepting the immutable request through claim().
  */
 export function buildExecutionRequest(input: BridgeStartInput): ExecutionRequest {
+  // CR-33: one derivation, copied into the RunSpec the adapter launches with.
+  const model = input.model ? { id: input.model } : undefined;
   return {
     schemaVersion: 1,
     executionRequestId: input.dispatchId ?? `erq_${input.taskId}_${input.attempt}`,
@@ -57,10 +65,12 @@ export function buildExecutionRequest(input: BridgeStartInput): ExecutionRequest
     attempt: input.attempt,
     assistantId: input.assistantId as ExecutionRequest["assistantId"],
     routingDecisionRef: input.routingDecisionRef,
+    ...(model ? { model } : {}),
     runSpec: {
       taskId: input.taskId as ExecutionRequest["taskId"],
       prompt: input.prompt,
       workdir: input.workdir,
+      ...(model ? { model } : {}),
       permissionPolicy: { mode: input.approvalMode },
       env: { redactionRules: DEFAULT_REDACTION_RULES, maxRuntimeMs: input.maxRuntimeMs },
     },

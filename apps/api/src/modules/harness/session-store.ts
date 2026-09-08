@@ -253,9 +253,9 @@ export class SessionStore {
     if (existing) return existing;
 
     const req = this.db
-      .prepare("SELECT id, task_id, attempt, assistant_id, superseded FROM execution_requests WHERE id = ?")
+      .prepare("SELECT id, task_id, attempt, assistant_id, model, superseded FROM execution_requests WHERE id = ?")
       .get(executionRequestId) as
-      | { id: string; task_id: string; attempt: number; assistant_id: string; superseded: number }
+      | { id: string; task_id: string; attempt: number; assistant_id: string; model: string | null; superseded: number }
       | undefined;
     if (!req) throw new Error(`No execution_request ${executionRequestId} to create a session for`);
     if (req.superseded) throw new Error('Superseded request no longer owns execution');
@@ -271,8 +271,8 @@ export class SessionStore {
         .prepare(
           `INSERT INTO runs
              (id, task_id, assistant_id, state, session_state, version, provider_start_acked,
-              cancel_requested, attempt, execution_request_id, started_at, dispatch_id)
-           VALUES (?, ?, ?, ?, 'PREPARED', 0, 0, 0, ?, ?, ?, ?)`,
+              cancel_requested, attempt, execution_request_id, started_at, dispatch_id, model_requested)
+           VALUES (?, ?, ?, ?, 'PREPARED', 0, 0, 0, ?, ?, ?, ?, ?)`,
         )
         .run(
           sessionId,
@@ -283,6 +283,8 @@ export class SessionStore {
           executionRequestId,
           this.iso(),
           dispatch ? executionRequestId : null,
+          // Copied from the immutable request — the request stays the authority.
+          req.model ? ((JSON.parse(req.model) as { id?: string }).id ?? null) : null,
         );
     } catch (err) {
       // Lost a race on uq_runs_execution_request — return the winner.
@@ -434,6 +436,17 @@ export class SessionStore {
    * STARTING→RUNNING transition (`patch.providerStartAcked`), which is what the
    * first streamed event triggers.
    */
+  /**
+   * Record the model the PROVIDER reported serving (I-M5). Evidence-only: never
+   * called with a requested selector, and first evidence wins so a later event
+   * cannot rewrite what the start actually reported.
+   */
+  recordResolvedModel(sessionId: string, modelId: string, source: "run.started" | "result"): void {
+    this.db
+      .prepare("UPDATE runs SET model_resolved = ?, model_resolved_source = ? WHERE id = ? AND model_resolved IS NULL")
+      .run(modelId, source, sessionId);
+  }
+
   ackHandle(
     sessionId: string,
     ref: ProviderSessionRef,

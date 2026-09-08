@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, type Assistant, type CapabilityChange, type SchedulerStatus, type Workspace } from "./api.js";
+import { api, type Assistant, type CapabilityChange, type CatalogModel, type SchedulerStatus, type Workspace } from "./api.js";
 import { NewTask } from "./NewTask.jsx";
 import { TaskDetail } from "./TaskDetail.jsx";
 import { OrbitalBoard } from "./OrbitalBoard.js";
@@ -119,6 +119,67 @@ export function App() {
   );
 }
 
+/**
+ * K7 model catalog card: evidence with its provenance, never a ranking. The
+ * catalog says what is known about a model; provider discovery (above) remains
+ * the authority for which assistant can serve it.
+ */
+function ModelCatalogCard() {
+  const [models, setModels] = useState<CatalogModel[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const load = () => {
+    void api.models().then((r) => { setModels(r.models); setError(null); })
+      .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)));
+  };
+  useEffect(load, []);
+
+  const refresh = async () => {
+    setBusy(true);
+    try { await api.refreshModels(); load(); }
+    catch (err) { setError(err instanceof Error ? err.message : String(err)); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <Card>
+      <div style={{ display: "flex", alignItems: "center", gap: "0.7rem" }}>
+        <strong>Model catalog</strong>
+        <span style={{ fontSize: "0.8rem", color: tokens.muted }}>identity + price evidence (K7)</span>
+        <span style={{ marginLeft: "auto" }}>
+          <Button variant="secondary" onClick={() => void refresh()} disabled={busy}>
+            {busy ? "Refreshing…" : "Refresh"}
+          </Button>
+        </span>
+      </div>
+      {error && <p style={{ margin: "0.6rem 0 0", fontSize: "0.85rem", color: tokens.muted }}>Catalog unavailable: {error}. Routing is unaffected.</p>}
+      {!error && models.length === 0 && (
+        <p style={{ margin: "0.6rem 0 0", fontSize: "0.85rem", color: tokens.muted }}>
+          No catalog evidence yet — refresh to collect it from provider discovery and this workspace’s own runs.
+        </p>
+      )}
+      {models.map((m) => (
+        <div key={m.modelId} style={{ marginTop: "0.6rem", fontSize: "0.83rem" }}>
+          <strong>{m.modelId}</strong>{" "}
+          <span style={{ color: tokens.muted }}>
+            {m.provider} · {m.provenance.tier} via {m.provenance.source} · {m.freshness}
+            {m.contextWindowTokens ? ` · ctx ${m.contextWindowTokens}` : ""}
+            {m.availableVia.length ? ` · via ${m.availableVia.join(", ")}` : " · no assistant advertises it"}
+          </span>
+          {m.pricing.map((p) => (
+            <div key={p.pricingVersion} style={{ color: tokens.muted }}>
+              price {p.inputPerMtok}/{p.outputPerMtok} {p.currency} per Mtok · version {p.pricingVersion} · {p.provenance.tier}
+              {p.appliesTo ? ` · applies to ${p.appliesTo.servingProvider}${p.appliesTo.accountKind ? `/${p.appliesTo.accountKind}` : ""}` : " · applicability not established"}
+              {" · evidence only, not an enforcement tariff"}
+            </div>
+          ))}
+        </div>
+      ))}
+    </Card>
+  );
+}
+
 function Catalog() {
   const [assistants, setAssistants] = useState<Assistant[]>([]);
   const [cooldowns, setCooldowns] = useState<Array<{ assistantId: string; reason: string; until: string }>>([]);
@@ -208,6 +269,7 @@ function Catalog() {
           </Card>
         );
       })}
+      <ModelCatalogCard />
     </div>
   );
 }

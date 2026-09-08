@@ -200,7 +200,9 @@ adapters 8 / web 3, lint clean. **Next phase is the orchestrator/control-plane c
    `execution_request_id IS NULL`. `008_state_vocab_authority.sql` is a
    non-load-bearing consistency backfill. The legacy write path is unchanged.
 3. **Bounded *cost* caps** (`budget.maxCostUsd` with `enforcement:"bounded"`) —
-   Prepare rejects them `policy_unenforceable` (no pricing table). Token caps work.
+   Prepare rejects them `policy_unenforceable`. K7 added catalog price *evidence*,
+   which is not an enforcement tariff, so the rejection stands until the five
+   §4.4.5 gates hold. Token caps work.
    **Partial input planned, not closure:** vNext increment 16a (M12 model catalog with
    versioned price *evidence*, `docs/agentic-os-kernel-services.md` §4.4, slice K7) supplies
    one of five gates. Closure additionally needs an applicable tariff for the serving

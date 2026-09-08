@@ -74,7 +74,7 @@ export function renderMarkdown(card: Scorecard): string {
     ``,
     `- **compare / race / parallel** — no Execution Harness parity yet (roadmap §3.4); legacy-only until vNext increment 6.`,
     `- **provider-resume / cross-provider handoff claim** — the claim protocol is unwired (standing deferral #7).`,
-    `- **bounded cost caps** — no pricing table to derive cost from tokens yet (standing deferral #3).`,
+    `- **bounded cost caps** — K7 catalog price evidence is not an enforcement tariff; the five §4.4.5 gates remain open (standing deferral #3).`,
     `- **real-provider approval-gating evidence** (\`needs-approval\`) — this scorecard's run used the documented FakeAdapter fallback (R8); the real-provider assertion is an area-1 flip precondition.`,
     `- **full eval-plan area-1 conformance suite** and **area-2's ≥6/7-over-two-nights bar** — flip preconditions, not increment-3 deliverables (\`docs/harness-rollout.md\`).`,
     ``,

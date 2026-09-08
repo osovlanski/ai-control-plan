@@ -7,6 +7,7 @@ import {
   fieldPulse,
   layoutBodies,
   nextStep,
+  modelIdentityView,
   observedModel,
   pointAt,
   probeFreshness,
@@ -173,5 +174,30 @@ describe("execution evidence", () => {
     expect(fieldPulse(tasks)).toEqual({ running: 0, attention: 1, waiting: 0, ready: 1, unknown: 0, settled: 0, total: 2 });
     expect(layoutBodies(tasks).every(body => body.ring === 1)).toBe(true);
     expect(nextStep({ state: "LIMIT_PAUSED" })).not.toMatch(/budget exhausted/i);
+  });
+});
+
+describe("model identity (K7)", () => {
+  it("separates requested from served and renders an unknown provider identity honestly", () => {
+    const served = modelIdentityView(
+      { requestedSelector: "opus", resolvedModelId: "claude-opus-4-1-20991231", servingProvider: "anthropic" },
+      "Unknown",
+    );
+    expect(served).toMatchObject({ requested: "opus", served: "claude-opus-4-1-20991231", servedKnown: true });
+
+    const unknown = modelIdentityView({ requestedSelector: "gpt-5-codex", resolvedModelId: null, servingProvider: "openai" }, "Unknown");
+    expect(unknown.requested).toBe("gpt-5-codex");
+    expect(unknown.served).toMatch(/^Unknown — provider did not report model identity$/);
+    // Honest unknown, not an error: the Inspector styles it muted on this flag.
+    expect(unknown.servedKnown).toBe(false);
+
+    const unrequested = modelIdentityView(undefined, "Unknown");
+    expect(unrequested.requested).toBe("Unspecified — no model was requested");
+    expect(unrequested.servedKnown).toBe(false);
+
+    // Pre-K7 rows fall back to this run's own start event, never to the request.
+    const legacy = modelIdentityView(undefined, "claude-opus-4-1-20991231");
+    expect(legacy.served).toBe("claude-opus-4-1-20991231");
+    expect(legacy.servedKnown).toBe(true);
   });
 });

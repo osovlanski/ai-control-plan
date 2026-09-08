@@ -124,6 +124,25 @@ export function observedModel(
     : "Unknown";
 }
 
+/**
+ * The two identity facts an operator reads (K7): what was asked for, and what
+ * the provider said it served. `servedKnown: false` is an honest unknown — the
+ * Inspector renders it muted, never as an error.
+ */
+export function modelIdentityView(
+  identity: { requestedSelector: string | null; resolvedModelId: string | null; servingProvider: string | null } | undefined,
+  fallbackResolved: string,
+): { requested: string; served: string; servedKnown: boolean; servingProvider: string | null } {
+  // "Unknown" is `observedModel`'s sentinel for "no provider evidence".
+  const served = identity?.resolvedModelId ?? (fallbackResolved === "Unknown" ? null : fallbackResolved);
+  return {
+    requested: identity?.requestedSelector ?? "Unspecified — no model was requested",
+    served: served ?? "Unknown — provider did not report model identity",
+    servedKnown: served !== null,
+    servingProvider: identity?.servingProvider ?? null,
+  };
+}
+
 export interface ContextView {
   occupancyTokens?: number;
   effectiveWindowTokens?: number;

@@ -14,6 +14,8 @@ export const OBSERVABILITY_CAPABILITIES = [
   "verification.read",
   "approvals.read",
   "schedules.read",
+  // K7 (M12): model identity + catalog reads.
+  "models.read",
 ] as const;
 
 export const COMMAND_CAPABILITIES = ["commands.write"] as const;
