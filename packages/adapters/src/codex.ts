@@ -62,6 +62,19 @@ export class CodexAdapter implements AgentAdapter {
         execution: { shell: true, filesystem: true, web: "unknown" },
         auth: detectAuth(this.options.authEnvVars),
       },
+      // M14 K9: `turn.completed` token accounting is NOT established as live
+      // context occupancy, and this SDK layer exposes no context-usage payload.
+      // App Server `thread/compact/start` + `thread/tokenUsage/updated` exist
+      // beyond it but require an app-server transport that is not wired.
+      context: {
+        occupancy: "unavailable",
+        effectiveWindow: "unavailable",
+        compact: "none",
+        autoManagement: "provider",
+        autoManagementDetail:
+          "Codex manages its own context; experimental context management (keeps notes, searches earlier task history) is opt-in and account-dependent. Not observable at this SDK layer.",
+        observesAutoCompaction: false,
+      },
       providerDetail: {
         runtime: "@openai/codex-sdk",
         sandboxModes: ["read-only", "workspace-write", "danger-full-access"],

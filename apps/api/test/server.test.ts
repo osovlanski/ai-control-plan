@@ -50,6 +50,7 @@ describe("api server", () => {
         "approvals.read",
         "schedules.read",
         "models.read",
+        "context.read",
         "commands.write",
       ],
     });

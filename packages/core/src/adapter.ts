@@ -1,4 +1,5 @@
 import type { CapabilityManifest } from "./capabilities.js";
+import type { AdapterContextSample } from "./context.js";
 import type { NormalizedEvent } from "./events.js";
 import type { AssistantId, ProviderSessionRef, TaskId } from "./ids.js";
 import type { ModelRef } from "./capabilities.js";
@@ -25,6 +26,15 @@ export interface AgentAdapter {
 
   /** Mid-run user input / approval responses. Optional capability. */
   send?(handle: RunHandle, input: RunInput): Promise<void>;
+
+  /**
+   * Capability-gated context observation (M14 K9). Implemented ONLY by an
+   * adapter with a real provider mechanism (Claude via the Agent SDK's
+   * `getContextUsage`). Returns `null` when momentarily unavailable — the
+   * Harness then records no observation rather than a fabricated one. K9 adds no
+   * `compact` counterpart; that arrives capability-gated in K10.
+   */
+  observeContext?(handle: RunHandle): Promise<AdapterContextSample | null>;
 
   cancel(handle: RunHandle): Promise<void>;
 }

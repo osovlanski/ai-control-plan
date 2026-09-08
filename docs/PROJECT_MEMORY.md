@@ -35,7 +35,7 @@ This is not an independent product: it is the `docs/agentic-os-contract-lifecycl
 ## Demo A: K1-K3 through the Orbital operator UI
 
 - `feat/agentic-os-demo-a` reconciles the Orbital UI (`feat/agentic-os-orbital-ui@04cbfb5`) onto current `main` instead of replacing the shipped board: one primary experience, with K1/K2/K3 backend truth winning wherever the two disagreed.
-- The Orbital inspector now reads persisted kernel state — wait kind/generation/next eligible time, quota blocker scope and provenance, checkpoint and continuation, dispatch phases, post-wake assistant identity, scheduler enablement and K3 probe freshness. `Planned` labels survive only for K4, K5 and K9.
+- The Orbital inspector now reads persisted kernel state — wait kind/generation/next eligible time, quota blocker scope and provenance, checkpoint and continuation, dispatch phases, post-wake assistant identity, scheduler enablement and K3 probe freshness. The Context tab is `Implemented · K9`; `Planned` labels now point forward to K10 (provider-command compaction) and K11 (context yield / continuation).
 - `pnpm demo:a` runs `apps/web/e2e/demo-a.spec.ts` against an in-process API with an injected clock and probe transport: deterministic, no provider credentials, no real quota consumption, with trace/video/screenshots kept under `apps/web/test-results/`.
 - Operator runbook: `docs/demo/demo-a.md` (prerequisites, Oracle start, SSH tunnel, deterministic run, optional real-Claude smoke, artefact locations, deliberately unimplemented functionality).
 - Defect found and fixed here: routing-side quota reads (`routeTask`, `Orchestrator.quotaPlan`) and `CooldownStore` used wall time while the scheduler ran on the injected kernel clock, so under a divergent clock fresh evidence read as stale and expired cooldowns read as live — a blocked assistant could be started at a wake. All of them now share the kernel clock, with a regression test in `apps/api/test/quota-probe.test.ts`.
@@ -88,3 +88,52 @@ Docs: `docs/ui/orbital-operator.md`.
   is still rejected, with the five §4.4.5 gates named in the code and a negative
   test that grants proven usage reporting and still expects rejection.
 - Evidence: `docs/agentic-os-k7-model-identity.md`.
+
+
+## K9 context observation (2026-09-08)
+
+- OBSERVATION ONLY. Nothing added compacts, prunes, yields, issues `/compact` or
+  `/clear`, or starts a clean-session continuation. K10 (provider-command
+  compaction), K11 (context yield / continuation) and K12 (Cockpit gauge) stay
+  explicitly pending.
+- Canonical `ContextObservation` and `ContextCapability` live in
+  `packages/core/src/context.ts`. `buildContextObservation` computes `pressure`
+  ONLY from `occupancy / effectiveWindow` when both are known and fresh — never
+  from the advertised maximum or from token/cost accounting. Effective
+  (provider-managed) window and advertised model maximum are stored and rendered
+  as separate facts.
+- `CapabilityManifest.context` (new, top-level, optional) carries honest tiers:
+  Claude `provider-reported` occupancy + effective window via the Agent SDK's
+  `getContextUsage` control request (`totalTokens` / `rawMaxTokens`), observes
+  auto-compaction via `compact_boundary`; Codex/Cursor/Bedrock/OpenRouter
+  `unavailable` (Codex `turn.completed` accounting is not occupancy). No adapter
+  declares a `compact` control at K9.
+- The Claude adapter forwards `compact_boundary` system messages as
+  `context.compaction.observed` (`requestedByPlane: false` — the provider
+  compacted, not the plane) instead of dropping them, and exposes
+  `observeContext` off the live SDK query.
+- `SessionRunner` samples context at a turn boundary (assistant `message`, or
+  right after a witnessed `compact_boundary`) and records `context.observed` with
+  a monotonic per-session `sequence`. A quota-only `usage.updated` produces no
+  observation; an `unavailable`/`null` sample records nothing (no fabricated
+  number). Recovery never fabricates an observation.
+- `GET /api/tasks/:id/context` (`context.read`, new in
+  `OBSERVABILITY_CAPABILITIES` — pre-K9 credentials fail closed 403 until
+  rotated) returns the latest truthful state via `apps/api/src/modules/context.ts`:
+  KNOWN (occupancy + window + source + freshness, pressure only when valid) or
+  UNAVAILABLE. A terminal session or an observation older than 45s renders
+  `stale` and drops pressure. The legacy execution path returns UNAVAILABLE with
+  reason `legacy execution path` — no synthesised parity.
+- K7 integration: `advertisedMaxTokens` falls back to the catalog
+  `contextWindowTokens` ONLY when the resolved model id is known; a catalog
+  maximum is never turned into an effective managed window.
+- Web: the Orbital inspector Context tab is now `Implemented · K9` and renders
+  the KNOWN / partial (tokens, no %) / UNAVAILABLE / stale states with a
+  method chip, freshness, a separate advertised-maximum line, and provider
+  auto-compaction shown as "Observed". Context events flow over the existing
+  SSE/event stream — no new streaming subsystem.
+- Real-provider smoke (Claude CLI login): `observeContext` returned
+  `totalTokens` occupancy against a `rawMaxTokens` effective window, both
+  `provider-reported`; no `compact_boundary` in a short run. No transcript
+  committed.
+- Evidence: `docs/agentic-os-k9-context-observation.md`.

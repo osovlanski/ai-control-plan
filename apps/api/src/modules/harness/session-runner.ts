@@ -17,8 +17,10 @@
  * verification stage here is the minimal command runner; Phase 5 hardens it.
  */
 import type {
+  AdapterContextSample,
   AgentAdapter,
   CapabilityManifest,
+  ContextObservation,
   EvaluationResult,
   ExecutionFailure,
   ExecutionRequest,
@@ -33,7 +35,7 @@ import type {
   TerminalSessionState,
   UsagePayload,
 } from "@agent-plane/core";
-import { evaluationResult, newExecutionSessionId, outcomeOf, redactValue } from "@agent-plane/core";
+import { buildContextObservation, evaluationResult, newExecutionSessionId, outcomeOf, redactValue } from "@agent-plane/core";
 import type { SessionStore } from "./session-store.js";
 import type { EventRecorder } from "./event-recorder.js";
 import type { ApprovalService } from "./approval-service.js";
@@ -208,6 +210,8 @@ class RunContext {
   private limitQuota: HandoffRequest['quota'];
   private snapshot: GuardSnapshot;
   private lastEvidenceSeq = 0;
+  /** Monotonic per session (K9). Recovery never fabricates one that did not occur. */
+  private observationSeq = 0;
   private evidence: RerouteRequest["evidence"] = [];
   private cancelBy: "user" | "plane" = "plane";
   private tickPlan: TerminalPlan | undefined;
@@ -387,6 +391,13 @@ class RunContext {
             terminalPlan = planned;
             break;
           }
+        }
+        // K9 observation only — a turn boundary (or a provider auto-compaction we
+        // just witnessed) is the cue to sample live context. No intervention.
+        // ponytail: samples on every assistant message; add a min-interval
+        // throttle if event volume ever matters.
+        if (event.type === "message" || event.type === "context.compaction.observed") {
+          await this.sampleContext(adapter, handle);
         }
         if (this.d.store.get(this.sessionId)?.cancelRequested) {
           this.cancelBy = "plane";
@@ -919,6 +930,39 @@ class RunContext {
     }
   }
 
+  /**
+   * K9 — record a truthful `context.observed` from a fresh provider sample.
+   * OBSERVATION ONLY: nothing here compacts, yields or continues. Silent no-op
+   * unless the adapter declares a real occupancy source AND exposes
+   * `observeContext`; a `null`/`unavailable` sample records nothing (never a
+   * fabricated number). Token/cost accounting is NOT a source here.
+   */
+  private async sampleContext(adapter: AgentAdapter, handle: RunHandle): Promise<void> {
+    const cap = this.d.registry.manifest(this.request.assistantId)?.context;
+    if (!cap || cap.occupancy === "unavailable" || typeof adapter.observeContext !== "function") return;
+    let sample: AdapterContextSample | null;
+    try {
+      sample = await adapter.observeContext(handle);
+    } catch {
+      return; // a transient control-request failure is not an observation
+    }
+    if (!sample || sample.occupancySource === "unavailable") return;
+    const observation = buildContextObservation(sample, {
+      sessionId: this.sessionId,
+      sequence: ++this.observationSeq,
+      now: this.iso(),
+    });
+    this.recordEvents([
+      {
+        runId: this.sessionId as never,
+        ts: observation.observedAt,
+        type: "context.observed",
+        summary: contextSummary(observation),
+        payload: { ...observation } as unknown as Record<string, unknown>,
+      },
+    ]);
+  }
+
   private async applyDirective(
     directive: GuardDirective,
     adapter: AgentAdapter,
@@ -1273,6 +1317,15 @@ type TerminalPlan =
   | { kind: "fail"; failure: ExecutionFailure }
   | { kind: "cancel"; by: "user" | "plane" }
   | { kind: "yield"; yieldKind: "reroute" | "handoff" | "limit" };
+
+/** One-line timeline summary for a `context.observed` event. */
+function contextSummary(o: ContextObservation): string {
+  if (o.occupancyTokens === undefined) return "Context: occupancy unavailable";
+  const used = `${Math.round(o.occupancyTokens / 1000)}k tokens`;
+  if (o.pressure === undefined) return `Context: ${used} (effective window unknown)`;
+  const win = o.effectiveWindowTokens ? `${Math.round(o.effectiveWindowTokens / 1000)}k` : "?";
+  return `Context: ${used} / ${win} (${Math.round(o.pressure * 100)}%)`;
+}
 
 function normalizeStartError(err: unknown): ExecutionFailure {
   const message = redactMessage(err);

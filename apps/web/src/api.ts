@@ -280,6 +280,7 @@ export const api = {
     }),
   scores: () => req<AssistantScore[]>("/api/scores"),
   sessions: (taskId: string) => req<SessionSummary[]>(`/api/tasks/${taskId}/sessions`),
+  taskContext: (id: string) => req<TaskContext>(`/api/tasks/${id}/context`),
   session: (id: string) => req<SessionDetail>(`/api/sessions/${id}`),
   verification: (id: string) => req<SessionVerification>(`/api/sessions/${id}/verification`),
   sessionsByGroup: (groupId: string) =>
@@ -314,6 +315,36 @@ export interface SessionVerification {
     createdAt: string;
     updatedAt: string;
   }>;
+}
+
+/** M14 K9 — `GET /api/tasks/:id/context`. KNOWN (occupancy + window + source +
+ * freshness) or UNAVAILABLE. No percentage without a fresh, known effective window. */
+export interface TaskContext {
+  status: "known" | "unavailable";
+  sessionId?: string;
+  reason?: string;
+  capability?: {
+    occupancy: "provider-reported" | "estimated" | "unavailable";
+    effectiveWindow: "provider-reported" | "catalog" | "unavailable";
+    compact: "provider-command" | "none";
+    autoManagement: "provider" | "none";
+    autoManagementDetail?: string;
+    observesAutoCompaction: boolean;
+  };
+  observation?: {
+    sequence: number;
+    observedAt: string;
+    occupancyTokens?: number;
+    occupancySource: "provider-reported" | "estimated" | "unavailable";
+    estimator?: { name: string; version: string };
+    effectiveWindowTokens?: number;
+    effectiveWindowSource: "provider-reported" | "catalog" | "unavailable";
+    advertisedMaxTokens?: number;
+    pressure?: number;
+    freshness: "live" | "stale";
+    breakdown?: Array<{ category: string; tokens: number }>;
+  };
+  autoCompaction?: { observed: boolean; count: number; lastAt?: string; trigger?: string };
 }
 
 /** One row of the Execution Harness session list for a task (§11 drill-down). */

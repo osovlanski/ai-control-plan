@@ -1,5 +1,6 @@
 import type { RunId } from "./ids.js";
 import type { ActivityPhase } from "./task.js";
+import type { ContextObservation } from "./context.js";
 
 /**
  * Closed set of normalized event types (revised architecture §4).
@@ -28,6 +29,11 @@ export const EVENT_TYPES = [
   "verification.result",
   "guard.decision",
   "recovery.decision",
+  // M14 K9 — context observation (no intervention). `context.observed` is a
+  // truthful ContextObservation; `context.compaction.observed` witnesses a
+  // provider auto-compaction the plane did NOT request.
+  "context.observed",
+  "context.compaction.observed",
 ] as const;
 
 export type NormalizedEventType = (typeof EVENT_TYPES)[number];
@@ -206,6 +212,24 @@ export interface ErrorEventPayload {
 }
 
 /**
+ * Payload for `context.observed` — a truthful `ContextObservation` (§4.3.1).
+ * `sessionId` equals the event's `runId`; it is kept for a self-contained record.
+ */
+export type ContextObservedPayload = ContextObservation;
+
+/**
+ * Payload for `context.compaction.observed` — the provider compacted its own
+ * transcript. It does NOT mean Agentic OS requested compaction (I-C1): no K9
+ * code issues `/compact`, and `requestedByPlane` is always `false` here.
+ */
+export interface ContextCompactionObservedPayload {
+  trigger: "manual" | "auto" | "unknown";
+  preTokens?: number;
+  postTokens?: number;
+  requestedByPlane: false;
+}
+
+/**
  * Payload for `recovery.decision` — an append-only witness of what boot
  * reconcile / the lease sweeper / directive replay / approval settlement did to
  * a session after a crash (§9). Durable so Cockpit can tell "orphaned" from
@@ -250,6 +274,8 @@ export interface EventPayloads {
   "verification.result": VerificationResultPayload;
   "guard.decision": GuardDecisionPayload;
   "recovery.decision": RecoveryDecisionPayload;
+  "context.observed": ContextObservedPayload;
+  "context.compaction.observed": ContextCompactionObservedPayload;
 }
 
 /** Compile-time proof `EventPayloads` has an entry for every event type. */

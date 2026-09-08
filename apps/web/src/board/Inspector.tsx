@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import {
   api,
   type Assistant,
+  type TaskContext,
   type TaskDetail,
   type TaskEvent,
   type RoutingExplanation,
@@ -23,6 +24,7 @@ export type Snapshot = {
   assistants: Assistant[];
   sessions: SessionSummary[];
   scheduler: SchedulerStatus | null;
+  context: TaskContext | null;
   unavailable: string[];
 };
 
@@ -49,7 +51,7 @@ export function Inspector({
     let timer: ReturnType<typeof setTimeout>;
     const load = async () => {
       try {
-        const [detail, events, routing, assistants, sessions, scheduler] =
+        const [detail, events, routing, assistants, sessions, scheduler, context] =
           await Promise.allSettled([
             api.task(task.id),
             api.events(task.id),
@@ -57,6 +59,7 @@ export function Inspector({
             api.assistants(),
             api.sessions(task.id),
             api.schedulerStatus(),
+            api.taskContext(task.id),
           ]);
         if (detail.status === "rejected") throw detail.reason;
         if (!disposed) {
@@ -69,12 +72,14 @@ export function Inspector({
             sessions: sessions.status === "fulfilled" ? sessions.value : [],
             scheduler:
               scheduler.status === "fulfilled" ? scheduler.value : null,
+            context: context.status === "fulfilled" ? context.value : null,
             unavailable: [
               events.status === "rejected" ? "Events" : "",
               routing.status === "rejected" ? "Routing" : "",
               assistants.status === "rejected" ? "Provider discovery" : "",
               sessions.status === "rejected" ? "Sessions" : "",
               scheduler.status === "rejected" ? "Scheduler status" : "",
+              context.status === "rejected" ? "Context observation" : "",
             ].filter(Boolean),
           });
           setError(null);
@@ -368,42 +373,38 @@ export function Inspector({
       {tab === "context" && (
         <div className="inspector-content">
           <div className="section-label">
-            Context observation <span className="planned">Planned · K9</span>
+            Context observation <span className="tone-complete">Implemented · K9</span>
           </div>
-          <ContextReadout
-            observation={{
-              occupancySource: "unavailable",
-              freshness: "unavailable",
-            }}
-          />
-          <p>
-            No canonical ContextObservation is exposed by this backend. Usage
-            accounting is not context occupancy.
+          <ContextReadout context={snapshot?.context ?? null} />
+          <p className="fine-print">
+            Observation only. Token/cost accounting is not context occupancy, and no
+            percentage is shown without a fresh, known effective window.
           </p>
           <ul className="capability-list">
             <li>
-              <strong>Model intelligence & composition</strong>
-              <span className="planned">Planned · M12</span>
+              <strong>Truthful context observation & pressure gauge</strong>
+              <span className="tone-complete">Implemented · K9</span>
             </li>
             <li>
-              <strong>Attached skills / MCP / memory</strong>
-              <span className="planned">Planned · Composer</span>
+              <strong>Provider-command compaction</strong>
+              <span className="planned">Planned · K10</span>
             </li>
             <li>
-              <strong>Context pressure & intervention</strong>
-              <span className="planned">Planned · K9 / M14</span>
+              <strong>Context yield & clean-session continuation</strong>
+              <span className="planned">Planned · K11</span>
             </li>
           </ul>
           <details>
             <summary>Context lifecycle</summary>
             <p>
               Observe → pressure → provider-capable intervention → re-observe →
-              continuation.
+              continuation. K9 delivers observation only.
             </p>
             <p>
-              Compaction boundaries, relief and checkpoint-backed clean-session
-              continuation await M14. Provider controls vary; no universal
-              compaction action is available.
+              Provider auto-compaction is recorded as an observation, never as an
+              Agentic OS action. Plane-driven compaction (K10) and
+              checkpoint-backed clean-session continuation (K11) are not yet
+              implemented.
             </p>
           </details>
         </div>

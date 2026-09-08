@@ -32,6 +32,7 @@ import { Scheduler } from "./modules/scheduler.js";
 import { QuotaProbeService, type QuotaProbeFn } from "./modules/quota-probe.js";
 import { ModelCatalogService, CATALOG_REVISION, type CatalogSource } from "./modules/model-catalog.js";
 import { QuotaProjection } from "./modules/quota.js";
+import { readTaskContext } from "./modules/context.js";
 import { TaskStore } from "./modules/tasks.js";
 import { TelemetryService } from "./modules/telemetry.js";
 import { EventRetention } from "./modules/retention.js";
@@ -98,6 +99,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   } as const;
   const schedulerRead = { config: { auth: { require: "schedules.read" } } } as const;
   const modelsRead = { config: { auth: { require: "models.read" } } } as const;
+  const contextRead = { config: { auth: { require: "context.read" } } } as const;
   const write = { config: { auth: { require: "commands.write" } } } as const;
 
   // The internal bridge + recovery are wired for every real composition root
@@ -330,6 +332,19 @@ export function buildServer(deps: ServerDeps): BuiltServer {
       schedulerEnabled: scheduler.enabled,
       intent: JSON.parse(row.intent_json) as unknown,
     };
+  });
+
+  // K9 (M14) — current/latest truthful context observation for the task's
+  // active session. `context.read`; credentials minted before K9 lack the
+  // capability and fail closed until rotated. Observation only.
+  app.get<{ Params: { id: string } }>("/api/tasks/:id/context", contextRead, (req, reply) => {
+    if (!tasks.get(req.params.id)) return reply.status(404).send({ error: "not found" });
+    return readTaskContext(db, req.params.id, {
+      now,
+      capabilityFor: (assistantId) => registry.manifest(assistantId)?.context ?? undefined,
+      advertisedMaxFor: (provider, modelId) =>
+        modelCatalog.resolve(`${provider}:${modelId}`).entry?.contextWindowTokens?.value,
+    });
   });
 
   app.get('/api/scheduler/status', schedulerRead, () => scheduler.status());
