@@ -8,7 +8,8 @@ export interface TaskIntent {
   constraints: string[];
   repository?: { path: string; branch?: string };
   profile: RoutingProfile;
-  overrides?: { assistantId?: AssistantId };
+  /** `model` is the requested SELECTOR only — never the resolved provider model id (I-M5). */
+  overrides?: { assistantId?: AssistantId; model?: string };
 }
 export type Continuation = { kind: 'fresh' } | { kind: 'checkpoint'; checkpointId: string };
 export type PauseKind = 'limit' | 'provider_unavailable' | 'no_candidate' | 'harness_error'

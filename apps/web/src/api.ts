@@ -147,8 +147,45 @@ export interface TaskDetail {
     usage: Record<string, unknown> | null;
     started_at: string;
     ended_at: string | null;
+    /** K7. `resolvedModelId: null` = the provider reported no model identity. */
+    modelIdentity?: {
+      requestedSelector: string | null;
+      resolvedModelId: string | null;
+      resolvedSource: string;
+      servingProvider: string | null;
+    };
   }>;
   active: boolean;
+}
+
+type Prov = { source: string; tier: string; observedAt: string; attribution?: string };
+/** A merged fact and the evidence that supplied it — not the entry's provenance. */
+type Attributed<T> = { value: T; provenance: Prov };
+
+/** K7 catalog entry as served by `GET /api/models`. Evidence, never a score. */
+export interface CatalogModel {
+  /** `provider:modelId` — model ids alone are not unique across providers. */
+  modelKey: string;
+  modelId: string;
+  provider: string;
+  displayName?: Attributed<string>;
+  aliases: Array<Attributed<string>>;
+  contextWindowTokens?: Attributed<number>;
+  maxOutputTokens?: Attributed<number>;
+  availableVia: string[];
+  status: string;
+  freshness: string;
+  catalogRevision: string;
+  provenance: Prov;
+  pricing: Array<{
+    inputPerMtok: number;
+    outputPerMtok: number;
+    currency: string;
+    pricingVersion: string;
+    freshness: string;
+    appliesTo?: { servingProvider: string; accountKind?: string };
+    provenance: Prov;
+  }>;
 }
 
 async function req<T>(url: string, init?: RequestInit): Promise<T> {
@@ -223,6 +260,11 @@ export const api = {
         to_assistant: string | null;
       }>
     >(`/api/tasks/${id}/handoffs`),
+  models: () =>
+    req<{ catalogRevision: string; models: CatalogModel[]; refreshes: Array<{ source: string; status: string; detail: string | null; finishedAt: string }> }>(
+      "/api/models",
+    ),
+  refreshModels: () => req<{ attempts: Array<{ source: string; status: string; entries: number; detail?: string }> }>("/api/models/refresh", { method: "POST" }),
   cooldowns: () =>
     req<Array<{ assistantId: string; reason: string; until: string }>>("/api/cooldowns"),
   startParallel: (id: string, assistants: string[], mode: "compare" | "race") =>

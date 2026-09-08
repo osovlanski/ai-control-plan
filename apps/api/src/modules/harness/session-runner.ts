@@ -796,10 +796,15 @@ class RunContext {
         return "budget.enforcement bounded requires a proven quantitative usage-reporting contract";
       }
       if (p.budget.maxCostUsd !== undefined) {
-        // H-I10: a bounded COST cap needs a pricing table to derive cost from
-        // tokens. That table is not implemented yet — reject rather than
-        // silently enforce only the token cap.
-        return "bounded cost caps are not enforceable yet (no pricing table) — use a token cap or advisory mode";
+        // H-I10 / standing deferral #3. K7 adds price EVIDENCE, not an
+        // enforcement tariff, so this rejection stands. Closing it needs all
+        // five gates (kernel-services §4.4.5): (1) an applicable tariff whose
+        // `appliesTo` matches the serving provider and account kind, (2) a
+        // KNOWN resolved model identity, (3) proven `usageReporting`
+        // conformance (deferral #4), (4) declared reporting latency and
+        // overshoot bounds, (5) non-model call costs priced or scoped out.
+        // A catalog price, a model family or an estimate authorizes none of it.
+        return "bounded cost caps are not enforceable yet (catalog price evidence is not an enforcement tariff) — use a token cap or advisory mode";
       }
     }
     const declaresSandbox = h?.processIsolation === "os-sandbox" || h?.processIsolation === "provider-sandbox";
@@ -868,6 +873,13 @@ class RunContext {
     if (typeof event.seq === "number") this.lastEvidenceSeq = event.seq;
 
     switch (event.type) {
+      case "run.started": {
+        // The provider's own statement of what it is serving. Absent ⇒ unknown;
+        // the requested selector is never promoted into resolved identity.
+        const model = (event.payload as { model?: string } | undefined)?.model;
+        if (model) this.d.store.recordResolvedModel(this.sessionId, model, "run.started");
+        break;
+      }
       case "usage.updated": {
         const payload = event.payload as UsagePayload | undefined;
         this.tokens.input = accumulateTokens(this.tokens.input, { inputTokens: payload?.inputTokens }, this.snapshot.accountingMode);
