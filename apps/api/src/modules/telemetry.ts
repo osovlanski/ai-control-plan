@@ -1,10 +1,15 @@
 import type { ExecutionResult } from "@agent-plane/core";
-import { isReliabilityFailure } from "@agent-plane/core";
+import { reliabilityClass } from "@agent-plane/core";
 import type { Db } from "../db/index.js";
 import { effectiveStateSql, effectiveUsageJoin, effectiveUsageSql } from "./harness/state-vocab.js";
 
 export interface AssistantScore {
   assistantId: string;
+  /**
+   * Reliability SAMPLE count — sessions that said something about the provider.
+   * Neutral lifecycle outcomes (a healthy K11 context yield, a cancellation) are
+   * excluded, so they can neither inflate nor depress `successRate` (I-M4).
+   */
   runs: number;
   successRate: number;
   /** Median wall-clock of completed runs, ms. Undefined until a run finishes. */
@@ -74,12 +79,17 @@ export class TelemetryService {
         };
         byAssistant.set(row.assistant_id, score);
       }
-      score.runs += 1;
-      // I-M4: one shared predicate decides what counts against a provider. A
-      // healthy K11 context yield is a lifecycle event, not a fault — the work
-      // continues in a clean session and the predecessor is not penalized.
-      if (!isReliabilityFailure(reliabilityView(row.result, row.state))) score.successRate += 1;
-      else score.errors += 1;
+      // I-M4: one shared classifier decides what a session says about a
+      // provider. A healthy K11 context yield (and a cancellation) is a
+      // lifecycle event, not a fault AND not a completion — the work continues
+      // in a clean session, so the predecessor is neither credited nor
+      // penalized and stays out of the reliability denominator entirely.
+      const reliability = reliabilityClass(reliabilityView(row.result, row.state));
+      if (reliability !== "neutral") {
+        score.runs += 1;
+        if (reliability === "success") score.successRate += 1;
+        else score.errors += 1;
+      }
       const duration = Date.parse(row.ended_at) - Date.parse(row.started_at);
       if (Number.isFinite(duration) && duration >= 0) score.durations.push(duration);
       if (row.usage) {
@@ -142,7 +152,7 @@ export class TelemetryService {
 }
 
 /**
- * Project a run row onto the shape {@link isReliabilityFailure} reads. Legacy
+ * Project a run row onto the shape {@link reliabilityClass} reads. Legacy
  * rows without a persisted `ExecutionResult` fall back to the run state, which
  * is exactly what this file used before K11.
  */
@@ -155,7 +165,11 @@ function reliabilityView(resultJson: string | null, state: string): Pick<Executi
       // fall through to the state-only view
     }
   }
-  return { outcome: state === "COMPLETED" ? "completed" : "failed" };
+  if (state === "COMPLETED") return { outcome: "completed" };
+  // A cancelled run is a human/plane decision. Reading it as `failed` charged
+  // the provider for a decision it never made.
+  if (state === "CANCELLED") return { outcome: "cancelled" };
+  return { outcome: "failed" };
 }
 
 /** Cheap task-kind heuristic — no LLM call on the routing path (review §3.3). */

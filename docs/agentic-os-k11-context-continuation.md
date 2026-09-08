@@ -154,9 +154,15 @@ dispatch log and they survive a process restart for free.
   counting *every* phase: a reparked or aborted attempt still consumed one.
   `attemptsSoFar >= 3` → `continuation_limit_reached`.
 - **Progress** = a change in `completed` or `remaining` between successive
-  context-anchor checkpoint envelopes. More tokens, more events, elapsed time and
+  continuation-anchor envelopes. More tokens, more events, elapsed time and
   reworded summaries are explicitly not progress. Two consecutive no-progress
   continuations → `continuation_no_progress`.
+- **Which anchors count**: the chain is the checkpoints real continuations were
+  dispatched from (`dispatches.origin = 'context-yield'`), plus the candidate
+  being judged. A `reason = 'context'` checkpoint that never produced a dispatch
+  — one the evidence gate refused, say — is *not* a continuation: it consumes no
+  budget, moves no ordinal and anchors no streak. The provenance ordinal is that
+  same dispatch chain, so it always equals the gate's decision number.
 - **Successor immediately critical**: the yielding session was itself started by
   a `context-yield` dispatch **and** the yield came on `observation.sequence === 1`
   → `successor_immediately_critical`. This is checked before the bounds and
@@ -168,12 +174,19 @@ resolves them.
 
 ## 8. Reliability (I-M4)
 
-`isReliabilityFailure(result)` (`packages/core/src/execution.ts`) is the single
-predicate: `completed` and `cancelled` are not failures; a `yielded` result is a
-failure unless `yield.kind === "context"`; everything else is. `TelemetryService`
-uses it for the success/error split, and excludes `handoffs.trigger = 'context'`
-from the failover count — a continuation of the same work by the same assistant
-is not a rescue.
+`reliabilityClass(result)` (`packages/core/src/execution.ts`) is the single
+classifier: `completed` is a **success**; `cancelled` and a `yielded` result with
+`yield.kind === "context"` are **neutral**; everything else is an **error**.
+`isReliabilityFailure(result)` is `reliabilityClass(result) === "error"`, so the
+predicate and the classifier can never disagree.
+
+Neutral is not "no failure": it means the session says nothing about the
+provider, so it is excluded from the reliability **denominator** as well as the
+numerator. `AssistantScore.runs` is the sample count — a context-yield
+predecessor does not increment it and is never credited with a completion it did
+not make, so a context yield can neither inflate nor depress `successRate`.
+`TelemetryService` also excludes `handoffs.trigger = 'context'` from the failover
+count — a continuation of the same work by the same assistant is not a rescue.
 
 ## 9. Recovery
 
@@ -221,9 +234,10 @@ Kernel-services §5.2 K11 items 5–10, and the K11 test matrix:
 | 13 | routing provenance recorded | `context-continuation.test.ts` (`contextContinuation` block on the persisted explanation) |
 | 14 | continuation #4 blocked | `context-continuation.test.ts` ("continuation #4 is blocked from the durable dispatch log alone") |
 | 15 | two no-progress continuations blocked | `context-continuation.test.ts` ("two consecutive continuations with no envelope progress park the task", incl. the streak clearing on real progress) |
+| 15b | continuation history follows real dispatches | `context-continuation.test.ts` ("continuation history follows real continuations": a Git-failed checkpoint dispatches nothing and the next valid one is continuation 1, a reparked real continuation still consumes an attempt, the routing explanation's number is the dispatch-based one) |
 | 16 | bounds survive restart | `context-continuation.test.ts` ("bounds are recomputed from committed rows…", second connection to the same file) |
 | 17 | immediately-critical successor cannot continue again | `context-continuation.test.ts` ("an immediately critical successor stops the loop and overrides the budget") |
-| 18 | healthy context yield not a reliability failure | `context-continuation.test.ts` ("…is not a reliability failure and costs no cooldown": `isReliabilityFailure`, no cooldown, telemetry errors/failovers 0) |
+| 18 | healthy context yield not a reliability failure | `context-continuation.test.ts` ("…is not a reliability failure and costs no cooldown": `isReliabilityFailure`, no cooldown, telemetry errors/failovers 0); `harness/telemetry-harness.test.ts` ("neutral lifecycle outcomes are excluded from reliability": neutral outcomes leave `runs`/`successRate`/`errors` untouched) |
 | 19 | cancel before successor start → no provider call | `context-continuation.test.ts` ("a cancellation committed before the successor starts makes no provider call") |
 | 20 | crash boundaries create no duplicate successor | `context-continuation.test.ts` (parameterised over `reserved`, `routed`, `materialized`, `start_attempted`, `session_created`) |
 | 21 | no compact command issued | `context-continuation.test.ts` ("issues no compaction command and never a clear") |

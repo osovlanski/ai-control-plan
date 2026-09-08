@@ -61,13 +61,6 @@ export interface ContinuationProvenance {
   observedAt?: string;
 }
 
-interface CheckpointEnvelopeRow {
-  id: string;
-  envelope_snapshot: string;
-  session_id: string | null;
-  git_ref: string | null;
-}
-
 /**
  * Continuations ALREADY ATTEMPTED for this task, counted from the durable
  * dispatch log. Every phase counts — a reparked or aborted continuation still
@@ -80,17 +73,34 @@ export function continuationAttempts(db: Db, taskId: string): number {
   return row.n;
 }
 
-/** The context-yield anchor checkpoints for a task, oldest first. */
-function contextCheckpoints(db: Db, taskId: string): CheckpointEnvelopeRow[] {
-  return db
-    .prepare(
-      `SELECT id, envelope_snapshot, session_id, git_ref FROM checkpoints
-       WHERE task_id = ? AND reason = 'context' ORDER BY at, rowid`,
-    )
-    .all(taskId) as CheckpointEnvelopeRow[];
+/**
+ * The anchors of the continuations that ACTUALLY HAPPENED, oldest first.
+ *
+ * A `reason = 'context'` checkpoint is NOT a continuation: a checkpoint whose
+ * Git commit failed is refused by the evidence gate and never produces a
+ * dispatch, and an operator may later resume the same task from a fresh, valid
+ * checkpoint. Only a durable `dispatches.origin = 'context-yield'` row proves a
+ * successor was actually started, so the dispatch log — not the checkpoint
+ * table — is the authority for continuation history (§4.3.3 item 6).
+ */
+function dispatchedAnchors(db: Db, taskId: string): string[] {
+  return (
+    db
+      .prepare(
+        `SELECT checkpoint_id FROM dispatches
+         WHERE task_id = ? AND origin = 'context-yield' AND checkpoint_id IS NOT NULL
+         ORDER BY created_at, rowid`,
+      )
+      .all(taskId) as Array<{ checkpoint_id: string }>
+  ).map((row) => row.checkpoint_id);
 }
 
-function snapshot(row: CheckpointEnvelopeRow): TaskEnvelope | undefined {
+/** The immutable envelope snapshot a checkpoint carries, if it is readable. */
+function snapshot(db: Db, checkpointId: string): TaskEnvelope | undefined {
+  const row = db
+    .prepare("SELECT envelope_snapshot FROM checkpoints WHERE id = ?")
+    .get(checkpointId) as { envelope_snapshot: string } | undefined;
+  if (!row) return undefined;
   try {
     return JSON.parse(row.envelope_snapshot) as TaskEnvelope;
   } catch {
@@ -117,10 +127,20 @@ function sameList(a: string[] | undefined, b: string[] | undefined): boolean {
   return x.length === y.length && x.every((v, i) => v === y[i]);
 }
 
-/** Trailing run of consecutive continuations that changed nothing durable. */
-export function noProgressStreak(db: Db, taskId: string): number {
-  const snaps = contextCheckpoints(db, taskId)
-    .map(snapshot)
+/**
+ * Trailing run of consecutive continuations that changed nothing durable.
+ *
+ * The anchors compared are the ones real continuations were dispatched from,
+ * plus `candidateCheckpointId` — the checkpoint being judged right now, which
+ * has no dispatch yet. A context checkpoint that never produced a continuation
+ * (a Git-failed one, say) is not part of the chain and must not consume the
+ * no-progress budget: the task made no *automatic* continuation from it.
+ */
+export function noProgressStreak(db: Db, taskId: string, candidateCheckpointId?: string): number {
+  const anchors = dispatchedAnchors(db, taskId);
+  if (candidateCheckpointId && !anchors.includes(candidateCheckpointId)) anchors.push(candidateCheckpointId);
+  const snaps = anchors
+    .map((id) => snapshot(db, id))
     .filter((e): e is TaskEnvelope => e !== undefined);
   let streak = 0;
   for (let i = snaps.length - 1; i > 0; i -= 1) {
@@ -189,7 +209,8 @@ export function decideContextContinuation(
   policy: ContextPolicy = DEFAULT_CONTEXT_POLICY,
 ): ContinuationDecision {
   const attemptsSoFar = continuationAttempts(db, detail.taskId);
-  const streak = noProgressStreak(db, detail.taskId);
+  const candidateCheckpointId = detail.checkpointId ?? result.checkpoint.checkpointId;
+  const streak = noProgressStreak(db, detail.taskId, candidateCheckpointId);
   const base = {
     continuationNumber: attemptsSoFar + 1,
     attemptsSoFar,
@@ -280,10 +301,11 @@ export function continuationProvenance(
     }
   }
 
-  // This checkpoint's own continuation is the one being routed, so it is the
-  // count of attempts up to and including it.
-  const ordinal =
-    contextCheckpoints(db, taskId).findIndex((row) => row.id === checkpointId) + 1 || 1;
+  // This checkpoint's own continuation dispatch is the one being routed, so its
+  // position in the dispatch chain IS the decision number the gate computed
+  // (`attemptsSoFar + 1`) — both count real continuations, never checkpoints
+  // that produced none.
+  const ordinal = dispatchedAnchors(db, taskId).indexOf(checkpointId) + 1 || 1;
 
   return {
     continuationNumber: ordinal,

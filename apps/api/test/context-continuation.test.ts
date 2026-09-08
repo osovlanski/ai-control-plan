@@ -18,7 +18,7 @@ import { loadConfig, type ResolvedConfig } from "../src/config.js";
 import { openDb, type Db } from "../src/db/index.js";
 import { buildServer, type BuiltServer } from "../src/server.js";
 import { Scheduler, type SchedulerDeps } from "../src/modules/scheduler.js";
-import { decideContextContinuation } from "../src/modules/context-continuation.js";
+import { continuationProvenance, decideContextContinuation } from "../src/modules/context-continuation.js";
 import { readTaskContext } from "../src/modules/context.js";
 
 let home: string;
@@ -117,6 +117,81 @@ function contextDispatches(taskId: string) {
   return db
     .prepare("SELECT * FROM dispatches WHERE task_id = ? AND origin = 'context-yield' ORDER BY created_at, rowid")
     .all(taskId) as Array<{ dispatch_id: string; checkpoint_id: string | null; session_id: string | null; phase: string }>;
+}
+
+/**
+ * A synthetic `reason = 'context'` checkpoint cloned from an existing anchor,
+ * with its committed continuation envelope. `mutate` edits the durable evidence
+ * a successor reads (`completed` / `remaining`); leave it out for a checkpoint
+ * that restates the anchor verbatim — the definition of no progress.
+ */
+function synthCheckpoint(
+  taskId: string,
+  anchorCheckpointId: string,
+  id: string,
+  mutate?: (envelope: { completed?: string[]; remaining?: string[] }) => void,
+): string {
+  const anchor = db
+    .prepare("SELECT run_id, session_id, envelope_snapshot FROM checkpoints WHERE id = ?")
+    .get(anchorCheckpointId) as { run_id: string; session_id: string | null; envelope_snapshot: string };
+  const snap = JSON.parse(anchor.envelope_snapshot) as { completed?: string[]; remaining?: string[] };
+  mutate?.(snap);
+  instant += 1000;
+  db.prepare(
+    `INSERT INTO checkpoints(id,task_id,run_id,session_id,envelope_snapshot,git_ref,reason,at)
+     VALUES(?,?,?,?,?,'deadbeef','context',?)`,
+  ).run(id, taskId, anchor.run_id, anchor.session_id, JSON.stringify(snap), now().toISOString());
+
+  const template = db
+    .prepare("SELECT * FROM handoff_envelopes WHERE checkpoint_id = ? ORDER BY created_at LIMIT 1")
+    .get(anchorCheckpointId) as {
+    envelope: string;
+    from_assistant_id: string;
+    reason: string;
+    source_session_id: string | null;
+  };
+  const envelope = { ...(JSON.parse(template.envelope) as Record<string, unknown>), checkpointId: id };
+  db.prepare(
+    `INSERT INTO handoff_envelopes(id,task_id,checkpoint_id,envelope,state,from_assistant_id,reason,source_session_id,created_at,updated_at)
+     VALUES(?,?,?,?,'ready',?,?,?,?,?)`,
+  ).run(
+    `ho_${id}`, taskId, id, JSON.stringify(envelope), template.from_assistant_id, template.reason,
+    template.source_session_id, now().toISOString(), now().toISOString(),
+  );
+  return id;
+}
+
+/**
+ * A durable `origin = 'context-yield'` dispatch anchored to `checkpointId` — the
+ * only proof that a continuation ACTUALLY happened. Any phase counts: a
+ * reparked or aborted continuation still consumed an attempt.
+ */
+function synthContinuationDispatch(taskId: string, checkpointId: string, phase = "started"): string {
+  const generation =
+    ((db.prepare("SELECT MAX(generation) AS g FROM wait_conditions WHERE task_id = ?").get(taskId) as {
+      g: number | null;
+    }).g ?? 0) + 1;
+  db.prepare(
+    `INSERT INTO wait_conditions(task_id,generation,state,kind,not_before,created_by,created_at,reason,checkpoint_id,origin)
+     VALUES(?,?,'consumed','time',?,'context-yield',?,'synthetic prior continuation',?,'context-yield')`,
+  ).run(taskId, generation, now().toISOString(), now().toISOString(), checkpointId);
+  const dispatchId = `d_${checkpointId}_${generation}`;
+  db.prepare(
+    `INSERT INTO dispatches(dispatch_id,task_id,condition_generation,origin,checkpoint_id,execution_path,phase,created_at,updated_at)
+     VALUES(?,?,?,'context-yield',?,'harness',?,?,?)`,
+  ).run(dispatchId, taskId, generation, checkpointId, phase, now().toISOString(), now().toISOString());
+  return dispatchId;
+}
+
+/** The gate's view of one candidate checkpoint, reusing a settled yield's detail. */
+function candidate(detail: ContextYieldRequest, result: ExecutionResult, checkpointId: string) {
+  return {
+    detail: { ...detail, checkpointId },
+    result: {
+      ...result,
+      checkpoint: { ...result.checkpoint, checkpointId, committed: true, gitRef: "deadbeef" },
+    } as ExecutionResult,
+  };
 }
 
 function eventTypes(sessionId: string): string[] {
@@ -446,34 +521,144 @@ describe("K11 — task-level bounds", () => {
     await done;
     const detail = resultOf(sessions(id)[0]!.id).yield!.detail as ContextYieldRequest;
     const result = resultOf(sessions(id)[0]!.id);
+    const anchorId = detail.checkpointId!;
 
-    // Two further context checkpoints whose envelopes repeat the anchor's
-    // completed/remaining verbatim — new events, new timestamps, no progress.
-    const anchor = db
-      .prepare("SELECT envelope_snapshot, run_id FROM checkpoints WHERE id = ?")
-      .get(detail.checkpointId!) as { envelope_snapshot: string; run_id: string };
-    for (const suffix of ["a", "b"]) {
-      instant += 1000;
-      db.prepare(
-        `INSERT INTO checkpoints(id,task_id,run_id,session_id,envelope_snapshot,git_ref,reason,at)
-         VALUES(?,?,?,?,?,'deadbeef','context',?)`,
-      ).run(`ckpt_np_${suffix}`, id, anchor.run_id, anchor.run_id, anchor.envelope_snapshot, now().toISOString());
-    }
-    expect(decideContextContinuation(db, detail, result)).toMatchObject({
+    // A second continuation that really happened — its dispatch was reparked,
+    // which still consumed the attempt and still anchors the chain — whose
+    // envelope repeats the first anchor's completed/remaining verbatim. New
+    // events, new timestamps, no progress.
+    synthCheckpoint(id, anchorId, "ckpt_np_a");
+    synthContinuationDispatch(id, "ckpt_np_a", "reparked");
+    // ...and the candidate now being judged, which restates it once more.
+    synthCheckpoint(id, anchorId, "ckpt_np_b");
+    const stalled = candidate(detail, result, "ckpt_np_b");
+    expect(decideContextContinuation(db, stalled.detail, stalled.result)).toMatchObject({
       allowed: false,
       block: "continuation_no_progress",
+      attemptsSoFar: 2,
       noProgressStreak: 2,
     });
 
-    // A checkpoint that DID move the work on clears the streak.
-    const moved = JSON.parse(anchor.envelope_snapshot) as { completed: string[] };
-    moved.completed = [...moved.completed, "wired the new module"];
+    // A candidate that DID move the work on clears the streak.
+    synthCheckpoint(id, anchorId, "ckpt_progress", (e) => {
+      e.completed = [...(e.completed ?? []), "wired the new module"];
+    });
+    const moved = candidate(detail, result, "ckpt_progress");
+    expect(decideContextContinuation(db, moved.detail, moved.result)).toMatchObject({
+      allowed: true,
+      noProgressStreak: 0,
+    });
+  });
+});
+
+/**
+ * K11 review correction (P1-B): the continuation CHAIN is the durable
+ * `dispatches.origin = 'context-yield'` log, not every `reason = 'context'`
+ * checkpoint. A checkpoint the evidence gate refused produced no successor, so
+ * it must consume no budget, move no ordinal and anchor no streak.
+ */
+describe("K11 — continuation history follows real continuations", () => {
+  it("a Git-failed checkpoint dispatches nothing, and the next valid one is continuation 1", async () => {
+    await boot();
+    const s = scheduler();
+    const id = contextTask(s, 0.96, 0.3);
+    const git = await import("../src/repo/git.js");
+    vi.spyOn(git, "commitCheckpoint").mockRejectedValue(new Error("git index.lock held"));
     instant += 1000;
+    const done = settled(id);
+    await s.tick();
+    await done;
+
+    // 1. The inadequate checkpoint exists but started no successor.
+    expect(built.tasks.get(id)!.pause_kind).toBe("continuation_evidence_missing");
+    expect(contextDispatches(id)).toHaveLength(0);
+    const failed = resultOf(sessions(id)[0]!.id);
+    const detail = failed.yield!.detail as ContextYieldRequest;
+    const failedCheckpointId = detail.checkpointId!;
+
+    // A second stalled attempt leaves a second inadequate checkpoint, again
+    // with no dispatch. Both restate the same completed/remaining.
+    synthCheckpoint(id, failedCheckpointId, "ckpt_failed_b");
+
+    // 2. The task later reaches a valid critical checkpoint — an operator
+    // resumed it, or the work moved on and hit the ceiling again.
+    synthCheckpoint(id, failedCheckpointId, "ckpt_valid");
+    const resumed = candidate(detail, failed, "ckpt_valid");
+    const decision = decideContextContinuation(db, resumed.detail, resumed.result);
+
+    // This is the FIRST actual automatic continuation.
+    expect(decision).toMatchObject({
+      allowed: true,
+      attemptsSoFar: 0,
+      continuationNumber: 1,
+      // 3. Two identical inadequate checkpoints consumed no no-progress budget:
+      // counting them would have blocked this at the default limit of 2.
+      noProgressStreak: 0,
+    });
+    expect(decision.checkpointId).toBe("ckpt_valid");
+  });
+
+  it("a reparked real continuation still consumes an attempt", async () => {
+    await boot();
+    const s = scheduler();
+    const id = contextTask(s, 0.96, 0.3);
+    instant += 1000;
+    const done = settled(id);
+    await s.tick();
+    await done;
+    const result = resultOf(sessions(id)[0]!.id);
+    const detail = result.yield!.detail as ContextYieldRequest;
+    const anchorId = detail.checkpointId!;
+
+    synthCheckpoint(id, anchorId, "ckpt_reparked", (e) => {
+      e.completed = [...(e.completed ?? []), "reparked but real"];
+    });
+    synthContinuationDispatch(id, "ckpt_reparked", "reparked");
+    synthCheckpoint(id, anchorId, "ckpt_next", (e) => {
+      e.completed = [...(e.completed ?? []), "reparked but real", "and moved on"];
+    });
+
+    const next = candidate(detail, result, "ckpt_next");
+    expect(decideContextContinuation(db, next.detail, next.result)).toMatchObject({
+      allowed: true,
+      attemptsSoFar: 2,
+      continuationNumber: 3,
+    });
+  });
+
+  it("the routing explanation's continuationNumber is the dispatch-based decision number", async () => {
+    await boot();
+    const s = scheduler();
+    const id = contextTask(s, 0.96, 0.3);
+    instant += 1000;
+    const done = settled(id);
+    await s.tick();
+    await done;
+
+    const dispatch = contextDispatches(id)[0]!;
+    const explanation = JSON.parse(
+      (
+        db
+          .prepare(
+            "SELECT explanation FROM routing_decisions WHERE id = (SELECT routing_decision_id FROM dispatches WHERE dispatch_id = ?)",
+          )
+          .get(dispatch.dispatch_id) as { explanation: string }
+      ).explanation,
+    ) as { contextContinuation?: { continuationNumber?: number } };
+    expect(explanation.contextContinuation?.continuationNumber).toBe(1);
+
+    // An inadequate context checkpoint recorded BEFORE the real anchor used to
+    // shift the provenance ordinal to 2, contradicting the gate's decision
+    // number. The dispatch chain is the authority, so it stays 1.
+    const earlier = db
+      .prepare("SELECT run_id, session_id, envelope_snapshot FROM checkpoints WHERE id = ?")
+      .get(dispatch.checkpoint_id!) as { run_id: string; session_id: string | null; envelope_snapshot: string };
     db.prepare(
       `INSERT INTO checkpoints(id,task_id,run_id,session_id,envelope_snapshot,git_ref,reason,at)
-       VALUES(?,?,?,?,?,'deadbeef','context',?)`,
-    ).run("ckpt_progress", id, anchor.run_id, anchor.run_id, JSON.stringify(moved), now().toISOString());
-    expect(decideContextContinuation(db, detail, result)).toMatchObject({ allowed: true, noProgressStreak: 0 });
+       VALUES('ckpt_earlier_failed',?,?,?,?,NULL,'context','2029-12-31T00:00:00.000Z')`,
+    ).run(id, earlier.run_id, earlier.session_id, earlier.envelope_snapshot);
+
+    expect(continuationProvenance(db, id, dispatch.checkpoint_id!)?.continuationNumber).toBe(1);
   });
 });
 

@@ -420,24 +420,44 @@ export interface RerouteRequest {
 // ---------------------------------------------------------------------------
 
 /**
- * The ONE shared answer to "did this session reflect badly on the provider?".
+ * How one settled session counts in a reliability aggregate.
+ *
+ * `neutral` is NOT "no failure": it is "this session says nothing about the
+ * provider", so it belongs in neither the numerator nor the DENOMINATOR. A
+ * healthy `YIELDED(context)` predecessor did not complete the work — crediting
+ * it as a success would inflate every long task's successRate; counting it as a
+ * failure would make every long task look like an unreliable model.
+ */
+export type ReliabilityClass = "success" | "error" | "neutral";
+
+/**
+ * The ONE shared answer to "what did this session say about the provider?".
  *
  * A `context` yield is a healthy, plane-initiated lifecycle event: the session
  * hit its context ceiling, checkpointed and handed the work to a clean
- * successor. Counting it as a provider fault would make every long task look
- * like an unreliable model. Cancellation is a human/plane decision, not a
- * provider fault either. Everything else — failed, timed out, and the
- * limit/handoff/reroute yields that DO say something about the route — keeps
- * today's meaning.
+ * successor. Cancellation is a human/plane decision. Both are neutral.
+ * Everything else — completed, failed, timed out, and the limit/handoff/reroute
+ * yields that DO say something about the route — keeps today's meaning.
  */
-export function isReliabilityFailure(result: Pick<ExecutionResult, "outcome" | "yield">): boolean {
+export function reliabilityClass(result: Pick<ExecutionResult, "outcome" | "yield">): ReliabilityClass {
   switch (result.outcome) {
     case "completed":
+      return "success";
     case "cancelled":
-      return false;
+      return "neutral";
     case "yielded":
-      return result.yield?.kind !== "context";
+      return result.yield?.kind === "context" ? "neutral" : "error";
     default:
-      return true;
+      return "error";
   }
+}
+
+/**
+ * The shared provider-failure predicate (I-M4). Derived from
+ * {@link reliabilityClass} so the two can never disagree. Callers that build an
+ * aggregate must use `reliabilityClass` instead: `!isReliabilityFailure(...)`
+ * is "not a fault", which is not the same as "a success".
+ */
+export function isReliabilityFailure(result: Pick<ExecutionResult, "outcome" | "yield">): boolean {
+  return reliabilityClass(result) === "error";
 }
