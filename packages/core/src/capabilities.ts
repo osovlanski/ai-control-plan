@@ -1,4 +1,5 @@
 import type { AssistantId } from "./ids.js";
+import type { ContextCapability } from "./context.js";
 
 export type TriState = "yes" | "no" | "unknown";
 
@@ -83,6 +84,13 @@ export interface CapabilityManifest {
     processIsolation: "os-sandbox" | "provider-sandbox" | "none";
     provisioningContractVersion?: string;
   };
+  /**
+   * M14 context-observation tiers (kernel-services §4.3.1). Optional: absent ⇒
+   * the Harness treats context occupancy as `unavailable` for this adapter and
+   * never calls `observeContext`. A tier here represents ONLY proven provider
+   * behaviour — `compact: "provider-command"` is not declared at K9.
+   */
+  context?: ContextCapability;
   /** Provider-specific detail: skills/plugins (Claude), sandbox (Codex), rules (Cursor), deployed agents (Bedrock). */
   providerDetail: Record<string, unknown>;
   evidence: {

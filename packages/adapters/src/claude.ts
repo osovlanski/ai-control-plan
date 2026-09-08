@@ -1,8 +1,9 @@
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { query, type PermissionResult, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
+import { query, type PermissionResult, type Query, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import type {
+  AdapterContextSample,
   AgentAdapter,
   AssistantId,
   CapabilityManifest,
@@ -21,6 +22,10 @@ interface ClaudeRunState {
   abort: AbortController;
   pendingApprovals: Map<string, (result: PermissionResult) => void>;
   pendingTools: Map<string, { tool: string; input: Record<string, unknown> }>;
+  /** The live SDK query — kept so `observeContext` can issue `getContextUsage`. */
+  stream?: Query;
+  /** Advertised model maximum, lifted from `result.modelUsage[*].contextWindow`. */
+  advertisedMaxTokens?: number;
 }
 
 /** Tools that mutate a file on disk, and where to find the path in their input. */
@@ -43,7 +48,11 @@ const FILE_MUTATING_TOOLS: Record<string, { pathKey: string; kind: string }> = {
 export class ClaudeAdapter implements AgentAdapter {
   private runs = new Map<string, ClaudeRunState>();
 
-  constructor(readonly id: AssistantId) {}
+  /** `queryFn` is injectable for deterministic scripted-stream tests. */
+  constructor(
+    readonly id: AssistantId,
+    private queryFn: typeof query = query,
+  ) {}
 
   async describe(): Promise<CapabilityManifest> {
     const auth = detectAuth();
@@ -63,6 +72,20 @@ export class ClaudeAdapter implements AgentAdapter {
         reportsLimits: true, // SDKRateLimitEvent: utilization + resetsAt per window
         execution: { shell: true, filesystem: true, web: "yes" },
         auth,
+      },
+      // M14 K9 — the Agent SDK's `getContextUsage` control request reports live
+      // occupancy (`totalTokens`) against the resolved autocompaction window
+      // (`rawMaxTokens`), which is a DIFFERENT fact from the model's advertised
+      // maximum (`ModelUsage.contextWindow`). `compact_boundary` system messages
+      // are forwarded as `context.compaction.observed`. K9 exposes no compaction
+      // control — that is K10, capability-gated.
+      context: {
+        occupancy: "provider-reported",
+        effectiveWindow: "provider-reported",
+        compact: "none",
+        autoManagement: "provider",
+        autoManagementDetail: "Claude Code auto-compaction (observed via compact_boundary)",
+        observesAutoCompaction: true,
       },
       providerDetail: {
         runtime: "claude-agent-sdk",
@@ -92,7 +115,7 @@ export class ClaudeAdapter implements AgentAdapter {
 
     const handle: RunHandle = { runId, assistantId: this.id };
 
-    const stream = query({
+    const stream = this.queryFn({
       prompt: run.prompt,
       options: {
         cwd: run.workdir,
@@ -108,6 +131,7 @@ export class ClaudeAdapter implements AgentAdapter {
       },
     });
 
+    state.stream = stream;
     void this.pump(runId, handle, stream, state);
     return handle;
   }
@@ -156,6 +180,21 @@ export class ClaudeAdapter implements AgentAdapter {
               model: msg.model,
               tools: msg.tools,
               version: msg.claude_code_version,
+            },
+            raw: msg,
+          });
+        } else if (msg.subtype === "compact_boundary") {
+          // The PROVIDER compacted its own transcript. This is not an Agentic OS
+          // action (I-C1) — K9 issues no `/compact`. Forwarded instead of dropped.
+          const meta = msg.compact_metadata;
+          emit({
+            type: "context.compaction.observed",
+            summary: `Provider auto-compaction (${meta.trigger}, ${meta.pre_tokens}→${meta.post_tokens ?? "?"} tokens)`,
+            payload: {
+              trigger: meta.trigger === "auto" || meta.trigger === "manual" ? meta.trigger : "unknown",
+              preTokens: meta.pre_tokens,
+              postTokens: meta.post_tokens,
+              requestedByPlane: false,
             },
             raw: msg,
           });
@@ -240,6 +279,14 @@ export class ClaudeAdapter implements AgentAdapter {
         return;
       }
       case "result": {
+        // Advertised model maximum (K9) — a different fact from the effective
+        // autocompaction window `observeContext` reads. Keep the largest across
+        // model-usage entries (subagents may run smaller-window models).
+        const advertised = Math.max(
+          0,
+          ...Object.values(msg.modelUsage ?? {}).map((u) => (typeof u?.contextWindow === "number" ? u.contextWindow : 0)),
+        );
+        if (advertised > 0) state.advertisedMaxTokens = advertised;
         const usage = {
           inputTokens: msg.usage.input_tokens,
           outputTokens: msg.usage.output_tokens,
@@ -315,6 +362,46 @@ export class ClaudeAdapter implements AgentAdapter {
       return;
     }
     throw new NotSupportedError("mid-run messages (Phase 1 supports approvals only)");
+  }
+
+  /**
+   * M14 K9 — a live context sample from the Agent SDK's `getContextUsage`
+   * control request. `totalTokens` is the provider's own occupancy figure;
+   * `rawMaxTokens` is the resolved autocompaction window it is measured against.
+   * Returns `null` when the query is gone or the control request fails, so the
+   * Harness records no observation rather than a fabricated one.
+   */
+  async observeContext(handle: RunHandle): Promise<AdapterContextSample | null> {
+    const state = this.runs.get(handle.runId);
+    if (!state?.stream) return null;
+    try {
+      const u = await state.stream.getContextUsage();
+      if (!u || typeof u.totalTokens !== "number") return null;
+      const window = typeof u.rawMaxTokens === "number" && u.rawMaxTokens > 0 ? u.rawMaxTokens : undefined;
+      return {
+        occupancyTokens: u.totalTokens,
+        occupancySource: "provider-reported",
+        effectiveWindowTokens: window,
+        effectiveWindowSource: window !== undefined ? "provider-reported" : "unavailable",
+        advertisedMaxTokens: state.advertisedMaxTokens,
+        // `getContextUsage`'s categories carry no used/free/buffer `kind`, so
+        // exclude the non-content buckets by name — a breakdown that counts
+        // "Free space" as occupancy would mislead.
+        breakdown: Array.isArray(u.categories)
+          ? u.categories
+              .filter(
+                (c) =>
+                  !c.isDeferred &&
+                  typeof c.tokens === "number" &&
+                  c.tokens > 0 &&
+                  !/^(free space|autocompact buffer)$/i.test(c.name),
+              )
+              .map((c) => ({ category: c.name, tokens: c.tokens }))
+          : undefined,
+      };
+    } catch {
+      return null;
+    }
   }
 
   async cancel(handle: RunHandle): Promise<void> {

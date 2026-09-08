@@ -90,6 +90,14 @@ export class CursorAdapter implements AgentAdapter {
         execution: { shell: true, filesystem: true, web: "unknown" },
         auth: version === "unavailable" ? { state: "missing", account: "cursor CLI not found" } : { state: "ok" },
       },
+      // M14 K9: no verified context-occupancy mechanism at this CLI layer.
+      context: {
+        occupancy: "unavailable",
+        effectiveWindow: "unavailable",
+        compact: "none",
+        autoManagement: "none",
+        observesAutoCompaction: false,
+      },
       providerDetail: {
         runtime: `${this.command} (CLI)`,
         version,

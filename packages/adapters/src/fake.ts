@@ -1,4 +1,5 @@
 import type {
+  AdapterContextSample,
   AgentAdapter,
   AssistantId,
   CapabilityManifest,
@@ -40,6 +41,24 @@ interface FakeRunState {
   queue: EventQueue<NormalizedEvent>;
   cancelled: boolean;
   pendingApproval?: { requestId: string; resolve: (approved: boolean) => void };
+  /** K9 scripted context observation (from `[FAKE:CONTEXT:…]` prompt markers). */
+  context?: { unavailable: boolean; tokens?: number; window?: number };
+  /** Set once a scripted `[FAKE:COMPACT]` boundary has fired — later samples show relief. */
+  compacted?: boolean;
+}
+
+const FAKE_CONTEXT_WINDOW = 200_000;
+
+/** Parse `[FAKE:CONTEXT:0.46]`, `[FAKE:CONTEXT:unavailable]`, `[FAKE:CONTEXT:nowindow]`. */
+function parseContextMarker(prompt: string): FakeRunState["context"] | undefined {
+  const m = prompt.match(/\[FAKE:CONTEXT:([^\]]+)\]/);
+  if (!m) return undefined;
+  const arg = m[1]!.trim().toLowerCase();
+  if (arg === "unavailable") return { unavailable: true };
+  if (arg === "nowindow") return { unavailable: false, tokens: 72_000 };
+  const pressure = Number(arg);
+  if (!Number.isFinite(pressure) || pressure < 0) return { unavailable: true };
+  return { unavailable: false, tokens: Math.round(pressure * FAKE_CONTEXT_WINDOW), window: FAKE_CONTEXT_WINDOW };
 }
 
 /**
@@ -74,6 +93,15 @@ export class FakeAdapter implements AgentAdapter {
       // token-usage telemetry (deferral-#5-adjacent, increment 3) see the same
       // numbers the legacy path reads straight off the raw event payload.
       harness: { usageAccounting: "cumulative", toolGating: "none", approvalRelay: true, processIsolation: "none" },
+      // K9: `observeContext` returns whatever `[FAKE:CONTEXT:…]` scripted. No
+      // compaction control is exposed (that is K10) — `compact: "none"`.
+      context: {
+        occupancy: "provider-reported",
+        effectiveWindow: "provider-reported",
+        compact: "none",
+        autoManagement: "none",
+        observesAutoCompaction: true,
+      },
       providerDetail: { runtime: "fake" },
       evidence: { source: "runtime-probe", observedAt: new Date().toISOString() },
     };
@@ -81,7 +109,11 @@ export class FakeAdapter implements AgentAdapter {
 
   async start(run: RunSpec): Promise<RunHandle> {
     const runId = newRunId();
-    const state: FakeRunState = { queue: new EventQueue<NormalizedEvent>(), cancelled: false };
+    const state: FakeRunState = {
+      queue: new EventQueue<NormalizedEvent>(),
+      cancelled: false,
+      context: parseContextMarker(run.prompt),
+    };
     this.runs.set(runId, state);
     const handle: RunHandle = {
       runId,
@@ -122,6 +154,17 @@ export class FakeAdapter implements AgentAdapter {
       if (this.script.delayMs) await sleep(this.script.delayMs);
       emit(event);
       i += 1;
+    }
+    // Scripted provider auto-compaction (K9). Emitted AFTER the script events so
+    // the Harness's next observation samples the post-compaction relief below.
+    if (run.prompt.includes("[FAKE:COMPACT]") && !state.cancelled) {
+      const pre = state.context?.tokens ?? 0;
+      state.compacted = true;
+      emit({
+        type: "context.compaction.observed",
+        summary: `Provider auto-compaction (${pre}→${Math.round(pre / 2)} tokens)`,
+        payload: { trigger: "auto", preTokens: pre, postTokens: Math.round(pre / 2), requestedByPlane: false },
+      });
     }
     // The limit fires only on a fresh start: a run that picked the task up via
     // handoff must be able to finish it, or a failover test never terminates.
@@ -177,6 +220,20 @@ export class FakeAdapter implements AgentAdapter {
       return;
     }
     throw new NotSupportedError(`no pending approval ${input.kind === "approval" ? input.requestId : ""}`);
+  }
+
+  async observeContext(handle: RunHandle): Promise<AdapterContextSample | null> {
+    const state = this.runs.get(handle.runId);
+    const cfg = state?.context;
+    if (!state || !cfg || cfg.unavailable) return null;
+    const tokens = cfg.tokens === undefined ? undefined : state.compacted ? Math.round(cfg.tokens / 2) : cfg.tokens;
+    return {
+      occupancyTokens: tokens,
+      occupancySource: "provider-reported",
+      effectiveWindowTokens: cfg.window,
+      effectiveWindowSource: cfg.window === undefined ? "unavailable" : "provider-reported",
+      advertisedMaxTokens: cfg.window,
+    };
   }
 
   async cancel(handle: RunHandle): Promise<void> {

@@ -84,6 +84,15 @@ export class BedrockAdapter implements AgentAdapter {
         execution: { shell: false, filesystem: false, web: "unknown" },
         auth: this.detectAuth(configured),
       },
+      // M14 K9: the context lives inside the deployed agent; the plane cannot
+      // observe its occupancy or window.
+      context: {
+        occupancy: "unavailable",
+        effectiveWindow: "unavailable",
+        compact: "none",
+        autoManagement: "none",
+        observesAutoCompaction: false,
+      },
       providerDetail: {
         runtime: "@aws-sdk/client-bedrock-agentcore",
         agentRuntimeArn: this.options.agentRuntimeArn ?? null,
