@@ -158,26 +158,33 @@ export interface TaskDetail {
   active: boolean;
 }
 
+type Prov = { source: string; tier: string; observedAt: string; attribution?: string };
+/** A merged fact and the evidence that supplied it — not the entry's provenance. */
+type Attributed<T> = { value: T; provenance: Prov };
+
 /** K7 catalog entry as served by `GET /api/models`. Evidence, never a score. */
 export interface CatalogModel {
+  /** `provider:modelId` — model ids alone are not unique across providers. */
+  modelKey: string;
   modelId: string;
   provider: string;
-  displayName?: string;
-  aliases: string[];
-  contextWindowTokens?: number;
-  maxOutputTokens?: number;
+  displayName?: Attributed<string>;
+  aliases: Array<Attributed<string>>;
+  contextWindowTokens?: Attributed<number>;
+  maxOutputTokens?: Attributed<number>;
   availableVia: string[];
   status: string;
   freshness: string;
   catalogRevision: string;
-  provenance: { source: string; tier: string; observedAt: string; attribution?: string };
+  provenance: Prov;
   pricing: Array<{
     inputPerMtok: number;
     outputPerMtok: number;
     currency: string;
     pricingVersion: string;
+    freshness: string;
     appliesTo?: { servingProvider: string; accountKind?: string };
-    provenance: { source: string; tier: string; observedAt: string; attribution?: string };
+    provenance: Prov;
   }>;
 }
 

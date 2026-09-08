@@ -70,6 +70,17 @@ Docs: `docs/ui/orbital-operator.md`.
   evidence by `EVIDENCE_PRIORITY`; availability is a JOIN onto provider discovery,
   never a second availability system. Refresh never throws and never blocks
   routing; external sources exist only as the `CatalogSource` seam for K8.
+- Catalog identity is `(provider, model_id)`, exposed as `modelKey`. Model ids are
+  not globally unique — Codex (`openai`) and Cursor both advertise `default` — so
+  a bare id that several providers claim resolves to 409 with the candidates,
+  never to an arbitrary provider.
+- Merged catalog fields are `{ value, provenance }`: a gap filled by weaker
+  evidence keeps that evidence's provenance instead of inheriting the entry's.
+  `GET /api/models/:id` also returns the unmerged evidence rows.
+- The catalog hydrates from local evidence on first read
+  (`refreshLocalEvidence()`, no network), so a fresh workspace lists its models
+  without a manual refresh; the pinned price snapshot keeps its transcription
+  date (`PRICE_SEED_OBSERVED_AT`) and ages out even when refresh re-runs.
 - `models.read` is new in `OBSERVABILITY_CAPABILITIES`, so credentials minted
   before this change get a fail-closed 403 on `/api/models` until
   `pnpm --filter @agent-plane/api rotate`.

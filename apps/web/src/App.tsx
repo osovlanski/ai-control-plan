@@ -160,16 +160,17 @@ function ModelCatalogCard() {
         </p>
       )}
       {models.map((m) => (
-        <div key={m.modelId} style={{ marginTop: "0.6rem", fontSize: "0.83rem" }}>
+        <div key={m.modelKey} style={{ marginTop: "0.6rem", fontSize: "0.83rem" }}>
           <strong>{m.modelId}</strong>{" "}
           <span style={{ color: tokens.muted }}>
             {m.provider} · {m.provenance.tier} via {m.provenance.source} · {m.freshness}
-            {m.contextWindowTokens ? ` · ctx ${m.contextWindowTokens}` : ""}
+            {/* Each fact names its own source: a filled gap is not the entry's evidence. */}
+            {m.contextWindowTokens ? ` · ctx ${m.contextWindowTokens.value} (${m.contextWindowTokens.provenance.source})` : ""}
             {m.availableVia.length ? ` · via ${m.availableVia.join(", ")}` : " · no assistant advertises it"}
           </span>
           {m.pricing.map((p) => (
             <div key={p.pricingVersion} style={{ color: tokens.muted }}>
-              price {p.inputPerMtok}/{p.outputPerMtok} {p.currency} per Mtok · version {p.pricingVersion} · {p.provenance.tier}
+              price {p.inputPerMtok}/{p.outputPerMtok} {p.currency} per Mtok · version {p.pricingVersion} · {p.provenance.tier} · {p.freshness}
               {p.appliesTo ? ` · applies to ${p.appliesTo.servingProvider}${p.appliesTo.accountKind ? `/${p.appliesTo.accountKind}` : ""}` : " · applicability not established"}
               {" · evidence only, not an enforcement tariff"}
             </div>

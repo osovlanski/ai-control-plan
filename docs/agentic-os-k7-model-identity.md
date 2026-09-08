@@ -98,17 +98,52 @@ sources are:
    attribution "manually transcribed from the published provider pricing page", because
    that is how it was obtained. It is not dressed up as fetched provider-official data.
 
-Rows are stored per `(model_id, source)` and merged at read time by `EVIDENCE_PRIORITY`
-(ties by `observedAt`), so weaker evidence only fills gaps a stronger source left empty.
-Every entry carries `source`, `tier`, `observedAt`, `normalizationVersion`, `freshness`
-(computed at read time from a per-tier TTL: 7 d official/own, 30 d external/manual) and
-`catalogRevision`. Nothing is flattened into an untraceable number.
+### Identity is (provider, model id)
+
+Model ids are **not** globally unique: Codex (`openai`) and Cursor both advertise a model
+whose id is literally `default`. Keyed on the id alone, the two collapsed into one entry
+and the higher-priority source overwrote the other provider's evidence. Catalog identity
+is therefore `(provider, model_id)`, surfaced as `modelKey = "provider:modelId"`
+(`020_model_catalog_provider_identity.sql` re-keys `model_catalog` and `model_prices`;
+both tables hold only re-derivable evidence, so the rows are rebuilt rather than
+migrated). Availability, observed-run evidence and price rows all join on that identity,
+so nothing crosses providers.
+
+### Field-level provenance
+
+Rows are stored per `(provider, model_id, source)` and merged at read time by
+`EVIDENCE_PRIORITY` (ties by `observedAt`), so weaker evidence only fills gaps a stronger
+source left empty. A filled gap keeps **its own** provenance: `displayName`,
+`contextWindowTokens`, `maxOutputTokens`, `capabilities` and each alias are
+`{ value, provenance }` (`Attributed<T>`), so a field supplied by a manual transcription
+never reads as provider-official just because a provider-official row established the
+entry. The entry-level `provenance` describes what established the entry — and therefore
+its `provider` and `status` — and nothing else. Every fact carries `source`, `tier`,
+`observedAt`, `normalizationVersion`, `freshness` (computed at read time from a per-tier
+TTL: 7 d official/own, 30 d external/manual) and `catalogRevision`. Nothing is flattened
+into an untraceable number.
 
 `availableVia` is a **join** onto provider discovery, not a second availability system: a
 model no enabled assistant advertises is still listed, with an empty `availableVia`.
 
 Price evidence keeps `inputPerMtok`, `outputPerMtok`, optional cache prices, `currency`,
-`pricingVersion`, `appliesTo` (serving provider, account kind) and its own provenance.
+`pricingVersion`, `appliesTo` (serving provider, account kind) and its own provenance, and
+is read back with a read-time `freshness` label.
+
+### The price snapshot is pinned in time
+
+`PRICE_SEED_OBSERVED_AT` is the date the snapshot was transcribed, not the time of the
+refresh that loaded it. Refreshing records that a refresh was attempted now; the evidence
+keeps its original `observedAt` and therefore ages out on schedule. Only a newer price
+revision, with its own evidence row, makes a price fresh again.
+
+### Cold start
+
+`refreshLocalEvidence()` is split from `refresh()`: it re-derives the three local sources
+synchronously, contacts no network and no `CatalogSource`. A read against an empty catalog
+hydrates through it once per process, so a fresh workspace that has synced provider
+discovery already answers `GET /api/models` without the operator knowing to press Refresh
+first. Routing never depends on this — it reads the registry.
 
 ### Refresh
 
@@ -141,8 +176,15 @@ prices loaded, and still expects rejection. Bounded token caps are unaffected.
 | Route | Capability |
 |---|---|
 | `GET /api/models` | `models.read` |
-| `GET /api/models/:id` (by model id or known alias) | `models.read` |
+| `GET /api/models/:id` (by `provider:modelId`, model id, or known alias) | `models.read` |
 | `POST /api/models/refresh` | `commands.write` |
+
+The three routes are unchanged. `GET /api/models/:id` still accepts a bare model id or an
+alias; when several providers claim it (`default`), it answers **409** with the candidate
+`modelKey`s rather than picking a provider. `GET /api/models` returns the merged
+projection for the UI; `GET /api/models/:id` additionally returns `evidence`, the unmerged
+stored rows behind the entry. Catalog entries are `schemaVersion: 2` — `modelKey` is new,
+and the merged fields listed above are now `{ value, provenance }`.
 
 `models.read` was added to `OBSERVABILITY_CAPABILITIES`; the existing capability
 negotiation, credential file and `GET /api/meta` advertisement carry it with no parallel
@@ -196,6 +238,14 @@ dispatch may legitimately request something else. K1–K6 ownership semantics ar
 | Catalog egress carries no task/prompt/repo/usage data | same file — "sends no task, prompt, repository or usage content" |
 | Refresh failure leaves routing operational | same file — "records a failing source and leaves the stored catalog readable" |
 | `GET /api/models` capability enforcement | same file — "requires models.read", "fails closed for a credential without models.read" |
+| Codex and Cursor `default` never collapse or overwrite | same file — "keeps Codex `default` and Cursor `default` as two model identities" |
+| Observed-run evidence merges onto the serving provider only | same file — "merges observed-run evidence onto the provider that actually served it" |
+| Price evidence binds to the priced provider | same file — "binds price evidence to the priced provider only" |
+| An ambiguous id fails explicitly instead of guessing | same file — "refuses to guess a provider for an ambiguous id" |
+| Each merged field keeps its own provenance | same file — "keeps each merged field attributable to the evidence that supplied it" |
+| Detail returns the unmerged evidence rows | same file — "returns the unmerged evidence rows from GET /api/models/:id" |
+| Cold start lists models without a manual refresh | same file — "lists the models configured assistants expose without a manual refresh" |
+| A pinned price snapshot does not become fresh on refresh | same file — "does not become live again just because the catalog was refreshed" |
 | Refresh command capability enforcement | same file — "gates refresh behind commands.write" |
 | Bounded `maxCostUsd` still rejected | same file's sibling in `model-identity.test.ts` — "stay rejected even though the catalog now carries price evidence" |
 | Unknown identity renders honestly | `apps/web/src/orbital.test.ts` — "model identity (K7)" |

@@ -2,13 +2,17 @@ import {
   CATALOG_NORMALIZATION_VERSION,
   EVIDENCE_PRIORITY,
   freshnessOf,
+  modelKey,
 } from '@agent-plane/core';
 import type {
   AssistantId,
+  Attributed,
   CapabilityManifest,
   EvidenceSource,
+  Freshness,
   ModelCatalogEntry,
   ModelPriceEvidence,
+  ModelPriceView,
   Provenance,
 } from '@agent-plane/core';
 import type { Db } from '../db/index.js';
@@ -21,13 +25,17 @@ import type { Registry } from './registry.js';
  * are a seam (`CatalogSource`) so K8 can add them without reopening this file;
  * a source failure is recorded and never blocks routing (I-M3).
  *
+ * Identity here is (provider, model id), never the model id alone: `default` is
+ * a real model id for both Codex (openai) and Cursor, and one provider's
+ * evidence must never land on the other's model.
+ *
  * NOT implemented here, deliberately: benchmark ingestion (K8) and any scoring
  * or model selection (K13). This module answers "what do we know about this
  * model, and how do we know it" — nothing chooses a model from it.
  */
 
 /** Bumped when the merge/normalization of catalog facts changes. */
-export const CATALOG_REVISION = '2026-09-08.1';
+export const CATALOG_REVISION = '2026-09-08.2';
 
 export interface CatalogObservation {
   modelId: string;
@@ -40,6 +48,18 @@ export interface CatalogObservation {
   status?: ModelCatalogEntry['status'];
   provenance: Provenance;
   pricing?: ModelPriceEvidence[];
+}
+
+/** One stored evidence row, as `GET /api/models/:id` returns it unmerged. */
+export interface CatalogEvidenceRow {
+  provider: string;
+  modelId: string;
+  source: EvidenceSource;
+  tier: Provenance['tier'];
+  observedAt: string;
+  freshness: Freshness;
+  catalogRevision: string;
+  observation: CatalogObservation;
 }
 
 /**
@@ -67,6 +87,13 @@ export interface RefreshAttempt {
  * `session-runner`'s bounded-cost rejection and standing deferral #3.
  */
 export const PRICE_SEED_VERSION = '2026-09-08';
+/**
+ * When this snapshot was transcribed — a fixed historical fact, NOT the time of
+ * the refresh that loaded it. Re-running refresh in 2027 must not make a 2026
+ * price look freshly observed; only a newer price revision with its own
+ * evidence row can do that.
+ */
+export const PRICE_SEED_OBSERVED_AT = '2026-09-08T00:00:00.000Z';
 const PRICE_SEED: Array<{ modelId: string; provider: string; aliases?: string[]; price: Omit<ModelPriceEvidence, 'provenance'> }> = [
   {
     modelId: 'claude-opus-4-1', provider: 'anthropic', aliases: ['opus'],
@@ -87,7 +114,15 @@ function tierFor(source: EvidenceSource): Provenance['tier'] {
   return 'manual';
 }
 
+/** A merged field keeps the provenance of the source that actually supplied it. */
+function attribute<T>(value: T | undefined, provenance: Provenance): Attributed<T> | undefined {
+  return value === undefined ? undefined : { value, provenance };
+}
+
 export class ModelCatalogService {
+  /** Cold-start hydration runs at most once per process (see `list`). */
+  private hydrated = false;
+
   constructor(
     private db: Db,
     private registry: Registry,
@@ -98,11 +133,13 @@ export class ModelCatalogService {
   ) {}
 
   /**
-   * Re-derive local evidence and poll any registered sources. Never throws: a
-   * failing source is recorded in `model_catalog_refresh` and the previously
-   * stored rows stay readable under the freshness policy.
+   * Re-derive the evidence that already exists on this machine. Synchronous, no
+   * network, no external source: safe to run on a cold read so the catalog is
+   * populated as soon as provider discovery is, without the operator having to
+   * know they must press Refresh first. Split from `refresh` deliberately —
+   * startup must never wait on a K8 source.
    */
-  async refresh(): Promise<RefreshAttempt[]> {
+  refreshLocalEvidence(): RefreshAttempt[] {
     const attempts: RefreshAttempt[] = [];
     const run = (name: string, collect: () => CatalogObservation[]): void => {
       const startedAt = nowIso(this.now);
@@ -121,6 +158,17 @@ export class ModelCatalogService {
     run('provider-discovery', () => this.discoveryObservations());
     run('observed-runs', () => this.observedRunObservations());
     run('price-seed', () => this.priceSeedObservations());
+    this.hydrated = true;
+    return attempts;
+  }
+
+  /**
+   * Local evidence plus any registered external source. Never throws: a failing
+   * source is recorded in `model_catalog_refresh` and the previously stored rows
+   * stay readable under the freshness policy.
+   */
+  async refresh(): Promise<RefreshAttempt[]> {
+    const attempts = this.refreshLocalEvidence();
 
     for (const source of this.sources) {
       const startedAt = nowIso(this.now);
@@ -139,11 +187,16 @@ export class ModelCatalogService {
     return attempts;
   }
 
-  /** Merged catalog. Higher-priority evidence wins per field; ties break newest. */
+  /**
+   * Merged catalog, one entry per (provider, model id). Higher-priority evidence
+   * establishes the entry; weaker evidence fills only the gaps it left, and each
+   * filled field keeps the provenance of the source that supplied it.
+   */
   list(): ModelCatalogEntry[] {
+    this.hydrateOnce();
     const rows = this.db
-      .prepare('SELECT model_id, source, provider, tier, observed_at, catalog_revision, entry_json FROM model_catalog')
-      .all() as Array<{ model_id: string; source: EvidenceSource; provider: string; tier: Provenance['tier']; observed_at: string; catalog_revision: string; entry_json: string }>;
+      .prepare('SELECT provider, model_id, source, tier, observed_at, catalog_revision, entry_json FROM model_catalog')
+      .all() as Array<{ provider: string; model_id: string; source: EvidenceSource; tier: Provenance['tier']; observed_at: string; catalog_revision: string; entry_json: string }>;
     const prices = this.pricesByModel();
     const availability = this.availabilityFromDiscovery();
     const nowMs = this.now().getTime();
@@ -153,40 +206,78 @@ export class ModelCatalogService {
       EVIDENCE_PRIORITY[b.source] - EVIDENCE_PRIORITY[a.source] || b.observed_at.localeCompare(a.observed_at));
     for (const row of ranked) {
       const observed = JSON.parse(row.entry_json) as CatalogObservation;
-      const existing = byModel.get(row.model_id);
+      const key = modelKey(row.provider, row.model_id);
+      const provenance: Provenance = {
+        source: row.source, tier: row.tier, observedAt: row.observed_at,
+        normalizationVersion: CATALOG_NORMALIZATION_VERSION, attribution: observed.provenance.attribution,
+      };
+      const existing = byModel.get(key);
       if (!existing) {
-        byModel.set(row.model_id, {
-          schemaVersion: 1,
+        byModel.set(key, {
+          schemaVersion: 2,
+          modelKey: key,
           modelId: row.model_id,
           provider: row.provider,
-          displayName: observed.displayName,
-          aliases: observed.aliases ?? [],
-          contextWindowTokens: observed.contextWindowTokens,
-          maxOutputTokens: observed.maxOutputTokens,
-          capabilities: observed.capabilities,
-          pricing: prices.get(row.model_id) ?? [],
-          availableVia: availability.get(row.model_id) ?? [],
+          displayName: attribute(observed.displayName, provenance),
+          aliases: (observed.aliases ?? []).map((value) => ({ value, provenance })),
+          contextWindowTokens: attribute(observed.contextWindowTokens, provenance),
+          maxOutputTokens: attribute(observed.maxOutputTokens, provenance),
+          capabilities: attribute(observed.capabilities, provenance),
+          pricing: prices.get(key) ?? [],
+          availableVia: availability.get(key) ?? [],
           status: observed.status ?? 'unknown',
-          provenance: { source: row.source, tier: row.tier, observedAt: row.observed_at, normalizationVersion: CATALOG_NORMALIZATION_VERSION, attribution: observed.provenance.attribution },
+          provenance,
           freshness: freshnessOf(row.observed_at, row.tier, nowMs),
           catalogRevision: row.catalog_revision,
         });
         continue;
       }
-      // Weaker evidence only fills gaps the stronger source left empty.
-      existing.displayName ??= observed.displayName;
-      existing.contextWindowTokens ??= observed.contextWindowTokens;
-      existing.maxOutputTokens ??= observed.maxOutputTokens;
-      existing.capabilities ??= observed.capabilities;
-      for (const alias of observed.aliases ?? []) if (!existing.aliases.includes(alias)) existing.aliases.push(alias);
+      // Weaker evidence only fills gaps the stronger source left empty — and the
+      // filled field carries THIS row's provenance, not the entry's.
+      existing.displayName ??= attribute(observed.displayName, provenance);
+      existing.contextWindowTokens ??= attribute(observed.contextWindowTokens, provenance);
+      existing.maxOutputTokens ??= attribute(observed.maxOutputTokens, provenance);
+      existing.capabilities ??= attribute(observed.capabilities, provenance);
+      for (const value of observed.aliases ?? []) {
+        if (!existing.aliases.some((a) => a.value === value)) existing.aliases.push({ value, provenance });
+      }
     }
-    return [...byModel.values()].sort((a, b) => a.modelId.localeCompare(b.modelId));
+    return [...byModel.values()].sort((a, b) => a.modelKey.localeCompare(b.modelKey));
   }
 
-  /** By model id or by a known alias — aliases resolve for READS only. */
-  get(idOrAlias: string): ModelCatalogEntry | undefined {
+  /**
+   * Resolve a public identifier to exactly ONE entry. Accepted forms, in order:
+   * `provider:modelId`, a bare model id, a known alias. A bare id or alias that
+   * several providers claim is ambiguous — the caller gets the candidates and no
+   * entry, because picking one of them would attribute a provider's evidence to
+   * a model it never described.
+   */
+  resolve(ref: string): { entry?: ModelCatalogEntry; candidates: ModelCatalogEntry[] } {
     const entries = this.list();
-    return entries.find((e) => e.modelId === idOrAlias) ?? entries.find((e) => e.aliases.includes(idOrAlias));
+    const byKey = entries.filter((e) => e.modelKey === ref);
+    const byId = byKey.length ? byKey : entries.filter((e) => e.modelId === ref);
+    const matched = byId.length ? byId : entries.filter((e) => e.aliases.some((a) => a.value === ref));
+    return { entry: matched.length === 1 ? matched[0] : undefined, candidates: matched };
+  }
+
+  /** The stored rows behind a merged entry, unflattened (canonical API contract). */
+  evidenceFor(entry: ModelCatalogEntry): CatalogEvidenceRow[] {
+    const nowMs = this.now().getTime();
+    const rows = this.db
+      .prepare('SELECT provider, model_id, source, tier, observed_at, catalog_revision, entry_json FROM model_catalog WHERE provider = ? AND model_id = ?')
+      .all(entry.provider, entry.modelId) as Array<{ provider: string; model_id: string; source: EvidenceSource; tier: Provenance['tier']; observed_at: string; catalog_revision: string; entry_json: string }>;
+    return rows
+      .map((row) => ({
+        provider: row.provider,
+        modelId: row.model_id,
+        source: row.source,
+        tier: row.tier,
+        observedAt: row.observed_at,
+        freshness: freshnessOf(row.observed_at, row.tier, nowMs),
+        catalogRevision: row.catalog_revision,
+        observation: JSON.parse(row.entry_json) as CatalogObservation,
+      }))
+      .sort((a, b) => EVIDENCE_PRIORITY[b.source] - EVIDENCE_PRIORITY[a.source] || b.observedAt.localeCompare(a.observedAt));
   }
 
   refreshes(limit = 20): Array<{ source: string; status: string; entries: number; detail: string | null; startedAt: string; finishedAt: string }> {
@@ -197,6 +288,18 @@ export class ModelCatalogService {
   }
 
   // --- sources ------------------------------------------------------------
+
+  /**
+   * Cold start: a workspace that has synced provider discovery but never pressed
+   * Refresh still has a catalog. Local only, once per process — routing never
+   * depends on this, and no external source is contacted.
+   */
+  private hydrateOnce(): void {
+    if (this.hydrated) return;
+    this.hydrated = true;
+    const { n } = this.db.prepare('SELECT COUNT(*) n FROM model_catalog').get() as { n: number };
+    if (n === 0) this.refreshLocalEvidence();
+  }
 
   /** Provider discovery is the authority for which assistant can serve what. */
   private discoveryObservations(): CatalogObservation[] {
@@ -227,7 +330,8 @@ export class ModelCatalogService {
   /**
    * Models this workspace has actually been served, from persisted run
    * evidence. `runtime-probe` because it is our own measurement — and it only
-   * ever contains ids a provider reported.
+   * ever contains ids a provider reported. Grouped by serving provider so an
+   * observation merges onto the provider that actually served it.
    */
   private observedRunObservations(): CatalogObservation[] {
     const rows = this.db
@@ -249,12 +353,12 @@ export class ModelCatalogService {
   }
 
   private priceSeedObservations(): CatalogObservation[] {
-    const observedAt = nowIso(this.now);
     return PRICE_SEED.map((seed) => {
       const provenance: Provenance = {
-        source: 'manual', tier: 'manual', observedAt,
+        // Pinned, never `now`: refreshing a snapshot does not re-observe it.
+        source: 'manual', tier: 'manual', observedAt: PRICE_SEED_OBSERVED_AT,
         normalizationVersion: CATALOG_NORMALIZATION_VERSION,
-        attribution: 'manually transcribed from the published provider pricing page',
+        attribution: `manually transcribed from the published provider pricing page on ${PRICE_SEED_VERSION}`,
       };
       return {
         modelId: seed.modelId, provider: seed.provider, aliases: seed.aliases,
@@ -269,20 +373,20 @@ export class ModelCatalogService {
     this.db.transaction(() => {
       for (const observation of observations) {
         this.db
-          .prepare(`INSERT INTO model_catalog (model_id, source, provider, tier, observed_at, catalog_revision, entry_json)
+          .prepare(`INSERT INTO model_catalog (provider, model_id, source, tier, observed_at, catalog_revision, entry_json)
                     VALUES (?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(model_id, source) DO UPDATE SET
-                      provider = excluded.provider, tier = excluded.tier, observed_at = excluded.observed_at,
+                    ON CONFLICT(provider, model_id, source) DO UPDATE SET
+                      tier = excluded.tier, observed_at = excluded.observed_at,
                       catalog_revision = excluded.catalog_revision, entry_json = excluded.entry_json`)
-          .run(observation.modelId, observation.provenance.source, observation.provider, observation.provenance.tier,
+          .run(observation.provider, observation.modelId, observation.provenance.source, observation.provenance.tier,
             observation.provenance.observedAt, CATALOG_REVISION, JSON.stringify(observation));
         for (const price of observation.pricing ?? []) {
           this.db
-            .prepare(`INSERT INTO model_prices (model_id, pricing_version, serving_provider, account_kind, source, tier, observed_at, price_json)
-                      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                      ON CONFLICT(model_id, pricing_version, serving_provider, account_kind) DO UPDATE SET
+            .prepare(`INSERT INTO model_prices (provider, model_id, pricing_version, serving_provider, account_kind, source, tier, observed_at, price_json)
+                      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                      ON CONFLICT(provider, model_id, pricing_version, serving_provider, account_kind) DO UPDATE SET
                         source = excluded.source, tier = excluded.tier, observed_at = excluded.observed_at, price_json = excluded.price_json`)
-            .run(observation.modelId, price.pricingVersion, price.appliesTo?.servingProvider ?? '*',
+            .run(observation.provider, observation.modelId, price.pricingVersion, price.appliesTo?.servingProvider ?? '*',
               price.appliesTo?.accountKind ?? '*', price.provenance.source, price.provenance.tier,
               price.provenance.observedAt, JSON.stringify(price));
         }
@@ -296,15 +400,20 @@ export class ModelCatalogService {
       .run(source, status, detail ?? null, entries, startedAt, nowIso(this.now));
   }
 
-  private pricesByModel(): Map<string, ModelPriceEvidence[]> {
+  /** Keyed by `provider:modelId`: a price binds to the provider's model, not to a bare id. */
+  private pricesByModel(): Map<string, ModelPriceView[]> {
+    const nowMs = this.now().getTime();
     const rows = this.db
-      .prepare('SELECT model_id, price_json FROM model_prices ORDER BY pricing_version DESC')
-      .all() as Array<{ model_id: string; price_json: string }>;
-    const out = new Map<string, ModelPriceEvidence[]>();
+      .prepare('SELECT provider, model_id, tier, observed_at, price_json FROM model_prices ORDER BY pricing_version DESC')
+      .all() as Array<{ provider: string; model_id: string; tier: Provenance['tier']; observed_at: string; price_json: string }>;
+    const out = new Map<string, ModelPriceView[]>();
     for (const row of rows) {
-      const list = out.get(row.model_id) ?? [];
-      list.push(JSON.parse(row.price_json) as ModelPriceEvidence);
-      out.set(row.model_id, list);
+      const key = modelKey(row.provider, row.model_id);
+      const list = out.get(key) ?? [];
+      const evidence = JSON.parse(row.price_json) as ModelPriceEvidence;
+      // Freshness is read-time, from the evidence's own observation time.
+      list.push({ ...evidence, freshness: freshnessOf(evidence.provenance.observedAt, evidence.provenance.tier, nowMs) });
+      out.set(key, list);
     }
     return out;
   }
@@ -316,9 +425,12 @@ export class ModelCatalogService {
       const manifest: CapabilityManifest | null = assistant.manifestParsed;
       if (!manifest || assistant.enabled !== 1) continue;
       for (const model of manifest.core.models) {
-        const list = out.get(model.id) ?? [];
+        // Keyed by the serving provider's identity: Codex's `default` is not
+        // Cursor's, so availability never crosses providers.
+        const key = modelKey(assistant.provider, model.id);
+        const list = out.get(key) ?? [];
         list.push(assistant.id as AssistantId);
-        out.set(model.id, list);
+        out.set(key, list);
       }
     }
     return out;

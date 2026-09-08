@@ -222,10 +222,23 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     refreshes: modelCatalog.refreshes(10),
   }));
 
+  // `:id` accepts `provider:modelId`, a bare model id, or a known alias. A bare
+  // id several providers claim (Codex and Cursor both call a model `default`)
+  // is answered with 409 and the candidate keys — never an arbitrary provider.
   app.get<{ Params: { id: string } }>("/api/models/:id", modelsRead, (req, reply) => {
-    const model = modelCatalog.get(req.params.id);
-    if (!model) return reply.status(404).send({ error: "not found" });
-    return model;
+    const { entry, candidates } = modelCatalog.resolve(req.params.id);
+    if (!entry) {
+      if (candidates.length > 1) {
+        return reply.status(409).send({
+          error: `"${req.params.id}" is not a unique model identity`,
+          candidates: candidates.map((c) => c.modelKey),
+        });
+      }
+      return reply.status(404).send({ error: "not found" });
+    }
+    // Detail carries the unmerged evidence rows too; the list stays the merged
+    // projection so the UI is not handed every source for every model.
+    return { ...entry, evidence: modelCatalog.evidenceFor(entry) };
   });
 
   app.post("/api/models/refresh", write, async () => ({ attempts: await modelCatalog.refresh() }));
