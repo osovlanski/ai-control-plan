@@ -4,7 +4,8 @@ import type { Db } from "../db/index.js";
 import { commitCheckpoint, worktreeChangedFiles, worktreeDiffStat } from "../repo/git.js";
 import type { TaskStore } from "./tasks.js";
 
-export type CheckpointReason = "limit" | "handoff" | "cancel" | "completion" | "periodic" | "manual" | "pre_verification";
+/** `context` is the K11 continuation anchor — a healthy yield, not a limit. */
+export type CheckpointReason = "limit" | "handoff" | "cancel" | "completion" | "periodic" | "manual" | "pre_verification" | "context";
 
 export interface Checkpoint {
   id: string;

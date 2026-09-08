@@ -345,6 +345,20 @@ export interface TaskContext {
     breakdown?: Array<{ category: string; tokens: number }>;
   };
   autoCompaction?: { observed: boolean; count: number; lastAt?: string; trigger?: string };
+  /** K11 — bounded checkpoint-backed clean-session continuation state. */
+  continuation?: {
+    number: number;
+    limit: number;
+    reason: string;
+    checkpointId?: string;
+    predecessorSessionId?: string;
+    successorSessionId?: string;
+    waitingReason?:
+      | "continuation_evidence_missing"
+      | "continuation_limit_reached"
+      | "continuation_no_progress"
+      | "successor_immediately_critical";
+  };
 }
 
 /** One row of the Execution Harness session list for a task (§11 drill-down). */

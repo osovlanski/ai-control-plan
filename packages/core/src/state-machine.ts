@@ -30,6 +30,10 @@ const TRANSITIONS: Record<TaskState, readonly TaskState[]> = {
   ROUTING: ["WAITING_RESOURCE", "RUNNING", "WAITING_INPUT", "FAILED", "CANCELLED"],
   RUNNING: [
     "WAITING_INPUT",
+    // K11: a settled YIELDED(context) parks the task on a scheduler wait so the
+    // normal K1 dispatch path owns the successor. No live session remains and no
+    // human decision is pending, which is exactly what WAITING_RESOURCE means.
+    "WAITING_RESOURCE",
     "LIMIT_PAUSED",
     "HANDING_OFF", // manual handoff requested mid-run
     "COMPLETED",

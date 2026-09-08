@@ -8,12 +8,33 @@
  * synthesised from accounting or the advertised maximum. The legacy execution
  * path reports UNAVAILABLE explicitly rather than a synthesised parity value.
  */
-import type { ContextCapability, ContextObservation } from "@agent-plane/core";
+import type { ContextCapability, ContextObservation, PauseKind } from "@agent-plane/core";
+import { CONTEXT_STALE_MS, DEFAULT_CONTEXT_POLICY } from "@agent-plane/core";
 import type { Db } from "../db/index.js";
 import { effectiveStateSql } from "./harness/state-vocab.js";
 
 /** An observation older than this (or on a terminal session) renders `stale`. */
-export const CONTEXT_STALE_MS = 45_000;
+export { CONTEXT_STALE_MS };
+
+/** K11 — the truthful continuation state for the Orbital context surface. */
+export interface TaskContextContinuation {
+  /** Continuations already attempted for this task. */
+  number: number;
+  limit: number;
+  reason: string;
+  checkpointId?: string;
+  predecessorSessionId?: string;
+  /** Absent while the successor is reserved/routing but has no session yet. */
+  successorSessionId?: string;
+  /** Set when the plane refused a further automatic continuation. */
+  waitingReason?: Extract<
+    PauseKind,
+    | "continuation_evidence_missing"
+    | "continuation_limit_reached"
+    | "continuation_no_progress"
+    | "successor_immediately_critical"
+  >;
+}
 const TERMINAL = new Set(["COMPLETED", "FAILED", "CANCELLED", "TIMED_OUT", "YIELDED"]);
 
 export interface TaskContextResponse {
@@ -24,6 +45,8 @@ export interface TaskContextResponse {
   capability?: ContextCapability;
   observation?: ContextObservation & { freshness: "live" | "stale" };
   autoCompaction?: { observed: boolean; count: number; lastAt?: string; trigger?: string };
+  /** Present once this task has had at least one context yield. */
+  continuation?: TaskContextContinuation;
 }
 
 export interface ReadTaskContextDeps {
@@ -65,10 +88,11 @@ export function readTaskContext(db: Db, taskId: string, deps: ReadTaskContextDep
       }
     | undefined;
 
-  if (!run) return { status: "unavailable", reason: "no execution session for this task" };
+  const continuation = readContinuation(db, taskId);
+  if (!run) return { status: "unavailable", reason: "no execution session for this task", continuation };
   // The legacy path cannot produce the observation contract — say so, don't fake parity.
   if (run.execution_request_id === null) {
-    return { status: "unavailable", sessionId: run.id, reason: "legacy execution path" };
+    return { status: "unavailable", sessionId: run.id, reason: "legacy execution path", continuation };
   }
 
   const capability = deps.capabilityFor(run.assistant_id);
@@ -98,6 +122,7 @@ export function readTaskContext(db: Db, taskId: string, deps: ReadTaskContextDep
       status: "unavailable",
       sessionId: run.id,
       capability,
+      continuation,
       autoCompaction: autoCompaction.observed ? autoCompaction : undefined,
       reason:
         !capability || capability.occupancy === "unavailable"
@@ -108,7 +133,7 @@ export function readTaskContext(db: Db, taskId: string, deps: ReadTaskContextDep
 
   const raw = safeParse(obsRow.payload) as ContextObservation | undefined;
   if (!raw) {
-    return { status: "unavailable", sessionId: run.id, capability, reason: "context observation unreadable" };
+    return { status: "unavailable", sessionId: run.id, capability, continuation, reason: "context observation unreadable" };
   }
 
   const ageMs = deps.now().getTime() - Date.parse(obsRow.ts);
@@ -123,6 +148,7 @@ export function readTaskContext(db: Db, taskId: string, deps: ReadTaskContextDep
     status: "known",
     sessionId: run.id,
     capability,
+    continuation,
     autoCompaction,
     observation: {
       ...raw,
@@ -131,5 +157,51 @@ export function readTaskContext(db: Db, taskId: string, deps: ReadTaskContextDep
       // A stale observation never masquerades as a live pressure reading.
       pressure: stale ? undefined : raw.pressure,
     },
+  };
+}
+
+const CONTINUATION_PAUSES = new Set([
+  "continuation_evidence_missing",
+  "continuation_limit_reached",
+  "continuation_no_progress",
+  "successor_immediately_critical",
+]);
+
+/**
+ * K11 continuation state, read from the durable dispatch log and the checkpoints
+ * it anchors to. Observation only, like the rest of this module: no counters are
+ * maintained anywhere else, so this can never disagree with what the guard and
+ * the bounds actually enforced.
+ */
+function readContinuation(db: Db, taskId: string): TaskContextContinuation | undefined {
+  const dispatches = db
+    .prepare(
+      `SELECT dispatch_id, checkpoint_id, session_id FROM dispatches
+       WHERE task_id = ? AND origin = 'context-yield' ORDER BY created_at, rowid`,
+    )
+    .all(taskId) as Array<{ dispatch_id: string; checkpoint_id: string | null; session_id: string | null }>;
+  const task = db.prepare("SELECT state, pause_kind FROM tasks WHERE id = ?").get(taskId) as
+    | { state: string; pause_kind: string | null }
+    | undefined;
+  const waitingReason =
+    task?.state === "WAITING_INPUT" && task.pause_kind && CONTINUATION_PAUSES.has(task.pause_kind)
+      ? (task.pause_kind as TaskContextContinuation["waitingReason"])
+      : undefined;
+  if (dispatches.length === 0 && !waitingReason) return undefined;
+
+  const last = dispatches.at(-1);
+  const predecessor = last?.checkpoint_id
+    ? (db.prepare("SELECT session_id FROM checkpoints WHERE id = ?").get(last.checkpoint_id) as
+        | { session_id: string | null }
+        | undefined)
+    : undefined;
+  return {
+    number: dispatches.length,
+    limit: DEFAULT_CONTEXT_POLICY.maxContinuationsPerTask,
+    reason: "Critical context pressure",
+    checkpointId: last?.checkpoint_id ?? undefined,
+    predecessorSessionId: predecessor?.session_id ?? undefined,
+    successorSessionId: last?.session_id ?? undefined,
+    waitingReason,
   };
 }

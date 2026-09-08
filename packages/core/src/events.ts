@@ -1,6 +1,6 @@
 import type { RunId } from "./ids.js";
 import type { ActivityPhase } from "./task.js";
-import type { ContextObservation } from "./context.js";
+import type { ContextObservation, ContextYieldReason } from "./context.js";
 
 /**
  * Closed set of normalized event types (revised architecture §4).
@@ -34,6 +34,9 @@ export const EVENT_TYPES = [
   // provider auto-compaction the plane did NOT request.
   "context.observed",
   "context.compaction.observed",
+  // M14 K11 — the session settled YIELDED(context): a healthy, checkpoint-backed
+  // clean-session continuation point. Not a fault, not a limit, not a handoff.
+  "context.yield",
 ] as const;
 
 export type NormalizedEventType = (typeof EVENT_TYPES)[number];
@@ -230,6 +233,19 @@ export interface ContextCompactionObservedPayload {
 }
 
 /**
+ * Payload for `context.yield` — the fresh critical observation that authorized
+ * the yield plus the durable anchor the successor will start from (§4.3.3).
+ * Append-only witness; it mutates nothing (I-C1).
+ */
+export interface ContextYieldPayload {
+  reason: ContextYieldReason;
+  checkpointId?: string;
+  envelopeId?: string;
+  gitRef?: string;
+  observation: ContextObservation;
+}
+
+/**
  * Payload for `recovery.decision` — an append-only witness of what boot
  * reconcile / the lease sweeper / directive replay / approval settlement did to
  * a session after a crash (§9). Durable so Cockpit can tell "orphaned" from
@@ -276,6 +292,7 @@ export interface EventPayloads {
   "recovery.decision": RecoveryDecisionPayload;
   "context.observed": ContextObservedPayload;
   "context.compaction.observed": ContextCompactionObservedPayload;
+  "context.yield": ContextYieldPayload;
 }
 
 /** Compile-time proof `EventPayloads` has an entry for every event type. */

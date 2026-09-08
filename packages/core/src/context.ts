@@ -107,3 +107,67 @@ export function buildContextObservation(
     breakdown: sample.breakdown && sample.breakdown.length > 0 ? sample.breakdown : undefined,
   };
 }
+
+// ---------------------------------------------------------------------------
+// K11 — context policy and the context yield (kernel-services §4.3.2, §4.3.3)
+// ---------------------------------------------------------------------------
+
+/**
+ * Thresholds and task-level bounds for the context guard.
+ *
+ * K11 implements the `criticalRatio` yield and the task-level bounds only.
+ * `actRatio` belongs to K10 (provider-command compaction) and is carried here
+ * as a declared threshold with no behaviour attached to it yet.
+ */
+export interface ContextPolicy {
+  /** Gauge turns amber; eager checkpoint. Advisory at K11. */
+  warnRatio: number;
+  /** K10 compaction threshold. Declared, deliberately unimplemented at K11. */
+  actRatio: number;
+  /** Fresh pressure at or above this, with no usable compaction control, yields. */
+  criticalRatio: number;
+  /** Task-level (not session-level) continuation bound. */
+  maxContinuationsPerTask: number;
+  /** Consecutive continuations with no envelope progress before parking. */
+  noProgressContinuationLimit: number;
+  /** Unknown/stale observations never authorize an automatic continuation. */
+  onUnknown: "warn-only";
+}
+
+export const DEFAULT_CONTEXT_POLICY: ContextPolicy = {
+  warnRatio: 0.7,
+  actRatio: 0.85,
+  criticalRatio: 0.92,
+  maxContinuationsPerTask: 3,
+  noProgressContinuationLimit: 2,
+  onUnknown: "warn-only",
+};
+
+/** An observation older than this is stale and can never authorize a yield. */
+export const CONTEXT_STALE_MS = 45_000;
+
+/**
+ * Why a session yielded `context`. `critical_context_pressure` is the ordinary
+ * K11 outcome; `successor_immediately_critical` is the safety stop when a clean
+ * successor's FIRST fresh observation is already critical (§4.3.3).
+ */
+export type ContextYieldReason = "critical_context_pressure" | "successor_immediately_critical";
+
+/**
+ * `ExecutionResult.yield.detail` for `yield.kind === "context"`.
+ *
+ * A healthy lifecycle outcome, NOT a provider fault, a limit, a handoff or a
+ * reroute — {@link isReliabilityFailure} keeps it out of reliability aggregates.
+ * The Harness proposes no successor target (H-I1); the Control Plane decides.
+ */
+export interface ContextYieldRequest {
+  sessionId: ExecutionSessionId;
+  taskId: string;
+  reason: ContextYieldReason;
+  /** The checkpoint taken at the yield. Absent only when checkpointing failed. */
+  checkpointId?: string;
+  /** The continuation envelope committed in the terminal transaction. */
+  envelopeId?: string;
+  /** The fresh critical observation that authorized the yield. */
+  observation: ContextObservation;
+}

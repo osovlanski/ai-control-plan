@@ -49,11 +49,19 @@ interface FakeRunState {
 
 const FAKE_CONTEXT_WINDOW = 200_000;
 
-/** Parse `[FAKE:CONTEXT:0.46]`, `[FAKE:CONTEXT:unavailable]`, `[FAKE:CONTEXT:nowindow]`. */
+/**
+ * Parse `[FAKE:CONTEXT:0.46]`, `[FAKE:CONTEXT:unavailable]`, `[FAKE:CONTEXT:nowindow]`
+ * and the K11 continuation form `[FAKE:CONTEXT:0.95>0.40]` — pressure in a fresh
+ * session, then pressure in a session started from a continuation prompt. Two
+ * values are what makes a bounded continuation testable end to end: without
+ * them the successor inherits the predecessor's marker and can only ever be
+ * immediately critical.
+ */
 function parseContextMarker(prompt: string): FakeRunState["context"] | undefined {
   const m = prompt.match(/\[FAKE:CONTEXT:([^\]]+)\]/);
   if (!m) return undefined;
-  const arg = m[1]!.trim().toLowerCase();
+  const [first, second] = m[1]!.trim().toLowerCase().split(">");
+  const arg = (second !== undefined && isHandoff(prompt) ? second : first)!.trim();
   if (arg === "unavailable") return { unavailable: true };
   if (arg === "nowindow") return { unavailable: false, tokens: 72_000 };
   const pressure = Number(arg);

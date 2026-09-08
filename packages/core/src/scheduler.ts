@@ -14,7 +14,13 @@ export interface TaskIntent {
 export type Continuation = { kind: 'fresh' } | { kind: 'checkpoint'; checkpointId: string };
 export type PauseKind = 'limit' | 'provider_unavailable' | 'no_candidate' | 'harness_error'
   | 'approval_pending' | 'verification_failed' | 'comparison_pending' | 'handoff_requested'
-  | 'intervention_required' | 'dependency_failed' | 'unknown';
+  | 'intervention_required' | 'dependency_failed' | 'unknown'
+  /** K11 context-continuation stops. None is wait-eligible (CR-32): each needs an operator. */
+  | 'continuation_evidence_missing' | 'continuation_limit_reached' | 'continuation_no_progress'
+  | 'successor_immediately_critical';
+
+/** CR-30: audit label on a dispatch and its routing decision; never changes what is routed. */
+export type DispatchOrigin = 'intake' | 'wake' | 'run-now' | 'failover' | 'context-yield';
 export interface QuotaBlocker {
   kind: 'provider-reset' | 'inferred-backoff' | 'transient-unavailable' | 'unknown-recovery' | 'intervention-required';
   assistantId: AssistantId;
@@ -49,6 +55,12 @@ export interface WaitCondition {
   blockers?: QuotaBlocker[];
   assistants?: AssistantId[];
   notBefore: string;
+  /**
+   * K11: the dispatch origin this wait must produce when it wakes. Durable so a
+   * crash between the context yield and the successor dispatch cannot silently
+   * relabel a context continuation as an ordinary wake.
+   */
+  origin?: DispatchOrigin;
   createdBy: string;
   createdAt: string;
   autoWakes: number;
@@ -61,7 +73,7 @@ export interface Dispatch {
   dispatch_id: string;
   task_id: string;
   condition_generation: number;
-  origin: 'wake' | 'run-now';
+  origin: DispatchOrigin;
   checkpoint_id: string | null;
   execution_path: 'legacy' | 'harness';
   phase: 'reserved' | 'start_attempted' | 'started' | 'reparked' | 'aborted' | 'cancelled';

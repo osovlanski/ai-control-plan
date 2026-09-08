@@ -12,6 +12,7 @@
 
 import type { RunSpec, PermissionPolicy } from "./adapter.js";
 import type { ModelRef } from "./capabilities.js";
+import type { ContextYieldRequest } from "./context.js";
 import type {
   AssistantId,
   ExecutionSessionId,
@@ -211,7 +212,14 @@ export interface ExecutionResult {
    * decides the task verdict (H-I6).
    */
   outcome: "completed" | "failed" | "cancelled" | "timed_out" | "yielded";
-  yield?: { kind: "reroute" | "handoff" | "limit"; detail: RerouteRequest | HandoffRequest };
+  /**
+   * `context` is a HEALTHY lifecycle outcome (K11) and is deliberately distinct
+   * from `limit`, `handoff` and `reroute` — see {@link isReliabilityFailure}.
+   */
+  yield?: {
+    kind: "reroute" | "handoff" | "limit" | "context";
+    detail: RerouteRequest | HandoffRequest | ContextYieldRequest;
+  };
   /** Present iff outcome is failed/timed_out. */
   failure?: ExecutionFailure;
   /** Present iff cancelled. */
@@ -405,4 +413,51 @@ export interface RerouteRequest {
   checkpointId?: string;
   /** The Harness proposes no target — typed boundary (H-I1). */
   suggestion?: never;
+}
+
+// ---------------------------------------------------------------------------
+// Reliability predicate (I-M4)
+// ---------------------------------------------------------------------------
+
+/**
+ * How one settled session counts in a reliability aggregate.
+ *
+ * `neutral` is NOT "no failure": it is "this session says nothing about the
+ * provider", so it belongs in neither the numerator nor the DENOMINATOR. A
+ * healthy `YIELDED(context)` predecessor did not complete the work — crediting
+ * it as a success would inflate every long task's successRate; counting it as a
+ * failure would make every long task look like an unreliable model.
+ */
+export type ReliabilityClass = "success" | "error" | "neutral";
+
+/**
+ * The ONE shared answer to "what did this session say about the provider?".
+ *
+ * A `context` yield is a healthy, plane-initiated lifecycle event: the session
+ * hit its context ceiling, checkpointed and handed the work to a clean
+ * successor. Cancellation is a human/plane decision. Both are neutral.
+ * Everything else — completed, failed, timed out, and the limit/handoff/reroute
+ * yields that DO say something about the route — keeps today's meaning.
+ */
+export function reliabilityClass(result: Pick<ExecutionResult, "outcome" | "yield">): ReliabilityClass {
+  switch (result.outcome) {
+    case "completed":
+      return "success";
+    case "cancelled":
+      return "neutral";
+    case "yielded":
+      return result.yield?.kind === "context" ? "neutral" : "error";
+    default:
+      return "error";
+  }
+}
+
+/**
+ * The shared provider-failure predicate (I-M4). Derived from
+ * {@link reliabilityClass} so the two can never disagree. Callers that build an
+ * aggregate must use `reliabilityClass` instead: `!isReliabilityFailure(...)`
+ * is "not a fault", which is not the same as "a success".
+ */
+export function isReliabilityFailure(result: Pick<ExecutionResult, "outcome" | "yield">): boolean {
+  return reliabilityClass(result) === "error";
 }

@@ -1,8 +1,15 @@
+import type { ExecutionResult } from "@agent-plane/core";
+import { reliabilityClass } from "@agent-plane/core";
 import type { Db } from "../db/index.js";
 import { effectiveStateSql, effectiveUsageJoin, effectiveUsageSql } from "./harness/state-vocab.js";
 
 export interface AssistantScore {
   assistantId: string;
+  /**
+   * Reliability SAMPLE count — sessions that said something about the provider.
+   * Neutral lifecycle outcomes (a healthy K11 context yield, a cancellation) are
+   * excluded, so they can neither inflate nor depress `successRate` (I-M4).
+   */
   runs: number;
   successRate: number;
   /** Median wall-clock of completed runs, ms. Undefined until a run finishes. */
@@ -38,6 +45,7 @@ export class TelemetryService {
         `SELECT r.id, r.assistant_id,
            ${effectiveStateSql("r")} AS state,
            ${effectiveUsageSql("r")} AS usage,
+           er.result AS result,
            r.started_at, r.ended_at, t.goal
          FROM runs r
          JOIN tasks t ON t.id = r.task_id
@@ -49,6 +57,7 @@ export class TelemetryService {
       assistant_id: string;
       state: string;
       usage: string | null;
+      result: string | null;
       started_at: string;
       ended_at: string;
       goal: string;
@@ -70,9 +79,17 @@ export class TelemetryService {
         };
         byAssistant.set(row.assistant_id, score);
       }
-      score.runs += 1;
-      if (row.state === "COMPLETED") score.successRate += 1;
-      else score.errors += 1;
+      // I-M4: one shared classifier decides what a session says about a
+      // provider. A healthy K11 context yield (and a cancellation) is a
+      // lifecycle event, not a fault AND not a completion — the work continues
+      // in a clean session, so the predecessor is neither credited nor
+      // penalized and stays out of the reliability denominator entirely.
+      const reliability = reliabilityClass(reliabilityView(row.result, row.state));
+      if (reliability !== "neutral") {
+        score.runs += 1;
+        if (reliability === "success") score.successRate += 1;
+        else score.errors += 1;
+      }
       const duration = Date.parse(row.ended_at) - Date.parse(row.started_at);
       if (Number.isFinite(duration) && duration >= 0) score.durations.push(duration);
       if (row.usage) {
@@ -86,8 +103,11 @@ export class TelemetryService {
     // alone does not carry.
     for (const row of this.db
       .prepare(
+        // `trigger = 'context'` is a K11 continuation of the SAME work, not a
+        // rescue by someone else — it is not a failover signal (I-M4).
         `SELECT r.assistant_id, COUNT(*) AS n FROM handoffs h
-         JOIN runs r ON r.id = h.from_run_id WHERE h.at >= ? GROUP BY r.assistant_id`,
+         JOIN runs r ON r.id = h.from_run_id
+         WHERE h.at >= ? AND h.trigger != 'context' GROUP BY r.assistant_id`,
       )
       .all(since) as Array<{ assistant_id: string; n: number }>) {
       const score = byAssistant.get(row.assistant_id);
@@ -129,6 +149,27 @@ export class TelemetryService {
     }
     return result;
   }
+}
+
+/**
+ * Project a run row onto the shape {@link reliabilityClass} reads. Legacy
+ * rows without a persisted `ExecutionResult` fall back to the run state, which
+ * is exactly what this file used before K11.
+ */
+function reliabilityView(resultJson: string | null, state: string): Pick<ExecutionResult, "outcome" | "yield"> {
+  if (resultJson) {
+    try {
+      const parsed = JSON.parse(resultJson) as ExecutionResult;
+      if (parsed?.outcome) return { outcome: parsed.outcome, yield: parsed.yield };
+    } catch {
+      // fall through to the state-only view
+    }
+  }
+  if (state === "COMPLETED") return { outcome: "completed" };
+  // A cancelled run is a human/plane decision. Reading it as `failed` charged
+  // the provider for a decision it never made.
+  if (state === "CANCELLED") return { outcome: "cancelled" };
+  return { outcome: "failed" };
 }
 
 /** Cheap task-kind heuristic — no LLM call on the routing path (review §3.3). */

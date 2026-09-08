@@ -1068,9 +1068,11 @@ Definitions the rule needs:
   same harness major version, inside the 30-day window; runs with `model_resolved = unknown`
   never join a model's cohort.
 - **Healthy context yields** (`yield.kind = "context"` with a successful continuation) are not
-  provider errors and are excluded from failure/reliability aggregates; **one predicate**
-  (`isReliabilityFailure(result)`) is used by the outcome, test-pass and handoff aggregates so
-  task/model filtering cannot drift between them (I-M4).
+  provider errors and are excluded from failure/reliability aggregates — numerator **and**
+  denominator: they are neutral, not successes, so they neither inflate nor depress a success
+  rate. **One classifier** (`reliabilityClass(result)`, of which `isReliabilityFailure` is the
+  `=== "error"` case) is used by the outcome, test-pass and handoff aggregates so task/model
+  filtering cannot drift between them (I-M4).
 
 **What the rule does and does not guarantee (corrects revision 1).** `w(n)` is **monotone in
 `n`**; with a rolling window `n` can fall, so it is **not** monotone over time. Greater telemetry
@@ -1272,8 +1274,8 @@ clock, generation CAS, dispatch phases); `apps/api/test/harness/boot-recovery` d
 8. A successor whose first fresh observation is already ≥ `criticalRatio` yields
    `successor_immediately_critical` and no further automatic continuation occurs.
 9. Unknown or stale observations never trigger a yield or compaction (`onUnknown: warn-only`).
-10. Healthy context yields do not appear in provider-error or reliability aggregates (shared
-    `isReliabilityFailure` predicate test, I-M4).
+10. Healthy context yields do not appear in provider-error or reliability aggregates, and are not
+    counted as successes either (shared `reliabilityClass` classifier test, I-M4).
 
 **K10 — provider-command compaction (after conformance).**
 
