@@ -1,5 +1,5 @@
 import type { ExecutionResult } from "@agent-plane/core";
-import { reliabilityClass } from "@agent-plane/core";
+import { modelKey, reliabilityClass } from "@agent-plane/core";
 import type { Db } from "../db/index.js";
 import { effectiveStateSql, effectiveUsageJoin, effectiveUsageSql } from "./harness/state-vocab.js";
 
@@ -149,6 +149,173 @@ export class TelemetryService {
     }
     return result;
   }
+}
+
+/**
+ * One K13 telemetry cohort: runs with the SAME resolved model, task kind and
+ * harness major version, inside the rolling window (§4.4.3). Runs whose model
+ * the provider never reported (`model_resolved` NULL) and runs recorded before
+ * the harness major was stamped never join one — an unknown model is not a
+ * model, and a cohort that silently absorbed them would be measuring something
+ * else (I-M5).
+ */
+export interface ModelCohort {
+  /** `provider:modelId` — the identity every evidence row joins on. */
+  resolvedModelKey: string;
+  taskKind: string;
+  harnessMajor: string;
+  windowDays: number;
+  /** Reliability sample count. Neutral outcomes are excluded from it (I-M4). */
+  reliabilityRuns: number;
+  successRate: number;
+  testPassRate?: number;
+  verificationPassRate?: number;
+  /** Runs that reported output tokens AND a duration — the speed sample. */
+  outputRateRuns: number;
+  medianOutputTokensPerSecond?: number;
+  /** Completed runs whose usage is known — the cost sample. */
+  usageRuns: number;
+  medianInputTokens?: number;
+  medianOutputTokens?: number;
+}
+
+/**
+ * Rolling per-resolved-model cohorts for K13. Deliberately a second read over
+ * the same tables the assistant-level scores use, sharing `reliabilityClass`
+ * (I-M4) so a model cohort and an assistant score can never disagree about what
+ * a session said.
+ */
+export function modelCohorts(
+  db: Db,
+  opts: { taskKind: string; harnessMajor: string; windowDays?: number; now?: () => Date },
+): Map<string, ModelCohort> {
+  const windowDays = opts.windowDays ?? 30;
+  const nowMs = (opts.now?.() ?? new Date()).getTime();
+  const since = new Date(nowMs - windowDays * 86_400_000).toISOString();
+
+  const rows = db
+    .prepare(
+      `SELECT r.id, r.model_resolved AS model_resolved, a.provider AS provider,
+         ${effectiveStateSql("r")} AS state,
+         ${effectiveUsageSql("r")} AS usage,
+         er.result AS result,
+         r.started_at, r.ended_at, t.goal
+       FROM runs r
+       JOIN tasks t ON t.id = r.task_id
+       JOIN assistants a ON a.id = r.assistant_id
+       ${effectiveUsageJoin("r")}
+       WHERE r.started_at >= ? AND r.ended_at IS NOT NULL
+         AND r.model_resolved IS NOT NULL AND r.harness_major = ?`,
+    )
+    .all(since, opts.harnessMajor) as Array<{
+    id: string;
+    model_resolved: string;
+    provider: string;
+    state: string;
+    usage: string | null;
+    result: string | null;
+    started_at: string;
+    ended_at: string;
+    goal: string;
+  }>;
+
+  interface Acc extends ModelCohort {
+    successes: number;
+    rates: number[];
+    inputs: number[];
+    outputs: number[];
+    runIds: string[];
+  }
+  const byModel = new Map<string, Acc>();
+  for (const row of rows) {
+    if (classifyGoal(row.goal) !== opts.taskKind) continue;
+    const key = modelKey(row.provider, row.model_resolved);
+    let acc = byModel.get(key);
+    if (!acc) {
+      acc = {
+        resolvedModelKey: key, taskKind: opts.taskKind, harnessMajor: opts.harnessMajor, windowDays,
+        reliabilityRuns: 0, successRate: 0, outputRateRuns: 0, usageRuns: 0,
+        successes: 0, rates: [], inputs: [], outputs: [], runIds: [],
+      };
+      byModel.set(key, acc);
+    }
+    acc.runIds.push(row.id);
+    // The SAME classifier the assistant aggregates use: a healthy context yield
+    // and a cancellation are neutral — out of numerator and denominator both.
+    const reliability = reliabilityClass(reliabilityView(row.result, row.state));
+    if (reliability !== "neutral") {
+      acc.reliabilityRuns += 1;
+      if (reliability === "success") acc.successes += 1;
+    }
+    const durationMs = Date.parse(row.ended_at) - Date.parse(row.started_at);
+    const usage = row.usage ? (JSON.parse(row.usage) as { inputTokens?: number; outputTokens?: number }) : undefined;
+    if (usage && (usage.inputTokens !== undefined || usage.outputTokens !== undefined)) {
+      acc.usageRuns += 1;
+      acc.inputs.push(usage.inputTokens ?? 0);
+      acc.outputs.push(usage.outputTokens ?? 0);
+      // Own output RATE, measured over run wall-clock. Named precisely because
+      // it is NOT the provider-side generation rate an external benchmark
+      // reports — the explanation carries both metric names so the difference
+      // is visible rather than blended away silently.
+      if ((usage.outputTokens ?? 0) > 0 && Number.isFinite(durationMs) && durationMs > 0) {
+        acc.outputRateRuns += 1;
+        acc.rates.push((usage.outputTokens ?? 0) / (durationMs / 1000));
+      }
+    }
+  }
+
+  const out = new Map<string, ModelCohort>();
+  for (const [key, acc] of byModel) {
+    const tests = testAndVerificationRates(db, acc.runIds);
+    out.set(key, {
+      resolvedModelKey: acc.resolvedModelKey, taskKind: acc.taskKind, harnessMajor: acc.harnessMajor,
+      windowDays: acc.windowDays,
+      reliabilityRuns: acc.reliabilityRuns,
+      successRate: acc.reliabilityRuns > 0 ? acc.successes / acc.reliabilityRuns : 0,
+      ...(tests.testPassRate !== undefined ? { testPassRate: tests.testPassRate } : {}),
+      ...(tests.verificationPassRate !== undefined ? { verificationPassRate: tests.verificationPassRate } : {}),
+      outputRateRuns: acc.outputRateRuns,
+      ...(median(acc.rates) !== undefined ? { medianOutputTokensPerSecond: median(acc.rates)! } : {}),
+      usageRuns: acc.usageRuns,
+      ...(median(acc.inputs) !== undefined ? { medianInputTokens: median(acc.inputs)! } : {}),
+      ...(median(acc.outputs) !== undefined ? { medianOutputTokens: median(acc.outputs)! } : {}),
+    });
+  }
+  return out;
+}
+
+/** Test and verification pass rates for exactly the runs in one cohort. */
+function testAndVerificationRates(
+  db: Db,
+  runIds: string[],
+): { testPassRate?: number; verificationPassRate?: number } {
+  if (runIds.length === 0) return {};
+  const placeholders = runIds.map(() => "?").join(",");
+  const rows = db
+    .prepare(
+      `SELECT type, payload FROM events
+        WHERE run_id IN (${placeholders}) AND type IN ('test.result', 'verification.result')`,
+    )
+    .all(...runIds) as Array<{ type: string; payload: string | null }>;
+  let passed = 0;
+  let failed = 0;
+  let verificationPassed = 0;
+  let verificationTotal = 0;
+  for (const row of rows) {
+    if (!row.payload) continue;
+    const parsed = JSON.parse(row.payload) as { passed?: number | boolean; failed?: number };
+    if (row.type === "test.result") {
+      passed += typeof parsed.passed === "number" ? parsed.passed : 0;
+      failed += parsed.failed ?? 0;
+    } else {
+      verificationTotal += 1;
+      if (parsed.passed === true) verificationPassed += 1;
+    }
+  }
+  return {
+    ...(passed + failed > 0 ? { testPassRate: passed / (passed + failed) } : {}),
+    ...(verificationTotal > 0 ? { verificationPassRate: verificationPassed / verificationTotal } : {}),
+  };
 }
 
 /**

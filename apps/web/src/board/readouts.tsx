@@ -1,3 +1,4 @@
+import type { ModelRecommendation } from "@agent-plane/core";
 import type { SchedulerStatus, TaskContext } from "../api.js";
 import { contextPercent, probeFreshness } from "../orbital.js";
 
@@ -249,6 +250,164 @@ export function ContextReadout({ context }: { context: TaskContext | null }) {
       )}
       {auto}
       {continuation}
+    </>
+  );
+}
+
+/**
+ * K13 shadow model recommendation. It must be impossible to read this panel and
+ * think the recommendation affected the run: the heading says SHADOW, the
+ * execution line states what actually ran, and every number carries the source
+ * and sample size it came from.
+ */
+export function ModelRecommendationReadout({
+  recommendation,
+}: {
+  recommendation: ModelRecommendation | null | undefined;
+}) {
+  if (!recommendation) {
+    return (
+      <p className="fine-print">
+        No model recommendation was recorded for this decision. Routing never
+        waits on model intelligence, so a missing catalog simply leaves this
+        empty.
+      </p>
+    );
+  }
+
+  const applied = recommendation.mode === "applied";
+  const winner = recommendation.candidates.find((c) => c.label === recommendation.recommended);
+  const alternatives = recommendation.candidates.filter((c) => !c.eligible);
+
+  return (
+    <>
+      <div className="section-label">
+        {applied ? "Applied model selection" : "Shadow model recommendation"}{" "}
+        <span className={applied ? "tone-complete" : "tone-limit"}>
+          {applied ? "APPLIED" : "SHADOW"}
+        </span>
+      </div>
+
+      <p>
+        {recommendation.recommended ? (
+          <>
+            {applied ? "Chose" : "Would choose"}{" "}
+            <span className="mono">{recommendation.recommended}</span>.
+          </>
+        ) : (
+          <>No model is recommended: {recommendation.reason}</>
+        )}
+      </p>
+
+      {!applied && (
+        <p className="fine-print">
+          Current execution: <strong>unchanged</strong>. This recommendation did
+          not set the requested model
+          {recommendation.executionUnchanged.requestedModelSelector ? (
+            <>
+              {" "}— the run asked for{" "}
+              <span className="mono">
+                {recommendation.executionUnchanged.requestedModelSelector}
+              </span>
+            </>
+          ) : (
+            " — the run named no model"
+          )}
+          , and {recommendation.executionUnchanged.authority} remains the only
+          authority for it.
+        </p>
+      )}
+
+      {winner && (
+        <>
+          <p className="fine-print">Because:</p>
+          <ul className="candidate-list">
+            {winner.dimensions.map((d) => (
+              <li key={d.dimension}>
+                <strong>{d.dimension}</strong>
+                <span className={d.score === undefined ? "muted" : "tone-complete"}>
+                  {d.score === undefined ? "no evidence" : d.score.toFixed(2)}
+                </span>
+                <small>
+                  {d.telemetry
+                    ? `Own runs ${d.n} · weight ${Math.round(d.weight * 100)}% (k=${d.k}) · ${d.telemetry.metric}`
+                    : `Own runs 0 · weight 0% (k=${d.k})`}
+                  {d.prior
+                    ? ` · ${d.prior.source} ${d.prior.value.toFixed(2)} · ${d.prior.freshness}${
+                        d.prior.benchmarkRelease ? ` · ${d.prior.benchmarkRelease}` : ""
+                      } · observed ${new Date(d.prior.observedAt).toLocaleDateString()}${
+                        d.prior.benchmarkPublishedAt ? ` · published ${d.prior.benchmarkPublishedAt}` : ""
+                      }`
+                    : ` · ${d.missing ?? "no prior"}`}
+                  {d.excludedPriors.map((e) => ` · excluded ${e.source}: ${e.reason}`).join("")}
+                </small>
+              </li>
+            ))}
+          </ul>
+          <p className="fine-print">
+            Identity: {winner.identity.basis} — {winner.identity.evidence}
+          </p>
+          {winner.advisories.length > 0 && (
+            <p className="fine-print">Advisory: {winner.advisories.join(" · ")}</p>
+          )}
+        </>
+      )}
+
+      {recommendation.tieBreaker && (
+        <p className="fine-print">Tie-break: {recommendation.tieBreaker}</p>
+      )}
+      {recommendation.userOverride && (
+        <p className="fine-print">
+          Operator override <span className="mono">{recommendation.userOverride.selector}</span>:{" "}
+          {recommendation.userOverride.detail}
+        </p>
+      )}
+
+      {alternatives.length > 0 && (
+        <>
+          <p className="fine-print">Hard-filtered alternatives:</p>
+          <ul className="candidate-list">
+            {alternatives.map((c) => (
+              <li key={c.label}>
+                <strong>{c.label}</strong>
+                <span className="tone-failed">Excluded</span>
+                <small>{c.filterFailures.join(" · ")}</small>
+              </li>
+            ))}
+          </ul>
+          <p className="fine-print">
+            A benchmark score never resurrects an excluded candidate — hard
+            filters run before any score.
+          </p>
+        </>
+      )}
+
+      {recommendation.missingEvidence.length > 0 && (
+        <p className="fine-print">
+          Missing evidence: {recommendation.missingEvidence.join(" · ")}
+        </p>
+      )}
+
+      <details>
+        <summary>
+          Why this is {applied ? "active" : "shadow"}{" "}
+          <span className={applied ? "tone-complete" : "tone-limit"}>
+            {recommendation.activation.gates.filter((g) => g.passed).length}/
+            {recommendation.activation.gates.length} gates
+          </span>
+        </summary>
+        <ul className="candidate-list">
+          {recommendation.activation.gates.map((gate) => (
+            <li key={gate.name}>
+              <strong>{gate.name}</strong>
+              <span className={gate.passed ? "tone-complete" : "tone-failed"}>
+                {gate.passed ? "Passed" : "Failed"}
+              </span>
+              <small>{gate.detail}</small>
+            </li>
+          ))}
+        </ul>
+      </details>
     </>
   );
 }

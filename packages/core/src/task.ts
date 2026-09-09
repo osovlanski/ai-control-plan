@@ -1,4 +1,5 @@
 import type { AssistantId, TaskId } from "./ids.js";
+import type { ModelRecommendation } from "./model-selection.js";
 import type { Continuation } from './scheduler.js';
 import type { TaskState } from "./state-machine.js";
 
@@ -108,6 +109,12 @@ export interface RoutingExplanation {
    * than opening a second continuation-history subsystem.
    */
   contextContinuation?: ContextContinuationProvenance;
+  /**
+   * K13 model recommendation. SHADOW by default: it is computed, sourced and
+   * persisted here, and it changes nothing about `ExecutionRequest.model`,
+   * `RunSpec.model`, `chosen` or the provider call (§4.4.3, CR-33).
+   */
+  modelRecommendation?: ModelRecommendation;
 }
 
 /** Everything needed to explain one context continuation after the fact. */

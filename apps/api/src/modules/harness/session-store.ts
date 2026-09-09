@@ -18,6 +18,7 @@ import type {
   TerminalSessionState,
 } from "@agent-plane/core";
 import {
+  HARNESS_MAJOR,
   SESSION_STATE_TO_RUN_STATE,
   SESSION_TERMINAL_STATES,
   assertSessionTransition,
@@ -271,8 +272,9 @@ export class SessionStore {
         .prepare(
           `INSERT INTO runs
              (id, task_id, assistant_id, state, session_state, version, provider_start_acked,
-              cancel_requested, attempt, execution_request_id, started_at, dispatch_id, model_requested)
-           VALUES (?, ?, ?, ?, 'PREPARED', 0, 0, 0, ?, ?, ?, ?, ?)`,
+              cancel_requested, attempt, execution_request_id, started_at, dispatch_id, model_requested,
+              harness_major)
+           VALUES (?, ?, ?, ?, 'PREPARED', 0, 0, 0, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           sessionId,
@@ -285,6 +287,8 @@ export class SessionStore {
           dispatch ? executionRequestId : null,
           // Copied from the immutable request — the request stays the authority.
           req.model ? ((JSON.parse(req.model) as { id?: string }).id ?? null) : null,
+          // K13 cohort key — stamped, never inferred later (see migration 022).
+          HARNESS_MAJOR,
         );
     } catch (err) {
       // Lost a race on uq_runs_execution_request — return the winner.

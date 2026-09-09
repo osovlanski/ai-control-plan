@@ -23,6 +23,15 @@ export type Freshness = "live" | "fresh" | "stale" | "expired";
  */
 export type ExternalEvidenceSource = "external:artificial-analysis";
 
+/**
+ * K13's own source label for the cost prior: K7 price evidence re-normalized
+ * into a 0..1 prior for selection. Deliberately NOT an `ExternalEvidenceSource`
+ * — a benchmark's published pricing is never price authority (§4.4.5) — and
+ * deliberately distinguishable from the underlying `manual`/`provider-api` row
+ * it was derived from, whose own provenance rides along unchanged.
+ */
+export type SelectionEvidenceSource = "k7:price-evidence";
+
 /** Normalization version for catalog facts. Bump when the shape of a fact changes. */
 export const CATALOG_NORMALIZATION_VERSION = "1.0";
 
@@ -59,7 +68,7 @@ export interface BenchmarkIdentity {
 }
 
 export interface Provenance {
-  source: EvidenceSource | ExternalEvidenceSource;
+  source: EvidenceSource | ExternalEvidenceSource | SelectionEvidenceSource;
   tier: EvidenceTier;
   observedAt: string;
   /** External benchmark evidence only: the source's own release/config identity. */

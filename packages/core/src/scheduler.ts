@@ -10,6 +10,12 @@ export interface TaskIntent {
   profile: RoutingProfile;
   /** `model` is the requested SELECTOR only — never the resolved provider model id (I-M5). */
   overrides?: { assistantId?: AssistantId; model?: string };
+  /**
+   * Declared hard requirements of the task (K13 §4.4.3). A declared minimum
+   * context window turns unknown capacity from advisory into an exclusion:
+   * "we do not know" is not "big enough".
+   */
+  requirements?: { minContextTokens?: number };
 }
 export type Continuation = { kind: 'fresh' } | { kind: 'checkpoint'; checkpointId: string };
 export type PauseKind = 'limit' | 'provider_unavailable' | 'no_candidate' | 'harness_error'

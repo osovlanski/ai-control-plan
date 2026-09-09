@@ -60,6 +60,33 @@ export interface WorkspaceConfig {
     /** Local hour (0-23) for the daily capability sync. */
     dailyHour: number;
   };
+  /**
+   * M12 model intelligence (K13). The catalog, its benchmark evidence and the
+   * shadow recommendations are always readable; this block only controls
+   * whether a recommendation may ever become an execution decision.
+   */
+  models?: {
+    selection?: {
+      /**
+       * Automatic model selection. Default FALSE and fail-closed: shadow is the
+       * shipped mode. Setting it true is necessary but NOT sufficient — every
+       * gate in §4.4.3 must also hold (`evaluateActivationGate`).
+       */
+      enabled?: boolean;
+      /**
+       * Operator attestation, ISO 8601: "I reviewed the shadow log". The gate
+       * additionally requires that the log already spanned a week when it was
+       * signed, and that the attestation is under 30 days old.
+       */
+      shadowReviewedAt?: string;
+      /**
+       * Operator/CI attestation, ISO 8601: the K8 egress + security test was
+       * green on this build. An attestation, not a proof — which is exactly why
+       * it expires after 30 days.
+       */
+      egressVerifiedAt?: string;
+    };
+  };
   /** Execution-Harness cutover switches (execution-harness.md §5/§10). */
   execution?: {
     /**
@@ -82,8 +109,14 @@ export interface ResolvedExecutionConfig {
   harnessModes: { single: boolean };
 }
 
-export interface ResolvedConfig extends Omit<WorkspaceConfig, "execution"> {
+/** The resolved model block — always present, always fail-closed by default. */
+export interface ResolvedModelsConfig {
+  selection: { enabled: boolean; shadowReviewedAt?: string; egressVerifiedAt?: string };
+}
+
+export interface ResolvedConfig extends Omit<WorkspaceConfig, "execution" | "models"> {
   execution: ResolvedExecutionConfig;
+  models: ResolvedModelsConfig;
   /** Directory holding config.yaml and the workspace DB. */
   dir: string;
   dbPath: string;
@@ -115,6 +148,9 @@ const PERSONAL_DEFAULTS: Omit<WorkspaceConfig, "workspace"> = {
   scheduler: { enabled: true, maxAutoWakes: 3, quotaProbe: false },
   sync: { dailyHour: 7 },
   execution: { harnessModes: { single: false } },
+  // K13 ships in shadow. Turning this on is an explicit operator act that still
+  // has to satisfy every activation gate.
+  models: { selection: { enabled: false } },
 };
 
 /**
@@ -174,6 +210,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ResolvedConfig
 
   const warnings: string[] = [];
   const execution = resolveExecution(file.execution, env, configPath, warnings);
+  const models = resolveModels(file.models, configPath);
 
   const config: WorkspaceConfig = {
     workspace: file.workspace ?? workspace,
@@ -188,6 +225,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ResolvedConfig
   };
 
   validate(config, configPath);
+  validateModels(models, configPath);
 
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   chmodSync(dir, 0o700);
@@ -197,7 +235,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ResolvedConfig
   }
   ensureCredential(dir);
 
-  return { ...config, execution, dir, dbPath: join(dir, "agent-plane.db"), warnings };
+  return { ...config, execution, models, dir, dbPath: join(dir, "agent-plane.db"), warnings };
 }
 
 /**
@@ -270,6 +308,43 @@ function resolveExecution(
   return { harnessModes: { single } };
 }
 
+/**
+ * Resolve `models.selection` to its canonical shape. Fail-closed: an absent
+ * block, an absent key, or anything but an explicit `true` leaves selection
+ * disabled. There is deliberately NO environment-variable override — activation
+ * is an operator decision recorded in the workspace file, not an ambient one.
+ */
+function resolveModels(file: WorkspaceConfig["models"], configPath: string): ResolvedModelsConfig {
+  if (file !== undefined && (typeof file !== "object" || Array.isArray(file))) {
+    throw new Error(`${configPath}: models must be a mapping`);
+  }
+  const selection = file?.selection;
+  if (selection !== undefined && (typeof selection !== "object" || Array.isArray(selection))) {
+    throw new Error(`${configPath}: models.selection must be a mapping`);
+  }
+  return {
+    selection: {
+      enabled: selection?.enabled === true,
+      ...(selection?.shadowReviewedAt !== undefined ? { shadowReviewedAt: selection.shadowReviewedAt } : {}),
+      ...(selection?.egressVerifiedAt !== undefined ? { egressVerifiedAt: selection.egressVerifiedAt } : {}),
+    },
+  };
+}
+
+function validateModels(models: ResolvedModelsConfig, path: string): void {
+  const problems: string[] = [];
+  for (const key of ["shadowReviewedAt", "egressVerifiedAt"] as const) {
+    const value = models.selection[key];
+    if (value === undefined) continue;
+    if (typeof value !== "string" || !Number.isFinite(Date.parse(value))) {
+      problems.push(`models.selection.${key} must be an ISO 8601 timestamp, got ${JSON.stringify(value)}`);
+    }
+  }
+  if (problems.length > 0) {
+    throw new Error(`Invalid config at ${path}:\n  - ${problems.join("\n  - ")}`);
+  }
+}
+
 function validate(config: WorkspaceConfig, path: string): void {
   const problems: string[] = [];
   if (typeof config.scheduler?.enabled !== "boolean") problems.push("scheduler.enabled must be a boolean");
@@ -315,7 +390,17 @@ function validate(config: WorkspaceConfig, path: string): void {
 
 function renderDefaultConfig(workspace: string): string {
   const doc = { workspace, ...defaultsFor(workspace) };
-  const yaml = stringify(doc).replace(
+  const yaml = stringify(doc)
+    .replace(
+      /^models:/m,
+      [
+        "# models.selection.enabled: automatic model selection (K13). Default false — K13 ships in SHADOW:",
+        "# recommendations are computed and recorded, and execution keeps today's assistant-only semantics.",
+        "# Setting it true is necessary but not sufficient; every activation gate in §4.4.3 must also hold.",
+        "models:",
+      ].join("\n"),
+    )
+    .replace(
     /^execution:/m,
     [
       "# execution.harnessModes: per-mode Execution Harness routing. Only `single` has parity today; default off.",

@@ -1,6 +1,7 @@
 import { SessionStore } from './harness/session-store.js';
 import { HandoffService } from './harness/handoff.js';
 import { buildExecutionRequest } from './harness/control-plane-bridge.js';
+import type { ModelCatalogService } from './model-catalog.js';
 import type { ExecutionRequest } from '@agent-plane/core';
 import { QuotaProjection, controllingRetry } from './quota.js';
 import type { Scheduler } from './scheduler.js';
@@ -26,6 +27,7 @@ import type {
 import {
   DEFAULT_CONTEXT_POLICY,
   DEFAULT_REDACTION_RULES,
+  HARNESS_MAJOR,
   isSessionTerminal,
   isTaskState,
   isTerminal as isTerminalState,
@@ -181,6 +183,12 @@ export class Orchestrator {
     private repositoryIdentities?: Pick<RepositoryIdentityRegistry, "resolve">,
     /** Kernel clock; every quota/freshness read goes through it (K1-K3 share one clock). */
     private now: () => Date = () => new Date(),
+    /**
+     * K7 catalog, for the K13 SHADOW model recommendation recorded on every
+     * routing decision. Optional and advisory: without it the decision simply
+     * carries no recommendation, and with it nothing about execution changes.
+     */
+    private modelCatalog?: ModelCatalogService,
   ) {}
 
   /** `harnessModes.single` routing applies to this start (non-parallel, non-compare/race). */
@@ -515,8 +523,10 @@ export class Orchestrator {
     const startedAt = new Date().toISOString();
     this.db
       .prepare(
-        `INSERT INTO runs (id, task_id, assistant_id, provider_session_ref, state, started_at, worktree_path, branch, dispatch_id, model_requested)
-         VALUES (?, ?, ?, ?, 'ACTIVE', ?, ?, ?, ?, ?)`,
+        // `harness_major` is the K13 cohort key: telemetry from two execution
+        // majors is not comparable, so it is stamped at insert, never inferred.
+        `INSERT INTO runs (id, task_id, assistant_id, provider_session_ref, state, started_at, worktree_path, branch, dispatch_id, model_requested, harness_major)
+         VALUES (?, ?, ?, ?, 'ACTIVE', ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         handle.runId,
@@ -528,6 +538,7 @@ export class Orchestrator {
         options.worktree?.branch ?? null,
         options.dispatchId ?? null,
         requestedModel ?? null,
+        HARNESS_MAJOR,
       );
 
     if (options.dispatchId && this.tasks.get(taskId)?.state === "ROUTING") this.tasks.transition(taskId, "RUNNING");
@@ -1181,7 +1192,7 @@ export class Orchestrator {
   }
 
   routeTask(taskId: string, origin: 'intake' | 'wake' | 'run-now' | 'failover' | 'context-yield', options: { exclude?: string; override?: AssistantId; dispatchId?: string } = {}) {
-    return routeTask({ db: this.db, config: this.config, tasks: this.tasks, registry: this.registry, cooldowns: this.cooldowns, now: this.now }, taskId, origin, options);
+    return routeTask({ db: this.db, config: this.config, tasks: this.tasks, registry: this.registry, cooldowns: this.cooldowns, now: this.now, ...(this.modelCatalog ? { catalog: this.modelCatalog } : {}) }, taskId, origin, options);
   }
 
   private lastAssistant(taskId: string): string | undefined {

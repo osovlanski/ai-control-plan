@@ -8,6 +8,8 @@ export interface CreateTaskInput {
   repoPath?: string;
   profile?: RoutingProfile;
   overrides?: TaskIntent["overrides"];
+  /** Declared hard requirements — a minimum context window excludes candidates (K13). */
+  requirements?: TaskIntent["requirements"];
 }
 
 export interface TaskRow {
@@ -67,7 +69,7 @@ export class TaskStore {
         input.repoPath ?? null,
         envelope.repository?.branch ?? null,
         JSON.stringify(envelope),
-        JSON.stringify({ goal: input.goal, constraints: input.constraints ?? [], repository: envelope.repository, profile: input.profile ?? "auto", overrides: input.overrides } satisfies TaskIntent),
+        JSON.stringify({ goal: input.goal, constraints: input.constraints ?? [], repository: envelope.repository, profile: input.profile ?? "auto", overrides: input.overrides, requirements: input.requirements } satisfies TaskIntent),
         now,
         now,
       );
