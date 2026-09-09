@@ -1,5 +1,6 @@
 import type { Registry } from "./registry.js";
 import type { EventRetention } from "./retention.js";
+import type { ModelCatalogService } from "./model-catalog.js";
 export function msUntilDailyHour(hour: number, now = new Date()): number {
   const next = new Date(now); next.setHours(hour, 0, 0, 0);
   if (next <= now) next.setDate(next.getDate() + 1);
@@ -10,17 +11,22 @@ export interface JobLogger {
 }
 
 /**
- * Daily capability sync + event retention.
+ * Daily capability sync + event retention + model-catalog refresh.
  *
  * Every failure is contained and the next run is always rescheduled: an
  * unguarded throw in a timer callback takes down the whole API process, and
  * skipping the reschedule would silently stop the daily job forever.
+ *
+ * The catalog refresh (K7 local sources + the K8 Artificial Analysis source)
+ * runs here rather than in its own scheduler (§17). `ModelCatalogService.refresh`
+ * already never throws and never blocks routing (I-M3); the guard is belt-and-braces.
  */
 export function scheduleDailyJobs(
   hour: number,
   registry: Registry,
   retention: EventRetention,
   logger?: JobLogger,
+  modelCatalog?: Pick<ModelCatalogService, "refresh">,
 ): () => void {
   let timer: ReturnType<typeof setTimeout>;
   let stopped = false;
@@ -38,6 +44,11 @@ export function scheduleDailyJobs(
       retention.archive();
     } catch (err) {
       logger?.error({ err: String(err) }, "daily event retention failed");
+    }
+    try {
+      await modelCatalog?.refresh();
+    } catch (err) {
+      logger?.error({ err: String(err) }, "daily model catalog refresh failed");
     }
   };
 

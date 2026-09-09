@@ -15,17 +15,94 @@ export type EvidenceTier = "measured-own" | "provider-official" | "external-benc
 
 export type Freshness = "live" | "fresh" | "stale" | "expired";
 
+/**
+ * External benchmark sources, namespaced so they never collide with the
+ * capability-negotiation `EvidenceSource` enum. K8 adds exactly one
+ * (`external:artificial-analysis`); the architecture requires one source to
+ * prove value before a second is fetched (§5.3 K8).
+ */
+export type ExternalEvidenceSource = "external:artificial-analysis";
+
 /** Normalization version for catalog facts. Bump when the shape of a fact changes. */
 export const CATALOG_NORMALIZATION_VERSION = "1.0";
 
+/**
+ * Benchmark-prior normalization version (K8). Bump on ANY change to how a raw
+ * Artificial Analysis metric becomes a 0..1 prior — K13 must never blend values
+ * produced by two versions (§4.4.3 "versioned normalization").
+ */
+export const AA_NORMALIZATION_VERSION = "aa-normalization-v1";
+
+/**
+ * The benchmark's OWN identity — release and configuration, and its publication
+ * date WHERE the source supplies one. `observedAt` on the enclosing `Provenance`
+ * is a different fact: when WE fetched it. The two are never collapsed (§4.4.3
+ * "evidence age").
+ */
+export interface BenchmarkIdentity {
+  /** The benchmark release / methodology version, e.g. `intelligence-index-v4.3`. */
+  release: string;
+  /** The scored configuration where the source distinguishes several, e.g. `prompt_length=medium`. */
+  configuration?: string;
+  /** The benchmark's publication date. Absent when the source does not supply one — never faked. */
+  publishedAt?: string;
+  /** Which dimension this identity scopes, e.g. `coding` or `speed`. */
+  category: string;
+}
+
 export interface Provenance {
-  source: EvidenceSource;
+  source: EvidenceSource | ExternalEvidenceSource;
   tier: EvidenceTier;
   observedAt: string;
+  /** External benchmark evidence only: the source's own release/config identity. */
+  benchmark?: BenchmarkIdentity;
   normalizationVersion: string;
   /** Free-text pointer to the publisher / page / run the fact came from. */
   attribution?: string;
   sampleSize?: number;
+}
+
+/**
+ * One normalized external benchmark PRIOR for a catalog entry (K8). It is
+ * evidence about model intelligence — never an identity, status, availability or
+ * price fact, and never a selection (K13 does not exist). Enough of the raw
+ * source survives to audit the normalization (I-M1 / §9): the raw metric, its
+ * unit, the source's own model id, and the deterministic method that produced
+ * `normalized`.
+ */
+export interface BenchmarkPrior {
+  /** Only dimensions the source can truthfully support (§8). */
+  dimension: "coding" | "speed";
+  /** Deterministic 0..1, higher = better. Reconstructible from `raw` + `normalizationVersion`. */
+  normalized: number;
+  /** The untouched source measurement behind `normalized`. */
+  raw: { metric: string; value: number; unit: string };
+  /** The source's OWN identifier for the model this score describes. */
+  sourceModelId: string;
+  normalizationVersion: string;
+  provenance: Provenance;
+  freshness: Freshness;
+}
+
+/**
+ * `aa-normalization-v1` (K8). Deliberately a fixed ABSOLUTE rescale, not a
+ * dataset-relative rank: it needs no cross-model dataset, so ties, zero-range
+ * datasets and outliers have no degenerate case — an out-of-range input simply
+ * clamps. Provider-neutral by construction; changing `scaleMax` or `direction`
+ * for a dimension is a `normalizationVersion` bump (§10, §11).
+ */
+export function normalizeBenchmark(input: {
+  value: number;
+  /** `higher` — bigger raw is better (indices, tokens/s). `lower` — smaller is better (latency). */
+  direction: "higher" | "lower";
+  /** The raw value that maps to 1.0 (`higher`) or to 0.0 (`lower`). Must be > 0. */
+  scaleMax: number;
+}): number | undefined {
+  const { value, direction, scaleMax } = input;
+  if (!Number.isFinite(value) || !Number.isFinite(scaleMax) || scaleMax <= 0) return undefined;
+  const ratio = value / scaleMax;
+  const normalized = direction === "higher" ? ratio : 1 - ratio;
+  return Math.min(1, Math.max(0, normalized));
 }
 
 /**
@@ -85,6 +162,12 @@ export interface ModelCatalogEntry {
   maxOutputTokens?: Attributed<number>;
   capabilities?: Attributed<Record<string, boolean | number | string>>;
   pricing: ModelPriceView[];
+  /**
+   * Normalized external benchmark priors (K8), attached only to an entry a
+   * higher-authority source already established — a prior never creates a
+   * catalog entry or grants availability (§13, §14). Absent when none.
+   */
+  benchmarkPriors?: BenchmarkPrior[];
   /** JOINed from provider discovery — M12 never decides availability itself. */
   availableVia: AssistantId[];
   status: "available" | "unknown" | "retired";

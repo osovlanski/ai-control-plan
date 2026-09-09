@@ -1,0 +1,51 @@
+{
+  "status": 200,
+  "prompt_options": { "parallel_queries": 1, "prompt_length": "medium" },
+  "intelligence_index_version": "4.3",
+  "data": [
+    {
+      "id": "aa-opus-41",
+      "name": "Claude 4.1 Opus",
+      "slug": "claude-4-1-opus",
+      "model_creator": { "id": "anthropic", "name": "Anthropic", "slug": "anthropic" },
+      "evaluations": {
+        "artificial_analysis_intelligence_index": 74,
+        "artificial_analysis_coding_index": 71
+      },
+      "median_output_tokens_per_second": 88,
+      "median_time_to_first_token_seconds": 1.2,
+      "price_1m_input_tokens": 15,
+      "price_1m_output_tokens": 75
+    },
+    {
+      "id": "aa-sonnet-45",
+      "name": "Claude 4.5 Sonnet",
+      "slug": "claude-4-5-sonnet",
+      "model_creator": { "id": "anthropic", "name": "Anthropic", "slug": "anthropic" },
+      "evaluations": {
+        "artificial_analysis_intelligence_index": 66,
+        "artificial_analysis_coding_index": 66
+      },
+      "median_output_tokens_per_second": 130,
+      "median_time_to_first_token_seconds": 0.8,
+      "price_1m_input_tokens": 3,
+      "price_1m_output_tokens": 15
+    },
+    {
+      "id": "aa-frontier-x",
+      "name": "Frontier X",
+      "slug": "some-frontier-model",
+      "model_creator": { "id": "acme", "name": "Acme", "slug": "acme" },
+      "evaluations": { "artificial_analysis_coding_index": 80 },
+      "median_output_tokens_per_second": 200
+    },
+    {
+      "id": "aa-default",
+      "name": "default",
+      "slug": "default",
+      "model_creator": { "id": "somevendor", "name": "SomeVendor", "slug": "somevendor" },
+      "evaluations": { "artificial_analysis_coding_index": 40 },
+      "median_output_tokens_per_second": 50
+    }
+  ]
+}

@@ -7,8 +7,10 @@ import {
 import type {
   AssistantId,
   Attributed,
+  BenchmarkPrior,
   CapabilityManifest,
   EvidenceSource,
+  ExternalEvidenceSource,
   Freshness,
   ModelCatalogEntry,
   ModelPriceEvidence,
@@ -48,13 +50,20 @@ export interface CatalogObservation {
   status?: ModelCatalogEntry['status'];
   provenance: Provenance;
   pricing?: ModelPriceEvidence[];
+  /**
+   * External benchmark priors (K8). An observation carrying these has
+   * `provenance.tier === 'external-benchmark'`; the merge NEVER lets it
+   * establish an entry or fill an identity/price gap — it only attaches priors
+   * to an entry a stronger source already established (§13, §14).
+   */
+  benchmarks?: BenchmarkPrior[];
 }
 
 /** One stored evidence row, as `GET /api/models/:id` returns it unmerged. */
 export interface CatalogEvidenceRow {
   provider: string;
   modelId: string;
-  source: EvidenceSource;
+  source: EvidenceSource | ExternalEvidenceSource;
   tier: Provenance['tier'];
   observedAt: string;
   freshness: Freshness;
@@ -70,8 +79,20 @@ export interface CatalogEvidenceRow {
  */
 export interface CatalogSource {
   name: string;
-  collect(ctx: { fetch: typeof globalThis.fetch }): Promise<CatalogObservation[]>;
+  /**
+   * Returns observations, optionally with a fixed `detail` string for the
+   * refresh log (e.g. a mapped/unmatched count — §13). `detail` must never
+   * contain a transport error, response body or credential.
+   */
+  collect(ctx: { fetch: typeof globalThis.fetch }): Promise<CatalogObservation[] | { observations: CatalogObservation[]; detail?: string }>;
 }
+
+/** Deterministic conflict rank. External benchmark priors always rank last: they
+ * fill nothing on the entry and never override a provider fact (§14). */
+const CATALOG_SOURCE_PRIORITY: Record<EvidenceSource | ExternalEvidenceSource, number> = {
+  ...EVIDENCE_PRIORITY,
+  'external:artificial-analysis': 0,
+};
 
 export interface RefreshAttempt {
   source: string;
@@ -106,6 +127,21 @@ const PRICE_SEED: Array<{ modelId: string; provider: string; aliases?: string[];
 ];
 
 const nowIso = (now: () => Date): string => now().toISOString();
+
+/**
+ * A safe, fixed failure label. A source may attach its own via a `detail`
+ * string property (see `CatalogSourceError`); anything else collapses to a
+ * generic label so a raw transport error — which can echo the request URL,
+ * headers or a credential — is never written to `model_catalog_refresh`.
+ */
+const SAFE_DETAIL_LABELS = new Set(['not configured', 'unauthorized', 'unavailable', 'malformed response']);
+function classifiedDetail(err: unknown): string {
+  if (err && typeof err === 'object' && 'detail' in err) {
+    const d = (err as { detail: unknown }).detail;
+    if (typeof d === 'string' && SAFE_DETAIL_LABELS.has(d)) return d;
+  }
+  return 'source unavailable';
+}
 
 /** Manifest evidence describes how the adapter learned its model list. */
 function tierFor(source: EvidenceSource): Provenance['tier'] {
@@ -173,13 +209,18 @@ export class ModelCatalogService {
     for (const source of this.sources) {
       const startedAt = nowIso(this.now);
       try {
-        const observations = await source.collect({ fetch: this.fetchImpl });
+        const result = await source.collect({ fetch: this.fetchImpl });
+        const observations = Array.isArray(result) ? result : result.observations;
+        const okDetail = Array.isArray(result) ? undefined : result.detail;
         this.store(observations);
-        attempts.push({ source: source.name, status: 'ok', entries: observations.length });
-        this.recordAttempt(source.name, 'ok', observations.length, undefined, startedAt);
+        attempts.push({ source: source.name, status: 'ok', entries: observations.length, detail: okDetail });
+        this.recordAttempt(source.name, 'ok', observations.length, okDetail, startedAt);
       } catch (err) {
-        // Classified, never the raw error: a fetch failure can echo the request.
-        const detail = err instanceof Error ? `${source.name} source unavailable` : 'source unavailable';
+        // A source may hand us a fixed classification label (`CatalogSourceError`);
+        // otherwise a generic one. NEVER the raw transport error — it can echo the
+        // request or a credential (§3, §16).
+        const label = classifiedDetail(err);
+        const detail = `${source.name}: ${label}`;
         attempts.push({ source: source.name, status: 'failed', entries: 0, detail });
         this.recordAttempt(source.name, 'failed', 0, detail, startedAt);
       }
@@ -196,17 +237,35 @@ export class ModelCatalogService {
     this.hydrateOnce();
     const rows = this.db
       .prepare('SELECT provider, model_id, source, tier, observed_at, catalog_revision, entry_json FROM model_catalog')
-      .all() as Array<{ provider: string; model_id: string; source: EvidenceSource; tier: Provenance['tier']; observed_at: string; catalog_revision: string; entry_json: string }>;
+      .all() as Array<{ provider: string; model_id: string; source: EvidenceSource | ExternalEvidenceSource; tier: Provenance['tier']; observed_at: string; catalog_revision: string; entry_json: string }>;
     const prices = this.pricesByModel();
     const availability = this.availabilityFromDiscovery();
     const nowMs = this.now().getTime();
 
     const byModel = new Map<string, ModelCatalogEntry>();
     const ranked = [...rows].sort((a, b) =>
-      EVIDENCE_PRIORITY[b.source] - EVIDENCE_PRIORITY[a.source] || b.observed_at.localeCompare(a.observed_at));
+      CATALOG_SOURCE_PRIORITY[b.source] - CATALOG_SOURCE_PRIORITY[a.source] || b.observed_at.localeCompare(a.observed_at));
     for (const row of ranked) {
       const observed = JSON.parse(row.entry_json) as CatalogObservation;
       const key = modelKey(row.provider, row.model_id);
+
+      // External benchmark priors (K8): they never establish an entry, never
+      // fill an identity/price gap. Attach to an entry a stronger source already
+      // built; drop silently if none — a prior is not catalog availability (§13,
+      // §14). Ranked last, so `existing` is fully built by now.
+      if (row.tier === 'external-benchmark') {
+        const entry = byModel.get(key);
+        if (!entry || !observed.benchmarks?.length) continue;
+        entry.benchmarkPriors = [
+          ...(entry.benchmarkPriors ?? []),
+          ...observed.benchmarks.map((p) => ({
+            ...p,
+            freshness: freshnessOf(p.provenance.observedAt, 'external-benchmark', nowMs),
+          })),
+        ];
+        continue;
+      }
+
       const provenance: Provenance = {
         source: row.source, tier: row.tier, observedAt: row.observed_at,
         normalizationVersion: CATALOG_NORMALIZATION_VERSION, attribution: observed.provenance.attribution,
@@ -265,7 +324,7 @@ export class ModelCatalogService {
     const nowMs = this.now().getTime();
     const rows = this.db
       .prepare('SELECT provider, model_id, source, tier, observed_at, catalog_revision, entry_json FROM model_catalog WHERE provider = ? AND model_id = ?')
-      .all(entry.provider, entry.modelId) as Array<{ provider: string; model_id: string; source: EvidenceSource; tier: Provenance['tier']; observed_at: string; catalog_revision: string; entry_json: string }>;
+      .all(entry.provider, entry.modelId) as Array<{ provider: string; model_id: string; source: EvidenceSource | ExternalEvidenceSource; tier: Provenance['tier']; observed_at: string; catalog_revision: string; entry_json: string }>;
     return rows
       .map((row) => ({
         provider: row.provider,
@@ -277,7 +336,7 @@ export class ModelCatalogService {
         catalogRevision: row.catalog_revision,
         observation: JSON.parse(row.entry_json) as CatalogObservation,
       }))
-      .sort((a, b) => EVIDENCE_PRIORITY[b.source] - EVIDENCE_PRIORITY[a.source] || b.observedAt.localeCompare(a.observedAt));
+      .sort((a, b) => CATALOG_SOURCE_PRIORITY[b.source] - CATALOG_SOURCE_PRIORITY[a.source] || b.observedAt.localeCompare(a.observedAt));
   }
 
   refreshes(limit = 20): Array<{ source: string; status: string; entries: number; detail: string | null; startedAt: string; finishedAt: string }> {
