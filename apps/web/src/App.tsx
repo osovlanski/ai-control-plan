@@ -146,7 +146,7 @@ function ModelCatalogCard() {
     <Card>
       <div style={{ display: "flex", alignItems: "center", gap: "0.7rem" }}>
         <strong>Model catalog</strong>
-        <span style={{ fontSize: "0.8rem", color: tokens.muted }}>identity + price evidence (K7)</span>
+        <span style={{ fontSize: "0.8rem", color: tokens.muted }}>identity + price + external benchmark evidence (K7/K8)</span>
         <span style={{ marginLeft: "auto" }}>
           <Button variant="secondary" onClick={() => void refresh()} disabled={busy}>
             {busy ? "Refreshing…" : "Refresh"}
@@ -173,6 +173,22 @@ function ModelCatalogCard() {
               price {p.inputPerMtok}/{p.outputPerMtok} {p.currency} per Mtok · version {p.pricingVersion} · {p.provenance.tier} · {p.freshness}
               {p.appliesTo ? ` · applies to ${p.appliesTo.servingProvider}${p.appliesTo.accountKind ? `/${p.appliesTo.accountKind}` : ""}` : " · applicability not established"}
               {" · evidence only, not an enforcement tariff"}
+            </div>
+          ))}
+          {/* K8: external benchmark priors. Prior evidence about intelligence — not a
+              selection, not availability. Benchmark publication date, model release
+              date and our fetch date are three separate facts and shown apart. */}
+          {(m.benchmarkPriors ?? []).map((b, i) => (
+            <div key={`${b.dimension}-${i}`} style={{ color: tokens.muted }}>
+              {b.dimension} prior {b.normalized.toFixed(2)} · {b.provenance.source} · {b.provenance.tier}
+              {b.provenance.benchmark ? ` · release ${b.provenance.benchmark.release}` : ""}
+              {b.provenance.benchmark?.configuration ? ` (${b.provenance.benchmark.configuration})` : ""}
+              {b.provenance.benchmark?.sourceSlug ? ` · aa-slug ${b.provenance.benchmark.sourceSlug}` : ""}
+              {` · raw ${b.raw.value} ${b.raw.unit}`}
+              {` · benchmark published ${b.provenance.benchmark?.publishedAt ?? "n/a"}`}
+              {` · model released ${b.provenance.benchmark?.modelReleaseDate ?? "n/a"}`}
+              {` · fetched ${b.provenance.observedAt.slice(0, 10)} · ${b.freshness}`}
+              {b.provenance.attribution ? ` · ${b.provenance.attribution}` : ""}
             </div>
           ))}
         </div>

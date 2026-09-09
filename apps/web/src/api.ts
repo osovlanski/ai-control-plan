@@ -158,7 +158,23 @@ export interface TaskDetail {
   active: boolean;
 }
 
-type Prov = { source: string; tier: string; observedAt: string; attribution?: string };
+type Prov = {
+  source: string;
+  tier: string;
+  observedAt: string;
+  attribution?: string;
+  /** External benchmark only: the source's own release/config identity (K8). */
+  benchmark?: {
+    release: string;
+    configuration?: string;
+    publishedAt?: string;
+    /** The model's own release date per the source — not the benchmark's publication date. */
+    modelReleaseDate?: string;
+    /** The source's own slug for the model (display only). */
+    sourceSlug?: string;
+    category: string;
+  };
+};
 /** A merged fact and the evidence that supplied it — not the entry's provenance. */
 type Attributed<T> = { value: T; provenance: Prov };
 
@@ -184,6 +200,16 @@ export interface CatalogModel {
     pricingVersion: string;
     freshness: string;
     appliesTo?: { servingProvider: string; accountKind?: string };
+    provenance: Prov;
+  }>;
+  /** K8 normalized external benchmark priors. Evidence about intelligence, never a selection. */
+  benchmarkPriors?: Array<{
+    dimension: "coding" | "speed";
+    normalized: number;
+    raw: { metric: string; value: number; unit: string };
+    sourceModelId: string;
+    normalizationVersion: string;
+    freshness: string;
     provenance: Prov;
   }>;
 }

@@ -31,6 +31,7 @@ import { TaskEventBus } from "./modules/sse.js";
 import { Scheduler } from "./modules/scheduler.js";
 import { QuotaProbeService, type QuotaProbeFn } from "./modules/quota-probe.js";
 import { ModelCatalogService, CATALOG_REVISION, type CatalogSource } from "./modules/model-catalog.js";
+import { createArtificialAnalysisSource } from "./modules/artificial-analysis.js";
 import { QuotaProjection } from "./modules/quota.js";
 import { readTaskContext } from "./modules/context.js";
 import { TaskStore } from "./modules/tasks.js";
@@ -155,7 +156,13 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   const probes = deps.quotaProbes ?? new QuotaProbeService(db, config, registry, deps.quotaProbeFn, now);
   // K7 (M12). Catalog reads never sit on the routing path: routing reads the
   // registry, and a stale or failed catalog refresh only affects these routes.
-  const modelCatalog = deps.modelCatalog ?? new ModelCatalogService(db, registry, now, deps.modelCatalogSources, deps.modelCatalogFetch);
+  // K8: the one external benchmark source (Artificial Analysis) is registered
+  // here from the `AA_API_KEY` env only. With no key it records a classified
+  // `not configured` refresh attempt and the local catalog is untouched (§3).
+  const modelCatalogSources = deps.modelCatalogSources ?? [
+    createArtificialAnalysisSource({ apiKey: process.env.AA_API_KEY, now }),
+  ];
+  const modelCatalog = deps.modelCatalog ?? new ModelCatalogService(db, registry, now, modelCatalogSources, deps.modelCatalogFetch);
   const scheduler = new Scheduler({ db, tasks, orchestrator, bus, config, probes, now, onError: error => app.log.error(error) });
   const computeRoute = (taskId: string, userOverride?: AssistantId) => tasks.get(taskId)
     ? orchestrator.routeTask(taskId, 'intake', { override: userOverride }) : undefined;
