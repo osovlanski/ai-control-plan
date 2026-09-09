@@ -170,11 +170,22 @@ export interface ModelCohort {
   successRate: number;
   testPassRate?: number;
   verificationPassRate?: number;
-  /** Runs that reported output tokens AND a duration — the speed sample. */
+  /**
+   * Runs that reported output tokens AND a duration — the speed sample.
+   * Deliberately NOT the cost sample: a run that failed or yielded still
+   * measured a real generation rate, so speed and cost have different
+   * eligibility on purpose.
+   */
   outputRateRuns: number;
   medianOutputTokensPerSecond?: number;
-  /** Completed runs whose usage is known — the cost sample. */
-  usageRuns: number;
+  /**
+   * Runs that COMPLETED and reported usage — the cost sample. A failed,
+   * timed-out or cancelled run and a context-yield predecessor burn tokens
+   * without completing a task, so none of them may enter a median cost PER
+   * COMPLETED TASK; the successor that actually completes does.
+   */
+  completedUsageRuns: number;
+  /** Medians over `completedUsageRuns` only, for the same reason. */
   medianInputTokens?: number;
   medianOutputTokens?: number;
 }
@@ -234,7 +245,7 @@ export function modelCohorts(
     if (!acc) {
       acc = {
         resolvedModelKey: key, taskKind: opts.taskKind, harnessMajor: opts.harnessMajor, windowDays,
-        reliabilityRuns: 0, successRate: 0, outputRateRuns: 0, usageRuns: 0,
+        reliabilityRuns: 0, successRate: 0, outputRateRuns: 0, completedUsageRuns: 0,
         successes: 0, rates: [], inputs: [], outputs: [], runIds: [],
       };
       byModel.set(key, acc);
@@ -242,7 +253,8 @@ export function modelCohorts(
     acc.runIds.push(row.id);
     // The SAME classifier the assistant aggregates use: a healthy context yield
     // and a cancellation are neutral — out of numerator and denominator both.
-    const reliability = reliabilityClass(reliabilityView(row.result, row.state));
+    const view = reliabilityView(row.result, row.state);
+    const reliability = reliabilityClass(view);
     if (reliability !== "neutral") {
       acc.reliabilityRuns += 1;
       if (reliability === "success") acc.successes += 1;
@@ -250,9 +262,14 @@ export function modelCohorts(
     const durationMs = Date.parse(row.ended_at) - Date.parse(row.started_at);
     const usage = row.usage ? (JSON.parse(row.usage) as { inputTokens?: number; outputTokens?: number }) : undefined;
     if (usage && (usage.inputTokens !== undefined || usage.outputTokens !== undefined)) {
-      acc.usageRuns += 1;
-      acc.inputs.push(usage.inputTokens ?? 0);
-      acc.outputs.push(usage.outputTokens ?? 0);
+      // COST: completed runs only. Everything else (failed, timed out,
+      // cancelled, or a context-yield predecessor whose successor finishes the
+      // task) spent tokens without completing a task.
+      if (view.outcome === "completed") {
+        acc.completedUsageRuns += 1;
+        acc.inputs.push(usage.inputTokens ?? 0);
+        acc.outputs.push(usage.outputTokens ?? 0);
+      }
       // Own output RATE, measured over run wall-clock. Named precisely because
       // it is NOT the provider-side generation rate an external benchmark
       // reports — the explanation carries both metric names so the difference
@@ -276,7 +293,7 @@ export function modelCohorts(
       ...(tests.verificationPassRate !== undefined ? { verificationPassRate: tests.verificationPassRate } : {}),
       outputRateRuns: acc.outputRateRuns,
       ...(median(acc.rates) !== undefined ? { medianOutputTokensPerSecond: median(acc.rates)! } : {}),
-      usageRuns: acc.usageRuns,
+      completedUsageRuns: acc.completedUsageRuns,
       ...(median(acc.inputs) !== undefined ? { medianInputTokens: median(acc.inputs)! } : {}),
       ...(median(acc.outputs) !== undefined ? { medianOutputTokens: median(acc.outputs)! } : {}),
     });

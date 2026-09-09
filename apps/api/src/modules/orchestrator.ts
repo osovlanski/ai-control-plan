@@ -18,6 +18,7 @@ import type {
   ExecutionResult,
   ExecutionSessionState,
   ExecutionTarget,
+  ModelRecommendation,
   NormalizedEvent,
   ProviderSessionRef,
   RunHandle,
@@ -129,9 +130,42 @@ export class Orchestrator {
    * never re-derived from today's catalog (I-M5). A recovery / scheduler wake of
    * the same dispatch reuses the committed request instead of calling this.
    */
-  private requestedModel(taskId: string): string | undefined {
+  /**
+   * The selector this run will REQUEST (CR-33). Two sources, in priority order:
+   *
+   *  1. the operator's explicit `intent.overrides.model` — hard intent, and it
+   *     outranks any recommendation;
+   *  2. the model an ACTIVE K13 decision committed, read back from the durable
+   *     routing decision this dispatch already owns.
+   *
+   * It is only ever READ from the committed decision, never recomputed here: a
+   * recovery of an already committed dispatch must re-materialize the same
+   * request, not a newer opinion formed from telemetry that arrived since.
+   * Whatever this returns becomes `ExecutionRequest.model`, and the bridge
+   * remains the only place that becomes `RunSpec.model`.
+   */
+  private requestedModel(taskId: string, assistantId?: AssistantId, routingDecisionRef?: string): string | undefined {
     const row = this.tasks.get(taskId);
-    return row ? (JSON.parse(row.intent_json) as TaskIntent).overrides?.model : undefined;
+    const override = row ? (JSON.parse(row.intent_json) as TaskIntent).overrides?.model : undefined;
+    if (override) return override;
+    return this.appliedModel(assistantId, routingDecisionRef);
+  }
+
+  /** The committed K13 selector for this routing decision, if it committed one. */
+  private appliedModel(assistantId?: AssistantId, routingDecisionRef?: string): string | undefined {
+    if (!assistantId || !routingDecisionRef) return undefined;
+    const row = this.db
+      .prepare('SELECT explanation FROM routing_decisions WHERE id = ?')
+      .get(Number(routingDecisionRef)) as { explanation: string } | undefined;
+    if (!row) return undefined;
+    const recommendation = (JSON.parse(row.explanation) as { modelRecommendation?: ModelRecommendation })
+      .modelRecommendation;
+    // `applied` is written only when every activation gate passed; a shadow
+    // decision has none, so execution is untouched exactly as before.
+    if (recommendation?.mode !== 'applied' || !recommendation.applied) return undefined;
+    // The commitment is about the assistant that decision chose. If execution
+    // ended up elsewhere, its selector does not describe this run.
+    return recommendation.applied.assistantId === assistantId ? recommendation.applied.selector : undefined;
   }
 
   quotaPlan(taskId: string, attempt = 0) {
@@ -420,7 +454,7 @@ export class Orchestrator {
       const taskRow = this.tasks.get(taskId)!;
       const attempt = ((this.db.prepare('SELECT MAX(attempt) m FROM execution_requests WHERE task_id = ?').get(taskId) as { m: number | null }).m ?? 0) + 1;
       const project = envelope.repository && this.projectVerification ? this.projectVerification(workdir) : undefined;
-      const request = buildExecutionRequest({ taskId, dispatchId: options.dispatchId, assistantId, attempt, prompt, workdir, model: this.requestedModel(taskId),
+      const request = buildExecutionRequest({ taskId, dispatchId: options.dispatchId, assistantId, attempt, prompt, workdir, model: this.requestedModel(taskId, assistantId, options.routingDecisionRef),
         worktree: envelope.repository ? { repoPath: envelope.repository.path, branch: taskRow.branch ?? envelope.repository.branch, worktreePath: workdir, baseRef: taskRow.base_ref ?? 'HEAD' } : undefined,
         target: executionTarget, approvalMode: this.config.policy.approvalMode, maxRuntimeMs: this.maxRuntimeMs,
         routingDecisionRef: options.routingDecisionRef!, verificationPlan: project?.plan });
@@ -469,7 +503,7 @@ export class Orchestrator {
         {
           taskId,
           assistantId,
-          model: this.requestedModel(taskId),
+          model: this.requestedModel(taskId, assistantId, routingDecisionRef),
           dispatchId: options.dispatchId,
           checkpointId: options.continuation?.kind === "checkpoint" ? options.continuation.checkpointId : undefined,
           attempt,
@@ -499,7 +533,7 @@ export class Orchestrator {
     // Same-provider continuation resumes the provider session; cross-provider
     // handoff always starts fresh from the rendered package (arch §7).
     const priorRef = options.continuation?.kind === "checkpoint" ? this.resumableRef(taskId, assistantId) : undefined;
-    const requestedModel = this.requestedModel(taskId);
+    const requestedModel = this.requestedModel(taskId, assistantId, options.routingDecisionRef);
     const runSpec = {
       taskId: envelope.taskId,
       prompt,

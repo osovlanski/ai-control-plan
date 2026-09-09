@@ -15,6 +15,14 @@ export interface AssistantConfig {
   provider: string;
   enabled?: boolean;
   /**
+   * Which kind of account this assistant runs under (`api`, `subscription`, …),
+   * matched against a K7 price row's `appliesTo.accountKind`. Operator-declared
+   * `local-config` evidence and the ONLY proof of account identity we have: with
+   * it absent, an account-specific tariff is NOT applicable and the cost
+   * dimension has no evidence rather than a guessed one (§4.4.5).
+   */
+  accountKind?: string;
+  /**
    * Provider-specific settings. Bedrock needs the deployed AgentCore agent to
    * invoke (it is a hosting platform, not a discoverable assistant), so that
    * comes from configuration rather than capability discovery.

@@ -141,7 +141,7 @@ export async function modelShadow(): Promise<ScenarioScore> {
     assert.equal(request.model, undefined, "no model was requested, so none is fabricated");
     assert.equal(request.runSpec.model, undefined, "RunSpec.model is a projection, never a second writer");
     assert.equal(
-      filtered.modelRecommendation!.executionUnchanged.authority,
+      filtered.modelRecommendation!.execution.authority,
       "ExecutionRequest.model",
       "the explanation must name the single requested-selector authority",
     );
@@ -152,7 +152,8 @@ export async function modelShadow(): Promise<ScenarioScore> {
       .get(taskId) as { explanation: string };
     const persisted = (JSON.parse(stored.explanation) as RoutingExplanation).modelRecommendation!;
     assert.equal(persisted.mode, "shadow");
-    assert.equal(persisted.schemaVersion, 1);
+    assert.equal(persisted.applied, undefined, "shadow commits no selector");
+    assert.equal(persisted.schemaVersion, 2);
 
     return scoreTask(db, { scenario: "model-shadow", kind: "fake", taskId });
   } finally {

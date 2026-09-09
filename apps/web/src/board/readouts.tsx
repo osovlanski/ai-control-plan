@@ -299,22 +299,29 @@ export function ModelRecommendationReadout({
         )}
       </p>
 
-      {!applied && (
+      {applied ? (
+        <p className="fine-print">
+          Current execution: <strong>this model</strong>. The decision committed{" "}
+          <span className="mono">{recommendation.execution.requestedModelSelector}</span>,
+          and {recommendation.execution.authority} carries it into the run — it
+          remains the only authority for the requested model.
+        </p>
+      ) : (
         <p className="fine-print">
           Current execution: <strong>unchanged</strong>. This recommendation did
           not set the requested model
-          {recommendation.executionUnchanged.requestedModelSelector ? (
+          {recommendation.execution.requestedModelSelector ? (
             <>
               {" "}— the run asked for{" "}
               <span className="mono">
-                {recommendation.executionUnchanged.requestedModelSelector}
+                {recommendation.execution.requestedModelSelector}
               </span>
             </>
           ) : (
             " — the run named no model"
           )}
-          , and {recommendation.executionUnchanged.authority} remains the only
-          authority for it.
+          , and {recommendation.execution.authority} remains the only authority
+          for it. ({recommendation.execution.detail})
         </p>
       )}
 

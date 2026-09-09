@@ -16,6 +16,7 @@ import {
   type AssistantId,
   type ModelRecommendation,
   type RoutingExplanation,
+  type RunSpec,
 } from '@agent-plane/core';
 import { loadConfig, type ResolvedConfig } from '../src/config.js';
 import { openDb, type Db } from '../src/db/index.js';
@@ -24,6 +25,8 @@ import type { CatalogObservation, CatalogSource } from '../src/modules/model-cat
 import { buildExecutionRequest } from '../src/modules/harness/control-plane-bridge.js';
 import { resolveCandidateIdentity } from '../src/modules/model-selection.js';
 import { modelCohorts } from '../src/modules/telemetry.js';
+import { countHardFilterViolations, priceApplicability } from '../src/modules/model-selection.js';
+import { Scheduler } from '../src/modules/scheduler.js';
 
 let home: string;
 let db: Db;
@@ -37,10 +40,17 @@ const now = () => clock;
 /** The fake adapter advertises exactly one selector, and it IS a model id. */
 const FAKE_MODEL = 'fake-1';
 
-async function boot(sources: CatalogSource[] = [], assistants: ResolvedConfig['assistants'] = { [A]: { provider: 'fake' }, [B]: { provider: 'fake' } }) {
+async function boot(
+  sources: CatalogSource[] = [],
+  assistants: ResolvedConfig['assistants'] = { [A]: { provider: 'fake' }, [B]: { provider: 'fake' } },
+  options: { harness?: boolean } = {},
+) {
   home = mkdtempSync(join(tmpdir(), 'k13-'));
   config = loadConfig({ AGENT_PLANE_HOME: home });
   config.assistants = assistants;
+  // Flag-ON single mode routes execution through the ExecutionRequest → RunSpec
+  // bridge, which is the path CR-33 is about.
+  config.execution.harnessModes.single = options.harness ?? false;
   db = openDb(config.dbPath);
   built = buildServer({ config, db, now, modelCatalogSources: sources });
   built.registry.init();
@@ -83,6 +93,46 @@ function benchmarkSource(rows: Array<{ provider: string; modelId: string; coding
   };
 }
 
+/**
+ * A provider-official observation carrying ONE price row. `appliesTo` is passed
+ * through verbatim (including absent) so applicability can be tested honestly.
+ */
+function priceSource(rows: Array<{
+  provider: string;
+  modelId: string;
+  inputPerMtok?: number;
+  outputPerMtok?: number;
+  appliesTo?: { servingProvider: string; accountKind?: string };
+}>): CatalogSource {
+  return {
+    name: 'test-prices',
+    collect: async () => ({
+      observations: rows.map((row): CatalogObservation => {
+        const provenance = {
+          source: 'provider-api' as const,
+          tier: 'provider-official' as const,
+          observedAt: now().toISOString(),
+          normalizationVersion: '1.0',
+          attribution: 'test',
+        };
+        return {
+          modelId: row.modelId,
+          provider: row.provider,
+          provenance,
+          pricing: [{
+            inputPerMtok: row.inputPerMtok ?? 3,
+            outputPerMtok: row.outputPerMtok ?? 15,
+            currency: 'USD' as const,
+            pricingVersion: 'test-prices-1',
+            ...(row.appliesTo ? { appliesTo: row.appliesTo } : {}),
+            provenance,
+          }],
+        };
+      }),
+    }),
+  };
+}
+
 /** Insert a finished legacy run so it joins (or deliberately misses) a cohort. */
 function recordRun(input: {
   taskId: string;
@@ -94,6 +144,9 @@ function recordRun(input: {
   durationMs?: number;
   usage?: { inputTokens?: number; outputTokens?: number };
   result?: { outcome: string; yield?: { kind: string } };
+  /** Emit the coding factors this run contributes. Absent = that factor has no evidence. */
+  tests?: { passed: number; failed: number };
+  verification?: { passed: boolean };
 }): string {
   const id = `run_${Math.random().toString(36).slice(2, 10)}`;
   const startedAt = new Date(clock.getTime() - (input.durationMs ?? 10_000)).toISOString();
@@ -112,7 +165,91 @@ function recordRun(input: {
       `INSERT INTO execution_results (session_id, terminal_state, outcome, result, at) VALUES (?, ?, ?, ?, ?)`,
     ).run(id, input.result.outcome === 'yielded' ? 'YIELDED' : 'COMPLETED', input.result.outcome, JSON.stringify(input.result), clock.toISOString());
   }
+  let seq = 0;
+  const event = (type: string, payload: unknown) =>
+    db.prepare('INSERT INTO events (run_id, seq, ts, type, payload) VALUES (?, ?, ?, ?, ?)')
+      .run(id, (seq += 1), clock.toISOString(), type, JSON.stringify(payload));
+  if (input.tests) event('test.result', input.tests);
+  if (input.verification) event('verification.result', input.verification);
   return id;
+}
+
+/** A run carrying every canonical coding factor: success, test-pass, verification-pass. */
+function recordCodingRun(taskId: string, assistantId: string, over: Parameters<typeof recordRun>[0] extends infer T ? Partial<T> : never = {}): string {
+  return recordRun({
+    taskId, assistantId,
+    result: { outcome: 'completed' },
+    tests: { passed: 1, failed: 0 },
+    verification: { passed: true },
+    ...over,
+  });
+}
+
+/**
+ * Turn every activation gate green using the injected clock only. The week of
+ * shadow log is a REAL persisted recommendation dated a week back on the test
+ * clock — no production history is faked, and the review attestation still has
+ * to postdate a full week of it.
+ */
+function activateGates(): void {
+  config.models.selection.enabled = true;
+  const seed = built.tasks.create({ goal: 'a task routed a week ago' });
+  db.prepare('INSERT INTO routing_decisions (task_id, chosen_assistant_id, explanation, at) VALUES (?, ?, ?, ?)')
+    .run(
+      seed.taskId, A,
+      // A shadow decision that recommended nothing: real log, zero violations.
+      JSON.stringify({ candidates: [], ruleFired: 'seed', modelRecommendation: { schemaVersion: 2, mode: 'shadow', candidates: [], reason: 'seed' } }),
+      new Date(clock.getTime() - 8 * 86_400_000).toISOString(),
+    );
+  config.models.selection.shadowReviewedAt = new Date(clock.getTime() - 86_400_000).toISOString();
+  config.models.selection.egressVerifiedAt = new Date(clock.getTime() - 86_400_000).toISOString();
+}
+
+/**
+ * The `telemetry` gate wants two eligible candidates with a cohort at or above
+ * k. The runs go on their own finished task: a cohort is evidence from PAST
+ * work, and hanging historical runs off the task under test would make it look
+ * like a continuation.
+ */
+function fillCodingCohort(): void {
+  const past = built.tasks.create({ goal: 'Implement the parser' });
+  for (let i = 0; i < DIMENSION_K.coding; i += 1) recordCodingRun(past.taskId, A);
+}
+
+/** Route, then start exactly as `POST /api/tasks/:id/start` does. */
+async function routeAndStart(taskId: string) {
+  const routed = built.orchestrator.routeTask(taskId, 'intake');
+  built.tasks.transition(taskId, 'ROUTING');
+  const started = built.registry.adapter(routed.explanation.chosen!) as { start: RunSpecSpy };
+  const spec = new Promise<RunSpec>((resolve) => {
+    const original = started.start.bind(started);
+    started.start = async (run: RunSpec) => { resolve(run); return original(run); };
+  });
+  const done = terminal(taskId);
+  await built.orchestrator.startTask(taskId, routed.explanation.chosen!, { routingDecisionRef: String(routed.routingDecisionId) });
+  await done;
+  return { routed, recommendation: routed.explanation.modelRecommendation!, runSpec: await spec };
+}
+
+type RunSpecSpy = (run: RunSpec) => Promise<unknown>;
+
+/** Resolves when the task reaches a terminal state, so no run outlives the test. */
+function terminal(taskId: string): Promise<void> {
+  return new Promise<void>((resolve) => {
+    const off = built.bus.subscribe(taskId, (payload) => {
+      if (payload.kind === 'state' && ['COMPLETED', 'FAILED', 'CANCELLED', 'WAITING_INPUT'].includes(payload.state!.state)) {
+        off();
+        resolve();
+      }
+    });
+  });
+}
+
+/** The requested selector as the immutable execution request recorded it. */
+function requestedModelOf(taskId: string): string | undefined {
+  const row = db.prepare('SELECT model FROM execution_requests WHERE task_id = ? ORDER BY attempt DESC LIMIT 1')
+    .get(taskId) as { model: string | null } | undefined;
+  return row?.model ? (JSON.parse(row.model) as { id: string }).id : undefined;
 }
 
 function routeAndRead(taskId: string): { explanation: RoutingExplanation; recommendation: ModelRecommendation } {
@@ -167,7 +304,7 @@ describe('shadow recommendation is persisted with every number sourced', () => {
     const row = db.prepare('SELECT explanation FROM routing_decisions WHERE task_id = ? ORDER BY id DESC LIMIT 1').get(task.taskId) as { explanation: string };
     const persisted = (JSON.parse(row.explanation) as RoutingExplanation).modelRecommendation!;
     expect(persisted.mode).toBe('shadow');
-    expect(persisted.schemaVersion).toBe(1);
+    expect(persisted.schemaVersion).toBe(2);
     expect(persisted.candidates.length).toBeGreaterThan(0);
   });
 });
@@ -373,7 +510,7 @@ describe('telemetry cohorts are per resolved model', () => {
     await built.modelCatalog.refresh();
     const task = built.tasks.create({ goal: 'Implement the parser' });
     for (let i = 0; i < DIMENSION_K.coding; i += 1) {
-      recordRun({ taskId: task.taskId, assistantId: A, result: { outcome: 'completed' } });
+      recordCodingRun(task.taskId, A);
     }
 
     const { recommendation } = routeAndRead(task.taskId);
@@ -409,10 +546,12 @@ describe('shadow changes nothing about execution (CR-33)', () => {
     expect(request.runSpec.model?.id).toBe(FAKE_MODEL);
     // The recommendation named a candidate; the request still asks for the
     // operator's selector, and the RunSpec is its projection, not the score's.
-    expect(after.explanation.modelRecommendation!.executionUnchanged).toEqual({
+    expect(after.explanation.modelRecommendation!.execution).toMatchObject({
       requestedModelSelector: FAKE_MODEL,
       authority: 'ExecutionRequest.model',
+      decidedBy: 'operator-override',
     });
+    expect(after.explanation.modelRecommendation!.applied).toBeUndefined();
   });
 
   it('records no recommendation at all when the catalog is unavailable, and still routes', async () => {
@@ -477,5 +616,307 @@ describe('activation gate and rollback', () => {
     expect(explanation.chosen).toBe(A);
     const history = db.prepare('SELECT COUNT(*) n FROM routing_decisions WHERE task_id = ?').get(task.taskId) as { n: number };
     expect(history.n).toBeGreaterThan(1);
+  });
+});
+
+describe('activation applies the selection end to end (CR-33 unchanged)', () => {
+  /** The canonical story, with only the clock injected. */
+  async function activated() {
+    await boot([benchmarkSource([{ provider: 'fake', modelId: FAKE_MODEL, coding: 0.8 }])], undefined, { harness: true });
+    await built.modelCatalog.refresh();
+    const task = built.tasks.create({ goal: 'Implement the parser' });
+    fillCodingCohort();
+    activateGates();
+    return task;
+  }
+
+  it('changes nothing while the gate is closed: a recommendation exists and execution is untouched', async () => {
+    await boot([benchmarkSource([{ provider: 'fake', modelId: FAKE_MODEL, coding: 0.8 }])], undefined, { harness: true });
+    await built.modelCatalog.refresh();
+    const task = built.tasks.create({ goal: 'Implement the parser' });
+    fillCodingCohort();
+
+    const { recommendation, runSpec } = await routeAndStart(task.taskId);
+    expect(recommendation.recommended).toBe(`${A}/${FAKE_MODEL}`);
+    expect(recommendation.mode).toBe('shadow');
+    expect(recommendation.applied).toBeUndefined();
+    // The task named no model, so nothing asks for one — the recommendation is
+    // not quietly promoted into the request.
+    expect(requestedModelOf(task.taskId)).toBeUndefined();
+    expect(runSpec.model).toBeUndefined();
+  });
+
+  it('commits the winner into ExecutionRequest.model and RunSpec.model once every gate passes', async () => {
+    const task = await activated();
+    const { recommendation, routed, runSpec } = await routeAndStart(task.taskId);
+
+    expect(recommendation.activation.gates.filter((g) => !g.passed)).toEqual([]);
+    expect(recommendation.activation.active).toBe(true);
+    expect(recommendation.mode).toBe('applied');
+    expect(recommendation.applied).toEqual({ assistantId: A, selector: FAKE_MODEL, label: `${A}/${FAKE_MODEL}` });
+    expect(routed.explanation.chosen).toBe(A);
+
+    // The durable routing decision is the source; the request is its projection,
+    // and the RunSpec is the request's — no second writer anywhere.
+    expect(requestedModelOf(task.taskId)).toBe(FAKE_MODEL);
+    expect(runSpec.model).toEqual({ id: FAKE_MODEL });
+  });
+
+  it('never overrides the operator: an explicit model outranks the recommendation', async () => {
+    await boot([benchmarkSource([{ provider: 'fake', modelId: FAKE_MODEL, coding: 0.8 }])], undefined, { harness: true });
+    await built.modelCatalog.refresh();
+    const task = built.tasks.create({ goal: 'Implement the parser', overrides: { model: FAKE_MODEL } });
+    fillCodingCohort();
+    activateGates();
+
+    const { recommendation, runSpec } = await routeAndStart(task.taskId);
+    expect(recommendation.mode).toBe('shadow');
+    expect(recommendation.applied).toBeUndefined();
+    expect(recommendation.execution).toMatchObject({ decidedBy: 'operator-override', requestedModelSelector: FAKE_MODEL });
+    expect(requestedModelOf(task.taskId)).toBe(FAKE_MODEL);
+    expect(runSpec.model).toEqual({ id: FAKE_MODEL });
+  });
+
+  it('materializes a committed decision without recomputing it from newer evidence', async () => {
+    await boot([benchmarkSource([{ provider: 'fake', modelId: FAKE_MODEL, coding: 0.8 }])], undefined, { harness: true });
+    await built.modelCatalog.refresh();
+    const task = built.tasks.create({ goal: 'Implement the parser' });
+    fillCodingCohort();
+    activateGates();
+
+    // Between routing and materialization the world changes: the operator turns
+    // selection off. A dispatch that recomputed would materialize a different
+    // request; this one must re-read what it already committed.
+    const scheduler = new Scheduler({
+      db, config, tasks: built.tasks, orchestrator: built.orchestrator, bus: built.bus, now,
+      boundary: async (phase) => { if (phase === 'routed') config.models.selection.enabled = false; },
+    });
+    scheduler.attach(task.taskId, { kind: 'time', notBefore: new Date(clock.getTime() + 1000).toISOString() });
+    clock = new Date(clock.getTime() + 2000);
+    const done = terminal(task.taskId);
+    await scheduler.tick();
+    await done;
+
+    const decisions = db.prepare('SELECT explanation FROM routing_decisions WHERE task_id = ? ORDER BY id').all(task.taskId) as Array<{ explanation: string }>;
+    expect(decisions).toHaveLength(1);
+    const committed = (JSON.parse(decisions[0]!.explanation) as RoutingExplanation).modelRecommendation!;
+    expect(committed.mode).toBe('applied');
+    expect(requestedModelOf(task.taskId)).toBe(committed.applied!.selector);
+  });
+
+  it('returns new dispatches to shadow the moment the flag is cleared', async () => {
+    const task = await activated();
+    expect(routeAndRead(task.taskId).recommendation.mode).toBe('applied');
+
+    config.models.selection.enabled = false;
+    const second = built.tasks.create({ goal: 'Implement the parser' });
+    const { recommendation, runSpec } = await routeAndStart(second.taskId);
+    expect(recommendation.mode).toBe('shadow');
+    expect(recommendation.applied).toBeUndefined();
+    expect(requestedModelOf(second.taskId)).toBeUndefined();
+    expect(runSpec.model).toBeUndefined();
+  });
+});
+
+describe('a price is evidence only where it applies (§4.4.5)', () => {
+  const costPrior = (recommendation: ModelRecommendation) =>
+    scored(recommendation, A).dimensions.find((d) => d.dimension === 'cost')!.prior;
+
+  /** Boot with one price row and an optionally declared account kind. */
+  async function bootPriced(appliesTo?: { servingProvider: string; accountKind?: string }, accountKind?: string) {
+    await boot(
+      [priceSource([{ provider: 'fake', modelId: FAKE_MODEL, ...(appliesTo ? { appliesTo } : {}) }])],
+      { [A]: { provider: 'fake', ...(accountKind ? { accountKind } : {}) }, [B]: { provider: 'fake' } },
+    );
+    await built.modelCatalog.refresh();
+    return built.tasks.create({ goal: 'Implement the parser' });
+  }
+
+  it('uses a tariff whose serving provider and account kind are both proven', async () => {
+    const task = await bootPriced({ servingProvider: 'fake', accountKind: 'api' }, 'api');
+    const prior = costPrior(routeAndRead(task.taskId).recommendation);
+    expect(prior?.source).toBe('k7:price-evidence');
+    expect(prior?.normalizationVersion).toBe('price-normalization-v1');
+  });
+
+  it('uses a provider-wide tariff that declares no account kind', async () => {
+    const task = await bootPriced({ servingProvider: 'fake' });
+    expect(costPrior(routeAndRead(task.taskId).recommendation)?.source).toBe('k7:price-evidence');
+  });
+
+  it('refuses a tariff for a different serving provider', async () => {
+    const task = await bootPriced({ servingProvider: 'anthropic', accountKind: 'api' }, 'api');
+    expect(costPrior(routeAndRead(task.taskId).recommendation)).toBeUndefined();
+  });
+
+  it('refuses a tariff for a different account kind', async () => {
+    const task = await bootPriced({ servingProvider: 'fake', accountKind: 'api' }, 'subscription');
+    expect(costPrior(routeAndRead(task.taskId).recommendation)).toBeUndefined();
+  });
+
+  it('refuses an account-specific tariff when the account kind is not proven', async () => {
+    // This is the Anthropic-API-price-on-a-subscription-run case: the tariff is
+    // real, the model is right, and it still says nothing about this account.
+    const task = await bootPriced({ servingProvider: 'fake', accountKind: 'api' });
+    expect(costPrior(routeAndRead(task.taskId).recommendation)).toBeUndefined();
+  });
+
+  it('refuses a price row that declares no applicability at all', async () => {
+    const task = await bootPriced(undefined, 'api');
+    expect(costPrior(routeAndRead(task.taskId).recommendation)).toBeUndefined();
+  });
+
+  it('decides applicability the same way for every caller', () => {
+    const account = { servingProvider: 'fake', accountKind: 'api' };
+    expect(priceApplicability({ appliesTo: { servingProvider: 'fake', accountKind: 'api' } }, account).applicable).toBe(true);
+    expect(priceApplicability({ appliesTo: { servingProvider: 'fake' } }, account).applicable).toBe(true);
+    expect(priceApplicability({}, account)).toMatchObject({ applicable: false });
+    expect(priceApplicability({ appliesTo: { servingProvider: 'openai' } }, account)).toMatchObject({ applicable: false });
+    expect(priceApplicability({ appliesTo: { servingProvider: 'fake', accountKind: 'api' } }, { servingProvider: 'fake' }))
+      .toMatchObject({ applicable: false });
+  });
+});
+
+describe('cost per COMPLETED task samples only completed runs', () => {
+  const cohortNow = () => modelCohorts(db, { taskKind: 'coding', harnessMajor: HARNESS_MAJOR, now }).get(`fake:${FAKE_MODEL}`);
+
+  it('counts a completed run', async () => {
+    await boot();
+    const task = built.tasks.create({ goal: 'Implement the parser' });
+    recordRun({ taskId: task.taskId, assistantId: A, usage: { inputTokens: 100, outputTokens: 10 }, result: { outcome: 'completed' } });
+    expect(cohortNow()?.completedUsageRuns).toBe(1);
+    expect(cohortNow()?.medianInputTokens).toBe(100);
+  });
+
+  it('excludes a failed run that burned tokens without finishing the task', async () => {
+    await boot();
+    const task = built.tasks.create({ goal: 'Implement the parser' });
+    recordRun({ taskId: task.taskId, assistantId: A, state: 'ENDED_ERROR', usage: { inputTokens: 900, outputTokens: 90 }, result: { outcome: 'failed' } });
+    expect(cohortNow()?.completedUsageRuns).toBe(0);
+    expect(cohortNow()?.medianInputTokens).toBeUndefined();
+  });
+
+  it('excludes a cancelled run', async () => {
+    await boot();
+    const task = built.tasks.create({ goal: 'Implement the parser' });
+    recordRun({ taskId: task.taskId, assistantId: A, usage: { inputTokens: 900, outputTokens: 90 }, result: { outcome: 'cancelled' } });
+    expect(cohortNow()?.completedUsageRuns).toBe(0);
+  });
+
+  it('excludes a context-yield predecessor but counts the successor that completed', async () => {
+    await boot();
+    const task = built.tasks.create({ goal: 'Implement the parser' });
+    recordRun({ taskId: task.taskId, assistantId: A, usage: { inputTokens: 900, outputTokens: 90 }, result: { outcome: 'yielded', yield: { kind: 'context' } } });
+    recordRun({ taskId: task.taskId, assistantId: A, usage: { inputTokens: 100, outputTokens: 10 }, result: { outcome: 'completed' } });
+    const cohort = cohortNow()!;
+    expect(cohort.completedUsageRuns).toBe(1);
+    // The successor's usage alone — the predecessor's tokens are not half a task.
+    expect(cohort.medianInputTokens).toBe(100);
+    // Speed keeps its own eligibility: both runs generated tokens at a real rate.
+    expect(cohort.outputRateRuns).toBe(2);
+  });
+});
+
+describe('a missing coding factor is not a perfect factor', () => {
+  const codingOf = (recommendation: ModelRecommendation) =>
+    scored(recommendation, A).dimensions.find((d) => d.dimension === 'coding')!;
+
+  async function bootWithPrior() {
+    await boot([benchmarkSource([{ provider: 'fake', modelId: FAKE_MODEL, coding: 0.4 }])]);
+    await built.modelCatalog.refresh();
+    return built.tasks.create({ goal: 'Implement the parser' });
+  }
+
+  it('uses the canonical product when all three factors exist', async () => {
+    const task = await bootWithPrior();
+    for (let i = 0; i < DIMENSION_K.coding; i += 1) {
+      recordRun({ taskId: task.taskId, assistantId: A, result: { outcome: 'completed' }, tests: { passed: 3, failed: 1 }, verification: { passed: true } });
+    }
+    const coding = codingOf(routeAndRead(task.taskId).recommendation);
+    expect(coding.telemetry?.metric).toBe('success × test-pass × verification-pass');
+    // 1.0 × 0.75 × 1.0, blended at w = 0.5 against the 0.4 prior.
+    expect(coding.telemetry?.value).toBeCloseTo(0.75, 6);
+    expect(coding.score).toBeCloseTo(0.5 * 0.75 + 0.5 * 0.4, 6);
+  });
+
+  it('emits no coding telemetry when the test factor is missing', async () => {
+    const task = await bootWithPrior();
+    for (let i = 0; i < DIMENSION_K.coding; i += 1) {
+      recordRun({ taskId: task.taskId, assistantId: A, result: { outcome: 'completed' }, verification: { passed: true } });
+    }
+    const coding = codingOf(routeAndRead(task.taskId).recommendation);
+    expect(coding.telemetry).toBeUndefined();
+    expect(coding.telemetryWithheld).toContain('test-pass');
+    // The prior carries the dimension alone; nothing neutral is manufactured.
+    expect(coding.score).toBeCloseTo(0.4, 6);
+  });
+
+  it('emits no coding telemetry when the verification factor is missing', async () => {
+    const task = await bootWithPrior();
+    for (let i = 0; i < DIMENSION_K.coding; i += 1) {
+      recordRun({ taskId: task.taskId, assistantId: A, result: { outcome: 'completed' }, tests: { passed: 1, failed: 0 } });
+    }
+    const coding = codingOf(routeAndRead(task.taskId).recommendation);
+    expect(coding.telemetry).toBeUndefined();
+    expect(coding.telemetryWithheld).toContain('verification-pass');
+    expect(coding.score).toBeCloseTo(0.4, 6);
+  });
+
+  it('cannot improve a candidate: partial evidence never outscores the full product', async () => {
+    const task = await bootWithPrior();
+    // A perfect success rate with no test or verification evidence. Multiplying
+    // the absent factors in as 1.0 would score 0.5·1.0 + 0.5·0.4 = 0.7.
+    for (let i = 0; i < DIMENSION_K.coding; i += 1) {
+      recordRun({ taskId: task.taskId, assistantId: A, result: { outcome: 'completed' } });
+    }
+    const coding = codingOf(routeAndRead(task.taskId).recommendation);
+    expect(coding.score).toBeCloseTo(0.4, 6);
+    expect(coding.score!).toBeLessThan(0.7);
+  });
+});
+
+describe('the hard-filter audit covers the whole review window', () => {
+  it('fails activation for one old violation behind a thousand clean decisions', async () => {
+    await boot([benchmarkSource([{ provider: 'fake', modelId: FAKE_MODEL, coding: 0.8 }])], undefined);
+    await built.modelCatalog.refresh();
+    fillCodingCohort();
+    activateGates();
+    const task = built.tasks.create({ goal: 'Implement the parser' });
+
+    const record = (recommendation: unknown, at: string) =>
+      db.prepare('INSERT INTO routing_decisions (task_id, chosen_assistant_id, explanation, at) VALUES (?, ?, ?, ?)')
+        .run(task.taskId, A, JSON.stringify({ candidates: [], ruleFired: 'audited', modelRecommendation: recommendation }), at);
+
+    // One recommendation that named a candidate which had failed a hard filter.
+    record({
+      schemaVersion: 2, mode: 'shadow', recommended: `${A}/${FAKE_MODEL}`,
+      candidates: [{ label: `${A}/${FAKE_MODEL}`, assistantId: A, selector: FAKE_MODEL, eligible: false, filterFailures: ['auth expired'], advisories: [], dimensions: [], evidenceCoverage: 0 }],
+    }, new Date(clock.getTime() - 7 * 86_400_000).toISOString());
+
+    // …then far more than any plausible page of clean ones after it.
+    const clean = {
+      schemaVersion: 2, mode: 'shadow', recommended: `${A}/${FAKE_MODEL}`,
+      candidates: [{ label: `${A}/${FAKE_MODEL}`, assistantId: A, selector: FAKE_MODEL, eligible: true, filterFailures: [], advisories: [], dimensions: [], evidenceCoverage: 1 }],
+    };
+    db.transaction(() => {
+      for (let i = 0; i < 1200; i += 1) record(clean, new Date(clock.getTime() - 3 * 86_400_000 + i).toISOString());
+    })();
+
+    expect(countHardFilterViolations(db)).toBe(1);
+    const { recommendation } = routeAndRead(task.taskId);
+    const gate = recommendation.activation.gates.find((g) => g.name === 'no-filter-violations')!;
+    expect(gate.passed).toBe(false);
+    expect(recommendation.activation.active).toBe(false);
+    expect(recommendation.mode).toBe('shadow');
+  });
+
+  it('passes when every recorded recommendation named an eligible candidate', async () => {
+    await boot([benchmarkSource([{ provider: 'fake', modelId: FAKE_MODEL, coding: 0.8 }])], undefined);
+    await built.modelCatalog.refresh();
+    fillCodingCohort();
+    activateGates();
+    const task = built.tasks.create({ goal: 'Implement the parser' });
+    expect(countHardFilterViolations(db)).toBe(0);
+    expect(routeAndRead(task.taskId).recommendation.activation.gates.find((g) => g.name === 'no-filter-violations')?.passed).toBe(true);
   });
 });

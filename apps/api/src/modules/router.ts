@@ -188,16 +188,19 @@ function latestQuota(
 /**
  * Never let model intelligence break routing. A catalog read, a cohort query or
  * a normalization bug must degrade to "no recommendation", not to a failed
- * dispatch — routing is local-first and does not depend on this (I-M3).
+ * dispatch — routing is local-first and does not depend on this (I-M3). That
+ * holds in applied mode too: no recommendation means the request is
+ * materialized exactly as it was before K13 existed.
  */
-function shadowRecommendation(
+function modelRecommendation(
   deps: { db: Db; config: ResolvedConfig; registry: Registry; now?: () => Date },
   catalog: ModelCatalogService,
   intent: TaskIntent,
   candidates: RoutingExplanation['candidates'],
+  chosenAssistantId: AssistantId | undefined,
 ): ModelRecommendation | undefined {
   try {
-    return recommendModel({ db: deps.db, config: deps.config, registry: deps.registry, catalog, ...(deps.now ? { now: deps.now } : {}) }, intent, candidates);
+    return recommendModel({ db: deps.db, config: deps.config, registry: deps.registry, catalog, ...(deps.now ? { now: deps.now } : {}) }, intent, candidates, chosenAssistantId);
   } catch {
     return undefined;
   }
@@ -267,16 +270,19 @@ export function routeTask(
     cooldowns: new Map(), scores, projections: new Map(deps.registry.list().map(a => [a.id, new QuotaProjection(deps.db, deps.now).for(a.id, a.manifestParsed)])), userOverride: options.override ?? intent.overrides?.assistantId,
     preferSame: continuation?.previousAssistantId as AssistantId | undefined,
   }, candidates);
-  // K13 SHADOW. Computed AFTER the assistant decision and folded into the same
+  // K13. Computed AFTER the assistant decision and folded into the same
   // explanation object — it reads `base.candidates` (the router's own hard-filter
-  // verdict) and writes nothing back. `base.chosen`, `ExecutionRequest.model`
-  // and `RunSpec.model` are untouched by construction: this value is only ever
-  // read out of the persisted explanation (CR-33).
-  const modelRecommendation = deps.catalog
-    ? shadowRecommendation(deps, deps.catalog, intent, base.candidates)
+  // verdict) and `base.chosen`, and writes neither back. The assistant decision
+  // is never revisited. In shadow the recommendation is inert; when every
+  // activation gate passes it commits a selector HERE, in this durable routing
+  // decision, and request materialization projects that commitment into
+  // `ExecutionRequest.model` — still the only authority, still the only writer
+  // of `RunSpec.model` (CR-33).
+  const recommendation = deps.catalog
+    ? modelRecommendation(deps, deps.catalog, intent, base.candidates, base.chosen)
     : undefined;
   const explanation: RoutingExplanation & { origin: string } = { ...base, origin,
-    ...(modelRecommendation ? { modelRecommendation } : {}),
+    ...(recommendation ? { modelRecommendation: recommendation } : {}),
     ...(dispatch ? { dispatchId: options.dispatchId, continuation: dispatch.checkpoint_id ? { kind: 'checkpoint', checkpointId: dispatch.checkpoint_id } : { kind: 'fresh' } } : {}),
     ...(continuation ? { contextContinuation: {
       ...continuation,

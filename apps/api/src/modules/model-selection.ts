@@ -13,6 +13,7 @@ import type {
   CandidateIdentity,
   DimensionEvidence,
   DimensionPrior,
+  DimensionTelemetry,
   ModelCandidateInput,
   ModelCatalogEntry,
   ModelRecommendation,
@@ -86,6 +87,8 @@ export function recommendModel(
   deps: RecommendModelDeps,
   intent: TaskIntent,
   assistantFilters: RoutingExplanation['candidates'],
+  /** The assistant this same routing decision chose, if any — see `SelectModelInput`. */
+  chosenAssistantId?: AssistantId,
 ): ModelRecommendation {
   const now = deps.now ?? (() => new Date());
   const at = now();
@@ -158,7 +161,12 @@ export function recommendModel(
         identity,
         filterFailures,
         advisories,
-        evidence: gatherEvidence(entry, identity, cohorts),
+        evidence: gatherEvidence(entry, identity, cohorts, {
+          servingProvider: assistant.provider,
+          ...(deps.config.assistants[assistant.id]?.accountKind
+            ? { accountKind: deps.config.assistants[assistant.id]!.accountKind! }
+            : {}),
+        }),
       });
     }
   }
@@ -185,6 +193,7 @@ export function recommendModel(
     ...(override ? { userOverride: { selector: override, ...(intent.overrides?.assistantId ? { assistantId: intent.overrides.assistantId } : {}) } } : {}),
     activation: activationGate(deps, candidates, cohorts, at),
     ...(intent.overrides?.model ? { requestedModelSelector: intent.overrides.model } : {}),
+    ...(chosenAssistantId ? { chosenAssistantId } : {}),
   });
 }
 
@@ -280,6 +289,7 @@ function gatherEvidence(
   entry: ModelCatalogEntry | undefined,
   identity: CandidateIdentity,
   cohorts: Map<string, ModelCohort>,
+  account: AccountIdentity,
 ): Partial<Record<TaskDimension, DimensionEvidence>> {
   const evidence: Partial<Record<TaskDimension, DimensionEvidence>> = {};
   for (const dimension of TASK_DIMENSIONS) evidence[dimension] = { priors: [] };
@@ -302,20 +312,90 @@ function gatherEvidence(
         raw: prior.raw,
       });
     }
-    const costPrior = priceEvidencePrior(entry);
+    const costPrior = priceEvidencePrior(entry, account);
     if (costPrior) evidence.cost!.priors.push(costPrior);
   }
 
   const cohort = cohorts.get(identity.resolvedModelKey);
   if (cohort) {
     const coding = codingTelemetry(cohort);
-    if (coding) evidence.coding!.telemetry = coding;
+    if ('telemetry' in coding) evidence.coding!.telemetry = coding.telemetry;
+    else if (coding.withheld) evidence.coding!.telemetryWithheld = coding.withheld;
     const speed = speedTelemetry(cohort);
     if (speed) evidence.speed!.telemetry = speed;
-    const cost = costTelemetry(cohort, entry);
+    const cost = costTelemetry(cohort, entry, account);
     if (cost) evidence.cost!.telemetry = cost;
+    else if (cohort.completedUsageRuns > 0) {
+      evidence.cost!.telemetryWithheld =
+        'own completed-task usage exists but no applicable K7 price row proves what it cost';
+    }
   }
   return evidence;
+}
+
+/**
+ * Who is actually being billed for this candidate's runs: the provider that
+ * serves it, and the account kind the operator declared for that assistant.
+ * `accountKind` absent = unproven, which is NOT a wildcard.
+ */
+interface AccountIdentity {
+  servingProvider: string;
+  accountKind?: string;
+}
+
+/**
+ * Price applicability (§4.4.5). A tariff is evidence about a specific serving
+ * provider and, usually, a specific kind of account — an Anthropic API price
+ * says nothing about what a Claude subscription run costs. So a row is usable
+ * only when it PROVES it applies here:
+ *
+ *  - `appliesTo` absent → applicability was never established. Not applicable.
+ *  - `appliesTo.servingProvider` must equal the provider serving this candidate.
+ *  - a row that declares an `accountKind` needs our account kind to be proven
+ *    and equal; unknown account kind never matches an account-specific tariff.
+ *
+ * No applicable row is a valid outcome: the cost dimension then has no prior and
+ * no telemetry, which is the honest answer, not a defect.
+ */
+export function priceApplicability(
+  price: { appliesTo?: { servingProvider: string; accountKind?: string } },
+  account: AccountIdentity,
+): { applicable: boolean; reason: string } {
+  const appliesTo = price.appliesTo;
+  if (!appliesTo) {
+    return { applicable: false, reason: 'the price row declares no appliesTo, so its applicability is not established' };
+  }
+  if (appliesTo.servingProvider !== account.servingProvider) {
+    return {
+      applicable: false,
+      reason: `the price applies to serving provider ${appliesTo.servingProvider}, not ${account.servingProvider}`,
+    };
+  }
+  if (appliesTo.accountKind !== undefined) {
+    if (account.accountKind === undefined) {
+      return {
+        applicable: false,
+        reason: `the price applies only to ${appliesTo.accountKind} accounts and this workspace has not proven its account kind`,
+      };
+    }
+    if (appliesTo.accountKind !== account.accountKind) {
+      return {
+        applicable: false,
+        reason: `the price applies to ${appliesTo.accountKind} accounts, not ${account.accountKind}`,
+      };
+    }
+  }
+  return {
+    applicable: true,
+    reason: `applies to ${appliesTo.servingProvider}${appliesTo.accountKind ? `/${appliesTo.accountKind}` : ''}`,
+  };
+}
+
+/** Non-expired price rows proven to apply to this candidate's account, cheapest first. */
+function applicablePrices(entry: ModelCatalogEntry, account: AccountIdentity) {
+  return entry.pricing
+    .filter((p) => p.freshness !== 'expired' && priceApplicability(p, account).applicable)
+    .sort((a, b) => blendedPrice(a) - blendedPrice(b) || b.pricingVersion.localeCompare(a.pricingVersion));
 }
 
 /**
@@ -323,13 +403,10 @@ function gatherEvidence(
  * Analysis also publishes prices; K8 deliberately does not read them and K13
  * deliberately does not accept them — a benchmark is never price authority.
  */
-function priceEvidencePrior(entry: ModelCatalogEntry): DimensionPrior | undefined {
-  // Deterministic pick: cheapest applicable non-expired row, then pricing
+function priceEvidencePrior(entry: ModelCatalogEntry, account: AccountIdentity): DimensionPrior | undefined {
+  // Deterministic pick: cheapest APPLICABLE non-expired row, then pricing
   // version, so two rows for the same model cannot flip the answer run to run.
-  const usable = entry.pricing
-    .filter((p) => p.freshness !== 'expired')
-    .sort((a, b) => blendedPrice(a) - blendedPrice(b) || b.pricingVersion.localeCompare(a.pricingVersion));
-  const price = usable[0];
+  const price = applicablePrices(entry, account)[0];
   if (!price) return undefined;
   const perMtok = blendedPrice(price);
   const normalized = normalizeBenchmark({ value: perMtok, direction: 'lower', scaleMax: COST_SCALE_USD_PER_MTOK });
@@ -357,21 +434,34 @@ function blendedPrice(price: { inputPerMtok: number; outputPerMtok: number }): n
 }
 
 /**
- * `success × test-pass × verification-pass` over the cohort — but only over the
- * factors that exist. A missing factor is NOT multiplied in as 1.0 (that would
- * silently promote a model nobody ran tests on); the metric string names exactly
- * which factors the number contains.
+ * The canonical coding metric is `success × test-pass × verification-pass`
+ * (kernel-services §4.4.3) and there is no defined partial form of it. Omitting
+ * an absent factor from the product is arithmetically identical to asserting it
+ * is 1.0 — a perfect test-pass rate for a cohort that never ran a test — so a
+ * cohort missing any factor yields NO coding telemetry and names what is
+ * missing. The prior then carries the dimension alone, which is exactly what a
+ * prior is for.
  */
-function codingTelemetry(cohort: ModelCohort): DimensionEvidence['telemetry'] {
-  if (cohort.reliabilityRuns === 0) return undefined;
-  const factors: Array<[string, number]> = [['success', cohort.successRate]];
-  if (cohort.testPassRate !== undefined) factors.push(['test-pass', cohort.testPassRate]);
-  if (cohort.verificationPassRate !== undefined) factors.push(['verification-pass', cohort.verificationPassRate]);
+function codingTelemetry(cohort: ModelCohort): { telemetry: DimensionTelemetry } | { withheld?: string } {
+  if (cohort.reliabilityRuns === 0) return {};
+  const missing = [
+    ...(cohort.testPassRate === undefined ? ['test-pass'] : []),
+    ...(cohort.verificationPassRate === undefined ? ['verification-pass'] : []),
+  ];
+  if (missing.length > 0) {
+    return {
+      withheld:
+        `no coding telemetry: the canonical metric is success × test-pass × verification-pass and this cohort ` +
+        `(${cohort.reliabilityRuns} run(s)) has no ${missing.join(' or ')} evidence — a missing factor is never treated as 1.0`,
+    };
+  }
   return {
-    value: factors.reduce((product, [, v]) => product * v, 1),
-    n: cohort.reliabilityRuns,
-    metric: factors.map(([name]) => name).join(' × '),
-    cohort: cohortKey(cohort),
+    telemetry: {
+      value: cohort.successRate * cohort.testPassRate! * cohort.verificationPassRate!,
+      n: cohort.reliabilityRuns,
+      metric: 'success × test-pass × verification-pass',
+      cohort: cohortKey(cohort),
+    },
   };
 }
 
@@ -398,14 +488,24 @@ function speedTelemetry(cohort: ModelCohort): DimensionEvidence['telemetry'] {
 }
 
 /**
- * Median cost of a comparable completed task: this cohort's own median token
- * usage priced with applicable K7 price evidence. With no applicable price row
- * there is no cost telemetry — an unpriced subscription run has no cost we can
+ * Median cost per COMPLETED task: the cohort's own median usage over runs that
+ * actually completed, priced with a K7 row proven applicable to this account.
+ *
+ * The completed-only sample is the point of the metric. A failed, timed-out or
+ * cancelled run burns tokens without delivering a task, and a context-yield
+ * predecessor is half of one task whose successor is billed again — averaging
+ * any of them in would answer a different question than "what does this model
+ * cost to finish a task like this?". With no applicable price row there is no
+ * cost telemetry at all: an unpriced subscription run has no cost we can
  * honestly state (§4.4.5).
  */
-function costTelemetry(cohort: ModelCohort, entry: ModelCatalogEntry | undefined): DimensionEvidence['telemetry'] {
-  if (cohort.usageRuns === 0 || !entry) return undefined;
-  const price = entry.pricing.filter((p) => p.freshness !== 'expired')[0];
+function costTelemetry(
+  cohort: ModelCohort,
+  entry: ModelCatalogEntry | undefined,
+  account: AccountIdentity,
+): DimensionEvidence['telemetry'] {
+  if (cohort.completedUsageRuns === 0 || !entry) return undefined;
+  const price = applicablePrices(entry, account)[0];
   if (!price) return undefined;
   const inputTokens = cohort.medianInputTokens ?? 0;
   const outputTokens = cohort.medianOutputTokens ?? 0;
@@ -415,8 +515,8 @@ function costTelemetry(cohort: ModelCohort, entry: ModelCatalogEntry | undefined
   if (value === undefined) return undefined;
   return {
     value,
-    n: cohort.usageRuns,
-    metric: `median cost per completed task ($${usd.toFixed(4)} at pricing ${price.pricingVersion})`,
+    n: cohort.completedUsageRuns,
+    metric: `median cost per completed task ($${usd.toFixed(4)} at pricing ${price.pricingVersion}, ${priceApplicability(price, account).reason})`,
     cohort: cohortKey(cohort),
   };
 }
@@ -450,7 +550,7 @@ function activationGate(
     return (
       cohort.reliabilityRuns >= DIMENSION_K.coding ||
       cohort.outputRateRuns >= DIMENSION_K.speed ||
-      cohort.usageRuns >= DIMENSION_K.cost
+      cohort.completedUsageRuns >= DIMENSION_K.cost
     );
   }).length;
 
@@ -467,7 +567,9 @@ function activationGate(
     ...(shadowLog?.since ? { shadowLogSince: shadowLog.since } : {}),
     ...(selection.shadowReviewedAt ? { shadowReviewedAt: selection.shadowReviewedAt } : {}),
     ...(selection.egressVerifiedAt ? { egressVerifiedAt: selection.egressVerifiedAt } : {}),
-    hardFilterViolations: countHardFilterViolations(deps.db),
+    // The audit covers the WHOLE shadow interval the gate is about, from the
+    // first recorded recommendation to now — never a recent slice of it.
+    hardFilterViolations: countHardFilterViolations(deps.db, shadowLog?.since ?? undefined),
     now: at,
   });
 }
@@ -477,22 +579,27 @@ function activationGate(
  * recommendation naming a candidate that had failed a hard filter. It is
  * impossible by construction (`selectModel` scores only eligible candidates),
  * which is exactly why the gate checks the record rather than trusting the code.
+ *
+ * EVERY recommendation in the interval is audited. There is no row cap: a cap
+ * makes the gate lossy rather than fail-closed — a violation would silently age
+ * out of the window it is supposed to disqualify as soon as enough clean
+ * decisions were recorded after it. Efficiency comes from doing the whole check
+ * in SQL (`json_each` over each recommendation's candidates, no row leaves the
+ * database) rather than from looking at fewer rows.
  */
-export function countHardFilterViolations(db: Db, limit = 1000): number {
-  const rows = db
+export function countHardFilterViolations(db: Db, since?: string): number {
+  const row = db
     .prepare(
-      `SELECT explanation FROM routing_decisions
-        WHERE json_extract(explanation, '$.modelRecommendation') IS NOT NULL
-        ORDER BY id DESC LIMIT ?`,
+      `SELECT COUNT(*) AS violations FROM routing_decisions rd
+        WHERE json_extract(rd.explanation, '$.modelRecommendation.recommended') IS NOT NULL
+          AND (? IS NULL OR rd.at >= ?)
+          AND NOT EXISTS (
+            SELECT 1 FROM json_each(rd.explanation, '$.modelRecommendation.candidates') c
+             WHERE json_extract(c.value, '$.label')
+                   = json_extract(rd.explanation, '$.modelRecommendation.recommended')
+               AND json_array_length(json_extract(c.value, '$.filterFailures')) = 0
+          )`,
     )
-    .all(limit) as Array<{ explanation: string }>;
-  let violations = 0;
-  for (const row of rows) {
-    const recommendation = (JSON.parse(row.explanation) as { modelRecommendation?: ModelRecommendation })
-      .modelRecommendation;
-    if (!recommendation?.recommended) continue;
-    const named = recommendation.candidates.find((c) => c.label === recommendation.recommended);
-    if (!named || named.filterFailures.length > 0) violations += 1;
-  }
-  return violations;
+    .get(since ?? null, since ?? null) as { violations: number };
+  return row.violations;
 }

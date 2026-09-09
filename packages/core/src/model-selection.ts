@@ -14,6 +14,12 @@ import type { TaskIntent } from "./scheduler.js";
  * file writes `ExecutionRequest.model` or `RunSpec.model`; CR-33 keeps
  * `ExecutionRequest.model` the single requested-selector authority, and a
  * recommendation only ever becomes one through an accepted routing decision.
+ *
+ * `mode: "applied"` is therefore a statement about execution, not about the
+ * gate: it is written ONLY when this decision commits a selector that the
+ * immutable execution request will actually carry (`applied`). An active gate
+ * whose winner cannot be committed — no winner, a different assistant was
+ * chosen, or the operator named a model — stays SHADOW and says why.
  */
 
 /** The three dimensions revision 1 can honestly score (§4.4.3). */
@@ -101,6 +107,13 @@ export interface DimensionEvidence {
   /** Every prior row the caller found, including expired and mismatched ones. */
   priors: DimensionPrior[];
   telemetry?: DimensionTelemetry;
+  /**
+   * Set when own runs EXIST but cannot produce this dimension's canonical
+   * metric — a coding cohort with no test evidence, say. It names the missing
+   * factors so the record says why the prior is carrying the dimension alone,
+   * instead of a partial product masquerading as the canonical metric.
+   */
+  telemetryWithheld?: string;
 }
 
 export interface ModelCandidateInput {
@@ -153,6 +166,8 @@ export interface DimensionScore {
   };
   /** Prior rows the caller offered that selection refused, and why. */
   excludedPriors: Array<{ source: string; reason: string }>;
+  /** Own runs exist but the canonical metric is unavailable — which factors are missing. */
+  telemetryWithheld?: string;
   /** `w·telemetry + (1−w)·prior`, or `w·telemetry` with no prior. */
   score?: number;
   /** Set when the dimension could not produce a number at all. */
@@ -176,8 +191,11 @@ export interface CandidateScore {
 }
 
 export interface ModelRecommendation {
-  schemaVersion: 1;
-  /** SHADOW is the only value this revision ever writes (§4.4.3, K13 gate). */
+  schemaVersion: 2;
+  /**
+   * `applied` ⇔ `applied` below is present ⇔ the execution request built from
+   * this decision carries that selector. Never a synonym for "the gate passed".
+   */
   mode: "shadow" | "applied";
   classification: TaskClassification;
   candidates: CandidateScore[];
@@ -193,10 +211,23 @@ export interface ModelRecommendation {
   /** Why this is shadow — every gate, so "why not active" is readable. */
   activation: ActivationGateResult;
   /**
-   * The requested selector the execution path will actually use, copied here so
-   * an audit can see that the recommendation changed nothing (CR-33).
+   * The selector THIS decision commits. Present only in `applied` mode, and the
+   * routing decision is its durable home: request materialization projects it
+   * into `ExecutionRequest.model`, which the existing bridge copies into
+   * `RunSpec.model`. Nothing else may write either (CR-33).
    */
-  executionUnchanged: { requestedModelSelector?: string; authority: "ExecutionRequest.model" };
+  applied?: { assistantId: AssistantId; selector: string; label: string };
+  /**
+   * What the execution path will request for this decision and who decided it,
+   * recorded so an audit can read the outcome — unchanged, the operator's
+   * model, or K13's — from the record alone.
+   */
+  execution: {
+    authority: "ExecutionRequest.model";
+    requestedModelSelector?: string;
+    decidedBy: "unchanged" | "operator-override" | "k13-recommendation";
+    detail: string;
+  };
 }
 
 // --- classification ---------------------------------------------------------
@@ -372,6 +403,7 @@ export function scoreDimension(dimension: TaskDimension, evidence: DimensionEvid
     n,
     weight,
     excludedPriors: excluded,
+    ...(evidence?.telemetryWithheld ? { telemetryWithheld: evidence.telemetryWithheld } : {}),
     ...(telemetry ? { telemetry: { value: telemetry.value, metric: telemetry.metric, cohort: telemetry.cohort } } : {}),
     ...(chosen
       ? {
@@ -418,16 +450,22 @@ export interface SelectModelInput {
   /** The operator's explicit model intent, already applied as a filter upstream. */
   userOverride?: { selector: string; assistantId?: string };
   activation: ActivationGateResult;
-  /** What the execution path will actually request — recorded, never written. */
+  /** What execution would request WITHOUT K13 — the operator's own selector, if any. */
   requestedModelSelector?: string;
+  /**
+   * The assistant this same routing decision chose. A model recommendation may
+   * only be committed onto the run that will actually happen, so a winner on
+   * any other assistant is advisory however good its score.
+   */
+  chosenAssistantId?: AssistantId;
 }
 
 /**
- * Compute a model recommendation. ADVISORY: the returned object is persisted
- * inside the routing explanation and changes nothing about execution while
- * `activation.active` is false — which is the shipped default (§11 of the K13
- * brief). Hard filters have already run; this function never revisits them and
- * cannot make an ineligible candidate eligible.
+ * Compute a model recommendation. Advisory while `activation.active` is false —
+ * the shipped default (§11 of the K13 brief) — and, when every gate passes, the
+ * durable commitment the execution request is materialized from. Hard filters
+ * have already run; this function never revisits them and cannot make an
+ * ineligible candidate eligible.
  */
 export function selectModel(input: SelectModelInput): ModelRecommendation {
   const { classification } = input;
@@ -476,9 +514,36 @@ export function selectModel(input: SelectModelInput): ModelRecommendation {
       ? "no candidate has any usable evidence — nothing is recommended"
       : "no eligible candidate";
 
+  // The commitment, and the ONLY thing that makes this decision `applied`. An
+  // explicit operator model is higher-priority hard intent, so K13 never
+  // commits over it; and a winner on an assistant this decision did not choose
+  // describes a run that will not happen.
+  const applied =
+    input.activation.active && winner && !input.userOverride && winner.assistantId === input.chosenAssistantId
+      ? { assistantId: winner.assistantId, selector: winner.selector, label: winner.label }
+      : undefined;
+  const execution = {
+    authority: "ExecutionRequest.model" as const,
+    ...(applied
+      ? { requestedModelSelector: applied.selector }
+      : input.requestedModelSelector
+        ? { requestedModelSelector: input.requestedModelSelector }
+        : {}),
+    decidedBy: applied ? ("k13-recommendation" as const) : input.userOverride ? ("operator-override" as const) : ("unchanged" as const),
+    detail: applied
+      ? `every activation gate passed: this routing decision commits ${applied.label}, and request materialization projects it into ExecutionRequest.model`
+      : input.userOverride
+        ? "the operator named a model; that intent outranks any recommendation and execution requests it unchanged"
+        : input.activation.active
+          ? winner
+            ? `the winner ${winner.label} is not on the assistant this decision chose${input.chosenAssistantId ? ` (${input.chosenAssistantId})` : ""}, so it stays advisory`
+            : "no candidate could be scored, so there is nothing to commit"
+          : "activation is off: execution is untouched and ExecutionRequest.model remains whatever the operator asked for",
+  };
+
   return {
-    schemaVersion: 1,
-    mode: input.activation.active ? "applied" : "shadow",
+    schemaVersion: 2,
+    mode: applied ? "applied" : "shadow",
     classification,
     candidates,
     ...(winner ? { recommended: winner.label } : {}),
@@ -507,10 +572,8 @@ export function selectModel(input: SelectModelInput): ModelRecommendation {
         }
       : {}),
     activation: input.activation,
-    executionUnchanged: {
-      ...(input.requestedModelSelector ? { requestedModelSelector: input.requestedModelSelector } : {}),
-      authority: "ExecutionRequest.model",
-    },
+    ...(applied ? { applied } : {}),
+    execution,
   };
 }
 

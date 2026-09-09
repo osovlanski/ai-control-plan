@@ -8,7 +8,7 @@ disagree.
 **Automatic model selection is NOT enabled by this PR and is not ready to be.**
 K13 ships in **shadow**: a recommendation is computed, fully sourced and
 persisted on every routing decision, and nothing about execution changes. The
-activation mechanism is implemented and fail-closed; the gates it requires
+activation path is implemented end to end and fail-closed; the gates it requires
 cannot hold at merge time (see §9).
 
 ```
@@ -19,9 +19,18 @@ TaskIntent
   → candidate identity          (proof, or priorMissing)
   → evidence                    (K8 priors + K7 price evidence + own cohorts)
   → blend                       score_d = w(n)·telemetry + (1−w(n))·prior
-  → routing_decisions.explanation.modelRecommendation      ← SHADOW, terminal
-      ✗ ExecutionRequest.model   ✗ RunSpec.model   ✗ chosen assistant
+  → routing_decisions.explanation.modelRecommendation
+
+        SHADOW (the shipped default)          APPLIED (every gate green)
+        ✗ ExecutionRequest.model              recommendation.applied
+        ✗ RunSpec.model                         → ExecutionRequest.model
+        ✗ chosen assistant                        → RunSpec.model (the one bridge)
+                                              ✗ chosen assistant
 ```
+
+`mode: "applied"` is a statement about execution, not about the gate: it is
+written only when this decision commits a selector the request actually
+carries.
 
 ## 1. Candidate identity — the hard precondition
 
@@ -114,6 +123,27 @@ prior is a fixed absolute rescale of a K7 priced row at a fixed reference mix
 against `COST_SCALE_USD_PER_MTOK`. The underlying row's own provenance rides
 along; only the `source` label and `normalizationVersion` are K13's.
 
+### 4.1 Price applicability is proven, never assumed
+
+A tariff is evidence about a specific serving provider and usually a specific
+kind of account, so `priceApplicability` (`apps/api/src/modules/model-selection.ts`)
+gates every price row — the cost prior **and** the cost telemetry read the same
+predicate:
+
+| Price row | Verdict |
+|---|---|
+| `appliesTo` absent | **not applicable** — applicability was never established, and absence is not a wildcard |
+| `appliesTo.servingProvider` ≠ the provider serving this candidate | **not applicable** |
+| row declares an `accountKind` and ours is unproven | **not applicable** |
+| row declares an `accountKind` ≠ ours | **not applicable** |
+| provider matches and the row declares no `accountKind`, or declares ours | applicable |
+
+Account identity is proven by one thing only: the operator's own
+`assistants.<id>.accountKind` in workspace config (`local-config` evidence).
+With it unset, an Anthropic **API** tariff can never price a Claude
+**subscription** run. When nothing applies, the cost prior and the cost
+telemetry are both **missing** — a valid and common outcome, and the honest one.
+
 - **Expired** evidence stays readable and visible in the explanation
   (`excludedPriors`), and is never selected.
 - **Missing** prior is explicit: `priorMissing:<dimension>`. No neutral 0.5 is
@@ -134,9 +164,25 @@ along; only the `source` label and `normalizationVersion` are K13's.
 
 | Dimension | Own metric | `n` |
 |---|---|---|
-| coding | `success × test-pass × verification-pass`, over the factors that **exist** (a missing factor is not multiplied in as 1.0; the metric string names what the number contains) | reliability sample count |
+| coding | `success × test-pass × verification-pass` — the canonical metric, **only** when all three factors exist | reliability sample count |
 | speed | median own output tokens/s over run wall-clock, normalized on the **same** absolute scale as the AA speed prior | runs reporting output tokens and a duration |
-| cost | median cost per completed task = cohort median usage × applicable K7 price | runs with known usage |
+| cost | median cost per **completed** task = median usage of completed runs × an applicable K7 price | completed runs with known usage |
+
+**A missing coding factor is not a perfect factor.** kernel-services §4.4.3
+defines the coding metric as the product of all three rates and defines no
+partial form of it. Omitting an absent factor from the product is arithmetically
+identical to asserting it is `1.0` — a perfect test-pass rate for a cohort that
+never ran a test — so a cohort missing any factor emits **no** coding telemetry
+and records `telemetryWithheld` naming the missing factors. The prior then
+carries the dimension alone, which is what a prior is for. Partial evidence can
+therefore never improve a candidate.
+
+**Cost and speed have deliberately different eligibility.** A failed, timed-out
+or cancelled run, and a context-yield predecessor whose successor finishes the
+work, all burn tokens without completing a task, so none of them enter the
+cost-per-completed-task sample (`completedUsageRuns`) — the successor that
+actually completes does. The same runs still measured a real generation rate, so
+they remain in the speed sample.
 
 **Known limitation, recorded rather than hidden:** our speed number is a
 whole-run wall-clock rate (it includes tool use), which is not the provider-side
@@ -187,16 +233,29 @@ freshness, raw metric), the telemetry (value, metric, cohort key), `n`, `k`,
 `weight`, blended score, excluded priors and missing-evidence flags, plus the
 final recommendation, tie-break reason and the full activation gate.
 
-It also carries `executionUnchanged: { requestedModelSelector, authority:
-"ExecutionRequest.model" }` so an audit can see, from the record alone, that
-execution was untouched.
+It also carries `execution: { requestedModelSelector, authority:
+"ExecutionRequest.model", decidedBy, detail }` so an audit can read the outcome
+from the record alone: `unchanged`, `operator-override`, or `k13-recommendation`.
 
-**CR-33 is preserved.** `ExecutionRequest.model` remains the sole requested
-selector; `Orchestrator.requestedModel` still reads `intent.overrides.model` and
-`buildExecutionRequest` remains the only place it becomes `RunSpec.model`. K13
-creates no second writer. When activation is eventually allowed, the path is
-recommendation → accepted routing decision → immutable `ExecutionRequest.model`
-→ existing bridge → `RunSpec.model`; no layer writes `RunSpec.model` on its own.
+**CR-33 is preserved, in both modes.** `ExecutionRequest.model` remains the sole
+requested selector and `buildExecutionRequest` remains the only place it becomes
+`RunSpec.model`. `Orchestrator.requestedModel` reads, in order:
+
+1. `intent.overrides.model` — the operator's hard intent, which outranks K13;
+2. `modelRecommendation.applied.selector` **read back from the committed routing
+   decision** this dispatch already owns.
+
+The routing decision is the durable home of the commitment; materialization only
+projects it. Nothing recomputes a selection at materialization time, so a
+recovery of an already committed dispatch re-materializes the same request even
+if config, telemetry or the catalog changed in between (tested). A new dispatch
+recomputes normally. Failover and context continuation are untouched: each is a
+new routing decision with its own recommendation.
+
+A recommendation is committed only when **all** of these hold: every activation
+gate passed, a candidate was scored, the winner is on the assistant this same
+decision chose, and the operator named no model. Otherwise the decision stays
+SHADOW and `execution.detail` says which of those failed.
 
 Regressions: the routing decision (`chosen`, `ruleFired`, everything but the new
 field) is asserted identical with and without the recommendation, in both
@@ -217,11 +276,20 @@ environment-variable override**. `evaluateActivationGate` requires **all** of:
 | `telemetry` | ≥ 2 eligible candidates with a resolved per-model cohort at or above `k` on some dimension |
 | `shadow-week` | the persisted shadow log spans ≥ 7 days |
 | `shadow-reviewed` | `models.selection.shadowReviewedAt` is set, under 30 days old, and was signed **after** the log already spanned a week |
-| `no-filter-violations` | no persisted recommendation ever named a hard-filtered candidate (audited from the record, not assumed from the code) |
+| `no-filter-violations` | no persisted recommendation in the whole shadow interval ever named a hard-filtered candidate (audited from the record, not assumed from the code) |
 | `egress-verified` | `models.selection.egressVerifiedAt` is set and under 30 days old |
 
 Absent, unparseable or future timestamps **fail**; they never pass. The two
 timestamps are operator/CI **attestations**, which is exactly why they expire.
+
+`countHardFilterViolations` audits **every** recommendation from the first
+recorded one to now, with no row cap: a cap makes the gate lossy rather than
+fail-closed, because a violation would age out of the window it is supposed to
+disqualify as soon as enough clean decisions followed it. Efficiency comes from
+doing the whole check in one SQL pass (`json_each` over each recommendation's
+candidates, no row leaving the database), not from looking at fewer rows. A
+regression plants one violation behind 1200 later clean decisions and asserts
+activation still fails.
 
 **Why activation is off, and must be.** No week of K13 shadow evidence exists —
 the feature did not exist a week ago — and `harness_major` was only introduced by
@@ -233,9 +301,11 @@ alone and the seven-day boundary at ±1 ms.
 
 ## 10. Rollback
 
-Setting `models.selection.enabled: false` returns execution to assistant-only
-semantics on the next routing decision — it is a read of resolved config, not a
-migration. The catalog, benchmark evidence, telemetry and every previously
+Setting `models.selection.enabled: false` returns **new** dispatches to
+assistant-only semantics on the next routing decision — it is a read of resolved
+config, not a migration. A dispatch that already committed a decision keeps it,
+by design: recovery re-materializes what was committed rather than recomputing
+under the new config. The catalog, benchmark evidence, telemetry and every previously
 recorded shadow explanation stay readable. No migration rollback is required;
 migration 022 only adds a nullable column and an index.
 
@@ -246,9 +316,10 @@ The existing Routing/Inspector Decision tab, no redesign. `ModelRecommendationRe
 
 - a heading labelled **SHADOW** or **APPLIED** — never ambiguous;
 - "Would choose `assistant/selector`" (or why nothing is recommended);
-- an explicit "Current execution: **unchanged**" line naming what the run
-  actually requested and that `ExecutionRequest.model` is the only authority —
-  shown only in shadow;
+- an explicit "Current execution" line: **unchanged** in shadow (naming what the
+  run actually requested, plus `execution.detail` — why it was not applied), or
+  **this model** in applied mode; either way naming `ExecutionRequest.model` as
+  the only authority;
 - per dimension: own runs `n` / weight / `k` / metric, and the external prior
   with source, value, freshness, benchmark release, `observedAt` vs
   `publishedAt`, plus any excluded prior and its reason;
@@ -260,18 +331,21 @@ The existing Routing/Inspector Decision tab, no redesign. `ModelRecommendationRe
 
 ## 12. Tests
 
-`packages/core/test/model-intelligence.test.ts` (36) — classification
+`packages/core/test/model-intelligence.test.ts` (40) — classification
 determinism and signal attribution; the `w` table for every `k`; the score
 formula; missing prior; nothing-contributed; expired exclusion; all-expired;
 within-source publishedAt/observedAt tie; pinned primary source; normalization
-mismatch; external evidence cannot bypass a filter; no-evidence case; shadow vs
-applied mode; `executionUnchanged`; telemetry reversing a prior-best ranking and
+mismatch; external evidence cannot bypass a filter; no-evidence case; shadow
+committing nothing; a winner committed onto the chosen assistant; a winner on
+another assistant staying advisory; the operator's model outranking an open
+gate; `execution`; withheld telemetry leaving the prior to carry a dimension;
+telemetry reversing a prior-best ranking and
 failing to when the gap is insufficient; a falling rolling window; user override
 satisfied and unsatisfied; every activation gate failing alone; the fake-clock
 seven-day boundary; the review-signed-too-early case; attestation expiry;
 unparseable and future attestations.
 
-`apps/api/test/router-model.test.ts` (25) — shadow recommendation persisted and
+`apps/api/test/router-model.test.ts` (47) — shadow recommendation persisted and
 round-tripped through `routing_decisions`; disabled assistant; quota exhaustion;
 read-only security policy; unknown capacity advisory; declared minimum window
 excluding unknown capacity; override filtering and truthful failure; the four
@@ -283,10 +357,48 @@ end-to-end blend at `w = 0.5`; execution untouched (routing decision, request an
 gate closed on a fresh workspace and on the config flag alone; and the
 `enabled: false` rollback.
 
+The activation-path and correctness-review regressions in the same file: shadow
+leaving `ExecutionRequest.model` unset; every gate green committing the winner
+into `ExecutionRequest.model` and `RunSpec.model`; an operator override beating
+an open gate; a committed decision materializing unchanged after selection is
+disabled mid-dispatch; new dispatches returning to shadow when the flag is
+cleared; the six price-applicability cases plus the shared predicate; completed,
+failed, cancelled, context-yield-predecessor and successor cost sampling; the
+three coding-factor cases and partial evidence failing to improve a candidate;
+and one hard-filter violation behind 1200 later clean decisions still failing
+activation.
+
 `eval/scenarios/model-shadow.ts` — deterministic, offline, over the real
 composition root.
 
-## 13. Deliberately not done
+## 13. Independent K13 correctness review
+
+Four P1 findings from an independent review, and what changed:
+
+**P1-A — `applied` now means execution used the model.** `mode` was derived from
+the activation gate alone while routing still treated the recommendation as
+advisory, which would have become a lie the moment the one-week gate could pass.
+The winner is now committed in the routing decision (`recommendation.applied`)
+and projected into `ExecutionRequest.model` → `RunSpec.model` through the
+existing bridge; the operator's model still outranks it, a winner on another
+assistant stays advisory, and recovery re-materializes the committed decision
+instead of recomputing one (§8).
+
+**P1-B — price applicability and completed-only cost.** A non-expired price was
+used without checking `appliesTo`; now provider and account kind must both be
+proven, absence of `appliesTo` establishes nothing, and no applicable row means
+the cost dimension is simply missing (§4.1). The cost sample is now completed
+runs only, separated from the speed sample (§5).
+
+**P1-C — missing coding factors are not perfect factors.** The product was taken
+over whichever factors existed, which silently asserted `1.0` for the absent
+ones. The canonical metric is now emitted only with all three factors; otherwise
+the dimension records `telemetryWithheld` and the prior carries it (§5).
+
+**P1-D — the hard-filter audit is complete.** The 1000-row cap is gone; the
+audit covers the entire shadow interval in one SQL pass (§9).
+
+## 14. Deliberately not done
 
 - No second benchmark source.
 - No dimension beyond coding/speed/cost.

@@ -55,6 +55,10 @@ const CLASSIFICATION: TaskClassification = {
 
 const OPEN_GATE = { active: false, gates: [] };
 
+/** A candidate with just enough evidence to be scored and win. */
+const scorable = (selector: string) =>
+  candidate({ selector, evidence: { coding: { priors: [prior({ value: 0.5 })] } } });
+
 describe("classifyTask — deterministic, cheap, explainable", () => {
   it("is a pure function of the intent: the same intent always yields the same weights", () => {
     const intent = { goal: "Fix the failing auth test quickly", profile: "auto" as const, constraints: [] };
@@ -254,15 +258,64 @@ describe("selectModel — external evidence never grants eligibility", () => {
     expect(recommendation.reason).toContain("no candidate has any usable evidence");
   });
 
-  it("is SHADOW unless the activation gate says otherwise", () => {
-    const shadow = selectModel({ classification: CLASSIFICATION, activation: OPEN_GATE, candidates: [] });
+  it("is SHADOW while the gate is closed, and commits nothing", () => {
+    const shadow = selectModel({
+      classification: CLASSIFICATION,
+      activation: OPEN_GATE,
+      candidates: [scorable("a")],
+      chosenAssistantId: "claude" as AssistantId,
+    });
     expect(shadow.mode).toBe("shadow");
+    expect(shadow.applied).toBeUndefined();
+    expect(shadow.execution.decidedBy).toBe("unchanged");
+  });
+
+  it("commits the winner onto the chosen assistant once every gate passes", () => {
     const applied = selectModel({
       classification: CLASSIFICATION,
       activation: { active: true, gates: [] },
-      candidates: [],
+      candidates: [scorable("a")],
+      chosenAssistantId: "claude" as AssistantId,
     });
     expect(applied.mode).toBe("applied");
+    expect(applied.applied).toEqual({ assistantId: "claude", selector: "a", label: "claude/a" });
+    // The commitment IS the selector execution will request (CR-33's input).
+    expect(applied.execution).toEqual({
+      authority: "ExecutionRequest.model",
+      requestedModelSelector: "a",
+      decidedBy: "k13-recommendation",
+      detail: expect.stringContaining("commits claude/a"),
+    });
+  });
+
+  it("stays advisory when the winner is not on the assistant this decision chose", () => {
+    const recommendation = selectModel({
+      classification: CLASSIFICATION,
+      activation: { active: true, gates: [] },
+      candidates: [scorable("a")],
+      chosenAssistantId: "codex" as AssistantId,
+    });
+    expect(recommendation.recommended).toBe("claude/a");
+    expect(recommendation.mode).toBe("shadow");
+    expect(recommendation.applied).toBeUndefined();
+    expect(recommendation.execution.detail).toContain("not on the assistant this decision chose");
+  });
+
+  it("never commits over the operator's own model, however open the gate is", () => {
+    const recommendation = selectModel({
+      classification: CLASSIFICATION,
+      activation: { active: true, gates: [] },
+      candidates: [scorable("a")],
+      chosenAssistantId: "claude" as AssistantId,
+      userOverride: { selector: "b" },
+      requestedModelSelector: "b",
+    });
+    expect(recommendation.mode).toBe("shadow");
+    expect(recommendation.applied).toBeUndefined();
+    expect(recommendation.execution).toMatchObject({
+      requestedModelSelector: "b",
+      decidedBy: "operator-override",
+    });
   });
 
   it("records the requested selector so an audit sees execution was untouched", () => {
@@ -272,10 +325,32 @@ describe("selectModel — external evidence never grants eligibility", () => {
       candidates: [candidate({ selector: "a", evidence: { coding: { priors: [prior({ value: 0.5 })] } } })],
       requestedModelSelector: "b",
     });
-    expect(recommendation.executionUnchanged).toEqual({
+    expect(recommendation.execution).toMatchObject({
       requestedModelSelector: "b",
       authority: "ExecutionRequest.model",
+      decidedBy: "unchanged",
     });
+    expect(recommendation.applied).toBeUndefined();
+  });
+
+  it("carries a withheld-telemetry reason instead of a partial metric", () => {
+    const recommendation = selectModel({
+      classification: CLASSIFICATION,
+      activation: OPEN_GATE,
+      candidates: [
+        candidate({
+          selector: "a",
+          evidence: {
+            coding: { priors: [prior({ value: 0.5 })], telemetryWithheld: "no verification-pass evidence" },
+          },
+        }),
+      ],
+    });
+    const coding = recommendation.candidates[0]!.dimensions.find((d) => d.dimension === "coding")!;
+    expect(coding.telemetry).toBeUndefined();
+    expect(coding.telemetryWithheld).toBe("no verification-pass evidence");
+    // The prior carries the dimension alone — no manufactured neutral value.
+    expect(coding.score).toBe(0.5);
   });
 });
 
