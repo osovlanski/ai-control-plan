@@ -46,6 +46,14 @@ export interface BenchmarkIdentity {
   configuration?: string;
   /** The benchmark's publication date. Absent when the source does not supply one — never faked. */
   publishedAt?: string;
+  /**
+   * The MODEL's own release date per the source (K8: AA `release_date`). This is
+   * NOT the benchmark's publication date (`publishedAt`) — a model can be
+   * re-benchmarked long after it ships. Kept only as diagnostic context.
+   */
+  modelReleaseDate?: string;
+  /** The source's own slug for the model, kept for display. Never a join key (slugs drift). */
+  sourceSlug?: string;
   /** Which dimension this identity scopes, e.g. `coding` or `speed`. */
   category: string;
 }

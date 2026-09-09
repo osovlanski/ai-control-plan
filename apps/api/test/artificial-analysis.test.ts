@@ -16,13 +16,17 @@ import { loadConfig, type ResolvedConfig } from '../src/config.js';
 import { openDb, type Db } from '../src/db/index.js';
 import { buildServer, type BuiltServer } from '../src/server.js';
 import type { CatalogSource } from '../src/modules/model-catalog.js';
+import type { Registry } from '../src/modules/registry.js';
 import {
   createArtificialAnalysisSource,
   parseAaBody,
   CatalogSourceError,
   AA_ENDPOINT,
   AA_SPEED_SCALE_MAX,
+  AA_SPEED_CONFIGURATION,
+  AA_MODEL_MAP,
 } from '../src/modules/artificial-analysis.js';
+import { ModelCatalogService } from '../src/modules/model-catalog.js';
 import { randomBytes } from 'node:crypto';
 import { atomicWriteCredential, credentialPath, readCredential } from '../src/auth/credential-file.js';
 import fixture from './fixtures/artificial-analysis-models.json' with { type: 'json' };
@@ -166,11 +170,14 @@ describe('malformed and partial responses', () => {
 
   it('stores only the valid rows from a partial payload', () => {
     const body = {
-      prompt_options: { prompt_length: 'medium', parallel_queries: 1 },
-      intelligence_index_version: '4.3',
+      intelligence_index_version: 4.1,
       data: [
-        { slug: 'claude-4-1-opus', evaluations: { artificial_analysis_coding_index: 71 }, median_output_tokens_per_second: 88 },
-        { name: 'no slug here', evaluations: { artificial_analysis_coding_index: 99 } },
+        {
+          id: 'claude-4-1-opus', slug: 'claude-4-1-opus', model_creator: { id: 'anthropic' },
+          evaluations: { artificial_analysis_coding_index: 71 },
+          performance: { median_output_tokens_per_second: 88 },
+        },
+        { name: 'no id here', evaluations: { artificial_analysis_coding_index: 99 } },
         'garbage',
         null,
       ],
@@ -179,6 +186,7 @@ describe('malformed and partial responses', () => {
     expect(observations).toHaveLength(1);
     expect(observations[0]!.modelId).toBe('claude-opus-4-1');
     expect(detail).toContain('1 mapped');
+    expect(detail).toContain('1 no-id');
   });
 });
 
@@ -207,7 +215,7 @@ describe('egress boundary (I-M3)', () => {
     await built.modelCatalog.refresh();
     expect(requests).toHaveLength(1);
     const req = requests[0]!;
-    expect(req.url).toBe(AA_ENDPOINT);
+    expect(req.url).toBe(`${AA_ENDPOINT}?page=1`);
     expect(req.method).toBe('GET');
     expect(req.body).toBe('');
     expect(Object.keys(req.headers).map((k) => k.toLowerCase()).sort()).toEqual(['accept', 'x-api-key']);
@@ -224,8 +232,17 @@ describe('egress boundary (I-M3)', () => {
 
 // --- 8-10. model identity mapping -------------------------------------------
 
-describe('model identity mapping (§12, §13)', () => {
-  it('attaches a prior only on an exact AA-slug -> (provider, modelId) match', async () => {
+describe('model identity mapping (§12, §13, P1-B)', () => {
+  const row = (over: Record<string, unknown>) => ({
+    id: 'x', slug: 'x', model_creator: { id: 'anthropic' },
+    evaluations: { artificial_analysis_coding_index: 60 },
+    performance: { median_output_tokens_per_second: 100 },
+    ...over,
+  });
+  const parseRows = (data: unknown[]) =>
+    parseAaBody({ intelligence_index_version: 4.1, data }, '2030-01-01T00:00:00Z', Date.parse('2030-01-01T00:00:00Z'));
+
+  it('attaches a prior only on an exact AA stable-id + creator match', async () => {
     await boot([aaFixtureSource()]);
     await built.modelCatalog.refresh();
     expect(codingOf(built.modelCatalog.list().find((m) => m.modelKey === opusKey))).toBeTruthy();
@@ -241,29 +258,60 @@ describe('model identity mapping (§12, §13)', () => {
     expect(built.modelCatalog.list().filter((m) => m.modelId === 'default').every((m) => m.benchmarkPriors === undefined)).toBe(true);
   });
 
-  it('maps an AA slug to the reviewed (provider, modelId), never to a bare id', () => {
-    const body = {
-      prompt_options: { prompt_length: 'medium', parallel_queries: 1 },
-      intelligence_index_version: '4.3',
-      data: [{ slug: 'claude-4-5-sonnet', evaluations: { artificial_analysis_coding_index: 66 }, median_output_tokens_per_second: 130 }],
-    };
-    const { observations } = parseAaBody(body, '2030-01-01T00:00:00Z', Date.parse('2030-01-01T00:00:00Z'));
+  it('maps on the stable AA id -> reviewed (provider, modelId), never to a bare id', () => {
+    const { observations } = parseRows([row({ id: 'claude-4-5-sonnet' })]);
     expect(observations[0]!.provider).toBe('anthropic');
     expect(observations[0]!.modelId).toBe('claude-sonnet-4-5');
+  });
+
+  it('the stable id is the authority: a changed slug on a mapped id still maps (test #5)', () => {
+    const { observations } = parseRows([row({ id: 'claude-4-1-opus', slug: 'anthropic-opus-renamed-2027' })]);
+    expect(observations).toHaveLength(1);
+    expect(observations[0]!.modelId).toBe('claude-opus-4-1');
+    expect(observations[0]!.benchmarks![0]!.sourceModelId).toBe('claude-4-1-opus');
+  });
+
+  it('a slug collision alone never misattributes: unknown id, mapped slug -> unmatched (test #6)', () => {
+    const mappedSlug = AA_MODEL_MAP[0]!.aaSlugHint!;
+    const { observations, detail } = parseRows([row({ id: 'totally-unknown-id', slug: mappedSlug })]);
+    expect(observations).toHaveLength(0);
+    expect(detail).toContain('1 unmatched');
+  });
+
+  it('a creator mismatch on a mapped id never maps (test #7)', () => {
+    const { observations, detail } = parseRows([row({ id: 'claude-4-1-opus', model_creator: { id: 'not-anthropic' } })]);
+    expect(observations).toHaveLength(0);
+    expect(detail).toContain('1 creator-mismatch');
+  });
+
+  it('a reasoning/effort variant id is left unmatched; the base id keeps its own score (test #8)', async () => {
+    // fixture carries `claude-4-5-sonnet-max` (anthropic) alongside the base `claude-4-5-sonnet`.
+    await boot([aaFixtureSource()]);
+    const attempts = await built.modelCatalog.refresh();
+    expect(attempts.find((a) => a.source === 'artificial-analysis')!.detail).toContain('2 unmatched');
+    const sonnet = built.modelCatalog.list().find((m) => m.modelKey === sonnetKey)!;
+    // base row coding index is 66; the "max" variant's 78 must not leak in.
+    expect(codingOf(sonnet)!.raw.value).toBe(66);
+    expect(built.modelCatalog.list().map((m) => m.modelKey)).not.toContain('anthropic:claude-4-5-sonnet-max');
   });
 });
 
 // --- 11-14. provenance, raw+normalized, versioning, determinism ---------------
 
 describe('external provenance and normalization audit trail', () => {
-  it('carries source, external tier, benchmark release/category, attribution and both dates', async () => {
+  it('carries source, external tier, benchmark release/category, attribution and dates (test #2)', async () => {
     await boot([aaFixtureSource()]);
     await built.modelCatalog.refresh();
     const coding = codingOf(built.modelCatalog.list().find((m) => m.modelKey === opusKey))!;
     expect(coding.provenance.source).toBe('external:artificial-analysis');
     expect(coding.provenance.tier).toBe('external-benchmark');
-    expect(coding.provenance.benchmark).toMatchObject({ release: 'intelligence-index-4.3', category: 'coding' });
+    // release derives from the documented ROOT `intelligence_index_version` (4.1).
+    expect(coding.provenance.benchmark).toMatchObject({ release: 'intelligence-index-4.1', category: 'coding' });
+    // AA supplies no benchmark publication date — never faked.
     expect(coding.provenance.benchmark!.publishedAt).toBeUndefined();
+    // …but the MODEL's own release_date rides along, kept distinct from publishedAt.
+    expect(coding.provenance.benchmark!.modelReleaseDate).toBe('2025-08-05');
+    expect(coding.provenance.benchmark!.modelReleaseDate).not.toBe(coding.provenance.observedAt);
     expect(coding.provenance.observedAt).toBe('2030-01-01T00:00:00.000Z');
     expect(coding.provenance.attribution).toContain('Artificial Analysis');
     expect(coding.provenance.attribution).toContain('artificialanalysis.ai');
@@ -288,12 +336,30 @@ describe('external provenance and normalization audit trail', () => {
 
   it('coding priors are skipped, with a diagnostic, when the response carries no benchmark release (§7)', () => {
     const body = {
-      prompt_options: { prompt_length: 'medium', parallel_queries: 1 },
-      data: [{ slug: 'claude-4-1-opus', evaluations: { artificial_analysis_coding_index: 71 }, median_output_tokens_per_second: 88 }],
+      data: [{
+        id: 'claude-4-1-opus', slug: 'claude-4-1-opus', model_creator: { id: 'anthropic' },
+        evaluations: { artificial_analysis_coding_index: 71 },
+        performance: { median_output_tokens_per_second: 88 },
+      }],
     };
     const { observations, detail } = parseAaBody(body, '2030-01-01T00:00:00Z', Date.parse('2030-01-01T00:00:00Z'));
     expect(observations[0]!.benchmarks!.map((b) => b.dimension)).toEqual(['speed']);
     expect(detail).toContain('no benchmark release');
+  });
+
+  it('parses speed from the documented performance.* location (test #4)', () => {
+    const body = {
+      intelligence_index_version: 4.1,
+      data: [{
+        id: 'claude-4-1-opus', slug: 'claude-4-1-opus', model_creator: { id: 'anthropic' },
+        evaluations: { artificial_analysis_coding_index: 71 },
+        performance: { median_output_tokens_per_second: 123, median_time_to_first_token_seconds: 0.5 },
+      }],
+    };
+    const { observations } = parseAaBody(body, '2030-01-01T00:00:00Z', Date.parse('2030-01-01T00:00:00Z'));
+    const speed = observations[0]!.benchmarks!.find((b) => b.dimension === 'speed')!;
+    expect(speed.raw).toEqual({ metric: 'median_output_tokens_per_second', value: 123, unit: 'tokens/second' });
+    expect(speed.provenance.benchmark!.configuration).toBe(AA_SPEED_CONFIGURATION);
   });
 });
 
@@ -330,9 +396,12 @@ describe('deterministic normalization (§11)', () => {
 describe('missing values', () => {
   it('emits only the dimensions the row actually supports', () => {
     const body = {
-      prompt_options: { prompt_length: 'medium', parallel_queries: 1 },
-      intelligence_index_version: '4.3',
-      data: [{ slug: 'claude-4-1-opus', evaluations: { artificial_analysis_coding_index: null }, median_output_tokens_per_second: 88 }],
+      intelligence_index_version: 4.1,
+      data: [{
+        id: 'claude-4-1-opus', slug: 'claude-4-1-opus', model_creator: { id: 'anthropic' },
+        evaluations: { artificial_analysis_coding_index: null },
+        performance: { median_output_tokens_per_second: 88 },
+      }],
     };
     const { observations } = parseAaBody(body, '2030-01-01T00:00:00Z', Date.parse('2030-01-01T00:00:00Z'));
     expect(observations[0]!.benchmarks!.map((b) => b.dimension)).toEqual(['speed']);
@@ -439,5 +508,103 @@ describe('API capability gate (unchanged from K7)', () => {
     expect((await built.app.inject({ method: 'GET', url: '/api/models', headers: headers() })).statusCode).toBe(403);
     setCaps(['models.read']);
     expect((await built.app.inject({ method: 'GET', url: '/api/models', headers: headers() })).statusCode).toBe(200);
+  });
+});
+
+// --- pagination (test #3) --------------------------------------------------
+
+describe('pagination', () => {
+  it('follows pagination.has_more across pages and stamps ONE observedAt for the refresh', async () => {
+    const urls: string[] = [];
+    const page1 = {
+      intelligence_index_version: 4.1,
+      pagination: { page: 1, page_size: 1, total_pages: 2, has_more: true },
+      data: [{
+        id: 'claude-4-1-opus', slug: 'claude-4-1-opus', model_creator: { id: 'anthropic' },
+        release_date: '2025-08-05',
+        evaluations: { artificial_analysis_coding_index: 71 },
+        performance: { median_output_tokens_per_second: 88 },
+      }],
+    };
+    const page2 = {
+      intelligence_index_version: 4.1,
+      pagination: { page: 2, page_size: 1, total_pages: 2, has_more: false },
+      data: [{
+        id: 'claude-4-5-sonnet', slug: 'claude-4-5-sonnet', model_creator: { id: 'anthropic' },
+        release_date: '2025-09-29',
+        evaluations: { artificial_analysis_coding_index: 66 },
+        performance: { median_output_tokens_per_second: 130 },
+      }],
+    };
+    const fetchImpl: typeof globalThis.fetch = async (input) => {
+      const url = String(input);
+      urls.push(url);
+      const body = url.includes('page=2') ? page2 : page1;
+      return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+    };
+    await boot([createArtificialAnalysisSource({ apiKey: FAKE_KEY, now })], fetchImpl);
+    const attempts = await built.modelCatalog.refresh();
+
+    expect(urls).toEqual([`${AA_ENDPOINT}?page=1`, `${AA_ENDPOINT}?page=2`]);
+    const aa = attempts.find((a) => a.source === 'artificial-analysis')!;
+    expect(aa.status).toBe('ok');
+    expect(aa.detail).toContain('2 page(s)');
+    expect(aa.detail).toContain('2 mapped');
+
+    const list = built.modelCatalog.list();
+    const opus = codingOf(list.find((m) => m.modelKey === opusKey))!;
+    const sonnet = codingOf(list.find((m) => m.modelKey === sonnetKey))!;
+    expect(opus.raw.value).toBe(71); // from page 1
+    expect(sonnet.raw.value).toBe(66); // from page 2
+    expect(opus.provenance.observedAt).toBe(sonnet.provenance.observedAt); // one logical refresh
+  });
+
+  it('does not loop forever when has_more never clears — stops at AA_MAX_PAGES', async () => {
+    let calls = 0;
+    const fetchImpl: typeof globalThis.fetch = async () => {
+      calls += 1;
+      return new Response(
+        JSON.stringify({ intelligence_index_version: 4.1, pagination: { has_more: true }, data: [] }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    };
+    await boot([createArtificialAnalysisSource({ apiKey: FAKE_KEY, now })], fetchImpl);
+    await built.modelCatalog.refresh();
+    expect(calls).toBe(20); // AA_MAX_PAGES
+  });
+});
+
+// --- K13 readiness: availability is a real discovery join, never AA-granted (tests #9, #10) ---
+
+describe('K13 readiness — candidate availability is derived, not granted', () => {
+  const manifestModels = (ids: string[]) => ({
+    core: { models: ids.map((id) => ({ id, displayName: id })) },
+    evidence: { source: 'provider-api' as const, observedAt: '2030-01-01T00:00:00.000Z' },
+  });
+  const stubRegistry = (advertise: string[]) => ({
+    list: () => [{
+      id: 'anthropic-cli' as AssistantId,
+      provider: 'anthropic',
+      enabled: 1,
+      manifestParsed: manifestModels(advertise),
+    }],
+  }) as unknown as Registry;
+
+  it('a prior rides an entry whether or not discovery makes it runnable', async () => {
+    await boot(); // sets up db + schema; its own catalog is unused here
+    // discovery advertises the dated opus id -> that (provider, modelId) is runnable
+    const withOpus = new ModelCatalogService(db, stubRegistry(['claude-opus-4-1']), now, [aaFixtureSource()]);
+    await withOpus.refresh();
+    const opus = withOpus.list().find((m) => m.modelKey === opusKey)!;
+    expect(opus.availableVia).toEqual(['anthropic-cli']); // real join from discovery
+    expect(codingOf(opus)).toBeTruthy(); // AA prior still attached
+
+    // discovery advertises nothing -> same AA prior, but no availability is invented
+    const noDiscovery = new ModelCatalogService(db, stubRegistry([]), now, [aaFixtureSource()]);
+    await noDiscovery.refresh();
+    const sonnet = noDiscovery.list().find((m) => m.modelKey === sonnetKey)!;
+    expect(sonnet.availableVia).toEqual([]);
+    expect(codingOf(sonnet)).toBeTruthy();
+    expect(sonnet.provenance.source).not.toBe('external:artificial-analysis');
   });
 });

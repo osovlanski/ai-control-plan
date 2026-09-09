@@ -176,14 +176,18 @@ function ModelCatalogCard() {
             </div>
           ))}
           {/* K8: external benchmark priors. Prior evidence about intelligence — not a
-              selection, not availability. Fetched date and published date are shown apart. */}
+              selection, not availability. Benchmark publication date, model release
+              date and our fetch date are three separate facts and shown apart. */}
           {(m.benchmarkPriors ?? []).map((b, i) => (
             <div key={`${b.dimension}-${i}`} style={{ color: tokens.muted }}>
               {b.dimension} prior {b.normalized.toFixed(2)} · {b.provenance.source} · {b.provenance.tier}
               {b.provenance.benchmark ? ` · release ${b.provenance.benchmark.release}` : ""}
               {b.provenance.benchmark?.configuration ? ` (${b.provenance.benchmark.configuration})` : ""}
+              {b.provenance.benchmark?.sourceSlug ? ` · aa-slug ${b.provenance.benchmark.sourceSlug}` : ""}
               {` · raw ${b.raw.value} ${b.raw.unit}`}
-              {` · published ${b.provenance.benchmark?.publishedAt ?? "n/a"} · fetched ${b.provenance.observedAt.slice(0, 10)} · ${b.freshness}`}
+              {` · benchmark published ${b.provenance.benchmark?.publishedAt ?? "n/a"}`}
+              {` · model released ${b.provenance.benchmark?.modelReleaseDate ?? "n/a"}`}
+              {` · fetched ${b.provenance.observedAt.slice(0, 10)} · ${b.freshness}`}
               {b.provenance.attribution ? ` · ${b.provenance.attribution}` : ""}
             </div>
           ))}

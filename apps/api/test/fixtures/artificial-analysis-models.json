@@ -1,51 +1,65 @@
 {
-  "status": 200,
-  "prompt_options": { "parallel_queries": 1, "prompt_length": "medium" },
-  "intelligence_index_version": "4.3",
+  "tier": "free",
+  "intelligence_index_version": 4.1,
+  "pagination": { "page": 1, "page_size": 100, "total_pages": 1, "has_more": false },
   "data": [
     {
-      "id": "aa-opus-41",
-      "name": "Claude 4.1 Opus",
+      "id": "claude-4-1-opus",
+      "name": "Claude Opus 4.1",
       "slug": "claude-4-1-opus",
-      "model_creator": { "id": "anthropic", "name": "Anthropic", "slug": "anthropic" },
+      "release_date": "2025-08-05",
+      "model_creator": { "id": "anthropic", "name": "Anthropic" },
       "evaluations": {
         "artificial_analysis_intelligence_index": 74,
-        "artificial_analysis_coding_index": 71
+        "artificial_analysis_coding_index": 71,
+        "artificial_analysis_agentic_index": 40
       },
-      "median_output_tokens_per_second": 88,
-      "median_time_to_first_token_seconds": 1.2,
-      "price_1m_input_tokens": 15,
-      "price_1m_output_tokens": 75
+      "pricing": {
+        "price_1m_input_tokens": 15,
+        "price_1m_output_tokens": 75
+      },
+      "performance": {
+        "median_output_tokens_per_second": 88,
+        "median_time_to_first_token_seconds": 1.2
+      }
     },
     {
-      "id": "aa-sonnet-45",
-      "name": "Claude 4.5 Sonnet",
+      "id": "claude-4-5-sonnet",
+      "name": "Claude Sonnet 4.5",
       "slug": "claude-4-5-sonnet",
-      "model_creator": { "id": "anthropic", "name": "Anthropic", "slug": "anthropic" },
+      "release_date": "2025-09-29",
+      "model_creator": { "id": "anthropic", "name": "Anthropic" },
       "evaluations": {
         "artificial_analysis_intelligence_index": 66,
-        "artificial_analysis_coding_index": 66
+        "artificial_analysis_coding_index": 66,
+        "artificial_analysis_agentic_index": 38
       },
-      "median_output_tokens_per_second": 130,
-      "median_time_to_first_token_seconds": 0.8,
-      "price_1m_input_tokens": 3,
-      "price_1m_output_tokens": 15
+      "pricing": {
+        "price_1m_input_tokens": 3,
+        "price_1m_output_tokens": 15
+      },
+      "performance": {
+        "median_output_tokens_per_second": 130,
+        "median_time_to_first_token_seconds": 0.8
+      }
     },
     {
-      "id": "aa-frontier-x",
+      "id": "some-frontier-model",
       "name": "Frontier X",
       "slug": "some-frontier-model",
-      "model_creator": { "id": "acme", "name": "Acme", "slug": "acme" },
+      "release_date": null,
+      "model_creator": { "id": "acme", "name": "Acme" },
       "evaluations": { "artificial_analysis_coding_index": 80 },
-      "median_output_tokens_per_second": 200
+      "performance": { "median_output_tokens_per_second": 200 }
     },
     {
-      "id": "aa-default",
-      "name": "default",
-      "slug": "default",
-      "model_creator": { "id": "somevendor", "name": "SomeVendor", "slug": "somevendor" },
-      "evaluations": { "artificial_analysis_coding_index": 40 },
-      "median_output_tokens_per_second": 50
+      "id": "claude-4-5-sonnet-max",
+      "name": "Claude Sonnet 4.5 (max effort)",
+      "slug": "claude-4-5-sonnet-max",
+      "release_date": "2025-09-29",
+      "model_creator": { "id": "anthropic", "name": "Anthropic" },
+      "evaluations": { "artificial_analysis_coding_index": 78 },
+      "performance": { "median_output_tokens_per_second": 95 }
     }
   ]
 }

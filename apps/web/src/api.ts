@@ -164,7 +164,16 @@ type Prov = {
   observedAt: string;
   attribution?: string;
   /** External benchmark only: the source's own release/config identity (K8). */
-  benchmark?: { release: string; configuration?: string; publishedAt?: string; category: string };
+  benchmark?: {
+    release: string;
+    configuration?: string;
+    publishedAt?: string;
+    /** The model's own release date per the source — not the benchmark's publication date. */
+    modelReleaseDate?: string;
+    /** The source's own slug for the model (display only). */
+    sourceSlug?: string;
+    category: string;
+  };
 };
 /** A merged fact and the evidence that supplied it — not the entry's provenance. */
 type Attributed<T> = { value: T; provenance: Prov };

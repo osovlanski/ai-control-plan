@@ -10,36 +10,46 @@ K8 adds evidence to the **existing** K7 catalog. It does not create a second
 catalog, a second scheduler, or a new API surface.
 
 ```
-Artificial Analysis  →  GET /api/v2/data/llms/models  →  one CatalogSource
+Artificial Analysis  →  GET /api/v2/language/models/free  (paginated)  →  one CatalogSource
   →  normalized benchmark PRIOR evidence  →  existing model_catalog rows
   →  GET /api/models  (merged priors) + GET /api/models/:id (unmerged row)
 ```
 
-## 1. Official API verified (2026-09-09)
+## 1. Current official API re-verified (2026-09-09)
 
-Verified against `https://artificialanalysis.ai/api-reference` and
-`https://artificialanalysis.ai/data-api`:
+Re-checked against `https://artificialanalysis.ai/data-api/docs` (the current
+Data API reference). The first PR used the older `/data/llms/models` path and
+depended on `intelligence_index_version` appearing per row; that field is a
+**root** field of the versioned endpoint, which is what the docs now document
+and what promises the shape below. This PR moves to it.
 
 | Fact | Value |
 |---|---|
 | Base URL | `https://artificialanalysis.ai/api/v2` |
-| Endpoint used | `GET /data/llms/models` |
+| Endpoint used | `GET /language/models/free` — the versioned, free-tier language-model list |
 | Auth | a single `x-api-key` request header. No OAuth, no signing, no body. |
-| Free tier | 1 000 requests/day; `X-RateLimit-*` response headers |
-| Terms (free) | "Internal use only; with attribution." Our use — an internal operator catalog, attributed — is within these terms. |
+| Query params | `page` (1-indexed). No `prompt_type` on the free endpoint. |
+| Rate limit | the free tier is rate-limited; the effective limit is returned in `X-RateLimit-*` response headers and its **published value has changed between AA announcements**, so no fixed number is asserted in code. This client issues at most `AA_MAX_PAGES` (20) GET requests per daily refresh and treats a `429` as a classified, non-fatal `rate limited` outcome (`Retry-After` ignored; the next daily refresh retries). |
 | Attribution | required across all tiers: credit Artificial Analysis and link `https://artificialanalysis.ai/`. Stored on every row as `provenance.attribution`. |
-| Response shape | `{ status, prompt_options: { parallel_queries, prompt_length }, data: [ { id, name, slug, model_creator, evaluations, pricing, median_output_tokens_per_second, median_time_to_first_token_seconds, ... } ] }` |
-| Release identity | `intelligence_index_version` (e.g. `4.3`) — a methodology version, major.minor. |
-| Publication date | **none.** The response carries no per-row evaluation/publication timestamp. |
+| Response root | `{ tier, intelligence_index_version, pagination: { page, page_size, total_pages, has_more }, data: [ … ] }` |
+| Per row | stable `id`, `name`, `slug`, `release_date` (ISO date or `null`), `model_creator { id, name }`, `evaluations { artificial_analysis_coding_index, … }`, `performance { median_output_tokens_per_second, median_time_to_first_token_seconds, … }`, `pricing { … }` |
+| Release identity | root `intelligence_index_version` — a **number**, major.minor (e.g. `4.1`); the methodology release every `evaluations.*` index belongs to. |
+| Benchmark publication date | **none.** No per-row evaluation/publication timestamp. `benchmark.publishedAt` stays absent, never faked (§6). |
+| Model release date | `release_date` — the MODEL's own ship date. Distinct fact from a benchmark publication date; carried on `benchmark.modelReleaseDate`, never mapped onto `publishedAt`. |
+
+Pagination: `collect()` fetches `?page=1`, follows `pagination.has_more` up to
+`AA_MAX_PAGES`, concatenates every page's `data`, and takes
+`intelligence_index_version` from page 1. It runs **only** inside
+`modelCatalog.refresh()` (daily job / explicit refresh route) — never at startup
+or on a cold read (§14). One `observedAt` is stamped for the whole logical
+refresh regardless of page count.
 
 **Blocker check (§1 of the goal): not a blocker.** The terms permit attributed
 internal storage and display. The canonical K8 requirement is release +
 configuration identity on every selection-quality prior (§7); AA supplies a
-release (`intelligence_index_version`) and, for speed, a measurement
-configuration. It does **not** supply a per-row publication date — `publishedAt`
-is therefore always absent and never fabricated (§6). `publishedAt` is
-"where supplied" in §4.4.2, so its absence does not block ingestion; it is
-recorded as a known gap here and surfaced in the UI as `published n/a`.
+release (`intelligence_index_version`) and, for speed, a fixed measurement
+configuration. `publishedAt` is "where supplied" in §4.4.2, so its absence does
+not block ingestion; it is recorded as a known gap and surfaced as `n/a`.
 
 No `docs/agentic-os-k8-blocker.md` was created.
 
@@ -69,9 +79,9 @@ With no key the source is still registered; its first `collect()` throws
 
 `collect({ fetch })` receives **only** a transport. It has no access to a task,
 `TaskIntent`, prompt, repository, transcript, usage, cost history or routing
-decision — structurally, so none can be transmitted. The one request is
-`GET https://artificialanalysis.ai/api/v2/data/llms/models` with headers
-`x-api-key` and `accept` and no body.
+decision — structurally, so none can be transmitted. Each request is
+`GET https://artificialanalysis.ai/api/v2/language/models/free?page=<n>` with
+headers `x-api-key` and `accept` and no body.
 
 `CatalogSource.collect` may now return either `CatalogObservation[]` (unchanged,
 K7 stubs still work) or `{ observations, detail }` where `detail` is a fixed
@@ -84,39 +94,60 @@ source with a **recording fetch**, creates a task carrying
 `goal: "migrate the payments ledger on branch release/pci"`,
 `constraints: ["never touch prod db"]`, then asserts the single AA request:
 
-- URL is exactly `AA_ENDPOINT`, method `GET`, empty body;
+- URL is exactly `${AA_ENDPOINT}?page=1`, method `GET`, empty body;
 - headers are exactly `{ x-api-key, accept }`;
 - the wire (URL + headers + body) contains none of: the goal text, the
   constraint text, `release/pci`, the workspace home path, `AG-` (task ids),
   `inputTokens`, `outputTokens`, `costUsd`, `checkpoint`, `transcript`,
   `repoPath`.
 
-## 6. Model-id mapping (§12)
+## 6. Model identity mapping (§12, P1-B)
 
-AA `slug` is an external identity; catalog identity is `(provider, modelId)`.
-There is **no fuzzy matching**. `AA_MODEL_MAP` is an explicit table; each row
-carries an `evidence` comment. A row whose `slug` is not in the table is left
-**unmatched** — counted in the refresh `detail`, never attached to a near-named
-model, never used to invent a catalog entry (§13). `default` (Codex/Cursor) is
-absent from the table and cannot be matched; aliases never participate.
+AA's **stable `id`** plus its **`model_creator.id`** is the join authority — AA
+itself recommends the stable id because slugs drift. A `slug` is kept only for
+display (`aaSlugHint` in the table, `benchmark.sourceSlug` on the stored prior)
+and is **never read to join**. There is **no fuzzy matching**:
 
-Current table (best-effort; slugs need live confirmation once `AA_API_KEY` is
-available — an incorrect slug simply yields an unmatched row, never a
-misattribution):
+- a row whose `id` is not in `AA_MODEL_MAP` → **unmatched** (counted in `detail`);
+- a row whose `id` matches but whose `model_creator.id` does not → **creator-mismatch**,
+  never mapped (an id collision alone can never map);
+- a row with no `id` → **no-id**, cannot be joined (never falls back to the slug).
 
-| AA slug | provider | modelId |
-|---|---|---|
-| `claude-4-1-opus` | anthropic | `claude-opus-4-1` |
-| `claude-4-5-sonnet` | anthropic | `claude-sonnet-4-5` |
+**Reasoning / effort variants.** AA benchmarks those as **separate model `id`s**
+(e.g. a distinct id for a "…max" configuration). The exact-id join therefore
+cannot pull a variant's score onto the base model — the variant id is simply
+absent from the table and its row is unmatched. K7 exposes no execution-config
+/ effort dimension (`ExecutionIdentity` has requested selector, resolved id,
+serving provider, harness — no effort), and provider discovery lists only
+`{ id, displayName }`, so the Control Plane **cannot** prove a runtime candidate
+runs the same configuration AA benchmarked. A wrong attribution is worse than a
+missing prior, so anything not an exact base-id match stays unmatched.
+
+Current table. **No `AA_API_KEY` in this environment**, so the `aaId` values are
+AA's documented identifiers for these two models and must be confirmed against
+one bounded live refresh. A wrong `aaId` yields an unmatched row — never a
+misattribution (id-exact join + creator gate make a false positive impossible).
+
+| `aaId` (stable) | `aaCreatorId` | `aaSlugHint` (display only) | → catalog `(provider, modelId)` |
+|---|---|---|---|
+| `claude-4-1-opus` | `anthropic` | `claude-4-1-opus` | `anthropic` / `claude-opus-4-1` |
+| `claude-4-5-sonnet` | `anthropic` | `claude-4-5-sonnet` | `anthropic` / `claude-sonnet-4-5` |
+
+Both catalog targets are the K7 **price-seed** identities. Neither is currently
+advertised by provider discovery (which lists the CLI alias selectors `opus` /
+`sonnet`), so both have `availableVia = []` — see §K13 readiness.
 
 ## 7. Dimensions ingested (§8)
 
 Only the dimensions AA can truthfully support:
 
-| Dimension | Raw metric | Unit | Direction | Release identity |
+| Dimension | Raw metric (documented location) | Unit | Direction | Release identity |
 |---|---|---|---|---|
-| `coding` | `artificial_analysis_coding_index` (also tried: `coding_index`) | index 0–100 | higher-is-better | `intelligence-index-<intelligence_index_version>` — **required**; absent ⇒ the coding prior is skipped with a diagnostic |
-| `speed` | `median_output_tokens_per_second` | tokens/second | higher-is-better | `aa-speed-measurement`, `configuration = prompt_length=<…>;parallel_queries=<…>` |
+| `coding` | `evaluations.artificial_analysis_coding_index` (flat `coding_index` / flat key tried as resilience fallback) | index 0–100 | higher-is-better | `intelligence-index-<root intelligence_index_version>` — **required**; absent ⇒ the coding prior is skipped with a diagnostic |
+| `speed` | `performance.median_output_tokens_per_second` (flat key tried as fallback) | tokens/second | higher-is-better | `aa-speed-measurement`, `configuration = prompt_length=medium (AA free-tier default)` — the `/free` endpoint takes no `prompt_type`, so the configuration is fixed and recorded verbatim |
+
+`benchmark.modelReleaseDate` carries the row's `release_date` when present, on
+both priors — diagnostic context only, never conflated with `publishedAt`.
 
 `cost` is **not** ingested from AA — provider price evidence (K7 seed) remains
 the only price authority (§21). AA `price_1m_*` fields are deliberately not read.
@@ -147,7 +178,7 @@ lower-is-better:   clamp01(1 - value / scaleMax)
 ## 9. Raw vs normalized (§9)
 
 Every `BenchmarkPrior` retains `raw: { metric, value, unit }`, `sourceModelId`
-(the AA slug), `normalizationVersion` and `normalized`. The full unmerged
+(the AA **stable id**), `normalizationVersion` and `normalized`. The full unmerged
 observation (all priors, untouched) is returned by `GET /api/models/:id` under
 `evidence[].observation.benchmarks`.
 
@@ -160,7 +191,7 @@ Each prior's `provenance`:
 | `source` | `external:artificial-analysis` (new `ExternalEvidenceSource`; ranked **0** — always below every K7 source) |
 | `tier` | `external-benchmark` |
 | `observedAt` | when **we** fetched it — distinct from any benchmark date |
-| `benchmark` | `{ release, configuration?, publishedAt?, category }` — `publishedAt` always absent for AA |
+| `benchmark` | `{ release, configuration?, publishedAt?, modelReleaseDate?, sourceSlug?, category }` — `publishedAt` always absent for AA; `modelReleaseDate` = AA `release_date` when present; `sourceSlug` = AA slug, display only |
 | `normalizationVersion` | `aa-normalization-v1` |
 | `attribution` | `Artificial Analysis — https://artificialanalysis.ai/` |
 
@@ -192,8 +223,9 @@ ageing on its original `observedAt`.
 `ModelCatalogService.refresh()` never throws. An AA failure is recorded in
 `model_catalog_refresh` with a fixed label; local rows stay readable; previously
 fetched AA priors stay stored and keep ageing; routing (registry-driven) is
-unaffected. Tested for: not-configured, 401/403, network throw, non-JSON,
-no-`data` body.
+unaffected. Tested for: not-configured, 401/403, `429` (`rate limited`), network
+throw, non-JSON, no-`data` body. A page cap (`AA_MAX_PAGES = 20`) bounds a
+response whose `pagination.has_more` never clears.
 
 ## 14. Daily refresh (§17)
 
@@ -213,51 +245,101 @@ including the AA row. K7 clients that ignore the new field are unaffected.
 
 `apps/web` Model catalog card renders, per prior:
 `"<dimension> prior <0.NN> · external:artificial-analysis · external-benchmark ·
-release <…> (<config>) · raw <value> <unit> · published n/a · fetched <date> ·
+release <…> (<config>) · aa-slug <…> · raw <value> <unit> ·
+benchmark published n/a · model released <date|n/a> · fetched <date> ·
 <freshness> · Artificial Analysis — https://artificialanalysis.ai/"`.
 No redesign. K14 Cockpit, which renders `GET /api/models` generically, needs no
 change for these rows; no ai-control-plan change here depends on Cockpit.
 
 ## 17. Live smoke (§24)
 
-**Not run.** `AA_API_KEY` is not set in this environment. Verification is by the
-deterministic fixture `apps/api/test/fixtures/artificial-analysis-models.json`
-(synthetic, secret-free, 4 rows: 2 mapped, 1 unmapped vendor, 1 `default`). No
-live-source verification of the current AA slugs or response nesting occurred;
-`AA_MODEL_MAP` and the `evaluations` key candidates should be confirmed with one
-bounded live refresh when a key is available.
+**Not run — `AA_API_KEY` is not set in this environment.** Verification is by the
+deterministic fixture `apps/api/test/fixtures/artificial-analysis-models.json`,
+now shaped to the documented `/language/models/free` response (root
+`intelligence_index_version`, `pagination`, per-row `id` / `model_creator` /
+`release_date` / `evaluations` / `performance`; 4 rows: 2 mapped, 1 other-creator,
+1 effort variant). A regression fixture is **derived from the documented field
+structure**, not copied from a large live payload.
+
+When a key becomes available, run ONE bounded live refresh and record here:
+endpoint, pages fetched, `intelligence_index_version`, row count, mapped/unmatched
+count. Never record the key or the full source payload. The two `aaId` values in
+`AA_MODEL_MAP` must be confirmed against that refresh; a wrong `aaId` produces an
+unmatched row, never a misattribution.
+
+## 17a. K13 readiness check (goal §"K13 READINESS CHECK")
+
+Table derived from the **current local catalog** (K7 price-seed + the
+Claude-adapter discovery manifest advertising CLI aliases `opus` / `sonnet`):
+
+| AA evidence | mapped catalog `modelKey` | `availableVia` | safely usable by K13? | reason |
+|---|---|---|---|---|
+| `claude-4-1-opus` coding + speed priors | `anthropic:claude-opus-4-1` | `[]` | **no** | the runnable Anthropic identities in discovery are the alias selectors `anthropic:opus` / `anthropic:sonnet`; the dated price-seed identity is not advertised, so nothing runs it |
+| `claude-4-5-sonnet` coding + speed priors | `anthropic:claude-sonnet-4-5` | `[]` | **no** | same — no discovery join to a runnable assistant |
+| any AA effort/reasoning variant (e.g. `…-max`) | — (unmatched) | — | **no** | left unmatched by design; K7 cannot prove a runtime candidate uses that configuration |
+| `anthropic:opus` / `anthropic:sonnet` (runnable) | — (no AA prior) | non-empty | **no** | no AA prior: mapping a specific benchmarked model onto a generic runtime alias selector is forbidden without proven configuration equivalence, which K7 does not provide |
+
+**Result: K8 currently supplies NO usable prior for active model selection.**
+This is an honesty result, not a defect. K8 stores truthful, attributed,
+versioned evidence on concrete `(provider, modelId)` identities; it is ready the
+moment the missing joins exist.
+
+**`priorMissing` expectations for K13.** Until the gaps below close, K13 must
+treat `coding` and `speed` priors as **absent** for every runnable candidate and
+fall back to telemetry-only scoring (`w(n_d)` at `n_d = 0`), not error.
+
+**What identity / config evidence is missing:**
+
+1. **Availability join.** Provider discovery advertises the CLI alias selectors
+   (`opus`, `sonnet`), not the dated model ids (`claude-opus-4-1`,
+   `claude-sonnet-4-5`) the price seed and AA use. Nothing maps one to the other.
+   Closing it needs either the Claude adapter to advertise resolved dated ids, or
+   a reviewed alias→id equivalence in the catalog — **not** an AA-driven change.
+2. **Execution configuration / effort.** `ExecutionIdentity` records requested
+   selector, resolved id, serving provider and harness — no reasoning/effort
+   setting. AA benchmarks effort variants under distinct ids; without a Control
+   Plane effort dimension, an AA "…max" prior can never be proven equal to a
+   runtime candidate, so it stays unmatched.
+
+Provider discovery was **not** altered to make benchmark evidence look usable.
+External evidence never grants `availableVia`.
 
 ## 18. Acceptance criteria → tests
 
 All in `apps/api/test/artificial-analysis.test.ts` unless noted.
 
-| # (goal §23) | Criterion | Test |
+### P1 goal §TESTS 1–14
+
+| # | Criterion | Test |
 |---|---|---|
-| 1 | missing key ⇒ local catalog works | "missing AA_API_KEY > leaves the local catalog fully usable…" |
-| 2 | valid response ⇒ evidence stored | "valid source response > stores a normalized coding + speed prior…" |
-| 3 | 401/403 ⇒ classified, no secret leak | "source 401/403 > classifies as unauthorized and never leaks…" |
-| 4 | timeout/network ⇒ local-first | "timeout / network failure > records the failure, keeps the local catalog readable…" |
-| 5 | malformed ⇒ no corrupt rows | "malformed and partial responses > rejects a body with no data array" / "…rejects non-JSON…" |
-| 6 | partial ⇒ only valid rows | "…stores only the valid rows from a partial payload" |
-| 7 | egress recorder | "egress boundary (I-M3) > sends only the benchmark request…" |
-| 8 | model mapping exact match | "model identity mapping > attaches a prior only on an exact AA-slug → (provider, modelId) match" |
-| 9 | ambiguous mapping rejected | "…maps an AA slug to the reviewed (provider, modelId), never to a bare id" + no `default` match in "…never fuzzy-matches" |
-| 10 | unmatched not misattributed | "…never fuzzy-matches: an unmapped AA model is counted, not attached anywhere" |
-| 11 | release/config/publishedAt retained | "external provenance… > carries source, external tier, benchmark release/category, attribution and both dates" |
-| 12 | raw + normalized retained | "…retains the raw metric, unit and source model id behind every normalized value" |
-| 13 | normalization version retained | "…stamps the normalization version on every prior" |
-| 14 | deterministic normalization | "deterministic normalization > is a fixed absolute rescale…" + "…byte-identical across two runs" |
-| 15 | lower-is-better normalization | "deterministic normalization > handles lower-is-better metrics" |
-| 16 | tie / zero-range behavior | "deterministic normalization > ties map to equal outputs; a zero/negative scale is rejected" |
-| 17 | external TTL / freshness | "freshness and TTL > ages from live through fresh, stale and expired…" |
-| 18 | expired prior stays inspectable | "…an expired prior stays inspectable in the entry and in the evidence rows" |
-| 19 | failed refresh doesn't refresh observedAt | "…a later failed refresh does not restamp observedAt or refresh freshness" |
-| 20 | provider availability registry-owned | "provider availability remains registry-owned > a benchmark prior never adds availability…" |
-| 21 | K8 evidence doesn't alter routing | "K8 evidence cannot alter routing > routes a task to the same assistant before and after…" |
-| 22 | bounded cost-cap still rejected | "no pricing authority expansion > ingests no AA price data…" + K7 `model-identity.test.ts` "bounded cost caps (standing deferral #3)" (unchanged) |
-| — | missing coding value | "missing values > emits only the dimensions the row actually supports" |
-| — | no release ⇒ coding prior skipped | "…coding priors are skipped, with a diagnostic, when the response carries no benchmark release" |
-| — | capability gate unchanged | "API capability gate (unchanged from K7) > serves priors under models.read and refuses without it" |
+| 1 | fixture matches the current documented endpoint structure | fixture file (root `intelligence_index_version` + `pagination` + per-row `id`/`model_creator`/`release_date`/`evaluations`/`performance`); "valid source response > …" / "…byte-identical across two runs" |
+| 2 | benchmark version comes from a documented field | "external provenance … > carries source, external tier, benchmark release/category, attribution and dates (test #2)" — `release` = `intelligence-index-4.1` from the root field |
+| 3 | pagination is handled | "pagination > follows pagination.has_more across pages and stamps ONE observedAt" + "> does not loop forever … stops at AA_MAX_PAGES" |
+| 4 | speed parsed from the documented `performance.*` location | "external provenance … > parses speed from the documented performance.* location (test #4)" |
+| 5 | stable AA id is the mapping authority | "model identity mapping > the stable id is the authority: a changed slug on a mapped id still maps (test #5)" |
+| 6 | a slug change alone cannot misattribute | "model identity mapping > a slug collision alone never misattributes: unknown id, mapped slug -> unmatched (test #6)" |
+| 7 | a creator mismatch cannot map | "model identity mapping > a creator mismatch on a mapped id never maps (test #7)" |
+| 8 | reasoning/effort mismatch remains unmatched | "model identity mapping > a reasoning/effort variant id is left unmatched; the base id keeps its own score (test #8)" |
+| 9 | external evidence never grants availability | "provider availability remains registry-owned > …" + "K13 readiness > a prior rides an entry whether or not discovery makes it runnable" |
+| 10 | candidate readiness derived from real availability | "K13 readiness — candidate availability is derived, not granted > a prior rides an entry whether or not discovery makes it runnable" |
+| 11 | no fuzzy matching | "model identity mapping > never fuzzy-matches …" (+ tests #5–#8) |
+| 12 | routing byte/semantically unchanged by K8 | "K8 evidence cannot alter routing > routes a task to the same assistant before and after …" |
+| 13 | no AA price becomes bounded-cost authority | "no pricing authority expansion > ingests no AA price data …" + K7 `model-identity.test.ts` "bounded cost caps (standing deferral #3)" (unchanged) |
+| 14 | egress contains no user/task/repository/usage content | "egress boundary (I-M3) > sends only the benchmark request …" |
+
+### Retained coverage (first PR)
+
+| Criterion | Test |
+|---|---|
+| missing key ⇒ local catalog works | "missing AA_API_KEY > leaves the local catalog fully usable…" |
+| 401/403 ⇒ classified, no secret leak | "source 401/403 > classifies as unauthorized and never leaks…" |
+| timeout/network ⇒ local-first | "timeout / network failure > records the failure, keeps the local catalog readable…" |
+| malformed / partial ⇒ no corrupt rows | "malformed and partial responses > …" |
+| raw + normalized + normalization version retained | "…retains the raw metric, unit and source model id…" / "…stamps the normalization version…" |
+| deterministic / lower-is-better / tie / zero-range normalization | "deterministic normalization > …" |
+| external TTL / freshness / expired stays inspectable / failed refresh keeps observedAt | "freshness and TTL > …" |
+| missing coding value ⇒ speed-only; no release ⇒ coding skipped | "missing values > …" / "…coding priors are skipped…" |
+| capability gate unchanged | "API capability gate (unchanged from K7) > …" |
 
 ## 19. What remains for K13
 

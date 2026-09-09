@@ -134,7 +134,7 @@ const nowIso = (now: () => Date): string => now().toISOString();
  * generic label so a raw transport error — which can echo the request URL,
  * headers or a credential — is never written to `model_catalog_refresh`.
  */
-const SAFE_DETAIL_LABELS = new Set(['not configured', 'unauthorized', 'unavailable', 'malformed response']);
+const SAFE_DETAIL_LABELS = new Set(['not configured', 'unauthorized', 'unavailable', 'rate limited', 'malformed response']);
 function classifiedDetail(err: unknown): string {
   if (err && typeof err === 'object' && 'detail' in err) {
     const d = (err as { detail: unknown }).detail;
