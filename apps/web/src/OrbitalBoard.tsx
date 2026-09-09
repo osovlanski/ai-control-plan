@@ -100,10 +100,18 @@ export function OrbitalBoard({
   const now = Date.now();
   const executing = current?.state === "RUNNING" && snapshot?.detail.id === current.id
     ? executionRead(snapshot.detail, snapshot.sessions).assistants : [];
+  // K13 SHADOW: the assistant the model recommendation "would choose" for the
+  // selected mission, only while it stays advisory. In `applied` mode the winner
+  // is the one executing, so the executing marker already covers it.
+  const recommendation = snapshot?.detail.id === current?.id ? snapshot?.routing.at(-1)?.explanation.modelRecommendation : undefined;
+  const shadowChoice = recommendation && recommendation.mode === "shadow" && recommendation.recommended
+    ? recommendation.candidates.find((c) => c.label === recommendation.recommended)?.assistantId
+    : undefined;
   const satellites: Satellite[] = assistants.map((a) => ({
     assistant: a,
     executing: executing.includes(a.id),
     cooling: cooldowns.some((c) => c.assistantId === a.id && Date.parse(c.until) > now),
+    shadow: a.id === shadowChoice,
   }));
 
   return (
@@ -165,6 +173,9 @@ export function OrbitalBoard({
           <div className="map-legend">
             <span className="tone-active">
               <i /> In motion: executing
+            </span>
+            <span className="satellite-shadow-key">
+              <i /> Dashed satellite: K13 shadow “would choose” (not running)
             </span>
             <span className="tone-human">
               <i /> Beacon: needs you

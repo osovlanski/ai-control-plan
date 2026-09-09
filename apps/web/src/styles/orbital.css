@@ -471,6 +471,28 @@
   border-style: dotted;
   border-color: var(--tone-limit);
 }
+/* K13 SHADOW "would choose": a deliberate, non-running relationship — dashed
+   ring, no glow, no fill. It must never read like `.executing`. */
+.satellite.shadow {
+  color: var(--tone-human);
+}
+.satellite.shadow i {
+  border-style: dashed;
+  border-color: var(--tone-human);
+  background: radial-gradient(circle at 40% 35%, rgba(191, 160, 232, 0.18), rgba(6, 10, 15, 0.9) 70%);
+  box-shadow: 0 0 0 4px rgba(4, 7, 11, 0.85);
+}
+.satellite.shadow strong {
+  color: var(--text-2);
+}
+.satellite-shadow-key i {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 1px dashed var(--tone-human);
+  vertical-align: middle;
+}
 .map-caption {
   display: flex;
   justify-content: space-between;

@@ -28,6 +28,12 @@ export interface Satellite {
   assistant: Assistant;
   executing: boolean;
   cooling: boolean;
+  /**
+   * K13 SHADOW: this assistant is the model recommendation's "would choose" for
+   * the selected mission, and it is NOT executing it. Rendered as a distinct,
+   * non-running relationship so the field can never imply the shadow winner ran.
+   */
+  shadow?: boolean;
 }
 
 export function OrbitalField({
@@ -208,7 +214,7 @@ export function OrbitalField({
           );
         })}
 
-      {satellites.map(({ assistant, executing, cooling }, i) => {
+      {satellites.map(({ assistant, executing, cooling, shadow }, i) => {
         const availability = !assistant.enabled ? "disabled" : !assistant.manifest ? "availability unknown" : assistant.manifest.core.auth.state !== "ok" ? `auth ${assistant.manifest.core.auth.state}` : null;
         const a = ((-150 + (120 * (i + 0.5)) / satellites.length) * Math.PI) / 180;
         const x = 50 + ((SPHERE_R + 250) * Math.cos(a) * 100) / SCENE;
@@ -216,14 +222,14 @@ export function OrbitalField({
         return (
           <div
             key={assistant.id}
-            className={`satellite ${executing ? "executing" : ""} ${cooling ? "cooling" : ""} ${availability ? "unavailable" : ""}`}
+            className={`satellite ${executing ? "executing" : ""} ${cooling ? "cooling" : ""} ${availability ? "unavailable" : ""} ${shadow && !executing ? "shadow" : ""}`}
             style={{ left: `${x}%`, top: `${y}%` }}
-            title={`${assistant.id} · ${assistant.provider}${availability ? ` · ${availability}` : ""}${cooling ? " · cooling down" : ""}${executing ? " · executing selected mission" : ""}`}
+            title={`${assistant.id} · ${assistant.provider}${availability ? ` · ${availability}` : ""}${cooling ? " · cooling down" : ""}${executing ? " · executing selected mission" : ""}${shadow && !executing ? " · K13 shadow: would choose (not executing)" : ""}`}
           >
             <i />
             <span>
               <strong>{assistant.id}</strong>
-              <small>{[executing ? "executing" : "", cooling ? "cooling down" : "", availability].filter(Boolean).join(" · ") || assistant.provider}</small>
+              <small>{[executing ? "executing" : "", shadow && !executing ? "shadow: would choose" : "", cooling ? "cooling down" : "", availability].filter(Boolean).join(" · ") || assistant.provider}</small>
             </span>
           </div>
         );

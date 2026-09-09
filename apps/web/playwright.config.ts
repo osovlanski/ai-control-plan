@@ -11,7 +11,7 @@ export default defineConfig({
   projects: [
     {
       name: "chromium",
-      testIgnore: /(demo-a|demo-a5|visual)\.spec\.ts/,
+      testIgnore: /(demo-a|demo-a5|demo-b|visual)\.spec\.ts/,
       use: { browserName: "chromium" },
     },
     {
@@ -40,6 +40,20 @@ export default defineConfig({
       use: {
         browserName: "chromium",
         viewport: { width: 1440, height: 1024 },
+        trace: "on",
+        video: "on",
+        screenshot: "on",
+      },
+    },
+    {
+      // Demo B: K13 model intelligence in SHADOW mode, end to end through the
+      // Orbital UI, with reusable artefacts for the runbook. 1440×900 is the
+      // reference-image viewport for the visual acceptance pass.
+      name: "demo-b",
+      testMatch: /demo-b\.spec\.ts/,
+      use: {
+        browserName: "chromium",
+        viewport: { width: 1440, height: 900 },
         trace: "on",
         video: "on",
         screenshot: "on",

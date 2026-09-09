@@ -278,6 +278,12 @@ export function ModelRecommendationReadout({
   const applied = recommendation.mode === "applied";
   const winner = recommendation.candidates.find((c) => c.label === recommendation.recommended);
   const alternatives = recommendation.candidates.filter((c) => !c.eligible);
+  // Eligible, but no dimension could be scored — a runtime selector whose
+  // benchmark identity is unproven. Shown truthfully as priorMissing, never
+  // fuzzy-matched onto a benchmarked model.
+  const unproven = recommendation.candidates.filter(
+    (c) => c.eligible && c.total === undefined && c.label !== recommendation.recommended,
+  );
 
   return (
     <>
@@ -385,6 +391,31 @@ export function ModelRecommendationReadout({
           <p className="fine-print">
             A benchmark score never resurrects an excluded candidate — hard
             filters run before any score.
+          </p>
+        </>
+      )}
+
+      {unproven.length > 0 && (
+        <>
+          <p className="fine-print">Eligible, but benchmark identity unproven:</p>
+          <ul className="candidate-list">
+            {unproven.map((c) => (
+              <li key={c.label}>
+                <strong>{c.label}</strong>
+                <span className="muted">priorMissing</span>
+                <small>
+                  {c.identity.basis} — {c.identity.evidence} ·{" "}
+                  {c.dimensions
+                    .filter((d) => d.missing)
+                    .map((d) => d.missing)
+                    .join(" · ") || "no dimension could be scored"}
+                </small>
+              </li>
+            ))}
+          </ul>
+          <p className="fine-print">
+            No alias or fuzzy match is made to a benchmarked model. The candidate
+            stays eligible; it simply carries no prior.
           </p>
         </>
       )}
