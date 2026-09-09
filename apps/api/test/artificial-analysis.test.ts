@@ -478,8 +478,15 @@ describe('K8 evidence cannot alter routing (§22)', () => {
     await built.modelCatalog.refresh();
     const after = built.orchestrator.routeTask(id, 'intake').explanation;
     expect(after.chosen).toBe(before.chosen);
-    expect(JSON.stringify(after)).not.toContain('modelRecommendation');
-    expect(JSON.stringify(after)).not.toContain('artificial-analysis');
+    expect(after.ruleFired).toBe(before.ruleFired);
+    // K13 now records a SHADOW model recommendation on the same decision. AA
+    // evidence reaching that record is exactly what K8 fed it — what must stay
+    // true is that it changes nothing the router or the runner acts on.
+    expect(after.modelRecommendation?.mode).toBe('shadow');
+    expect(after.modelRecommendation?.activation.active).toBe(false);
+    const { modelRecommendation: _after, ...afterRouting } = after;
+    const { modelRecommendation: _before, ...beforeRouting } = before;
+    expect(afterRouting).toEqual(beforeRouting);
   });
 });
 

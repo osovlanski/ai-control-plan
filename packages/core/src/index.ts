@@ -6,6 +6,7 @@ export * from "./events.js";
 export * from "./capabilities.js";
 export * from "./context.js";
 export * from "./model-catalog.js";
+export * from "./model-selection.js";
 export * from "./adapter.js";
 export * from "./redaction.js";
 export * from "./contracts.js";

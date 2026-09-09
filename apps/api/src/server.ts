@@ -132,6 +132,18 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     throw new Error("execution-harness bridge is not wired for the internal composition root");
   }
 
+  // K7 (M12). Catalog reads never sit on the routing path: routing reads the
+  // registry, and a stale or failed catalog refresh only affects these routes.
+  // K8: the one external benchmark source (Artificial Analysis) is registered
+  // here from the `AA_API_KEY` env only. With no key it records a classified
+  // `not configured` refresh attempt and the local catalog is untouched (§3).
+  // K13 also reads it to build the SHADOW model recommendation on each routing
+  // decision — advisory, and a catalog failure degrades to no recommendation.
+  const modelCatalogSources = deps.modelCatalogSources ?? [
+    createArtificialAnalysisSource({ apiKey: process.env.AA_API_KEY, now }),
+  ];
+  const modelCatalog = deps.modelCatalog ?? new ModelCatalogService(db, registry, now, modelCatalogSources, deps.modelCatalogFetch);
+
   const orchestrator =
     deps.orchestrator ??
     new Orchestrator(
@@ -148,21 +160,13 @@ export function buildServer(deps: ServerDeps): BuiltServer {
       projectVerification,
       repositoryIdentities,
       now,
+      modelCatalog,
     );
 
   const repoAllowed = (repoPath: string | null | undefined): boolean =>
     !repoPath || config.repoAllowlist.some((allowed) => repoPath === allowed || repoPath.startsWith(`${allowed}/`));
 
   const probes = deps.quotaProbes ?? new QuotaProbeService(db, config, registry, deps.quotaProbeFn, now);
-  // K7 (M12). Catalog reads never sit on the routing path: routing reads the
-  // registry, and a stale or failed catalog refresh only affects these routes.
-  // K8: the one external benchmark source (Artificial Analysis) is registered
-  // here from the `AA_API_KEY` env only. With no key it records a classified
-  // `not configured` refresh attempt and the local catalog is untouched (§3).
-  const modelCatalogSources = deps.modelCatalogSources ?? [
-    createArtificialAnalysisSource({ apiKey: process.env.AA_API_KEY, now }),
-  ];
-  const modelCatalog = deps.modelCatalog ?? new ModelCatalogService(db, registry, now, modelCatalogSources, deps.modelCatalogFetch);
   const scheduler = new Scheduler({ db, tasks, orchestrator, bus, config, probes, now, onError: error => app.log.error(error) });
   const computeRoute = (taskId: string, userOverride?: AssistantId) => tasks.get(taskId)
     ? orchestrator.routeTask(taskId, 'intake', { override: userOverride }) : undefined;

@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { loadConfig, type ResolvedConfig } from "../../apps/api/src/config.js";
 import { openDb, type Db } from "../../apps/api/src/db/index.js";
 import { buildServer, type BuiltServer } from "../../apps/api/src/server.js";
+import type { CatalogSource } from "../../apps/api/src/modules/model-catalog.js";
 import { bearerClient, type EvalClient } from "./client.js";
 
 export interface BootedScenario {
@@ -27,6 +28,8 @@ export interface BootOptions {
   repoAllowlist?: string[];
   /** Force single-mode Harness routing on for this scenario's workspace. */
   harnessSingle?: boolean;
+  /** Catalog evidence sources (K8 seam). Scripted in-process — never the network. */
+  modelCatalogSources?: CatalogSource[];
 }
 
 export async function bootScenario(opts: BootOptions = {}): Promise<BootedScenario> {
@@ -46,7 +49,7 @@ export async function bootScenario(opts: BootOptions = {}): Promise<BootedScenar
   const config = loadConfig({ AGENT_PLANE_HOME: home });
   if (opts.repoAllowlist) config.repoAllowlist.push(...opts.repoAllowlist);
   const db = openDb(config.dbPath);
-  const built = buildServer({ config, db });
+  const built = buildServer({ config, db, ...(opts.modelCatalogSources ? { modelCatalogSources: opts.modelCatalogSources } : {}) });
   built.registry.init();
   await built.registry.syncAll();
   const client = bearerClient(config);

@@ -10,7 +10,7 @@ import {
   type SchedulerStatus,
 } from "../api.js";
 import { describeState, modelIdentityView, nextStep, observedModel, waitKindLabel } from "../orbital.js";
-import { QuotaReadout, ContextReadout } from "./readouts.js";
+import { QuotaReadout, ContextReadout, ModelRecommendationReadout } from "./readouts.js";
 import { executionRead, missionState, type Mission } from "./execution.js";
 
 export type Snapshot = {
@@ -343,9 +343,12 @@ export function Inspector({
               </ul>
             </>
           )}
+          <ModelRecommendationReadout
+            recommendation={routing?.explanation.modelRecommendation}
+          />
           <details>
             <summary>
-              Composition & model intelligence{" "}
+              Composition{" "}
               <span className="planned">Planned</span>
             </summary>
             <p>
@@ -357,15 +360,10 @@ export function Inspector({
               Ambient tooling is not evidence of attachment.
             </p>
             <p>
-              M12 will separate shadow recommendations from active routing, with
-              internal/external evidence, confidence and freshness. Public
-              benchmarks cannot bypass compatibility, authentication, security
-              or quota filters.
-            </p>
-            <p>
-              Current profile: {task.profile}. Model-level
-              cost/quality/speed/token/quota preferences and model overrides
-              await M12; existing assistant profiles remain available at intake.
+              Current profile: {task.profile}. K13 scores the three dimensions
+              above; the remaining M12 dimensions (architecture, frontend,
+              review, reasoning, long-context, tool-use) arrive only once both a
+              prior and a metric exist for them.
             </p>
           </details>
         </div>

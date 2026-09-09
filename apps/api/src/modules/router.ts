@@ -3,7 +3,9 @@ import type { ResolvedConfig } from '../config.js';
 import type { TaskStore } from './tasks.js';
 import type { Registry } from './registry.js';
 import type { CooldownStore } from './cooldown.js';
-import type { AssistantId, CapabilityManifest, RoutingExplanation, RoutingProfile, TaskIntent } from "@agent-plane/core";
+import type { AssistantId, CapabilityManifest, ModelRecommendation, RoutingExplanation, RoutingProfile, TaskIntent } from "@agent-plane/core";
+import type { ModelCatalogService } from "./model-catalog.js";
+import { recommendModel } from "./model-selection.js";
 import type { Db } from "../db/index.js";
 import { TelemetryService, classifyGoal, type AssistantScore } from "./telemetry.js";
 import { continuationProvenance } from "./context-continuation.js";
@@ -183,6 +185,27 @@ function latestQuota(
   return { usedPercent: worst.usedPercent, resetsAt: worst.resetsAt };
 }
 
+/**
+ * Never let model intelligence break routing. A catalog read, a cohort query or
+ * a normalization bug must degrade to "no recommendation", not to a failed
+ * dispatch — routing is local-first and does not depend on this (I-M3). That
+ * holds in applied mode too: no recommendation means the request is
+ * materialized exactly as it was before K13 existed.
+ */
+function modelRecommendation(
+  deps: { db: Db; config: ResolvedConfig; registry: Registry; now?: () => Date },
+  catalog: ModelCatalogService,
+  intent: TaskIntent,
+  candidates: RoutingExplanation['candidates'],
+  chosenAssistantId: AssistantId | undefined,
+): ModelRecommendation | undefined {
+  try {
+    return recommendModel({ db: deps.db, config: deps.config, registry: deps.registry, catalog, ...(deps.now ? { now: deps.now } : {}) }, intent, candidates, chosenAssistantId);
+  } catch {
+    return undefined;
+  }
+}
+
 /** Returns the inserted `routing_decisions.id`, for a real routing→session audit join. */
 export function persistRoutingDecision(db: Db, taskId: string, explanation: RoutingExplanation): number {
   const info = db
@@ -218,7 +241,13 @@ function qualityScore(score: AssistantScore | undefined): number | undefined {
 /** CR-30: all Control Plane routing uses current evidence and durable intent. */
 export function routeTask(
   deps: { db: Db; config: ResolvedConfig; tasks: TaskStore;
-    registry: Registry; cooldowns: CooldownStore; now?: () => Date },
+    registry: Registry; cooldowns: CooldownStore; now?: () => Date;
+    /**
+     * K13 model catalog. Optional: without it the routing decision simply
+     * carries no `modelRecommendation`. Routing NEVER waits on, or fails
+     * because of, model intelligence (I-M3).
+     */
+    catalog?: ModelCatalogService },
   taskId: string, origin: 'intake' | 'wake' | 'run-now' | 'failover' | 'context-yield',
   options: { exclude?: string; override?: AssistantId; dispatchId?: string } = {},
 ) {
@@ -241,7 +270,19 @@ export function routeTask(
     cooldowns: new Map(), scores, projections: new Map(deps.registry.list().map(a => [a.id, new QuotaProjection(deps.db, deps.now).for(a.id, a.manifestParsed)])), userOverride: options.override ?? intent.overrides?.assistantId,
     preferSame: continuation?.previousAssistantId as AssistantId | undefined,
   }, candidates);
+  // K13. Computed AFTER the assistant decision and folded into the same
+  // explanation object — it reads `base.candidates` (the router's own hard-filter
+  // verdict) and `base.chosen`, and writes neither back. The assistant decision
+  // is never revisited. In shadow the recommendation is inert; when every
+  // activation gate passes it commits a selector HERE, in this durable routing
+  // decision, and request materialization projects that commitment into
+  // `ExecutionRequest.model` — still the only authority, still the only writer
+  // of `RunSpec.model` (CR-33).
+  const recommendation = deps.catalog
+    ? modelRecommendation(deps, deps.catalog, intent, base.candidates, base.chosen)
+    : undefined;
   const explanation: RoutingExplanation & { origin: string } = { ...base, origin,
+    ...(recommendation ? { modelRecommendation: recommendation } : {}),
     ...(dispatch ? { dispatchId: options.dispatchId, continuation: dispatch.checkpoint_id ? { kind: 'checkpoint', checkpointId: dispatch.checkpoint_id } : { kind: 'fresh' } } : {}),
     ...(continuation ? { contextContinuation: {
       ...continuation,

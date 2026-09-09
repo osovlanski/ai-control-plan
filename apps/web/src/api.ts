@@ -1,3 +1,4 @@
+import type { ModelRecommendation } from "@agent-plane/core";
 export interface Workspace {
   workspace: string;
   assistants: string[];
@@ -103,6 +104,8 @@ export interface RoutingExplanation {
   chosen?: string;
   tieBreaker?: string;
   userOverride?: string;
+  /** K13 shadow model recommendation, recorded on the decision (§4.4.3). */
+  modelRecommendation?: ModelRecommendation;
 }
 
 export interface TaskEvent {
