@@ -10,7 +10,8 @@
     "test": "vitest run",
     "test:e2e": "pnpm build && playwright test --project=chromium",
     "demo:a": "pnpm build && playwright test --project=demo-a",
-    "demo:a5": "pnpm build && playwright test --project=demo-a5"
+    "demo:a5": "pnpm build && playwright test --project=demo-a5",
+    "demo:b": "pnpm build && playwright test --project=demo-b"
   },
   "dependencies": {
     "@fontsource-variable/ibm-plex-sans": "^5.3.0",

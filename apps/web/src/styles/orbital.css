@@ -4,13 +4,13 @@
   align-items: flex-end;
   justify-content: space-between;
   gap: 24px;
-  margin-bottom: 18px;
+  margin-bottom: 12px;
 }
 .board-head h1 {
-  font-size: 30px;
+  font-size: 32px;
   font-weight: 500;
-  letter-spacing: -0.02em;
-  line-height: 1.1;
+  letter-spacing: -0.025em;
+  line-height: 1.05;
   margin-top: 6px;
 }
 .board-head h1 em {
@@ -19,41 +19,46 @@
 }
 .board-head p {
   color: var(--text-2);
-  margin-top: 8px;
+  margin-top: 6px;
   max-width: 52ch;
+  font-size: 13px;
 }
 
-/* Command bar: the one obvious way to issue work. */
+/* Command surface: the page's primary way to issue work. Deliberately the
+   loudest element above the fold. */
+.command-surface {
+  margin-bottom: 14px;
+}
 .command-bar {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 8px 8px 8px 18px;
+  gap: 14px;
+  padding: 10px 10px 10px 22px;
   border-radius: var(--r-3);
-  border: 1px solid var(--line-strong);
+  border: 1px solid rgba(127, 227, 220, 0.28);
   background:
-    linear-gradient(90deg, rgba(127, 227, 220, 0.06), transparent 40%),
-    rgba(8, 13, 19, 0.7);
+    radial-gradient(120% 180% at 0% 50%, rgba(127, 227, 220, 0.1), transparent 45%),
+    linear-gradient(180deg, rgba(14, 22, 31, 0.9), rgba(8, 13, 19, 0.82));
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.04),
-    0 0 0 1px rgba(127, 227, 220, 0.05),
-    0 18px 50px rgba(0, 0, 0, 0.35);
-  margin-bottom: 8px;
+    inset 0 1px 0 rgba(255, 255, 255, 0.05),
+    0 0 0 1px rgba(127, 227, 220, 0.08),
+    0 26px 70px rgba(0, 0, 0, 0.45);
   transition: border-color var(--t-fast), box-shadow var(--t-med);
 }
 .command-bar:focus-within {
-  border-color: rgba(127, 227, 220, 0.55);
+  border-color: rgba(127, 227, 220, 0.6);
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.04),
-    0 0 0 4px rgba(127, 227, 220, 0.1),
-    0 18px 50px rgba(0, 0, 0, 0.35);
+    inset 0 1px 0 rgba(255, 255, 255, 0.05),
+    0 0 0 4px rgba(127, 227, 220, 0.12),
+    0 26px 70px rgba(0, 0, 0, 0.45);
 }
 .command-bar .cb-mark {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  background: var(--accent);
-  box-shadow: 0 0 14px var(--accent-glow);
+  width: 22px;
+  height: 22px;
+  border-radius: 7px;
+  background:
+    radial-gradient(circle at 32% 28%, #d9fbf8, var(--accent) 45%, #0f3a3a 100%);
+  box-shadow: 0 0 18px var(--accent-glow);
   flex-shrink: 0;
 }
 .command-bar input {
@@ -61,8 +66,8 @@
   min-width: 0;
   background: none;
   border: 0;
-  padding: 12px 0;
-  font-size: 16px;
+  padding: 16px 0;
+  font-size: 18px;
   color: var(--text);
 }
 .command-bar input::placeholder {
@@ -76,10 +81,35 @@
   font-size: 11px;
   white-space: nowrap;
 }
+.command-bar .cb-run {
+  padding: 12px 20px;
+  font-size: 14px;
+}
+.command-suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+.cb-chip {
+  padding: 7px 13px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+  color: var(--text-2);
+  font-size: 12px;
+  white-space: nowrap;
+  transition: border-color var(--t-fast), color var(--t-fast), background var(--t-fast);
+}
+.cb-chip:hover {
+  color: var(--text);
+  border-color: rgba(127, 227, 220, 0.4);
+  background: var(--surface-2);
+}
 .command-help {
   color: var(--text-2);
   font-size: 12px;
-  margin-bottom: 20px;
+  margin-top: 10px;
 }
 
 .workspace-status {
@@ -119,18 +149,20 @@
   color: var(--text-3);
 }
 
-/* Layout: field left (~46%), inspector right. */
+/* Layout: operational context + contextual inspector on the left/center-left,
+   the Orbital dominant on the right (~47% of the workspace), like the product
+   reference. The map is sticky so the sphere anchors the whole page. */
 .orbital-layout {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  gap: 0 30px;
+  gap: 0 32px;
   align-items: start;
-  margin-bottom: 30px;
+  margin-bottom: 20px;
 }
 .orbital-map {
   min-width: 0;
   position: sticky;
-  top: 18px;
+  top: 8px;
   display: flex;
   flex-direction: column;
 }
@@ -149,13 +181,17 @@
   font-size: 11px;
 }
 
-/* The scene */
+/* The scene — the sphere is the primary visual identity, so it fills its
+   column with only a small gutter for the constellation labels. */
 .sphere-scene {
   position: relative;
   width: 100%;
   aspect-ratio: 1;
-  max-width: 700px;
-  margin: 4px auto 0;
+  /* The sphere is the product's identity — it fills the Orbital column so the
+     luminous core spans ~58–64% of the region, like the reference, while the
+     relationships + legend still clear the 1440×900 fold. */
+  max-width: 600px;
+  margin: -54px auto 0;
   isolation: isolate;
 }
 .sphere-svg {
@@ -169,30 +205,31 @@
   transform-origin: center;
   transition: opacity var(--t-med);
 }
-.is-executing .sph-atmos,
-.is-executing .sph-energy {
-  animation: breathe 5s ease-in-out infinite;
+/* Idle atmosphere may breathe; nothing here animates work or events. */
+.sph-atmos {
+  animation: breathe 7s ease-in-out infinite;
 }
-.sph-energy {
-  opacity: 0.35;
+.is-executing .sph-atmos {
+  animation-duration: 5s;
 }
-.is-executing .sph-energy {
-  opacity: 0.9;
-}
-.sph-grid ellipse {
+.sph-arc {
   fill: none;
-  stroke: rgba(180, 225, 235, 0.13);
-  stroke-width: 1;
+  stroke-width: 3;
+  stroke-linecap: round;
 }
+.sph-arc-front { stroke-width: 3.5; }
 .orbit {
   fill: none;
   stroke-width: 1;
 }
+/* Occlusion: back halves sit clearly BEHIND the core (faint), front halves
+   clearly OVER it (bold + thicker) so volume reads instantly. */
 .orbit-back {
-  stroke: rgba(146, 178, 200, 0.16);
+  stroke: rgba(150, 168, 220, 0.16);
 }
 .orbit-front {
-  stroke: rgba(180, 225, 235, 0.36);
+  stroke: rgba(200, 214, 255, 0.66);
+  stroke-width: 1.6;
 }
 .orbit-2 {
   stroke-dasharray: 2 7;
@@ -241,26 +278,37 @@
   gap: 3px;
   pointer-events: none;
   z-index: 1;
+  padding: 18px 34px;
+}
+/* Dark lens so the readout stays legible over the luminous core. */
+.sphere-core::before {
+  content: "";
+  position: absolute;
+  inset: -10px -6px;
+  border-radius: 50%;
+  background: radial-gradient(closest-side, rgba(3, 5, 22, 0.62), rgba(3, 5, 22, 0) 78%);
+  z-index: -1;
 }
 .core-eyebrow {
   font-size: 10px;
   letter-spacing: 0.22em;
   text-transform: uppercase;
-  color: var(--accent);
-  opacity: 0.85;
+  color: #a9f0ea;
 }
 .sphere-core strong {
-  font-size: 58px;
+  font-size: 56px;
   line-height: 1;
   letter-spacing: -0.05em;
   font-weight: 300;
   font-variant-numeric: tabular-nums;
-  color: #eafffd;
-  text-shadow: 0 0 40px rgba(127, 227, 220, 0.35);
+  color: #f4ffff;
+  text-shadow:
+    0 2px 18px rgba(3, 5, 22, 0.9),
+    0 0 40px rgba(127, 227, 220, 0.3);
 }
 .core-sub {
   font-size: 11px;
-  color: var(--text-2);
+  color: #cdd8e6;
   letter-spacing: 0.04em;
 }
 
@@ -411,24 +459,31 @@
   opacity: 1;
 }
 
-/* Provider constellation */
+/* Provider constellation. Anchored at the dot so a label can only ever grow
+   inward, toward the sphere — never off the page. */
 .satellite {
   position: absolute;
-  transform: translate(-50%, -50%);
+  transform: translateY(-50%);
   display: flex;
   align-items: center;
   gap: 8px;
   font-size: 11px;
   color: var(--text-3);
   z-index: 1;
+  max-width: 200px;
+}
+.satellite.flip {
+  transform: translate(-100%, -50%);
 }
 .satellite i {
-  width: 22px;
-  height: 22px;
+  width: 26px;
+  height: 26px;
   border-radius: 50%;
-  border: 1px solid var(--line-strong);
-  background: radial-gradient(circle at 40% 35%, rgba(146, 178, 200, 0.28), rgba(6, 10, 15, 0.9) 70%);
-  box-shadow: 0 0 0 4px rgba(4, 7, 11, 0.85);
+  border: 1.5px solid var(--line-strong);
+  background: radial-gradient(circle at 38% 32%, rgba(146, 178, 200, 0.34), rgba(6, 10, 15, 0.95) 72%);
+  box-shadow:
+    0 0 0 4px rgba(4, 7, 11, 0.85),
+    inset 0 0 7px rgba(0, 0, 0, 0.6);
   flex-shrink: 0;
 }
 .satellite span {
@@ -439,10 +494,10 @@
   font-weight: 500;
   color: var(--text-2);
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 12px;
 }
 .satellite small {
-  font-size: 10px;
+  font-size: 10.5px;
 }
 .satellite.executing {
   color: var(--accent);
@@ -471,20 +526,277 @@
   border-style: dotted;
   border-color: var(--tone-limit);
 }
+/* K13 SHADOW "would choose": a deliberate, non-running relationship — dashed
+   ring, no glow, no fill. It must never read like `.executing`. */
+.satellite.shadow {
+  color: var(--tone-human);
+}
+.satellite.shadow i {
+  border-style: dashed;
+  border-color: var(--tone-human);
+  background: radial-gradient(circle at 40% 35%, rgba(191, 160, 232, 0.18), rgba(6, 10, 15, 0.9) 70%);
+  box-shadow: 0 0 0 4px rgba(4, 7, 11, 0.85);
+}
+.satellite.shadow strong {
+  color: var(--text-2);
+}
+.satellite-shadow-key i {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 1px dashed var(--tone-human);
+  vertical-align: middle;
+}
+/* Right-side satellites lay their label toward the sphere so nothing runs off
+   the page. */
+.satellite.flip {
+  flex-direction: row-reverse;
+  text-align: right;
+}
+.satellite.flip span {
+  justify-items: end;
+}
+
+/* ---------------------------------------------------------------------------
+ * K13 model candidates on the Orbital: assistant + selector nodes, with ACTUAL
+ * and SHADOW always shown together and never confusable, and a hard-filtered
+ * candidate visibly excluded — a benchmark score never resurrects it.
+ * ------------------------------------------------------------------------- */
+.model-node {
+  position: absolute;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  z-index: 3;
+  max-width: 224px;
+}
+.model-node.flip {
+  transform: translate(-100%, -50%);
+  flex-direction: row-reverse;
+  text-align: right;
+}
+.model-node.flip span {
+  justify-items: end;
+}
+.model-node > i {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  border: 2px solid var(--line-strong);
+  background: radial-gradient(circle at 38% 32%, #b5c7e4, #344668 34%, #080d1b 76%);
+  box-shadow:
+    0 0 0 4px rgba(4, 7, 11, 0.85),
+    inset 0 0 6px rgba(0, 0, 0, 0.6);
+}
+.model-node span {
+  display: grid;
+  line-height: 1.28;
+  min-width: 0;
+  max-width: 176px;
+}
+.model-node strong,
+.model-node small {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+.model-node strong {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-2);
+}
+.model-node strong em {
+  font-style: normal;
+  font-weight: 600;
+  color: var(--text);
+}
+.model-node small {
+  font-size: 11px;
+  letter-spacing: 0.03em;
+  color: var(--text-3);
+}
+
+/* ACTUAL — solid, active, teal. What Agentic OS is really executing / routed. */
+.model-node.is-actual strong,
+.model-node.is-actual strong em {
+  color: var(--text);
+}
+.model-node.is-actual small {
+  color: var(--accent);
+}
+.model-node.is-actual > i {
+  border-color: var(--accent);
+  border-style: solid;
+  background: radial-gradient(circle at 40% 35%, #cffaf6, var(--accent) 45%, #0f3a3a 100%);
+  box-shadow:
+    0 0 0 4px rgba(4, 7, 11, 0.85),
+    0 0 22px var(--accent-glow);
+}
+
+/* SHADOW — amber/gold, dashed, visibly NOT running. Never the teal treatment. */
+.model-node.is-shadow small {
+  color: var(--tone-human);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+}
+.model-node.is-shadow strong em {
+  color: var(--tone-human);
+}
+.model-node.is-shadow > i {
+  border-style: dashed;
+  border-color: var(--tone-human);
+  background: radial-gradient(circle at 35% 28%, #fff0d3, #a8763e 30%, #211c20 66%, #0a101b);
+  box-shadow: 0 0 0 4px rgba(4, 7, 11, 0.85);
+}
+
+/* ACTUAL *and* SHADOW on ONE candidate identity (same assistant + selector).
+   Two independent relationships, both shown — a solid teal core marker with a
+   dashed amber corona, and two stacked badges. Neither fact is dropped. */
+.model-node.is-actual.is-shadow strong,
+.model-node.is-actual.is-shadow strong em {
+  color: var(--text);
+}
+.model-node.is-actual.is-shadow > i {
+  border-style: solid;
+  border-color: var(--accent);
+  background: radial-gradient(circle at 40% 35%, #cffaf6, var(--accent) 45%, #0f3a3a 100%);
+  box-shadow:
+    0 0 0 4px rgba(4, 7, 11, 0.85),
+    0 0 0 6px rgba(243, 181, 101, 0.55),
+    0 0 20px var(--accent-glow);
+}
+.model-node .dual-tag {
+  display: grid;
+  gap: 2px;
+  white-space: nowrap;
+  overflow: visible;
+}
+.model-node .dual-tag .tag-actual {
+  color: var(--accent);
+  font-weight: 600;
+}
+.model-node .dual-tag .tag-shadow {
+  color: var(--tone-human);
+  font-weight: 600;
+  letter-spacing: 0.05em;
+}
+
+/* EXCLUDED — visually SUBORDINATE, not invisible. Dimmed + dotted + no glow so
+   a high prior can't overpower ineligibility, but the short reason ("Quota
+   exhausted") must read in the hero without opening the Inspector. */
+.model-node.is-excluded {
+  opacity: 0.74;
+}
+.model-node.is-excluded strong,
+.model-node.is-excluded strong em {
+  color: var(--text-3);
+}
+.model-node.is-excluded small {
+  color: var(--text-2);
+  letter-spacing: 0.04em;
+  /* Never clip the reason — let it wrap instead. */
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+}
+.model-node.is-excluded > i {
+  border-style: dotted;
+  border-color: var(--text-2);
+  background: rgba(6, 10, 15, 0.9);
+  box-shadow: none;
+}
+
+/* Eligible-but-unproven — present, neutral, honestly "prior unavailable". */
+.model-node.is-unproven small {
+  white-space: normal;
+  overflow: visible;
+  color: var(--text-3);
+  font-style: italic;
+}
+
+.model-actual-chip {
+  max-width: 240px;
+}
+.model-actual-chip span {
+  max-width: 210px;
+}
+.model-actual-chip strong {
+  letter-spacing: 0.04em;
+}
+/* The ACTUAL line is load-bearing ("Model: unspecified") — let it wrap, not clip. */
+.model-actual-chip small {
+  white-space: normal;
+  overflow: visible;
+}
+
+/* Relationship lines drawn from the core to the node. */
+.rel-line {
+  fill: none;
+}
+/* ACTUAL is ALWAYS solid teal — never dashed, in any state (routed, running,
+   waiting, shared destination). Execution animates glow + opacity only; the base
+   stroke stays continuous so `stroke-dasharray` computes to `none`. */
+.rel-actual {
+  stroke: var(--accent);
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-dasharray: none;
+  opacity: 0.85;
+  filter: drop-shadow(0 0 6px var(--accent-glow));
+}
+/* SHADOW is ALWAYS dashed amber — the dash is the semantic, not a state. */
+.rel-shadow {
+  stroke: var(--tone-human);
+  stroke-width: 2.25;
+  stroke-dasharray: 7 7;
+  stroke-linecap: round;
+  opacity: 0.9;
+}
+.is-executing .rel-actual {
+  animation: rel-actual-pulse 1.8s ease-in-out infinite;
+}
+@keyframes rel-actual-pulse {
+  0%,
+  100% {
+    opacity: 0.75;
+    filter: drop-shadow(0 0 4px var(--accent-glow));
+  }
+  50% {
+    opacity: 1;
+    filter: drop-shadow(0 0 13px var(--accent-glow));
+  }
+}
+
+.map-legend .model-shadow-key i {
+  background: transparent;
+  border: 1.5px dashed var(--tone-human);
+  box-shadow: none;
+}
+.map-legend .model-excluded-key i {
+  background: transparent;
+  border: 1.5px dotted var(--text-3);
+  box-shadow: none;
+}
+
 .map-caption {
   display: flex;
   justify-content: space-between;
   gap: 16px;
-  font-size: 11px;
+  font-size: 10.5px;
   color: var(--text-3);
-  margin-top: 8px;
+  margin-top: 6px;
 }
 .map-legend {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px 16px;
-  font-size: 11px;
-  margin-top: 10px;
+  gap: 3px 14px;
+  font-size: 10.5px;
+  margin-top: 7px;
 }
 .map-legend span {
   display: inline-flex;
@@ -670,7 +982,7 @@
 
 @media (max-width: 1100px) {
   .orbital-layout {
-    grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+    grid-template-columns: minmax(0, 1fr) minmax(0, 0.82fr);
     gap: 0 22px;
   }
   .body-label {
@@ -679,7 +991,9 @@
   .sphere-core strong {
     font-size: 52px;
   }
-  .satellite { max-width: 125px; }
+  .satellite { max-width: 118px; }
+  .model-node { max-width: 150px; }
+  .command-bar input { font-size: 16px; }
 }
 @media (max-width: 760px) {
   .board-head {
@@ -721,11 +1035,16 @@
   .body-label {
     display: none;
   }
-  .satellite {
+  .satellite,
+  .model-node {
     display: none;
   }
   .command-bar .btn {
     padding: 9px 12px;
+  }
+  .command-bar input {
+    font-size: 15px;
+    padding: 12px 0;
   }
   .board-head .btn {
     align-self: flex-start;

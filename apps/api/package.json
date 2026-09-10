@@ -8,6 +8,7 @@
     "start": "tsx src/index.ts",
     "open": "tsx src/bin/open-web.ts",
     "rotate": "tsx src/bin/rotate-credential.ts",
+    "model:shadow-report": "tsx src/bin/model-shadow-report.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:harness-on": "vitest run",

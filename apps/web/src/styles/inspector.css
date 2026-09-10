@@ -177,6 +177,64 @@
   padding-bottom: 8px;
   border-bottom: 1px solid var(--line);
 }
+
+/* ACTUAL vs SHADOW, stated together so neither can be misread as the other. */
+.truth-split {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin: 4px 0 14px;
+}
+.truth {
+  display: grid;
+  gap: 3px;
+  padding: 10px 12px;
+  border-radius: var(--r-2);
+  border: 1px solid var(--line);
+  background: var(--surface);
+}
+.truth .truth-tag {
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+.truth strong {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+.truth small {
+  font-size: 11px;
+  color: var(--text-3);
+}
+.truth-actual {
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  background: rgba(127, 227, 220, 0.06);
+}
+.truth-actual .truth-tag {
+  color: var(--accent);
+}
+.truth-shadow {
+  border-style: dashed;
+  border-color: color-mix(in srgb, var(--tone-human) 55%, transparent);
+  background: rgba(243, 181, 101, 0.05);
+}
+.truth-shadow .truth-tag {
+  color: var(--tone-human);
+}
+.truth-applied {
+  border-color: color-mix(in srgb, var(--tone-complete) 45%, transparent);
+  background: rgba(143, 211, 168, 0.06);
+}
+.truth-applied .truth-tag {
+  color: var(--tone-complete);
+}
+@media (max-width: 760px) {
+  .truth-split {
+    grid-template-columns: 1fr;
+  }
+}
 .section-label span {
   font-size: 10.5px;
   letter-spacing: 0.06em;
@@ -349,3 +407,40 @@ meter {
     gap: 2px;
   }
 }
+
+/* Mission → decision → relationship key; evidence follows in a disclosure. */
+.mission-decision { margin: 0 0 16px; }
+.mission-decision h3 {
+  margin: 0 0 10px;
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-2);
+}
+.mission-decision .truth { min-width: 0; gap: 5px; line-height: 1.4; }
+.mission-decision .truth strong { overflow-wrap: anywhere; }
+.mission-decision .truth small { color: var(--text-2); }
+.decision-why { margin: 0 0 12px; color: var(--text-2); font-size: 12px; line-height: 1.5; }
+.decision-why > span {
+  margin-right: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  font-size: 10px;
+  color: var(--text);
+}
+.relationship-key {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-size: 10.5px;
+  color: var(--text-2);
+}
+.relationship-key li { display: flex; align-items: center; gap: 6px; }
+.relationship-key i { width: 22px; border-top: 2px solid var(--accent); }
+.relationship-key .key-shadow i { border-top: 2px dashed var(--tone-human); }
+.relationship-key .key-excluded i { border-top: 2px dotted var(--text-3); }
+.inspector-content > .decision-evidence { margin-top: 0; padding-top: 0; border-top: 0; }

@@ -1,6 +1,6 @@
 import type { ModelRecommendation } from "@agent-plane/core";
 import type { SchedulerStatus, TaskContext } from "../api.js";
-import { contextPercent, probeFreshness } from "../orbital.js";
+import { actualStatusLine, contextPercent, probeFreshness, type ActualLifecycle } from "../orbital.js";
 
 /** K3 idle quota probe evidence, read from `/api/scheduler/status`. */
 export function QuotaReadout({
@@ -254,6 +254,49 @@ export function ContextReadout({ context }: { context: TaskContext | null }) {
   );
 }
 
+type RecommendationActual = { assistantId: string | null; running: boolean; lifecycle?: ActualLifecycle };
+
+/** The recorded decision, readable before its supporting engineering evidence. */
+export function DecisionSummary({ recommendation, actual }: {
+  recommendation: ModelRecommendation;
+  actual: RecommendationActual;
+}) {
+  const applied = recommendation.mode === "applied";
+  return (
+    <section className="mission-decision" aria-label="Decision summary">
+      <h3>Decision summary</h3>
+      {/* Two truths, side by side and never merged: what runs vs what K13 would
+          choose. In shadow mode the shadow column can never be the executing one. */}
+      <div className="truth-split">
+        <div className="truth truth-actual">
+          <span className="truth-tag">ACTUAL</span>
+          <strong className="mono">{actual?.assistantId ?? "Not routed"}</strong>
+          <small>
+            {actual?.lifecycle
+              ? actualStatusLine(actual.lifecycle)
+              : actual?.running
+                ? "Executing"
+                : "Routed · execution unchanged"}{" "}
+            · {recommendation.execution.requestedModelSelector ?? "Model: unspecified"}
+          </small>
+        </div>
+        <div className={`truth ${applied ? "truth-applied" : "truth-shadow"}`}>
+          <span className="truth-tag">{applied ? "APPLIED" : "SHADOW · would choose"}</span>
+          <strong className="mono">{recommendation.recommended ?? "no candidate"}</strong>
+          <small>{applied ? "Carried into execution" : "K13 advisory · not executing"}</small>
+        </div>
+      </div>
+
+      <p className="decision-why"><span>Why</span>{recommendation.reason}.</p>
+      <ul className="relationship-key" aria-label="Model relationship key">
+        <li className="key-actual"><i />Solid teal · ACTUAL</li>
+        <li className="key-shadow"><i />Dashed amber · SHADOW</li>
+        <li className="key-excluded"><i />Muted / dotted · EXCLUDED</li>
+      </ul>
+    </section>
+  );
+}
+
 /**
  * K13 shadow model recommendation. It must be impossible to read this panel and
  * think the recommendation affected the run: the heading says SHADOW, the
@@ -278,6 +321,12 @@ export function ModelRecommendationReadout({
   const applied = recommendation.mode === "applied";
   const winner = recommendation.candidates.find((c) => c.label === recommendation.recommended);
   const alternatives = recommendation.candidates.filter((c) => !c.eligible);
+  // Eligible, but no dimension could be scored — a runtime selector whose
+  // benchmark identity is unproven. Shown truthfully as priorMissing, never
+  // fuzzy-matched onto a benchmarked model.
+  const unproven = recommendation.candidates.filter(
+    (c) => c.eligible && c.total === undefined && c.label !== recommendation.recommended,
+  );
 
   return (
     <>
@@ -385,6 +434,31 @@ export function ModelRecommendationReadout({
           <p className="fine-print">
             A benchmark score never resurrects an excluded candidate — hard
             filters run before any score.
+          </p>
+        </>
+      )}
+
+      {unproven.length > 0 && (
+        <>
+          <p className="fine-print">Eligible, but benchmark identity unproven:</p>
+          <ul className="candidate-list">
+            {unproven.map((c) => (
+              <li key={c.label}>
+                <strong>{c.label}</strong>
+                <span className="muted">priorMissing</span>
+                <small>
+                  {c.identity.basis} — {c.identity.evidence} ·{" "}
+                  {c.dimensions
+                    .filter((d) => d.missing)
+                    .map((d) => d.missing)
+                    .join(" · ") || "no dimension could be scored"}
+                </small>
+              </li>
+            ))}
+          </ul>
+          <p className="fine-print">
+            No alias or fuzzy match is made to a benchmarked model. The candidate
+            stays eligible; it simply carries no prior.
           </p>
         </>
       )}

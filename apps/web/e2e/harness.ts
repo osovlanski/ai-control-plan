@@ -14,6 +14,7 @@ import { Registry } from "../../api/src/modules/registry.js";
 import { loadConfig, type ResolvedConfig } from "../../api/src/config.js";
 import { openDb, type Db } from "../../api/src/db/index.js";
 import { buildServer, type BuiltServer } from "../../api/src/server.js";
+import type { CatalogSource } from "../../api/src/modules/model-catalog.js";
 import type { QuotaProbeFn, ProbeOutcome } from "../../api/src/modules/quota-probe.js";
 import { credentialPath, readCredential } from "../../api/src/auth/credential-file.js";
 import { mintBootstrapToken } from "../../api/src/auth/bootstrap-token.js";
@@ -68,6 +69,8 @@ export async function boot(
   clock = new Clock(),
   configure?: (config: ResolvedConfig) => void,
   adapters: ReadonlyMap<string, AgentAdapter> = new Map(),
+  /** K8 catalog seam — scripted in-process benchmark/price evidence, never the network. */
+  modelCatalogSources?: CatalogSource[],
 ): Promise<Harness> {
   const home = mkdtempSync(join(tmpdir(), `${prefix}-`));
   const config = loadConfig({ AGENT_PLANE_HOME: home });
@@ -83,7 +86,10 @@ export async function boot(
     }
   }
   const registry = new TestRegistry(db, config);
-  const built = buildServer({ config, db, registry, now: clock.now, quotaProbeFn: demoProbe(clock) });
+  const built = buildServer({
+    config, db, registry, now: clock.now, quotaProbeFn: demoProbe(clock),
+    ...(modelCatalogSources ? { modelCatalogSources } : {}),
+  });
   built.registry.init();
   await built.registry.syncAll();
   await built.app.listen({ host: "127.0.0.1", port });

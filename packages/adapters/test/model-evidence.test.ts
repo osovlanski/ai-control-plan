@@ -46,6 +46,14 @@ describe("resolved identity in the run stream", () => {
     expect((started.payload as { model?: string }).model).toBe("fake-1");
   });
 
+  it("advertises one model by default and the options-supplied list when given (K13 demo needs two candidates)", async () => {
+    expect((await new FakeAdapter(id("fake")).describe()).core.models.map((m) => m.id)).toEqual(["fake-1"]);
+    const multi = await new FakeAdapter(id("fake"), undefined, {
+      models: [{ id: "premium-max" }, { id: "swift-mini" }],
+    }).describe();
+    expect(multi.core.models.map((m) => m.id)).toEqual(["premium-max", "swift-mini"]);
+  });
+
   it("documents the provider-evidence matrix this slice relies on", () => {
     // Kept as data so a regression in any adapter's stream is a failing test,
     // not a stale sentence in a document. See docs/agentic-os-k7-model-identity.md.

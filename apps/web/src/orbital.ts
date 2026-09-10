@@ -1,3 +1,4 @@
+import type { ModelRecommendation } from "@agent-plane/core";
 import type { TaskEvent, TaskWait } from "./api.js";
 import { missionState, type ExecutionRead } from "./board/execution.js";
 
@@ -176,11 +177,14 @@ export function contextPercent(observation: ContextView): number | undefined {
  * neither is a forecast of when anything will happen. */
 export type Ring = 0 | 1 | 2;
 export const SCENE = 1000;
-export const SPHERE_R = 210;
+// A dominant core: the sphere is the product's visual identity, not a widget.
+// Rings sit outside it with real spatial separation; the inner ring still
+// crosses in front of / behind the core (see orbit-front clip).
+export const SPHERE_R = 312;
 export const RINGS: ReadonlyArray<{ rx: number; ry: number; rot: number }> = [
-  { rx: 312, ry: 142, rot: -24 }, // in motion: ROUTING / RUNNING / HANDING_OFF
-  { rx: 385, ry: 158, rot: -9 }, // held: WAITING_RESOURCE / WAITING_INPUT / LIMIT_PAUSED / CREATED
-  { rx: 462, ry: 262, rot: 19 }, // settled: COMPLETED / FAILED / CANCELLED
+  { rx: 352, ry: 166, rot: -24 }, // in motion: ROUTING / RUNNING / HANDING_OFF
+  { rx: 410, ry: 188, rot: -9 }, // held: WAITING_RESOURCE / WAITING_INPUT / LIMIT_PAUSED / CREATED
+  { rx: 468, ry: 284, rot: 19 }, // settled: COMPLETED / FAILED / CANCELLED
 ];
 const HELD = new Set(["WAITING_RESOURCE", "WAITING_INPUT", "AWAITING_APPROVAL", "RUNTIME_UNKNOWN", "LIMIT_PAUSED", "CREATED"]);
 const SETTLED = new Set(["COMPLETED", "FAILED", "CANCELLED"]);
@@ -366,4 +370,176 @@ export function nextStep(input: {
   if (state === "FAILED") return "Settled in failure; inspect events and verification.";
   if (state === "CANCELLED") return "Retired without further execution.";
   return "Unknown state; no next step can be derived.";
+}
+
+/* ---------------------------------------------------------------------------
+ * K13 model-candidate presentation model.
+ *
+ * The Orbital must represent MODELS (assistant + selector), not only
+ * assistants: `fake-a` advertises `premium-max` and `swift-mini`, and K13's
+ * recommendation is `fake-a/premium-max` — a distinct node from
+ * `fake-a/swift-mini`. This is pure projection of the PERSISTED recommendation
+ * (`modelRecommendation.candidates`); it never scores anything.
+ * ------------------------------------------------------------------------- */
+
+/** What Agentic OS is really executing / about to execute for the mission. */
+export interface ActualExecution {
+  /** Routed or running assistant, or null when neither is known. */
+  assistantId: string | null;
+  /** The selector execution actually carries, or null when none was requested
+   *  (`ExecutionRequest.model = NULL`). Never invented. */
+  modelSelector: string | null;
+  /** A run is RUNNING now, versus merely routed and not yet started. */
+  running: boolean;
+  /** The mission's real lifecycle, so ACTUAL is truthful for terminal tasks and
+   *  never implies future execution. Derived from canonical task/run state, not
+   *  from visual state. */
+  lifecycle: ActualLifecycle;
+}
+
+/** Presentation buckets over the canonical task/effective-run state. Not a new
+ *  kernel state machine — a projection of one that already exists. */
+export type ActualLifecycle =
+  | "routed"
+  | "running"
+  | "held-resource"
+  | "held-input"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "unknown";
+
+/** Canonical / effective task state → the ACTUAL lifecycle bucket. */
+export function actualLifecycle(effectiveState: string): ActualLifecycle {
+  switch (effectiveState) {
+    case "RUNNING":
+      return "running";
+    case "WAITING_RESOURCE":
+    case "LIMIT_PAUSED":
+      return "held-resource";
+    case "WAITING_INPUT":
+    case "AWAITING_APPROVAL":
+      return "held-input";
+    case "COMPLETED":
+      return "completed";
+    case "FAILED":
+      return "failed";
+    case "CANCELLED":
+      return "cancelled";
+    case "RUNTIME_UNKNOWN":
+      return "unknown";
+    default: // CREATED / ROUTING / HANDING_OFF and any unseen state
+      return "routed";
+  }
+}
+
+/** Truthful ACTUAL status line for the Orbital chip / node. Terminal states
+ *  describe the past; none of them contains "will execute". */
+export function actualStatusLine(lc: ActualLifecycle): string {
+  switch (lc) {
+    case "running":
+      return "Executing";
+    case "routed":
+      return "Routed · awaiting execution";
+    case "held-resource":
+      return "Paused · waiting for resource";
+    case "held-input":
+      return "Held · waiting on a person";
+    case "completed":
+      return "Completed";
+    case "failed":
+      return "Failed";
+    case "cancelled":
+      return "Cancelled · will not execute";
+    case "unknown":
+      return "Runtime unknown";
+  }
+}
+
+/** Compact ACTUAL word for a dual ACTUAL+SHADOW badge on one node. */
+export function actualStatusShort(lc: ActualLifecycle): string {
+  const short: Record<ActualLifecycle, string> = {
+    running: "executing",
+    routed: "routed",
+    "held-resource": "paused",
+    "held-input": "held",
+    completed: "completed",
+    failed: "failed",
+    cancelled: "cancelled",
+    unknown: "runtime unknown",
+  };
+  return short[lc];
+}
+
+/**
+ * Short, human exclusion reason for the Orbital hero, so a hard filter is
+ * readable without opening the Inspector. Presentation only: the full technical
+ * routing/filter string is unchanged and still carried in the node title and
+ * the Inspector. It never alters the recorded hard-filter reason.
+ */
+export function shortFilterReason(failures: string[]): string {
+  const first = failures[0];
+  if (!first) return "Hard filter";
+  const raw = first.toLowerCase();
+  if (/quota exhausted/.test(raw)) return "Quota exhausted";
+  if (/quota/.test(raw)) return "Quota blocked";
+  if (/\bauth\b|authentication/.test(raw)) return "Authentication unavailable";
+  if (/disabled/.test(raw)) return "Disabled";
+  if (/context window/.test(raw)) return "Context window too small";
+  if (/security|policy/.test(raw)) return "Blocked by policy";
+  if (/override/.test(raw)) return "Operator override";
+  if (/no configured assistant advertises/.test(raw)) return "Unknown model";
+  return first;
+}
+
+export interface ModelNode {
+  assistantId: string;
+  selector: string;
+  /** `assistant/selector` — how K13 names the candidate to a human. */
+  label: string;
+  eligible: boolean;
+  filterFailures: string[];
+  /** `candidate.total` — the blended score, absent when nothing could be scored. */
+  score?: number;
+  /** No dimension carried a prior/metric: eligible, but benchmark identity unproven. */
+  priorMissing: boolean;
+  /**
+   * The persisted K13 SHADOW "would choose" — the winner's exact
+   * assistant+selector, and ONLY in shadow mode. An excluded candidate can
+   * never be the shadow winner.
+   */
+  shadow: boolean;
+  /**
+   * This node is (part of) actual execution: same assistant, and either the
+   * requested selector matches or no selector was requested (then every
+   * selector the assistant could serve is an equally-truthful "actual, model
+   * unspecified"). Distinct from `shadow`; the two are shown together.
+   */
+  actual: boolean;
+}
+
+/** Project the persisted recommendation onto model nodes. Order is preserved;
+ *  excluded candidates sink to the end so they read as a distinct band. */
+export function modelNodes(
+  rec: Pick<ModelRecommendation, "mode" | "recommended" | "candidates"> | undefined,
+  actual: ActualExecution,
+): ModelNode[] {
+  if (!rec || rec.candidates.length === 0) return [];
+  const nodes = rec.candidates.map((c): ModelNode => {
+    const scored = c.total !== undefined;
+    return {
+      assistantId: c.assistantId,
+      selector: c.selector,
+      label: c.label,
+      eligible: c.eligible,
+      filterFailures: c.filterFailures,
+      ...(scored ? { score: c.total } : {}),
+      priorMissing: c.eligible && !scored,
+      shadow: rec.mode === "shadow" && c.eligible && c.label === rec.recommended,
+      actual:
+        actual.assistantId === c.assistantId &&
+        (actual.modelSelector === null || actual.modelSelector === c.selector),
+    };
+  });
+  return nodes.sort((a, b) => Number(a.eligible === false) - Number(b.eligible === false));
 }

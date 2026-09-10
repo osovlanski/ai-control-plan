@@ -69,6 +69,19 @@ function parseContextMarker(prompt: string): FakeRunState["context"] | undefined
   return { unavailable: false, tokens: Math.round(pressure * FAKE_CONTEXT_WINDOW), window: FAKE_CONTEXT_WINDOW };
 }
 
+/** Optional per-assistant knobs, passed straight from workspace `assistants.<id>.options`. */
+export interface FakeOptions {
+  /**
+   * Model selectors this fake assistant advertises. Default `[{ id: "fake-1" }]`
+   * — unchanged for every existing caller. A demo/test that needs two distinct
+   * candidate identities (K13) sets this to two ids; each becomes its own
+   * `catalog-exact` entry once discovery is ingested.
+   */
+  models?: Array<{ id: string; displayName?: string }>;
+}
+
+const DEFAULT_MODELS: FakeOptions["models"] = [{ id: "fake-1", displayName: "Fake model" }];
+
 /**
  * Deterministic in-process adapter for tests and local development
  * (provider "fake" in workspace config). Runs no real assistant.
@@ -79,6 +92,7 @@ export class FakeAdapter implements AgentAdapter {
   constructor(
     readonly id: AssistantId,
     private script: FakeScript = DEFAULT_SCRIPT,
+    private options: FakeOptions = {},
   ) {}
 
   async describe(): Promise<CapabilityManifest> {
@@ -86,7 +100,7 @@ export class FakeAdapter implements AgentAdapter {
       assistantId: this.id,
       provider: "fake",
       core: {
-        models: [{ id: "fake-1", displayName: "Fake model" }],
+        models: this.options.models?.length ? this.options.models : DEFAULT_MODELS!,
         canResume: true,
         canMcp: false,
         supportsMidRunInput: true,

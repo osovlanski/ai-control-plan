@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, type Assistant } from "./api.js";
-import { fieldPulse } from "./orbital.js";
+import { actualLifecycle, fieldPulse, modelNodes, type ActualExecution } from "./orbital.js";
 import { CommandBar } from "./board/CommandBar.js";
 import { Inspector, type Snapshot } from "./board/Inspector.js";
 import { OrbitalField, type Satellite } from "./board/OrbitalField.js";
@@ -100,11 +100,38 @@ export function OrbitalBoard({
   const now = Date.now();
   const executing = current?.state === "RUNNING" && snapshot?.detail.id === current.id
     ? executionRead(snapshot.detail, snapshot.sessions).assistants : [];
-  const satellites: Satellite[] = assistants.map((a) => ({
-    assistant: a,
-    executing: executing.includes(a.id),
-    cooling: cooldowns.some((c) => c.assistantId === a.id && Date.parse(c.until) > now),
-  }));
+  // K13 SHADOW: the model recommendation "would choose" for the selected mission,
+  // only while it stays advisory. In `applied` mode the winner is the one
+  // executing, so the executing marker already covers it.
+  const forCurrent = snapshot?.detail.id === current?.id;
+  const recommendation = forCurrent ? snapshot?.routing.at(-1)?.explanation.modelRecommendation : undefined;
+  const routedAssistant = forCurrent ? snapshot?.routing.at(-1)?.chosen ?? null : null;
+  // What Agentic OS is actually executing / about to execute. The requested
+  // model comes ONLY from the persisted decision's execution record; a run that
+  // named no model stays `Model: unspecified` — never invented.
+  const actual: ActualExecution = {
+    assistantId: executing[0] ?? routedAssistant,
+    modelSelector: recommendation?.execution.requestedModelSelector ?? null,
+    running: executing.length > 0,
+    // Truthful lifecycle from the selected mission's canonical/effective state —
+    // never derived from the field's visual state.
+    lifecycle: current ? actualLifecycle(missionState(current)) : "routed",
+  };
+  const models = modelNodes(recommendation, actual);
+  const shadowChoice = recommendation && recommendation.mode === "shadow" && recommendation.recommended
+    ? recommendation.candidates.find((c) => c.label === recommendation.recommended)?.assistantId
+    : undefined;
+  // When the selected mission has a model recommendation, the model-candidate
+  // nodes ARE the constellation (assistant + selector). The assistant-only
+  // satellites would then be redundant and just crowd the field, so drop them.
+  const satellites: Satellite[] = models.length
+    ? []
+    : assistants.map((a) => ({
+        assistant: a,
+        executing: executing.includes(a.id),
+        cooling: cooldowns.some((c) => c.assistantId === a.id && Date.parse(c.until) > now),
+        shadow: a.id === shadowChoice,
+      }));
 
   return (
     <div className="orbital-workspace">
@@ -149,37 +176,6 @@ export function OrbitalBoard({
       )}
       {!!unavailable.length && <p role="status" className="error">Unavailable reads: {unavailable.join(", ")}. Provider and approval visibility may be incomplete.</p>}
       <div className="orbital-layout">
-        <section className="orbital-map" aria-label="Task orbital map">
-          <OrbitalField
-            tasks={bodies}
-            totalTasks={visible.length}
-            selectedId={current?.id ?? null}
-            onSelect={setSelected}
-            pulse={pulse}
-            satellites={satellites}
-          />
-          <div className="map-caption">
-            <span>Ring = state group · angle = index, not a forecast.</span>
-            <span>Select a body to inspect.</span>
-          </div>
-          <div className="map-legend">
-            <span className="tone-active">
-              <i /> In motion: executing
-            </span>
-            <span className="tone-human">
-              <i /> Beacon: needs you
-            </span>
-            <span className="tone-resource hollow">
-              <i /> Hollow + horizon: scheduler wait
-            </span>
-            <span className="tone-limit dashed">
-              <i /> Broken arc: limit / quota blocker
-            </span>
-            <span className="tone-complete">
-              <i /> Outer, faded: settled
-            </span>
-          </div>
-        </section>
         {current ? (
           <Inspector key={current.id} task={current} onOpen={() => onOpen(current.id)} onSnapshot={onSnapshot} />
         ) : (
@@ -195,6 +191,42 @@ export function OrbitalBoard({
             </p>
           </section>
         )}
+        <section className="orbital-map" aria-label="Task orbital map">
+          <OrbitalField
+            tasks={bodies}
+            totalTasks={visible.length}
+            selectedId={current?.id ?? null}
+            onSelect={setSelected}
+            pulse={pulse}
+            satellites={satellites}
+            models={models}
+            actual={actual}
+          />
+          <div className="map-caption">
+            <span>Ring = state group · angle = index, not a forecast.</span>
+            <span>Select a body to inspect.</span>
+          </div>
+          <div className="map-legend">
+            <span className="tone-active">
+              <i /> Solid line: ACTUAL execution
+            </span>
+            <span className="model-shadow-key">
+              <i /> Dashed amber: K13 SHADOW “would choose” (not running)
+            </span>
+            <span className="model-excluded-key">
+              <i /> Muted node: hard-filtered — a score can’t resurrect it
+            </span>
+            <span className="tone-human">
+              <i /> Beacon: needs you
+            </span>
+            <span className="tone-resource hollow">
+              <i /> Hollow + horizon: scheduler wait
+            </span>
+            <span className="tone-complete">
+              <i /> Outer, faded: settled
+            </span>
+          </div>
+        </section>
       </div>
       <TaskRegister
         tasks={visible}

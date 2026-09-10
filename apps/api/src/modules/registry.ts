@@ -8,6 +8,7 @@ import {
   OpenRouterCodexAdapter,
   type BedrockOptions,
   type CursorOptions,
+  type FakeOptions,
   type OpenRouterOptions,
 } from "@agent-plane/adapters";
 import type { ResolvedConfig } from "../config.js";
@@ -198,7 +199,7 @@ function createAdapter(
       // something the plane can discover (review §2.4).
       return new BedrockAdapter(id, options as BedrockOptions);
     case "fake":
-      return new FakeAdapter(id);
+      return new FakeAdapter(id, undefined, options as FakeOptions);
     default:
       throw new Error(
         `Unsupported provider "${provider}" for assistant ${id} (supported: anthropic, openai, openrouter, cursor, bedrock, fake)`,

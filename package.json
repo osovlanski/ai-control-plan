@@ -16,7 +16,9 @@
     "test:harness-on": "pnpm --filter @agent-plane/api test:harness-on",
     "test:recovery-chaos": "pnpm --filter @agent-plane/api test:recovery-chaos",
     "demo:a": "pnpm --filter @agent-plane/web demo:a",
-  "demo:a5": "pnpm --filter @agent-plane/web demo:a5",
+    "demo:a5": "pnpm --filter @agent-plane/web demo:a5",
+    "demo:b": "pnpm --filter @agent-plane/web demo:b",
+    "model:shadow-report": "pnpm --filter @agent-plane/api model:shadow-report",
     "eval": "pnpm --filter @agent-plane/eval eval",
     "eval:promote": "pnpm --filter @agent-plane/eval promote",
     "build": "pnpm -r --if-present build"
