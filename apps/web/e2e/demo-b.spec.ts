@@ -216,6 +216,28 @@ async function selectAndOpenDecision(page: Page, taskId: string) {
   return inspector;
 }
 
+/**
+ * Structural / perceptual convergence with `Agentic_OS_View.png`, asserted at
+ * whatever viewport the caller has already set. Deliberately layout-level, not
+ * pixel-level: the reference is design language, the Control Plane is truth.
+ */
+async function assertReferenceComposition(page: Page) {
+  const composer = page.getByRole("textbox", { name: "What should Agentic OS do?" });
+  // 1 + 18. The command composer is the primary surface and above the fold.
+  await expect(composer).toBeInViewport();
+
+  const main = await page.locator(".os-main").boundingBox();
+  const map = await page.locator(".orbital-map").boundingBox();
+  const scene = await page.locator(".sphere-scene").boundingBox();
+  // 2. The Orbital region owns ~44%+ of the usable workspace width.
+  expect(map!.width).toBeGreaterThan(main!.width * 0.44);
+  // 3. The sphere dominates that region — not a small inset widget.
+  expect(scene!.width).toBeGreaterThan(map!.width * 0.8);
+
+  // 14. No horizontal overflow at this width.
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+}
+
 // ===========================================================================
 // SCENARIO 1 — DETERMINISTIC SHADOW RECOMMENDATION
 // ===========================================================================
@@ -228,6 +250,8 @@ test("Demo B/1: deterministic SHADOW recommendation, and the provider request pr
 
   // 1a. Initial Overview / command state — the composer is the primary entry.
   await expect(page.getByRole("textbox", { name: "What should Agentic OS do?" })).toBeInViewport();
+  await assertReferenceComposition(page);
+  await page.screenshot({ path: testInfo.outputPath("demo-b-0-overview.png") });
   await page.screenshot({ path: testInfo.outputPath("demo-b-0-overview-command-state.png") });
 
   const { taskId, explanation } = routeFresh("Implement the streaming JSON parser", { profile: "best-quality" });
@@ -257,29 +281,64 @@ test("Demo B/1: deterministic SHADOW recommendation, and the provider request pr
   // --- the operator surface ---------------------------------------------------
   const inspector = await selectAndOpenDecision(page, taskId);
   await expect(inspector.getByText("Shadow model recommendation")).toBeVisible();
-  await expect(inspector.getByText("SHADOW", { exact: true })).toBeVisible();
-  await expect(inspector.getByText(`${A}/${PREMIUM}`)).toBeVisible();
   await expect(inspector.getByText(/Current execution:/)).toContainText("unchanged");
   await expect(inspector.getByText(/Because:/)).toBeVisible();
   await expect(inspector.getByText("external:artificial-analysis").first()).toBeVisible();
   await expect(inspector.getByText(/Identity: catalog-exact/)).toBeVisible();
 
-  // The Orbital marks the "would choose" satellite distinctly from executing.
-  await expect(page.locator(".satellite.shadow")).toHaveCount(1);
+  // Inspector states ACTUAL and SHADOW together, distinctly (§6, §17).
+  const split = inspector.locator(".truth-split");
+  await expect(split.locator(".truth-actual")).toContainText("Model: unspecified");
+  await expect(split.locator(".truth-shadow")).toContainText("SHADOW");
+  await expect(split.locator(".truth-shadow")).toContainText(`${A}/${PREMIUM}`);
+  await expect(inspector.getByText("APPLIED", { exact: true })).toHaveCount(0);
+
+  // --- the Orbital: model-level ACTUAL vs SHADOW, shown together -----------
+  const shadowNode = page.locator(".model-node.is-shadow");
+  // 5 + 6. SHADOW state is explicit and carries the MODEL selector, not just the assistant.
+  await expect(shadowNode).toHaveCount(1);
+  await expect(shadowNode).toContainText(`${A}/${PREMIUM}`);
+  await expect(shadowNode).toContainText(PREMIUM);
+  await expect(shadowNode).toContainText("SHADOW");
+  // 11. The sibling model under the SAME assistant does NOT inherit the shadow style.
+  const swiftNode = page.locator(".model-node", { hasText: `${A}/${SWIFT}` });
+  await expect(swiftNode).toHaveCount(1);
+  await expect(swiftNode).not.toHaveClass(/is-shadow/);
+  // 4 + 7. ACTUAL execution state is explicitly present and uses a distinct class.
+  const actualChip = page.locator(".model-node.model-actual-chip.is-actual");
+  await expect(actualChip).toBeVisible();
+  await expect(actualChip).toContainText(A);
+  await expect(actualChip).toContainText("Model: unspecified");
+  await expect(page.locator(".model-node.is-shadow.is-actual")).toHaveCount(0);
+  // 8 + 9. Distinct relationship strokes: solid teal for ACTUAL, dashed amber for SHADOW.
+  await expect(page.locator("line.rel-actual")).toHaveCount(1);
+  await expect(page.locator("line.rel-shadow")).toHaveCount(1);
   await expect(page.locator(".satellite.executing")).toHaveCount(0);
+
   await page.evaluate(() => window.scrollTo(0, 0));
+  await assertReferenceComposition(page);
   await page.screenshot({ path: testInfo.outputPath("demo-b-1-viewport-1440x900.png") });
+  // Hero: the product at 1440×900 telling the Demo B story — ACTUAL vs SHADOW,
+  // model-level, on a dominant Orbital. No test/debug chrome.
+  await page.screenshot({ path: testInfo.outputPath("demo-b-hero.png") });
+  await page.screenshot({ path: testInfo.outputPath("demo-b-1-shadow-vs-actual.png"), fullPage: true });
   await page.screenshot({ path: testInfo.outputPath("demo-b-1-shadow-recommendation.png"), fullPage: true });
 
-  // --- reference-image structural checks (visual acceptance) ---------------
-  // Orbital occupies substantial desktop width; composer visible without scroll;
-  // the page never scrolls horizontally; SHADOW cannot be read as ACTUAL.
-  const mapBox = await page.locator(".orbital-map").boundingBox();
-  expect(mapBox!.width).toBeGreaterThan(1440 * 0.3);
+  // 1280×800 must also hold together with no horizontal overflow.
+  await page.setViewportSize({ width: 1280, height: 800 });
   await expect(page.getByRole("textbox", { name: "What should Agentic OS do?" })).toBeInViewport();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
-  await expect(inspector.getByText("SHADOW", { exact: true })).toBeVisible();
-  await expect(inspector.getByText("APPLIED", { exact: true })).toHaveCount(0);
+  await expect(page.locator(".model-node.is-shadow")).toHaveCount(1);
+  await page.setViewportSize({ width: 1440, height: 900 });
+
+  // 17. Reduced motion still renders coherently: composer above the fold,
+  // both truths still legible, no overflow.
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await expect(page.getByRole("textbox", { name: "What should Agentic OS do?" })).toBeInViewport();
+  await expect(page.locator(".model-node.is-shadow")).toContainText("SHADOW");
+  await expect(page.locator(".model-node.model-actual-chip")).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.emulateMedia({ reducedMotion: null });
 
   // --- provider request proof: the shadow winner did NOT alter execution ---
   h.built.tasks.transition(taskId, "ROUTING");
@@ -346,10 +405,30 @@ test("Demo B/2: an excellent-scoring candidate that fails a hard filter cannot b
     await expect(inspector.getByText(`${A}/${PREMIUM}`)).toBeVisible();
     await expect(inspector.getByText(/never resurrects an excluded candidate/)).toBeVisible();
     await expect(inspector.getByText(`${B}/${SWIFT}`).first()).toBeVisible();
+
+    // --- the Orbital reads the exclusion without opening a debug table -------
+    // 10. The hard-filtered candidate has its own distinct style.
+    const excluded = page.locator(".model-node.is-excluded", { hasText: `${A}/${PREMIUM}` });
+    await expect(excluded).toHaveCount(1);
+    await expect(excluded).toContainText("EXCLUDED");
+    await expect(excluded).not.toHaveClass(/is-shadow/);
+    await expect(excluded).not.toHaveClass(/is-actual/);
+    // 13. The real, named filter reason is accessible (here: on the node itself).
+    await expect(excluded).toHaveAttribute("title", /quota/i);
+    // 12. The excluded candidate is never simultaneously the active shadow winner.
+    await expect(page.locator(".model-node.is-excluded.is-shadow")).toHaveCount(0);
+    // The lower-scoring but eligible candidate carries SHADOW instead.
+    const shadowNode = page.locator(".model-node.is-shadow");
+    await expect(shadowNode).toHaveCount(1);
+    await expect(shadowNode).toContainText(`${B}/${SWIFT}`);
+    await expect(shadowNode).toContainText(SWIFT);
+
     await page.evaluate(() => window.scrollTo(0, 0));
+    await assertReferenceComposition(page);
     await page.screenshot({ path: testInfo.outputPath("demo-b-2-viewport-1440x900.png") });
+    await page.screenshot({ path: testInfo.outputPath("demo-b-2-hard-filter.png"), fullPage: true });
     await page.screenshot({ path: testInfo.outputPath("demo-b-2-hard-filter-beats-benchmark.png"), fullPage: true });
-    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    expect(consoleErrors, `console errors: ${consoleErrors.join("\n")}`).toEqual([]);
   } finally {
     h.db.prepare("DELETE FROM quota_snapshots WHERE assistant_id = ?").run(A);
   }
@@ -382,8 +461,19 @@ test("Demo B/3: a runtime selector whose benchmark identity is unproven shows pr
   await expect(inspector.getByText("Decision", { exact: true })).toBeVisible();
   // The alias candidate is listed with priorMissing, not a borrowed score.
   await expect(inspector.getByText(/priorMissing:coding/).first()).toBeVisible();
+
+  // On the Orbital the alias node stays present and eligible — "prior
+  // unavailable", never an error, never a fuzzy-matched score.
+  const aliasNode = page.locator(".model-node", { hasText: `${C}/${ALIAS}` });
+  await expect(aliasNode).toHaveCount(1);
+  await expect(aliasNode).toContainText("prior unavailable");
+  await expect(aliasNode).not.toHaveClass(/is-excluded/);
+  await expect(aliasNode).not.toHaveClass(/is-shadow/);
+
   await page.evaluate(() => window.scrollTo(0, 0));
+  await assertReferenceComposition(page);
   await page.screenshot({ path: testInfo.outputPath("demo-b-3-viewport-1440x900.png") });
+  await page.screenshot({ path: testInfo.outputPath("demo-b-3-missing-prior.png"), fullPage: true });
   await page.screenshot({ path: testInfo.outputPath("demo-b-3-missing-prior-is-honest.png"), fullPage: true });
 
   // Execution still works under current routing semantics.

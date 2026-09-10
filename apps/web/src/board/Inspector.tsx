@@ -345,6 +345,10 @@ export function Inspector({
           )}
           <ModelRecommendationReadout
             recommendation={routing?.explanation.modelRecommendation}
+            actual={{
+              assistantId: latestRun?.assistant_id ?? routing?.chosen ?? null,
+              running: (currentExecution?.assistants.length ?? 0) > 0,
+            }}
           />
           <details>
             <summary>

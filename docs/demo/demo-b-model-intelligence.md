@@ -192,28 +192,52 @@ consumed by Usage + Retro. It is model **catalog and price evidence**, not model
 scoring — Demo B adds no duplicate scoring to Cockpit. The Control Plane remains
 the sole place a K13 recommendation is computed.
 
-## 10. Reference-image visual acceptance
+## 10. Reference-image visual acceptance — convergence pass
 
-Reference: `/home/ubuntu/workspace/reference-images/Agentic_OS_View.png`.
-Evaluation is structural / perceptual, not pixel similarity. Captured at
-1440×900 (`demo-b-*-viewport-1440x900.png`) plus full-page.
+Reference: `/home/ubuntu/workspace/reference-images/Agentic_OS_View.png` (design
+language only; the Control Plane is truth). Evaluation is structural /
+perceptual, not pixel similarity. Captured at 1440×900
+(`demo-b-*-viewport-1440x900.png`, `demo-b-hero.png`) plus full-page
+(`demo-b-1-shadow-vs-actual.png`, `demo-b-2-hard-filter.png`,
+`demo-b-3-missing-prior.png`). "Before" = the first Demo B pass
+(`.satellite`-level shadow, field-left / inspector-right, small dark sphere).
 
-| Category | Score | Note |
-|---|---|---|
-| Visual hierarchy | 4 | active mission prominent; Decision panel is the focus; register secondary |
-| Orbital prominence | 4 | `.orbital-map` > 40% of workspace width; sphere + provider satellites + rings |
-| Depth / dimensionality | 4 | existing glass/dark sphere with grid, halo, specular — unchanged |
-| Command composer prominence | 4 | "What should Agentic OS do?" full-width across the top, primary "Route mission" action, in viewport without scrolling |
-| Provider/model relationship clarity | 4 | satellites labelled per assistant; the shadow "would choose" satellite is distinctly dashed/amber and captioned |
-| Operational density | 4 | workspace status strip + register + inspector tabs; cards do not overwhelm the Orbital |
-| Readability | 4 | mono for identifiers, dimension rows carry source + freshness + sample size |
-| Premium / polished feel | 4 | dark technical aesthetic, restrained glow; no card-grid look |
-| Product-language similarity to the reference | 4 | same shell: compact left nav, top composer, Orbital left/centre, operational cards right |
-| Semantic truthfulness | 5 | Orbital state is real kernel state; SHADOW vs ACTUAL never conflated; failed gates shown truthfully; no invented agents/approvals/health |
+The first pass was functionally complete but **visually too incremental**: the
+Orbital represented *assistants*, not *models*, so a K13 recommendation of
+`assistant/selector` could not be drawn; SHADOW was a small dashed dot on the
+assistant with **no ACTUAL counterpart shown**; the sphere was a low-contrast
+near-black disc pushed into a corner; the hard filter lived only in Inspector
+prose. This pass is the correction.
 
-No category below 4. The real Orbital is dimmer than the mock when little is
-executing (there is no idle animation faking activity) — backend truth wins over
-the mock, per the acceptance brief.
+| # | Category | Before | Exact change | After evidence | Score |
+|---|---|---|---|---|---|
+| 1 | Overall composition | Field left / Inspector right, 50/50; no dominant element | `.orbital-layout` order swapped — contextual Inspector + operational strip on the left, Orbital on the right; grid `1fr 1fr`, map `position: sticky` | `demo-b-1-viewport-1440x900.png`: Orbital anchored top-right, ops/inspector left; matches the reference's left-ops / right-orbital split | 4 |
+| 2 | Orbital prominence | `.orbital-map` ~46% but the sphere filled little of it | Column ≈ 50% of the workspace; `SPHERE_R` 210→300, scene `max-width` 700→560 with negative top margin so the sphere fills its region | `assertReferenceComposition()` asserts `map.width > main.width*0.44` **and** `scene.width > map.width*0.8` at 1440×900 and 1280×800 | 4 |
+| 3 | Sphere depth | Teal-on-black disc, flat, grid + halo + specular only | Blue→violet body gradient; contained white-hot `#sph-core` light; 3 translucent `.sph-shell` rings; gold `#sph-arc` crossing in front of / behind the core; restrained `#sph-amber` counter-light; brighter rim + orbit strokes; idle-only atmospheric breathing | `demo-b-hero.png`: layered, dimensional sphere with a luminous core and visible orbit rings; `prefers-reduced-motion` still renders it coherently (asserted) | 4 |
+| 4 | Command composer prominence | Thin bar, 16px input, single action | `.command-surface`: 18px input, gradient border + glow, larger spark mark, primary `Route mission`, secondary `↵ route`, and a row of four suggestion chips that route to Intake (existing behaviour, no fake controls) | `demo-b-hero.png`: composer is the loudest element above the composer help line; `toBeInViewport()` asserted at 1440×900 and 1280×800 and under reduced motion | 4 |
+| 5 | ACTUAL vs SHADOW clarity | Only SHADOW shown (dashed dot); ACTUAL absent — "nothing is executing" was the implicit proof | Both drawn together: a teal `.model-actual-chip` ("ACTUAL · fake-a · Model: unspecified") with a **solid teal** relationship line, and an amber `.model-node.is-shadow` ("SHADOW · would choose · fake-a/premium-max") with a **dashed amber** line. Inspector repeats it as a two-panel `.truth-split` (`.truth-actual` / `.truth-shadow`) | `demo-b-1-shadow-vs-actual.png`; tests assert `line.rel-actual` = 1, `line.rel-shadow` = 1, `.model-node.is-shadow.is-actual` = 0, `APPLIED` absent, and the Inspector panels carry "Model: unspecified" and `fake-a/premium-max` | 5 |
+| 6 | Model-level relationship clarity | Nodes were `fake-a` (assistant), not `fake-a/premium-max` | New `modelNodes()` projection of `modelRecommendation.candidates`; every node is `assistantId/<em>selector</em>` and knows eligibility, filter failures, score, priorMissing, shadow, actual | Tests assert the SHADOW node contains `premium-max` (not just `fake-a`) and that `fake-a/swift-mini` — same assistant — is present and **not** `.is-shadow`; `orbital.test.ts` proves the projection | 5 |
+| 7 | Hard-filter legibility | Exclusion only in Inspector text | `.model-node.is-excluded`: 50% opacity, dotted ring, no glow, `EXCLUDED · <reason>`, full reason in `title`; sorted to a distinct band | `demo-b-2-hard-filter.png`: `fake-a/premium-max` reads as excluded despite AA 0.92; `fake-b/swift-mini` carries SHADOW. Tests assert `.is-excluded` style, `title` matches `/quota/i`, and `.is-excluded.is-shadow` = 0 | 4 |
+| 8 | Information hierarchy | Even-weight panels; register competed with the field | COMMAND (composer) → MISSION (status strip + selected mission) → ORBITAL INTELLIGENCE (right) → CONTEXTUAL INSPECTOR (left); register stays a secondary rail below | `demo-b-1-shadow-vs-actual.png`: the Orbital and the ACTUAL/SHADOW split are the eye's first two stops; no card grid | 4 |
+| 9 | Premium / polished feel | Dark + restrained but flat; sphere read as a widget | Dimensional sphere, layered glow, one-accent discipline (teal = active/selection, amber = shadow), mono identifiers, generous composer | `demo-b-hero.png` | 4 |
+| 10 | Semantic truthfulness | (already strong) | ACTUAL model is only ever the persisted `execution.requestedModelSelector`; when NULL it shows **`Model: unspecified`**, never invented; K13 stays SHADOW; `models.selection.enabled` untouched; no idle animation fakes work | Tests: `execution_requests.model` / `runs.model_requested` NULL after the run; `mode: "shadow"`, `decidedBy: "unchanged"`; `.model-node.is-shadow` never also `.is-actual` | 5 |
+
+**No category below 4.** Remaining compromises, stated plainly:
+
+- The sphere's lower ~30% falls below the 1440×900 fold (the `EXECUTION FIELD`
+  heading row costs vertical space). It is fully visible on the full-page shots.
+- Excluded-candidate reasons truncate on the node (`EXCLUDED · QUOTA BLOC…`); the
+  full named reason is in the node `title` and in the Inspector's
+  "Hard-filtered alternatives" list.
+- The amber `#sph-amber` counter-light is subtle at screenshot exposure.
+- The gold arcs are present but read as thin highlights rather than the bold
+  ribbons in the mock — kept restrained so status colour stays legible.
+- Left column below the Inspector is sparse on the hero (no fabricated
+  "Recent activity" feed — the reference's is illustrative).
+
+This pass is prepared for an **independent cold visual review by GPT-6 Astra
+High**; the scores above are the implementer's and are explicitly not a
+self-approval.
 
 ## 11. What Demo B proves
 
@@ -225,7 +249,8 @@ the mock, per the acceptance brief.
 | A hard-filtered candidate can never be recommended, however good its prior | Demo B/2: `fake-a/premium-max` (0.92 + full cohort) excluded, `total` undefined, `fake-b/swift-mini` (0.55) recommended |
 | A missing prior is shown, not guessed | Demo B/3: `fake-c/nightly` → `priorMissing:{coding,speed,cost}`, no fuzzy match, still eligible, still executes |
 | The shadow winner never alters execution (CR-33) | `execution_requests.model` and `runs.model_requested` are NULL after a run whose shadow winner was `fake-a/premium-max`; `execution.decidedBy: "unchanged"` |
-| The Orbital cannot imply the shadow winner ran | `.satellite.shadow` (dashed amber) is rendered; `.satellite.executing` count is 0 |
+| The Orbital cannot imply the shadow winner ran | `.model-node.is-shadow` (dashed amber, `SHADOW · would choose`) is rendered alongside the teal `.model-actual-chip`; `line.rel-shadow` is dashed amber, `line.rel-actual` solid teal; `.model-node.is-shadow.is-actual` count is 0 |
+| The Orbital represents models, not just assistants | `modelNodes()` projects `modelRecommendation.candidates`; the SHADOW node is `fake-a/premium-max` and `fake-a/swift-mini` (same assistant) does not inherit the style — `apps/web/src/orbital.test.ts` |
 | Activation stays closed | 1/6 gates pass; `models.selection.enabled` is never set; no attestation is written or backdated |
 | The soak report does not mutate activation state | `apps/api/test/model-shadow-report.test.ts` — identical output on re-run, row count unchanged, no write path to selection state |
 | Demo A and Demo A.5 stay green | `pnpm demo:a`, `pnpm demo:a5` in the same validation run |

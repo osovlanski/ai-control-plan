@@ -177,6 +177,64 @@
   padding-bottom: 8px;
   border-bottom: 1px solid var(--line);
 }
+
+/* ACTUAL vs SHADOW, stated together so neither can be misread as the other. */
+.truth-split {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin: 4px 0 14px;
+}
+.truth {
+  display: grid;
+  gap: 3px;
+  padding: 10px 12px;
+  border-radius: var(--r-2);
+  border: 1px solid var(--line);
+  background: var(--surface);
+}
+.truth .truth-tag {
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+.truth strong {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+.truth small {
+  font-size: 11px;
+  color: var(--text-3);
+}
+.truth-actual {
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  background: rgba(127, 227, 220, 0.06);
+}
+.truth-actual .truth-tag {
+  color: var(--accent);
+}
+.truth-shadow {
+  border-style: dashed;
+  border-color: color-mix(in srgb, var(--tone-human) 55%, transparent);
+  background: rgba(243, 181, 101, 0.05);
+}
+.truth-shadow .truth-tag {
+  color: var(--tone-human);
+}
+.truth-applied {
+  border-color: color-mix(in srgb, var(--tone-complete) 45%, transparent);
+  background: rgba(143, 211, 168, 0.06);
+}
+.truth-applied .truth-tag {
+  color: var(--tone-complete);
+}
+@media (max-width: 760px) {
+  .truth-split {
+    grid-template-columns: 1fr;
+  }
+}
 .section-label span {
   font-size: 10.5px;
   letter-spacing: 0.06em;

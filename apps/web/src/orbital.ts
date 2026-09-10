@@ -1,3 +1,4 @@
+import type { ModelRecommendation } from "@agent-plane/core";
 import type { TaskEvent, TaskWait } from "./api.js";
 import { missionState, type ExecutionRead } from "./board/execution.js";
 
@@ -176,11 +177,14 @@ export function contextPercent(observation: ContextView): number | undefined {
  * neither is a forecast of when anything will happen. */
 export type Ring = 0 | 1 | 2;
 export const SCENE = 1000;
-export const SPHERE_R = 210;
+// A dominant core: the sphere is the product's visual identity, not a widget.
+// Rings sit outside it with real spatial separation; the inner ring still
+// crosses in front of / behind the core (see orbit-front clip).
+export const SPHERE_R = 300;
 export const RINGS: ReadonlyArray<{ rx: number; ry: number; rot: number }> = [
-  { rx: 312, ry: 142, rot: -24 }, // in motion: ROUTING / RUNNING / HANDING_OFF
-  { rx: 385, ry: 158, rot: -9 }, // held: WAITING_RESOURCE / WAITING_INPUT / LIMIT_PAUSED / CREATED
-  { rx: 462, ry: 262, rot: 19 }, // settled: COMPLETED / FAILED / CANCELLED
+  { rx: 352, ry: 166, rot: -24 }, // in motion: ROUTING / RUNNING / HANDING_OFF
+  { rx: 410, ry: 188, rot: -9 }, // held: WAITING_RESOURCE / WAITING_INPUT / LIMIT_PAUSED / CREATED
+  { rx: 468, ry: 284, rot: 19 }, // settled: COMPLETED / FAILED / CANCELLED
 ];
 const HELD = new Set(["WAITING_RESOURCE", "WAITING_INPUT", "AWAITING_APPROVAL", "RUNTIME_UNKNOWN", "LIMIT_PAUSED", "CREATED"]);
 const SETTLED = new Set(["COMPLETED", "FAILED", "CANCELLED"]);
@@ -366,4 +370,77 @@ export function nextStep(input: {
   if (state === "FAILED") return "Settled in failure; inspect events and verification.";
   if (state === "CANCELLED") return "Retired without further execution.";
   return "Unknown state; no next step can be derived.";
+}
+
+/* ---------------------------------------------------------------------------
+ * K13 model-candidate presentation model.
+ *
+ * The Orbital must represent MODELS (assistant + selector), not only
+ * assistants: `fake-a` advertises `premium-max` and `swift-mini`, and K13's
+ * recommendation is `fake-a/premium-max` — a distinct node from
+ * `fake-a/swift-mini`. This is pure projection of the PERSISTED recommendation
+ * (`modelRecommendation.candidates`); it never scores anything.
+ * ------------------------------------------------------------------------- */
+
+/** What Agentic OS is really executing / about to execute for the mission. */
+export interface ActualExecution {
+  /** Routed or running assistant, or null when neither is known. */
+  assistantId: string | null;
+  /** The selector execution actually carries, or null when none was requested
+   *  (`ExecutionRequest.model = NULL`). Never invented. */
+  modelSelector: string | null;
+  /** A run is RUNNING now, versus merely routed and not yet started. */
+  running: boolean;
+}
+
+export interface ModelNode {
+  assistantId: string;
+  selector: string;
+  /** `assistant/selector` — how K13 names the candidate to a human. */
+  label: string;
+  eligible: boolean;
+  filterFailures: string[];
+  /** `candidate.total` — the blended score, absent when nothing could be scored. */
+  score?: number;
+  /** No dimension carried a prior/metric: eligible, but benchmark identity unproven. */
+  priorMissing: boolean;
+  /**
+   * The persisted K13 SHADOW "would choose" — the winner's exact
+   * assistant+selector, and ONLY in shadow mode. An excluded candidate can
+   * never be the shadow winner.
+   */
+  shadow: boolean;
+  /**
+   * This node is (part of) actual execution: same assistant, and either the
+   * requested selector matches or no selector was requested (then every
+   * selector the assistant could serve is an equally-truthful "actual, model
+   * unspecified"). Distinct from `shadow`; the two are shown together.
+   */
+  actual: boolean;
+}
+
+/** Project the persisted recommendation onto model nodes. Order is preserved;
+ *  excluded candidates sink to the end so they read as a distinct band. */
+export function modelNodes(
+  rec: Pick<ModelRecommendation, "mode" | "recommended" | "candidates"> | undefined,
+  actual: ActualExecution,
+): ModelNode[] {
+  if (!rec || rec.candidates.length === 0) return [];
+  const nodes = rec.candidates.map((c): ModelNode => {
+    const scored = c.total !== undefined;
+    return {
+      assistantId: c.assistantId,
+      selector: c.selector,
+      label: c.label,
+      eligible: c.eligible,
+      filterFailures: c.filterFailures,
+      ...(scored ? { score: c.total } : {}),
+      priorMissing: c.eligible && !scored,
+      shadow: rec.mode === "shadow" && c.eligible && c.label === rec.recommended,
+      actual:
+        actual.assistantId === c.assistantId &&
+        (actual.modelSelector === null || actual.modelSelector === c.selector),
+    };
+  });
+  return nodes.sort((a, b) => Number(a.eligible === false) - Number(b.eligible === false));
 }

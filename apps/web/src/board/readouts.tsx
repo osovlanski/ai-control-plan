@@ -262,8 +262,12 @@ export function ContextReadout({ context }: { context: TaskContext | null }) {
  */
 export function ModelRecommendationReadout({
   recommendation,
+  actual,
 }: {
   recommendation: ModelRecommendation | null | undefined;
+  /** What is really executing / routed for this mission, from the run + routing
+   *  record. Lets the panel state ACTUAL and SHADOW side by side. */
+  actual?: { assistantId: string | null; running: boolean };
 }) {
   if (!recommendation) {
     return (
@@ -292,6 +296,24 @@ export function ModelRecommendationReadout({
         <span className={applied ? "tone-complete" : "tone-limit"}>
           {applied ? "APPLIED" : "SHADOW"}
         </span>
+      </div>
+
+      {/* Two truths, side by side and never merged: what runs vs what K13 would
+          choose. In shadow mode the shadow column can never be the executing one. */}
+      <div className="truth-split">
+        <div className="truth truth-actual">
+          <span className="truth-tag">ACTUAL</span>
+          <strong className="mono">{actual?.assistantId ?? "Not routed"}</strong>
+          <small>
+            {actual?.running ? "Executing" : "Routed · execution unchanged"} ·{" "}
+            {recommendation.execution.requestedModelSelector ?? "Model: unspecified"}
+          </small>
+        </div>
+        <div className={`truth ${applied ? "truth-applied" : "truth-shadow"}`}>
+          <span className="truth-tag">{applied ? "APPLIED" : "SHADOW · would choose"}</span>
+          <strong className="mono">{recommendation.recommended ?? "no candidate"}</strong>
+          <small>{applied ? "Carried into execution" : "K13 advisory · not executing"}</small>
+        </div>
       </div>
 
       <p>

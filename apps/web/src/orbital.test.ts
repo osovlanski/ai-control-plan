@@ -6,6 +6,7 @@ import {
   describeState,
   fieldPulse,
   layoutBodies,
+  modelNodes,
   nextStep,
   modelIdentityView,
   observedModel,
@@ -174,6 +175,63 @@ describe("execution evidence", () => {
     expect(fieldPulse(tasks)).toEqual({ running: 0, attention: 1, waiting: 0, ready: 1, unknown: 0, settled: 0, total: 2 });
     expect(layoutBodies(tasks).every(body => body.ring === 1)).toBe(true);
     expect(nextStep({ state: "LIMIT_PAUSED" })).not.toMatch(/budget exhausted/i);
+  });
+});
+
+describe("model-candidate projection (K13 SHADOW)", () => {
+  const cand = (assistantId: string, selector: string, over: Record<string, unknown> = {}) =>
+    ({ assistantId, selector, label: `${assistantId}/${selector}`, eligible: true, filterFailures: [], total: 0.8, ...over });
+  // Only the fields `modelNodes` reads are needed; a full CandidateScore is not.
+  const build = (over: Record<string, unknown>) =>
+    ({ mode: "shadow", recommended: "fake-a/premium-max", candidates: [], ...over }) as Parameters<typeof modelNodes>[0];
+
+  const rec = build({
+    candidates: [
+      cand("fake-a", "premium-max"),
+      cand("fake-a", "swift-mini"),
+      cand("fake-b", "swift-mini", { total: 0.55 }),
+      cand("fake-c", "nightly", { total: undefined }),
+    ],
+  });
+
+  it("gives the SHADOW winner its own state and never leaks it to a sibling model", () => {
+    const nodes = modelNodes(rec, { assistantId: "fake-a", modelSelector: null, running: false });
+    expect(nodes.find((n) => n.label === "fake-a/premium-max")!.shadow).toBe(true);
+    // Same assistant, different selector — must NOT inherit the shadow style.
+    expect(nodes.find((n) => n.label === "fake-a/swift-mini")!.shadow).toBe(false);
+    expect(nodes.filter((n) => n.shadow)).toHaveLength(1);
+  });
+
+  it("shows ACTUAL and SHADOW together, and never invents a model for ACTUAL", () => {
+    const nodes = modelNodes(rec, { assistantId: "fake-a", modelSelector: null, running: false });
+    // No selector was requested: every fake-a model is a truthful "actual, model unspecified".
+    expect(nodes.filter((n) => n.actual).map((n) => n.label).sort()).toEqual(["fake-a/premium-max", "fake-a/swift-mini"]);
+    expect(nodes.find((n) => n.assistantId === "fake-b")!.actual).toBe(false);
+    // A concrete requested selector pins ACTUAL to exactly one node.
+    const pinned = modelNodes(rec, { assistantId: "fake-a", modelSelector: "swift-mini", running: true });
+    expect(pinned.filter((n) => n.actual).map((n) => n.label)).toEqual(["fake-a/swift-mini"]);
+  });
+
+  it("keeps a hard-filtered candidate excluded — a score can never resurrect it as the shadow winner", () => {
+    const filtered = build({
+      recommended: "fake-a/premium-max", // even if K13 somehow named it
+      candidates: [cand("fake-a", "premium-max", { eligible: false, filterFailures: ["quota exhausted"], total: undefined })],
+    });
+    const [node] = modelNodes(filtered, { assistantId: "fake-b", modelSelector: null, running: false });
+    expect(node!.eligible).toBe(false);
+    expect(node!.shadow).toBe(false);
+    expect(node!.filterFailures).toContain("quota exhausted");
+  });
+
+  it("marks an eligible candidate with no prior/metric as priorMissing, not excluded", () => {
+    const nodes = modelNodes(rec, { assistantId: "fake-a", modelSelector: null, running: false });
+    const alias = nodes.find((n) => n.label === "fake-c/nightly")!;
+    expect(alias).toMatchObject({ eligible: true, priorMissing: true, shadow: false });
+    expect(alias.score).toBeUndefined();
+  });
+
+  it("is empty without a persisted recommendation", () => {
+    expect(modelNodes(undefined, { assistantId: null, modelSelector: null, running: false })).toEqual([]);
   });
 });
 
