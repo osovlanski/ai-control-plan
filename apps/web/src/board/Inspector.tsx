@@ -9,7 +9,7 @@ import {
   type SessionSummary,
   type SchedulerStatus,
 } from "../api.js";
-import { describeState, modelIdentityView, nextStep, observedModel, waitKindLabel } from "../orbital.js";
+import { actualLifecycle, describeState, modelIdentityView, nextStep, observedModel, waitKindLabel } from "../orbital.js";
 import { QuotaReadout, ContextReadout, ModelRecommendationReadout } from "./readouts.js";
 import { executionRead, missionState, type Mission } from "./execution.js";
 
@@ -348,6 +348,7 @@ export function Inspector({
             actual={{
               assistantId: latestRun?.assistant_id ?? routing?.chosen ?? null,
               running: (currentExecution?.assistants.length ?? 0) > 0,
+              lifecycle: actualLifecycle(missionState(task)),
             }}
           />
           <details>

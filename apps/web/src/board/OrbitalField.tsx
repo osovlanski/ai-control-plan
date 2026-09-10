@@ -2,8 +2,11 @@ import { useEffect, useRef, useState, type CSSProperties } from "react";
 import type { Assistant } from "../api.js";
 import { missionState, type Mission } from "./execution.js";
 import {
+  actualStatusLine,
+  actualStatusShort,
   arcPath,
   describeState,
+  shortFilterReason,
   visibleBodies,
   ringPath,
   SCENE,
@@ -54,6 +57,24 @@ function polar(angleDeg: number, radius: number) {
   return { left, top, sx: (left / 100) * SCENE, sy: (top / 100) * SCENE };
 }
 
+/**
+ * Relationship path from the core to a node, bowed off the straight line by
+ * `bow` scene units on the perpendicular. ACTUAL and SHADOW are given opposite
+ * bows, so the two relationships stay separately legible even when they land on
+ * the SAME model node (same assistant + selector). Curve, never a class swap —
+ * ACTUAL stays solid, SHADOW stays dashed.
+ */
+function relPath(to: { sx: number; sy: number }, bow: number): string {
+  const cx = SCENE / 2;
+  const cy = SCENE / 2;
+  const dx = to.sx - cx;
+  const dy = to.sy - cy;
+  const len = Math.hypot(dx, dy) || 1;
+  const ox = (-dy / len) * bow;
+  const oy = (dx / len) * bow;
+  return `M ${cx} ${cy} Q ${(cx + to.sx) / 2 + ox} ${(cy + to.sy) / 2 + oy} ${to.sx} ${to.sy}`;
+}
+
 export function OrbitalField({
   tasks,
   selectedId,
@@ -100,7 +121,7 @@ export function OrbitalField({
   const actualNodePos = actual.modelSelector
     ? modelPlaced.find(({ m }) => m.actual && m.selector === actual.modelSelector)?.pos
     : undefined;
-  const actualChipPos = actual.assistantId && !actualNodePos ? polar(-222, SAT_R - 78) : undefined;
+  const actualChipPos = actual.assistantId && !actualNodePos ? polar(-206, SAT_R - 62) : undefined;
   const actualPos = actualNodePos ?? actualChipPos;
   const live = pulse.running + pulse.attention + pulse.waiting + pulse.ready + pulse.unknown;
   const ringLen = 2 * Math.PI * (SPHERE_R + 14);
@@ -260,10 +281,10 @@ export function OrbitalField({
         {/* ACTUAL vs SHADOW relationships — solid teal for what runs, dashed
             amber for what K13 would choose. The two are always drawn together. */}
         {actualPos && (
-          <line className="rel-line rel-actual" x1={SCENE / 2} y1={SCENE / 2} x2={actualPos.sx} y2={actualPos.sy} />
+          <path className="rel-line rel-actual" d={relPath(actualPos, 44)} />
         )}
         {shadowPos && (
-          <line className="rel-line rel-shadow" x1={SCENE / 2} y1={SCENE / 2} x2={shadowPos.sx} y2={shadowPos.sy} />
+          <path className="rel-line rel-shadow" d={relPath(shadowPos, -44)} />
         )}
       </svg>
 
@@ -328,22 +349,32 @@ export function OrbitalField({
       {/* K13 model candidates: assistant + selector, with the SHADOW winner and
           any hard-filtered candidate reading distinctly from an eligible one. */}
       {modelPlaced.map(({ m, pos }) => {
-        const isActualNode = m.actual && actual.modelSelector === m.selector && !m.shadow;
+        // ACTUAL pinned to THIS exact model (a concrete selector was requested
+        // and it matches). Distinct from "actual, model unspecified", which is
+        // carried by the assistant-level chip instead.
+        const pinnedActual =
+          m.actual && actual.modelSelector !== null && actual.modelSelector === m.selector;
+        // One candidate identity, two independent relationships: ACTUAL and
+        // SHADOW can both point at the same node. Neither fact is dropped.
+        const both = pinnedActual && m.shadow;
+        const isActualNode = pinnedActual && !m.shadow;
         const cls = !m.eligible
           ? "is-excluded"
-          : m.shadow
-            ? "is-shadow"
-            : isActualNode
-              ? "is-actual"
-              : m.priorMissing
-                ? "is-unproven"
-                : "is-eligible";
-        const tag = !m.eligible
-          ? `EXCLUDED · ${m.filterFailures[0] ?? "hard filter"}`
+          : both
+            ? "is-actual is-shadow"
+            : m.shadow
+              ? "is-shadow"
+              : isActualNode
+                ? "is-actual"
+                : m.priorMissing
+                  ? "is-unproven"
+                  : "is-eligible";
+        const soloTag = !m.eligible
+          ? `EXCLUDED · ${shortFilterReason(m.filterFailures)}`
           : m.shadow
             ? "SHADOW · would choose"
             : isActualNode
-              ? "ACTUAL · executing"
+              ? `ACTUAL · ${actualStatusShort(actual.lifecycle)}`
               : m.priorMissing
                 ? "eligible · prior unavailable"
                 : `eligible${m.score !== undefined ? ` · ${m.score.toFixed(2)}` : ""}`;
@@ -354,14 +385,23 @@ export function OrbitalField({
             style={{ left: `${pos.left}%`, top: `${pos.top}%` }}
             title={`${m.label}${m.score !== undefined ? ` · score ${m.score.toFixed(2)}` : ""}${
               m.eligible ? "" : ` · excluded: ${m.filterFailures.join(", ")}`
-            }${m.shadow ? " · K13 SHADOW: would choose (not executing)" : ""}`}
+            }${pinnedActual ? ` · ACTUAL: ${actualStatusLine(actual.lifecycle)}` : ""}${
+              m.shadow ? " · K13 SHADOW: would choose (not executing)" : ""
+            }`}
           >
             <i />
             <span>
               <strong>
                 {m.assistantId}/<em>{m.selector}</em>
               </strong>
-              <small>{tag}</small>
+              {both ? (
+                <small className="dual-tag">
+                  <span className="tag-actual">ACTUAL · {actualStatusShort(actual.lifecycle)}</span>
+                  <span className="tag-shadow">SHADOW · would choose</span>
+                </small>
+              ) : (
+                <small>{soloTag}</small>
+              )}
             </span>
           </div>
         );
@@ -371,13 +411,13 @@ export function OrbitalField({
         <div
           className={`model-node model-actual-chip is-actual ${actualChipPos.left > 52 ? "flip" : ""}`}
           style={{ left: `${actualChipPos.left}%`, top: `${actualChipPos.top}%` }}
-          title={`Actual execution · ${actual.assistantId}${actual.modelSelector ? ` · ${actual.modelSelector}` : " · model unspecified"}`}
+          title={`Actual execution · ${actual.assistantId} · ${actualStatusLine(actual.lifecycle)}${actual.modelSelector ? ` · ${actual.modelSelector}` : " · model unspecified"}`}
         >
           <i />
           <span>
             <strong>ACTUAL · {actual.assistantId}</strong>
             <small>
-              {actual.running ? "Executing" : "Routed · will execute"} ·{" "}
+              {actualStatusLine(actual.lifecycle)} ·{" "}
               {actual.modelSelector ?? "Model: unspecified"}
             </small>
           </span>

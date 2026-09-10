@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, type Assistant } from "./api.js";
-import { fieldPulse, modelNodes, type ActualExecution } from "./orbital.js";
+import { actualLifecycle, fieldPulse, modelNodes, type ActualExecution } from "./orbital.js";
 import { CommandBar } from "./board/CommandBar.js";
 import { Inspector, type Snapshot } from "./board/Inspector.js";
 import { OrbitalField, type Satellite } from "./board/OrbitalField.js";
@@ -113,6 +113,9 @@ export function OrbitalBoard({
     assistantId: executing[0] ?? routedAssistant,
     modelSelector: recommendation?.execution.requestedModelSelector ?? null,
     running: executing.length > 0,
+    // Truthful lifecycle from the selected mission's canonical/effective state —
+    // never derived from the field's visual state.
+    lifecycle: current ? actualLifecycle(missionState(current)) : "routed",
   };
   const models = modelNodes(recommendation, actual);
   const shadowChoice = recommendation && recommendation.mode === "shadow" && recommendation.recommended

@@ -201,11 +201,49 @@ test.beforeAll(async () => {
 test.afterAll(async () => h.close());
 
 /** Route a fresh task at intake and hand back its persisted recommendation. */
-function routeFresh(goal: string, opts: { profile?: RoutingProfile } = {}) {
-  const task = h.built.tasks.create({ goal, ...(opts.profile ? { profile: opts.profile } : {}) });
+function routeFresh(
+  goal: string,
+  opts: { profile?: RoutingProfile; overrides?: { assistantId?: AssistantId; model?: string } } = {},
+) {
+  const task = h.built.tasks.create({
+    goal,
+    ...(opts.profile ? { profile: opts.profile } : {}),
+    ...(opts.overrides ? { overrides: opts.overrides } : {}),
+  });
   const { explanation } = h.built.orchestrator.routeTask(task.taskId, "intake");
   return { taskId: task.taskId, explanation: explanation as RoutingExplanation };
 }
+
+/** Computed-style read of the two relationship strokes. ACTUAL must be solid
+ *  (dash array none / all-zero), SHADOW must be dashed (non-empty) — asserted
+ *  against getComputedStyle, never class presence (P1-3, §9-E). */
+async function relationshipStrokes(page: Page) {
+  return page.evaluate(() => {
+    const solid = (v: string | null) => !v || v === "none" || /^(0px\s*)+$/.test(v.trim());
+    const a = document.querySelector("path.rel-actual");
+    const s = document.querySelector("path.rel-shadow");
+    const da = a && getComputedStyle(a).strokeDasharray;
+    const ds = s && getComputedStyle(s).strokeDasharray;
+    return {
+      hasActual: !!a,
+      hasShadow: !!s,
+      actualDash: da ?? null,
+      shadowDash: ds ?? null,
+      actualSolid: !!a && solid(da),
+      shadowDashed: !!s && !solid(ds),
+      pathActual: a?.getAttribute("d") ?? null,
+      pathShadow: s?.getAttribute("d") ?? null,
+    };
+  });
+}
+
+/** Force / clear the executing visual state deterministically (no wall-clock
+ *  wait on a real run) so the running relationship styling can be verified and
+ *  captured. */
+const forceExecuting = (page: Page) =>
+  page.evaluate(() => document.querySelector(".sphere-scene")!.classList.add("is-executing"));
+const clearExecuting = (page: Page) =>
+  page.evaluate(() => document.querySelector(".sphere-scene")!.classList.remove("is-executing"));
 
 async function selectAndOpenDecision(page: Page, taskId: string) {
   const inspector = page.getByRole("region", { name: "Selected task inspector" });
@@ -310,10 +348,28 @@ test("Demo B/1: deterministic SHADOW recommendation, and the provider request pr
   await expect(actualChip).toContainText(A);
   await expect(actualChip).toContainText("Model: unspecified");
   await expect(page.locator(".model-node.is-shadow.is-actual")).toHaveCount(0);
-  // 8 + 9. Distinct relationship strokes: solid teal for ACTUAL, dashed amber for SHADOW.
-  await expect(page.locator("line.rel-actual")).toHaveCount(1);
-  await expect(page.locator("line.rel-shadow")).toHaveCount(1);
+  // 8 + 9 + P1-3. Two relationship PATHS; ACTUAL solid, SHADOW dashed, verified
+  // against computed style — pre-execution first.
+  await expect(page.locator("path.rel-actual")).toHaveCount(1);
+  await expect(page.locator("path.rel-shadow")).toHaveCount(1);
   await expect(page.locator(".satellite.executing")).toHaveCount(0);
+  {
+    const pre = await relationshipStrokes(page);
+    expect(pre.hasActual && pre.hasShadow, "both relationships present pre-exec").toBe(true);
+    expect(pre.actualSolid, `pre-exec ACTUAL stroke-dasharray="${pre.actualDash}" must be solid`).toBe(true);
+    expect(pre.shadowDashed, `pre-exec SHADOW stroke-dasharray="${pre.shadowDash}" must be dashed`).toBe(true);
+  }
+  // …then while executing: ACTUAL must NOT convert to dashed (the P1-3 bug).
+  await forceExecuting(page);
+  {
+    const run = await relationshipStrokes(page);
+    expect(run.hasActual, "RUNNING: ACTUAL relationship still present").toBe(true);
+    expect(run.actualSolid, `RUNNING ACTUAL stroke-dasharray="${run.actualDash}" must stay solid`).toBe(true);
+    expect(run.shadowDashed, `RUNNING SHADOW stroke-dasharray="${run.shadowDash}" must stay dashed`).toBe(true);
+  }
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await page.screenshot({ path: testInfo.outputPath("demo-b-running-unspecified.png") });
+  await clearExecuting(page);
 
   await page.evaluate(() => window.scrollTo(0, 0));
   await assertReferenceComposition(page);
@@ -413,7 +469,12 @@ test("Demo B/2: an excellent-scoring candidate that fails a hard filter cannot b
     await expect(excluded).toContainText("EXCLUDED");
     await expect(excluded).not.toHaveClass(/is-shadow/);
     await expect(excluded).not.toHaveClass(/is-actual/);
-    // 13. The real, named filter reason is accessible (here: on the node itself).
+    // P1-4. The SHORT reason is legible in the hero itself — RENDERED text, not
+    // tooltip-only — at 1440×900.
+    await expect(excluded).toContainText("Quota exhausted");
+    const excludedText = (await excluded.innerText()).replace(/\s+/g, " ").trim();
+    expect(excludedText, `visible excluded text: "${excludedText}"`).toContain("Quota exhausted");
+    // 13. The full technical routing/filter string is still carried in the title.
     await expect(excluded).toHaveAttribute("title", /quota/i);
     // 12. The excluded candidate is never simultaneously the active shadow winner.
     await expect(page.locator(".model-node.is-excluded.is-shadow")).toHaveCount(0);
@@ -480,6 +541,113 @@ test("Demo B/3: a runtime selector whose benchmark identity is unproven shows pr
   h.built.tasks.transition(taskId, "ROUTING");
   await h.built.orchestrator.startTask(taskId, C);
   await h.waitForState(taskId, "COMPLETED");
+
+  expect(consoleErrors, `console errors: ${consoleErrors.join("\n")}`).toEqual([]);
+});
+
+// ===========================================================================
+// SCENARIO 4 — ACTUAL + SHADOW ON THE SAME MODEL (P1-1)
+// ===========================================================================
+test("Demo B/4: ACTUAL and SHADOW that share one model stay independently visible", async ({ context }, testInfo) => {
+  const consoleErrors: string[] = [];
+  const page = await h.openApp(context);
+  page.on("console", (m) => m.type() === "error" && consoleErrors.push(m.text()));
+  page.on("pageerror", (e) => consoleErrors.push(String(e)));
+  await page.setViewportSize({ width: 1440, height: 900 });
+
+  // The operator pins premium-max; K13 SHADOW would choose the same model. That
+  // is one candidate identity carrying TWO independent relationships.
+  const { taskId, explanation } = routeFresh("Implement the checkpoint compaction path", {
+    profile: "best-quality",
+    overrides: { model: PREMIUM },
+  });
+  const rec = explanation.modelRecommendation!;
+  expect(rec.mode).toBe("shadow");
+  expect(rec.recommended).toBe(`${A}/${PREMIUM}`);
+  expect(rec.execution.requestedModelSelector).toBe(PREMIUM);
+  expect(rec.execution.decidedBy).toBe("operator-override");
+
+  await selectAndOpenDecision(page, taskId);
+
+  // ONE node for the shared destination — never duplicated into two fake nodes.
+  const shared = page.locator(".model-node", { hasText: `${A}/${PREMIUM}` });
+  await expect(shared).toHaveCount(1);
+  await expect(shared).toHaveClass(/is-actual/);
+  await expect(shared).toHaveClass(/is-shadow/);
+  await expect(shared).toContainText("ACTUAL");
+  await expect(shared).toContainText("SHADOW");
+  // The identity IS the node — no separate assistant-level ACTUAL chip.
+  await expect(page.locator(".model-node.model-actual-chip")).toHaveCount(0);
+  // The sibling selector under the same assistant inherits neither relationship.
+  const sibling = page.locator(".model-node", { hasText: `${A}/${SWIFT}` });
+  await expect(sibling).not.toHaveClass(/is-actual/);
+  await expect(sibling).not.toHaveClass(/is-shadow/);
+
+  // Two separate relationship paths to the shared node, still visually distinct.
+  await expect(page.locator("path.rel-actual")).toHaveCount(1);
+  await expect(page.locator("path.rel-shadow")).toHaveCount(1);
+  let strokes = await relationshipStrokes(page);
+  expect(strokes.pathActual).not.toEqual(strokes.pathShadow); // not one overlapping line
+  expect(strokes.actualSolid, `ACTUAL dash="${strokes.actualDash}"`).toBe(true);
+  expect(strokes.shadowDashed, `SHADOW dash="${strokes.shadowDash}"`).toBe(true);
+
+  // The Inspector still carries both truths, independently inspectable.
+  const inspector = page.getByRole("region", { name: "Selected task inspector" });
+  await expect(inspector.locator(".truth-split .truth-actual")).toContainText(PREMIUM);
+  await expect(inspector.locator(".truth-split .truth-shadow")).toContainText(`${A}/${PREMIUM}`);
+
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await assertReferenceComposition(page);
+  await page.screenshot({ path: testInfo.outputPath("demo-b-4-same-model-viewport-1440x900.png") });
+  await page.screenshot({ path: testInfo.outputPath("demo-b-4-same-model.png"), fullPage: true });
+
+  // While executing, ACTUAL must stay solid even on the shared node.
+  await forceExecuting(page);
+  strokes = await relationshipStrokes(page);
+  expect(strokes.actualSolid, `RUNNING same-model ACTUAL dash="${strokes.actualDash}"`).toBe(true);
+  expect(strokes.shadowDashed).toBe(true);
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await page.screenshot({ path: testInfo.outputPath("demo-b-running-same-model.png") });
+  await clearExecuting(page);
+
+  expect(consoleErrors, `console errors: ${consoleErrors.join("\n")}`).toEqual([]);
+});
+
+// ===========================================================================
+// SCENARIO 5 — TERMINAL LIFECYCLE TRUTH (P1-2)
+// ===========================================================================
+test("Demo B/5: a cancelled mission never shows 'will execute' for ACTUAL", async ({ context }, testInfo) => {
+  const consoleErrors: string[] = [];
+
+  const { taskId } = routeFresh("Draft the migration rollback checklist", { profile: "best-quality" });
+  // Real terminal lifecycle from canonical task state (mirrors review.spec's
+  // ROUTING → RUNNING → terminal path) — never derived from visual state.
+  h.built.tasks.transition(taskId, "ROUTING");
+  h.built.tasks.transition(taskId, "RUNNING");
+  h.built.tasks.transition(taskId, "CANCELLED");
+
+  const page = await h.openApp(context);
+  page.on("console", (m) => m.type() === "error" && consoleErrors.push(m.text()));
+  page.on("pageerror", (e) => consoleErrors.push(String(e)));
+  await page.setViewportSize({ width: 1440, height: 900 });
+
+  await selectAndOpenDecision(page, taskId);
+
+  const chip = page.locator(".model-node.model-actual-chip");
+  await expect(chip).toBeVisible();
+  await expect(chip).toContainText("Cancelled");
+  const chipText = (await chip.innerText()).replace(/\s+/g, " ").trim();
+  expect(chipText, `ACTUAL chip: "${chipText}"`).not.toMatch(/will execute/);
+  expect(chipText).toContain("Model: unspecified");
+
+  // The Inspector's ACTUAL panel agrees — terminal truth, no future-execution wording.
+  const inspector = page.getByRole("region", { name: "Selected task inspector" });
+  const actualPanel = (await inspector.locator(".truth-split .truth-actual").innerText()).replace(/\s+/g, " ");
+  expect(actualPanel, `ACTUAL panel: "${actualPanel}"`).not.toMatch(/will execute/);
+
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await page.screenshot({ path: testInfo.outputPath("demo-b-5-cancelled-viewport-1440x900.png") });
+  await page.screenshot({ path: testInfo.outputPath("demo-b-cancelled.png"), fullPage: true });
 
   expect(consoleErrors, `console errors: ${consoleErrors.join("\n")}`).toEqual([]);
 });

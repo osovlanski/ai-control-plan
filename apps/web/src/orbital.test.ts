@@ -1,5 +1,8 @@
 import { describe, it, expect } from "vitest";
 import {
+  actualLifecycle,
+  actualStatusLine,
+  actualStatusShort,
   arcPath,
   bodiesCollide,
   contextPercent,
@@ -14,7 +17,9 @@ import {
   probeFreshness,
   ringOf,
   ringPath,
+  shortFilterReason,
   waitKindLabel,
+  type ActualExecution,
 } from "./orbital.js";
 import type { TaskEvent } from "./api.js";
 
@@ -184,6 +189,8 @@ describe("model-candidate projection (K13 SHADOW)", () => {
   // Only the fields `modelNodes` reads are needed; a full CandidateScore is not.
   const build = (over: Record<string, unknown>) =>
     ({ mode: "shadow", recommended: "fake-a/premium-max", candidates: [], ...over }) as Parameters<typeof modelNodes>[0];
+  const act = (over: Partial<ActualExecution>): ActualExecution =>
+    ({ assistantId: null, modelSelector: null, running: false, lifecycle: "routed", ...over });
 
   const rec = build({
     candidates: [
@@ -195,7 +202,7 @@ describe("model-candidate projection (K13 SHADOW)", () => {
   });
 
   it("gives the SHADOW winner its own state and never leaks it to a sibling model", () => {
-    const nodes = modelNodes(rec, { assistantId: "fake-a", modelSelector: null, running: false });
+    const nodes = modelNodes(rec, act({ assistantId: "fake-a" }));
     expect(nodes.find((n) => n.label === "fake-a/premium-max")!.shadow).toBe(true);
     // Same assistant, different selector — must NOT inherit the shadow style.
     expect(nodes.find((n) => n.label === "fake-a/swift-mini")!.shadow).toBe(false);
@@ -203,13 +210,28 @@ describe("model-candidate projection (K13 SHADOW)", () => {
   });
 
   it("shows ACTUAL and SHADOW together, and never invents a model for ACTUAL", () => {
-    const nodes = modelNodes(rec, { assistantId: "fake-a", modelSelector: null, running: false });
+    const nodes = modelNodes(rec, act({ assistantId: "fake-a" }));
     // No selector was requested: every fake-a model is a truthful "actual, model unspecified".
     expect(nodes.filter((n) => n.actual).map((n) => n.label).sort()).toEqual(["fake-a/premium-max", "fake-a/swift-mini"]);
     expect(nodes.find((n) => n.assistantId === "fake-b")!.actual).toBe(false);
     // A concrete requested selector pins ACTUAL to exactly one node.
-    const pinned = modelNodes(rec, { assistantId: "fake-a", modelSelector: "swift-mini", running: true });
+    const pinned = modelNodes(rec, act({ assistantId: "fake-a", modelSelector: "swift-mini", running: true, lifecycle: "running" }));
     expect(pinned.filter((n) => n.actual).map((n) => n.label)).toEqual(["fake-a/swift-mini"]);
+  });
+
+  it("carries BOTH relationships on one node when ACTUAL and SHADOW share a destination (P1-1)", () => {
+    // actual model selector == shadow recommended selector == fake-a/premium-max.
+    const nodes = modelNodes(rec, act({ assistantId: "fake-a", modelSelector: "premium-max", lifecycle: "routed" }));
+    const winner = nodes.filter((n) => n.label === "fake-a/premium-max");
+    // One candidate identity — not duplicated into two fake nodes.
+    expect(winner).toHaveLength(1);
+    // Both facts survive, independently inspectable.
+    expect(winner[0]!.actual).toBe(true);
+    expect(winner[0]!.shadow).toBe(true);
+    // The sibling selector is neither.
+    const sibling = nodes.find((n) => n.label === "fake-a/swift-mini")!;
+    expect(sibling.shadow).toBe(false);
+    expect(sibling.actual).toBe(false);
   });
 
   it("keeps a hard-filtered candidate excluded — a score can never resurrect it as the shadow winner", () => {
@@ -217,21 +239,74 @@ describe("model-candidate projection (K13 SHADOW)", () => {
       recommended: "fake-a/premium-max", // even if K13 somehow named it
       candidates: [cand("fake-a", "premium-max", { eligible: false, filterFailures: ["quota exhausted"], total: undefined })],
     });
-    const [node] = modelNodes(filtered, { assistantId: "fake-b", modelSelector: null, running: false });
+    const [node] = modelNodes(filtered, act({ assistantId: "fake-b" }));
     expect(node!.eligible).toBe(false);
     expect(node!.shadow).toBe(false);
     expect(node!.filterFailures).toContain("quota exhausted");
   });
 
   it("marks an eligible candidate with no prior/metric as priorMissing, not excluded", () => {
-    const nodes = modelNodes(rec, { assistantId: "fake-a", modelSelector: null, running: false });
+    const nodes = modelNodes(rec, act({ assistantId: "fake-a" }));
     const alias = nodes.find((n) => n.label === "fake-c/nightly")!;
     expect(alias).toMatchObject({ eligible: true, priorMissing: true, shadow: false });
     expect(alias.score).toBeUndefined();
   });
 
   it("is empty without a persisted recommendation", () => {
-    expect(modelNodes(undefined, { assistantId: null, modelSelector: null, running: false })).toEqual([]);
+    expect(modelNodes(undefined, act({}))).toEqual([]);
+  });
+});
+
+describe("ACTUAL lifecycle truthfulness (P1-2)", () => {
+  it("maps canonical / effective task state to a lifecycle bucket", () => {
+    expect(actualLifecycle("RUNNING")).toBe("running");
+    expect(actualLifecycle("CREATED")).toBe("routed");
+    expect(actualLifecycle("ROUTING")).toBe("routed");
+    expect(actualLifecycle("WAITING_RESOURCE")).toBe("held-resource");
+    expect(actualLifecycle("LIMIT_PAUSED")).toBe("held-resource");
+    expect(actualLifecycle("WAITING_INPUT")).toBe("held-input");
+    expect(actualLifecycle("AWAITING_APPROVAL")).toBe("held-input");
+    expect(actualLifecycle("COMPLETED")).toBe("completed");
+    expect(actualLifecycle("FAILED")).toBe("failed");
+    expect(actualLifecycle("CANCELLED")).toBe("cancelled");
+    expect(actualLifecycle("RUNTIME_UNKNOWN")).toBe("unknown");
+  });
+
+  it("never implies future execution for a terminal task", () => {
+    for (const lc of ["completed", "failed", "cancelled"] as const) {
+      expect(actualStatusLine(lc)).not.toMatch(/will execute/);
+    }
+    expect(actualStatusLine("cancelled")).toBe("Cancelled · will not execute");
+    expect(actualStatusLine("completed")).toBe("Completed");
+    expect(actualStatusLine("failed")).toBe("Failed");
+  });
+
+  it("states a truthful held / awaiting phrase for every non-terminal state", () => {
+    expect(actualStatusLine("running")).toBe("Executing");
+    expect(actualStatusLine("routed")).toBe("Routed · awaiting execution");
+    expect(actualStatusLine("held-resource")).toBe("Paused · waiting for resource");
+    expect(actualStatusLine("held-input")).toBe("Held · waiting on a person");
+    expect(actualStatusShort("running")).toBe("executing");
+    expect(actualStatusShort("cancelled")).toBe("cancelled");
+  });
+});
+
+describe("hard-filter reason legibility (P1-4)", () => {
+  it("maps a technical filter string to a short semantic reason for the hero", () => {
+    expect(shortFilterReason(["quota exhausted"])).toBe("Quota exhausted");
+    expect(shortFilterReason(["quota blocked: quota until 2026-... (5h window)"])).toBe("Quota blocked");
+    expect(shortFilterReason(["auth expired"])).toBe("Authentication unavailable");
+    expect(shortFilterReason(["disabled in workspace config"])).toBe("Disabled");
+    expect(shortFilterReason(["context window 8000 is below the task's declared minimum of 32000 tokens"])).toBe(
+      "Context window too small",
+    );
+    expect(shortFilterReason(["excluded by the operator's explicit model override (premium-max)"])).toBe("Operator override");
+    expect(shortFilterReason(["the operator named a model no configured assistant advertises"])).toBe("Unknown model");
+  });
+
+  it("falls back to the raw reason rather than inventing one", () => {
+    expect(shortFilterReason(["some novel routing failure"])).toBe("some novel routing failure");
+    expect(shortFilterReason([])).toBe("Hard filter");
   });
 });
 

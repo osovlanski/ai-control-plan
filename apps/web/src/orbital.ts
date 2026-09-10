@@ -180,7 +180,7 @@ export const SCENE = 1000;
 // A dominant core: the sphere is the product's visual identity, not a widget.
 // Rings sit outside it with real spatial separation; the inner ring still
 // crosses in front of / behind the core (see orbit-front clip).
-export const SPHERE_R = 300;
+export const SPHERE_R = 312;
 export const RINGS: ReadonlyArray<{ rx: number; ry: number; rot: number }> = [
   { rx: 352, ry: 166, rot: -24 }, // in motion: ROUTING / RUNNING / HANDING_OFF
   { rx: 410, ry: 188, rot: -9 }, // held: WAITING_RESOURCE / WAITING_INPUT / LIMIT_PAUSED / CREATED
@@ -391,6 +391,105 @@ export interface ActualExecution {
   modelSelector: string | null;
   /** A run is RUNNING now, versus merely routed and not yet started. */
   running: boolean;
+  /** The mission's real lifecycle, so ACTUAL is truthful for terminal tasks and
+   *  never implies future execution. Derived from canonical task/run state, not
+   *  from visual state. */
+  lifecycle: ActualLifecycle;
+}
+
+/** Presentation buckets over the canonical task/effective-run state. Not a new
+ *  kernel state machine — a projection of one that already exists. */
+export type ActualLifecycle =
+  | "routed"
+  | "running"
+  | "held-resource"
+  | "held-input"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "unknown";
+
+/** Canonical / effective task state → the ACTUAL lifecycle bucket. */
+export function actualLifecycle(effectiveState: string): ActualLifecycle {
+  switch (effectiveState) {
+    case "RUNNING":
+      return "running";
+    case "WAITING_RESOURCE":
+    case "LIMIT_PAUSED":
+      return "held-resource";
+    case "WAITING_INPUT":
+    case "AWAITING_APPROVAL":
+      return "held-input";
+    case "COMPLETED":
+      return "completed";
+    case "FAILED":
+      return "failed";
+    case "CANCELLED":
+      return "cancelled";
+    case "RUNTIME_UNKNOWN":
+      return "unknown";
+    default: // CREATED / ROUTING / HANDING_OFF and any unseen state
+      return "routed";
+  }
+}
+
+/** Truthful ACTUAL status line for the Orbital chip / node. Terminal states
+ *  describe the past; none of them contains "will execute". */
+export function actualStatusLine(lc: ActualLifecycle): string {
+  switch (lc) {
+    case "running":
+      return "Executing";
+    case "routed":
+      return "Routed · awaiting execution";
+    case "held-resource":
+      return "Paused · waiting for resource";
+    case "held-input":
+      return "Held · waiting on a person";
+    case "completed":
+      return "Completed";
+    case "failed":
+      return "Failed";
+    case "cancelled":
+      return "Cancelled · will not execute";
+    case "unknown":
+      return "Runtime unknown";
+  }
+}
+
+/** Compact ACTUAL word for a dual ACTUAL+SHADOW badge on one node. */
+export function actualStatusShort(lc: ActualLifecycle): string {
+  const short: Record<ActualLifecycle, string> = {
+    running: "executing",
+    routed: "routed",
+    "held-resource": "paused",
+    "held-input": "held",
+    completed: "completed",
+    failed: "failed",
+    cancelled: "cancelled",
+    unknown: "runtime unknown",
+  };
+  return short[lc];
+}
+
+/**
+ * Short, human exclusion reason for the Orbital hero, so a hard filter is
+ * readable without opening the Inspector. Presentation only: the full technical
+ * routing/filter string is unchanged and still carried in the node title and
+ * the Inspector. It never alters the recorded hard-filter reason.
+ */
+export function shortFilterReason(failures: string[]): string {
+  const first = failures[0];
+  if (!first) return "Hard filter";
+  const raw = first.toLowerCase();
+  if (/quota exhausted/.test(raw)) return "Quota exhausted";
+  if (/quota/.test(raw)) return "Quota blocked";
+  if (/\bauth\b|authentication/.test(raw)) return "Authentication unavailable";
+  if (/disabled/.test(raw)) return "Disabled";
+  if (/context window/.test(raw)) return "Context window too small";
+  if (/security|policy/.test(raw)) return "Blocked by policy";
+  if (/override/.test(raw)) return "Operator override";
+  if (/no configured assistant advertises/.test(raw)) return "Unknown model";
+  return first;
 }
 
 export interface ModelNode {

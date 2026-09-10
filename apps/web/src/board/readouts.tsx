@@ -1,6 +1,6 @@
 import type { ModelRecommendation } from "@agent-plane/core";
 import type { SchedulerStatus, TaskContext } from "../api.js";
-import { contextPercent, probeFreshness } from "../orbital.js";
+import { actualStatusLine, contextPercent, probeFreshness, type ActualLifecycle } from "../orbital.js";
 
 /** K3 idle quota probe evidence, read from `/api/scheduler/status`. */
 export function QuotaReadout({
@@ -267,7 +267,7 @@ export function ModelRecommendationReadout({
   recommendation: ModelRecommendation | null | undefined;
   /** What is really executing / routed for this mission, from the run + routing
    *  record. Lets the panel state ACTUAL and SHADOW side by side. */
-  actual?: { assistantId: string | null; running: boolean };
+  actual?: { assistantId: string | null; running: boolean; lifecycle?: ActualLifecycle };
 }) {
   if (!recommendation) {
     return (
@@ -305,8 +305,12 @@ export function ModelRecommendationReadout({
           <span className="truth-tag">ACTUAL</span>
           <strong className="mono">{actual?.assistantId ?? "Not routed"}</strong>
           <small>
-            {actual?.running ? "Executing" : "Routed · execution unchanged"} ·{" "}
-            {recommendation.execution.requestedModelSelector ?? "Model: unspecified"}
+            {actual?.lifecycle
+              ? actualStatusLine(actual.lifecycle)
+              : actual?.running
+                ? "Executing"
+                : "Routed · execution unchanged"}{" "}
+            · {recommendation.execution.requestedModelSelector ?? "Model: unspecified"}
           </small>
         </div>
         <div className={`truth ${applied ? "truth-applied" : "truth-shadow"}`}>

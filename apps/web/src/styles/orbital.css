@@ -4,14 +4,14 @@
   align-items: flex-end;
   justify-content: space-between;
   gap: 24px;
-  margin-bottom: 18px;
+  margin-bottom: 12px;
 }
 .board-head h1 {
-  font-size: 40px;
+  font-size: 32px;
   font-weight: 500;
   letter-spacing: -0.025em;
   line-height: 1.05;
-  margin-top: 8px;
+  margin-top: 6px;
 }
 .board-head h1 em {
   font-style: normal;
@@ -19,14 +19,15 @@
 }
 .board-head p {
   color: var(--text-2);
-  margin-top: 8px;
+  margin-top: 6px;
   max-width: 52ch;
+  font-size: 13px;
 }
 
 /* Command surface: the page's primary way to issue work. Deliberately the
    loudest element above the fold. */
 .command-surface {
-  margin-bottom: 22px;
+  margin-bottom: 14px;
 }
 .command-bar {
   display: flex;
@@ -156,12 +157,12 @@
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 0 32px;
   align-items: start;
-  margin-bottom: 30px;
+  margin-bottom: 20px;
 }
 .orbital-map {
   min-width: 0;
   position: sticky;
-  top: 18px;
+  top: 8px;
   display: flex;
   flex-direction: column;
 }
@@ -186,8 +187,11 @@
   position: relative;
   width: 100%;
   aspect-ratio: 1;
-  max-width: 560px;
-  margin: -14px auto 0;
+  /* The sphere is the product's identity — it fills the Orbital column so the
+     luminous core spans ~58–64% of the region, like the reference, while the
+     relationships + legend still clear the 1440×900 fold. */
+  max-width: 600px;
+  margin: -54px auto 0;
   isolation: isolate;
 }
 .sphere-svg {
@@ -211,46 +215,52 @@
   animation-duration: 5s;
 }
 .sph-energy {
-  opacity: 0.4;
+  opacity: 0.52;
 }
 .is-executing .sph-energy {
-  opacity: 0.92;
+  opacity: 0.95;
 }
+/* Restrained warm gold/amber counter-light on the opposite side to the cool
+   rim — clearly perceptible, still not a theme. */
 .sph-amber {
-  opacity: 0.6;
+  opacity: 0.82;
 }
-/* Layered translucent shells around the core. */
+/* Layered translucent shells give the core visible volume, not one disc. */
 .sph-shell {
   fill: none;
-  stroke: rgba(150, 168, 255, 0.1);
-  stroke-width: 1;
+  stroke: rgba(150, 168, 255, 0.2);
+  stroke-width: 1.4;
 }
 .sph-corelight {
   mix-blend-mode: screen;
 }
 .sph-arc {
   fill: none;
-  stroke-width: 2.5;
+  stroke-width: 3;
   stroke-linecap: round;
-  opacity: 0.55;
+  opacity: 0.72;
 }
 .sph-arc-front {
-  opacity: 0.75;
+  opacity: 0.92;
+  stroke-width: 3.4;
 }
 .sph-grid ellipse {
   fill: none;
-  stroke: rgba(180, 200, 255, 0.12);
+  stroke: rgba(180, 200, 255, 0.2);
   stroke-width: 1;
 }
 .orbit {
   fill: none;
   stroke-width: 1;
 }
+/* Occlusion: back halves sit clearly BEHIND the core (faint), front halves
+   clearly OVER it (bold + thicker) so volume reads instantly. */
 .orbit-back {
-  stroke: rgba(150, 168, 220, 0.22);
+  stroke: rgba(150, 168, 220, 0.16);
 }
 .orbit-front {
-  stroke: rgba(196, 210, 255, 0.44);
+  stroke: rgba(200, 214, 255, 0.66);
+  stroke-width: 1.6;
 }
 .orbit-2 {
   stroke-dasharray: 2 7;
@@ -497,12 +507,14 @@
   transform: translate(-100%, -50%);
 }
 .satellite i {
-  width: 22px;
-  height: 22px;
+  width: 26px;
+  height: 26px;
   border-radius: 50%;
-  border: 1px solid var(--line-strong);
-  background: radial-gradient(circle at 40% 35%, rgba(146, 178, 200, 0.28), rgba(6, 10, 15, 0.9) 70%);
-  box-shadow: 0 0 0 4px rgba(4, 7, 11, 0.85);
+  border: 1.5px solid var(--line-strong);
+  background: radial-gradient(circle at 38% 32%, rgba(146, 178, 200, 0.34), rgba(6, 10, 15, 0.95) 72%);
+  box-shadow:
+    0 0 0 4px rgba(4, 7, 11, 0.85),
+    inset 0 0 7px rgba(0, 0, 0, 0.6);
   flex-shrink: 0;
 }
 .satellite span {
@@ -513,10 +525,10 @@
   font-weight: 500;
   color: var(--text-2);
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 12px;
 }
 .satellite small {
-  font-size: 10px;
+  font-size: 10.5px;
 }
 .satellite.executing {
   color: var(--accent);
@@ -587,9 +599,9 @@
   transform: translateY(-50%);
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 9px;
   z-index: 3;
-  max-width: 176px;
+  max-width: 208px;
 }
 .model-node.flip {
   transform: translate(-100%, -50%);
@@ -600,19 +612,21 @@
   justify-items: end;
 }
 .model-node > i {
-  width: 14px;
-  height: 14px;
+  width: 18px;
+  height: 18px;
   border-radius: 50%;
   flex-shrink: 0;
-  border: 1.5px solid var(--line-strong);
-  background: rgba(8, 13, 19, 0.9);
-  box-shadow: 0 0 0 4px rgba(4, 7, 11, 0.85);
+  border: 2px solid var(--line-strong);
+  background: radial-gradient(circle at 38% 32%, rgba(146, 178, 200, 0.32), rgba(8, 13, 19, 0.95) 72%);
+  box-shadow:
+    0 0 0 4px rgba(4, 7, 11, 0.85),
+    inset 0 0 6px rgba(0, 0, 0, 0.6);
 }
 .model-node span {
   display: grid;
-  line-height: 1.25;
+  line-height: 1.28;
   min-width: 0;
-  max-width: 144px;
+  max-width: 176px;
 }
 .model-node strong,
 .model-node small {
@@ -623,7 +637,7 @@
 }
 .model-node strong {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 500;
   color: var(--text-2);
 }
@@ -632,7 +646,7 @@
   color: var(--text);
 }
 .model-node small {
-  font-size: 10px;
+  font-size: 10.5px;
   letter-spacing: 0.03em;
   color: var(--text-3);
 }
@@ -670,22 +684,59 @@
   box-shadow: 0 0 0 4px rgba(4, 7, 11, 0.85);
 }
 
-/* EXCLUDED — muted, dimmed, no glow. A high prior can't overpower ineligibility. */
+/* ACTUAL *and* SHADOW on ONE candidate identity (same assistant + selector).
+   Two independent relationships, both shown — a solid teal core marker with a
+   dashed amber corona, and two stacked badges. Neither fact is dropped. */
+.model-node.is-actual.is-shadow strong,
+.model-node.is-actual.is-shadow strong em {
+  color: var(--text);
+}
+.model-node.is-actual.is-shadow > i {
+  border-style: solid;
+  border-color: var(--accent);
+  background: radial-gradient(circle at 40% 35%, #cffaf6, var(--accent) 45%, #0f3a3a 100%);
+  box-shadow:
+    0 0 0 4px rgba(4, 7, 11, 0.85),
+    0 0 0 6px rgba(243, 181, 101, 0.55),
+    0 0 20px var(--accent-glow);
+}
+.model-node .dual-tag {
+  display: grid;
+  gap: 2px;
+  white-space: nowrap;
+  overflow: visible;
+}
+.model-node .dual-tag .tag-actual {
+  color: var(--accent);
+  font-weight: 600;
+}
+.model-node .dual-tag .tag-shadow {
+  color: var(--tone-human);
+  font-weight: 600;
+  letter-spacing: 0.05em;
+}
+
+/* EXCLUDED — visually SUBORDINATE, not invisible. Dimmed + dotted + no glow so
+   a high prior can't overpower ineligibility, but the short reason ("Quota
+   exhausted") must read in the hero without opening the Inspector. */
 .model-node.is-excluded {
-  opacity: 0.5;
+  opacity: 0.74;
 }
 .model-node.is-excluded strong,
-.model-node.is-excluded strong em,
-.model-node.is-excluded small {
+.model-node.is-excluded strong em {
   color: var(--text-3);
 }
 .model-node.is-excluded small {
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
+  color: var(--text-2);
+  letter-spacing: 0.04em;
+  /* Never clip the reason — let it wrap instead. */
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
 }
 .model-node.is-excluded > i {
   border-style: dotted;
-  border-color: var(--text-3);
+  border-color: var(--text-2);
   background: rgba(6, 10, 15, 0.9);
   box-shadow: none;
 }
@@ -715,21 +766,38 @@
 .rel-line {
   fill: none;
 }
+/* ACTUAL is ALWAYS solid teal — never dashed, in any state (routed, running,
+   waiting, shared destination). Execution animates glow + opacity only; the base
+   stroke stays continuous so `stroke-dasharray` computes to `none`. */
 .rel-actual {
   stroke: var(--accent);
-  stroke-width: 2.5;
-  opacity: 0.8;
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-dasharray: none;
+  opacity: 0.85;
   filter: drop-shadow(0 0 6px var(--accent-glow));
 }
+/* SHADOW is ALWAYS dashed amber — the dash is the semantic, not a state. */
 .rel-shadow {
   stroke: var(--tone-human);
-  stroke-width: 2;
+  stroke-width: 2.25;
   stroke-dasharray: 7 7;
-  opacity: 0.85;
+  stroke-linecap: round;
+  opacity: 0.9;
 }
 .is-executing .rel-actual {
-  animation: dash-flow 1.4s linear infinite;
-  stroke-dasharray: 10 6;
+  animation: rel-actual-pulse 1.8s ease-in-out infinite;
+}
+@keyframes rel-actual-pulse {
+  0%,
+  100% {
+    opacity: 0.75;
+    filter: drop-shadow(0 0 4px var(--accent-glow));
+  }
+  50% {
+    opacity: 1;
+    filter: drop-shadow(0 0 13px var(--accent-glow));
+  }
 }
 
 .map-legend .model-shadow-key i {
@@ -743,26 +811,20 @@
   box-shadow: none;
 }
 
-@keyframes dash-flow {
-  to {
-    stroke-dashoffset: -16;
-  }
-}
-
 .map-caption {
   display: flex;
   justify-content: space-between;
   gap: 16px;
-  font-size: 11px;
+  font-size: 10.5px;
   color: var(--text-3);
-  margin-top: 8px;
+  margin-top: 6px;
 }
 .map-legend {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px 16px;
-  font-size: 11px;
-  margin-top: 10px;
+  gap: 3px 14px;
+  font-size: 10.5px;
+  margin-top: 7px;
 }
 .map-legend span {
   display: inline-flex;
