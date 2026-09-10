@@ -31,7 +31,8 @@
  * Run: `pnpm demo:b` (from repo root) or
  *      `pnpm --filter @agent-plane/web exec playwright test e2e/demo-b.spec.ts --project=demo-b`
  */
-import { test, expect, type Page } from "@playwright/test";
+import { test, expect, type Page, type TestInfo } from "@playwright/test";
+import { writeFile } from "node:fs/promises";
 import {
   AA_NORMALIZATION_VERSION,
   DIMENSION_K,
@@ -250,8 +251,45 @@ async function selectAndOpenDecision(page: Page, taskId: string) {
   await page.getByRole("textbox", { name: "Search tasks" }).fill(taskId);
   await page.getByRole("button", { name: new RegExp(taskId) }).first().click();
   await expect(inspector.getByRole("code")).toContainText(taskId);
+  // The decision must be readable on the default Execution tab, before debug evidence.
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await assertDecisionViewport(page);
   await inspector.getByRole("button", { name: "Decision", exact: true }).click();
+  await inspector.locator(".decision-evidence > summary").click();
   return inspector;
+}
+
+/** Layout contracts use viewport bounds, never sphere-artwork pixels. */
+async function assertDecisionViewport(page: Page) {
+  const summary = page.getByRole("region", { name: "Decision summary", exact: true });
+  await expect(summary).toBeVisible();
+  for (const selector of [".truth-actual", ".truth-shadow", ".decision-why", ".relationship-key"]) {
+    const element = summary.locator(selector);
+    await expect(element).toBeInViewport({ ratio: 1 });
+    const box = await element.boundingBox();
+    expect(box!.y).toBeGreaterThanOrEqual(0);
+    expect(box!.y + box!.height, `${selector} bottom`).toBeLessThan(page.viewportSize()!.height);
+  }
+}
+
+async function decisionOverview(page: Page) {
+  const disclosure = page.locator(".decision-evidence[open] > summary");
+  if (await disclosure.count()) await disclosure.click();
+  await page.evaluate(() => window.scrollTo(0, 0));
+}
+
+async function recordViewport(page: Page, testInfo: TestInfo, name: string) {
+  const bounds = await page.evaluate(() => {
+    const result: Record<string, { x: number; y: number; width: number; height: number; bottom: number }> = {};
+    for (const selector of [".truth-actual", ".truth-shadow", ".decision-why", ".relationship-key", ".command-bar", ".orbital-map", ".os-main"]) {
+      const b = document.querySelector(selector)!.getBoundingClientRect();
+      result[selector] = { x: b.x, y: b.y, width: b.width, height: b.height, bottom: b.bottom };
+    }
+    return { viewport: { width: innerWidth, height: innerHeight }, bounds: result, scrollWidth: document.documentElement.scrollWidth };
+  });
+  const path = testInfo.outputPath(`${name}.json`);
+  await writeFile(path, JSON.stringify(bounds, null, 2));
+  await testInfo.attach(name, { path, contentType: "application/json" });
 }
 
 /**
@@ -260,6 +298,8 @@ async function selectAndOpenDecision(page: Page, taskId: string) {
  * pixel-level: the reference is design language, the Control Plane is truth.
  */
 async function assertReferenceComposition(page: Page) {
+  await decisionOverview(page);
+  if (await page.locator(".mission-decision").count()) await assertDecisionViewport(page);
   const composer = page.getByRole("textbox", { name: "What should Agentic OS do?" });
   // 1 + 18. The command composer is the primary surface and above the fold.
   await expect(composer).toBeInViewport();
@@ -360,6 +400,7 @@ test("Demo B/1: deterministic SHADOW recommendation, and the provider request pr
     expect(pre.shadowDashed, `pre-exec SHADOW stroke-dasharray="${pre.shadowDash}" must be dashed`).toBe(true);
   }
   // …then while executing: ACTUAL must NOT convert to dashed (the P1-3 bug).
+  await decisionOverview(page);
   await forceExecuting(page);
   {
     const run = await relationshipStrokes(page);
@@ -377,11 +418,15 @@ test("Demo B/1: deterministic SHADOW recommendation, and the provider request pr
   // Hero: the product at 1440×900 telling the Demo B story — ACTUAL vs SHADOW,
   // model-level, on a dominant Orbital. No test/debug chrome.
   await page.screenshot({ path: testInfo.outputPath("demo-b-hero.png") });
+  await recordViewport(page, testInfo, "layout-1440x900");
   await page.screenshot({ path: testInfo.outputPath("demo-b-1-shadow-vs-actual.png"), fullPage: true });
   await page.screenshot({ path: testInfo.outputPath("demo-b-1-shadow-recommendation.png"), fullPage: true });
 
   // 1280×800 must also hold together with no horizontal overflow.
   await page.setViewportSize({ width: 1280, height: 800 });
+  await assertReferenceComposition(page);
+  await recordViewport(page, testInfo, "layout-1280x800");
+  await page.screenshot({ path: testInfo.outputPath("demo-b-hero-1280x800.png") });
   await expect(page.getByRole("textbox", { name: "What should Agentic OS do?" })).toBeInViewport();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await expect(page.locator(".model-node.is-shadow")).toHaveCount(1);
@@ -390,11 +435,29 @@ test("Demo B/1: deterministic SHADOW recommendation, and the provider request pr
   // 17. Reduced motion still renders coherently: composer above the fold,
   // both truths still legible, no overflow.
   await page.emulateMedia({ reducedMotion: "reduce" });
+  await assertReferenceComposition(page);
+  const animations = await page.locator(".sphere-scene").evaluate((el) =>
+    el.getAnimations({ subtree: true }).filter((animation) => animation.playState === "running").length);
+  expect(animations, "reduced motion stops sphere and relationship animations").toBe(0);
+  await page.screenshot({ path: testInfo.outputPath("demo-b-reduced-motion.png") });
   await expect(page.getByRole("textbox", { name: "What should Agentic OS do?" })).toBeInViewport();
   await expect(page.locator(".model-node.is-shadow")).toContainText("SHADOW");
   await expect(page.locator(".model-node.model-actual-chip")).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.emulateMedia({ reducedMotion: null });
+
+  // Mobile retains its existing single-column fallback (orbital labels are P2).
+  await page.setViewportSize({ width: 390, height: 844 });
+  // ResizeObserver updates the orbit's pixel path after the viewport changes.
+  // Wait for that layout to settle rather than measuring the old desktop path.
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  const mobileLayout = await page.evaluate(() => ({ width: innerWidth, scrollWidth: document.documentElement.scrollWidth }));
+  await writeFile(testInfo.outputPath("mobile-layout.json"), JSON.stringify(mobileLayout, null, 2));
+  await testInfo.attach("mobile-layout", { body: JSON.stringify(mobileLayout), contentType: "application/json" });
+  await expect(page.locator(".mission-decision .truth-actual")).toBeVisible();
+  await expect(page.locator(".mission-decision .truth-shadow")).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath("demo-b-mobile-p2.png"), fullPage: true });
+  await page.setViewportSize({ width: 1440, height: 900 });
 
   // --- provider request proof: the shadow winner did NOT alter execution ---
   h.built.tasks.transition(taskId, "ROUTING");
@@ -458,7 +521,7 @@ test("Demo B/2: an excellent-scoring candidate that fails a hard filter cannot b
 
     const inspector = await selectAndOpenDecision(page, taskId);
     await expect(inspector.getByText("Hard-filtered alternatives:")).toBeVisible();
-    await expect(inspector.getByText(`${A}/${PREMIUM}`)).toBeVisible();
+    await expect(inspector.locator(".decision-evidence").getByText(`${A}/${PREMIUM}`)).toBeVisible();
     await expect(inspector.getByText(/never resurrects an excluded candidate/)).toBeVisible();
     await expect(inspector.getByText(`${B}/${SWIFT}`).first()).toBeVisible();
 
@@ -602,6 +665,7 @@ test("Demo B/4: ACTUAL and SHADOW that share one model stay independently visibl
   await page.screenshot({ path: testInfo.outputPath("demo-b-4-same-model.png"), fullPage: true });
 
   // While executing, ACTUAL must stay solid even on the shared node.
+  await decisionOverview(page);
   await forceExecuting(page);
   strokes = await relationshipStrokes(page);
   expect(strokes.actualSolid, `RUNNING same-model ACTUAL dash="${strokes.actualDash}"`).toBe(true);
@@ -646,6 +710,7 @@ test("Demo B/5: a cancelled mission never shows 'will execute' for ACTUAL", asyn
   expect(actualPanel, `ACTUAL panel: "${actualPanel}"`).not.toMatch(/will execute/);
 
   await page.evaluate(() => window.scrollTo(0, 0));
+  await assertReferenceComposition(page);
   await page.screenshot({ path: testInfo.outputPath("demo-b-5-cancelled-viewport-1440x900.png") });
   await page.screenshot({ path: testInfo.outputPath("demo-b-cancelled.png"), fullPage: true });
 

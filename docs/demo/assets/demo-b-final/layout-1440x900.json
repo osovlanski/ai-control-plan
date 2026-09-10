@@ -1,0 +1,58 @@
+{
+  "viewport": {
+    "width": 1440,
+    "height": 900
+  },
+  "bounds": {
+    ".truth-actual": {
+      "x": 133,
+      "y": 585.484375,
+      "width": 287,
+      "height": 79.578125,
+      "bottom": 665.0625
+    },
+    ".truth-shadow": {
+      "x": 430,
+      "y": 585.484375,
+      "width": 287,
+      "height": 79.578125,
+      "bottom": 665.0625
+    },
+    ".decision-why": {
+      "x": 133,
+      "y": 679.0625,
+      "width": 584,
+      "height": 18,
+      "bottom": 697.0625
+    },
+    ".relationship-key": {
+      "x": 133,
+      "y": 709.0625,
+      "width": 584,
+      "height": 15.75,
+      "bottom": 724.8125
+    },
+    ".command-bar": {
+      "x": 108,
+      "y": 199.59375,
+      "width": 1300,
+      "height": 81,
+      "bottom": 280.59375
+    },
+    ".orbital-map": {
+      "x": 774,
+      "y": 394.59375,
+      "width": 634,
+      "height": 646,
+      "bottom": 1040.59375
+    },
+    ".os-main": {
+      "x": 76,
+      "y": 0,
+      "width": 1364,
+      "height": 1234.34375,
+      "bottom": 1234.34375
+    }
+  },
+  "scrollWidth": 1440
+}

@@ -407,3 +407,40 @@ meter {
     gap: 2px;
   }
 }
+
+/* Mission → decision → relationship key; evidence follows in a disclosure. */
+.mission-decision { margin: 0 0 16px; }
+.mission-decision h3 {
+  margin: 0 0 10px;
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-2);
+}
+.mission-decision .truth { min-width: 0; gap: 5px; line-height: 1.4; }
+.mission-decision .truth strong { overflow-wrap: anywhere; }
+.mission-decision .truth small { color: var(--text-2); }
+.decision-why { margin: 0 0 12px; color: var(--text-2); font-size: 12px; line-height: 1.5; }
+.decision-why > span {
+  margin-right: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  font-size: 10px;
+  color: var(--text);
+}
+.relationship-key {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-size: 10.5px;
+  color: var(--text-2);
+}
+.relationship-key li { display: flex; align-items: center; gap: 6px; }
+.relationship-key i { width: 22px; border-top: 2px solid var(--accent); }
+.relationship-key .key-shadow i { border-top: 2px dashed var(--tone-human); }
+.relationship-key .key-excluded i { border-top: 2px dotted var(--text-3); }
+.inspector-content > .decision-evidence { margin-top: 0; padding-top: 0; border-top: 0; }

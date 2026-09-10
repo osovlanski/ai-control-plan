@@ -192,7 +192,11 @@ consumed by Usage + Retro. It is model **catalog and price evidence**, not model
 scoring — Demo B adds no duplicate scoring to Cockpit. The Control Plane remains
 the sole place a K13 recommendation is computed.
 
-## 10. Reference-image visual acceptance — convergence pass
+## 10. Reference-image visual acceptance — historical convergence pass
+
+The scores in this historical section were superseded by the second independent
+review: sphere depth remained 3/5 and information hierarchy 2/5. The final
+correction and current screenshot evidence are in §10b below.
 
 Reference: `/home/ubuntu/workspace/reference-images/Agentic_OS_View.png` (design
 language only; the Control Plane is truth). Evaluation is structural /
@@ -222,7 +226,8 @@ prose. This pass is the correction.
 | 9 | Premium / polished feel | Dark + restrained but flat; sphere read as a widget | Dimensional sphere, layered glow, one-accent discipline (teal = active/selection, amber = shadow), mono identifiers, generous composer | `demo-b-hero.png` | 4 |
 | 10 | Semantic truthfulness | (already strong) | ACTUAL model is only ever the persisted `execution.requestedModelSelector`; when NULL it shows **`Model: unspecified`**, never invented; the ACTUAL status line is now the mission's real lifecycle (`actualStatusLine()`), so a terminal task never says "will execute"; K13 stays SHADOW | Tests: `execution_requests.model` / `runs.model_requested` NULL after the run; `mode: "shadow"`, `decidedBy: "unchanged"`; `demo-b-5-cancelled` asserts the ACTUAL chip + Inspector panel never match `/will execute/` | 5 |
 
-**No category below 4.** Remaining compromises, stated plainly:
+**Historical implementer assessment, superseded by independent review.**
+The following were still blockers, addressed in §10b:
 
 - The `.map-legend` / `.map-caption` key can sit just below the 1440×900 fold on
   the hero. The orbital *story* (sphere, ACTUAL + SHADOW nodes and both
@@ -247,8 +252,119 @@ activation, routing, CR-33, K8/K10/K11 or the task state machine.
 | **P1-4** hard-filter reason too dim / truncated in the hero (`EXCLUDED · QUOTA BLOC…`, 50% opacity, uppercased + clipped) | raw `filterFailures[0]` + `text-transform: uppercase` + `white-space: nowrap` + `opacity: 0.5` | `shortFilterReason()` presentation mapper (technical string → `Quota exhausted` / `Authentication unavailable` / `Disabled` / `Context window too small` / `Operator override` / …); excluded `small` wraps, `opacity: 0.74`, colour `--text-2`. Full technical string unchanged, still in `title` + Inspector | `orbital.test.ts` "maps a technical filter string to a short semantic reason"; `demo-b.spec` Demo B/2 asserts the **rendered** node text contains `Quota exhausted` at 1440×900 |
 | **P1-5** sphere depth / visual identity materially trailed the reference | scene `max-width: 560`, `SPHERE_R: 300` (~336 px apparent), faint single-gradient disc, weak front/back separation, tiny satellite labels | scene `max-width: 600` pulled up under the heading; `SPHERE_R` 300→312 (core spans ~60–64% of the Orbital region); shell/grid/rim/arc opacities and widths raised; `orbit-front` bold + thick vs faint `orbit-back` for unmistakable occlusion; `sph-amber` counter-light 0.6→0.82; model nodes 14→18 px bodies, 12 px labels; top chrome trimmed (h1 40→32, tighter margins) for vertical fit | `assertReferenceComposition()` still holds (`map.width > main.width*0.44`, `scene.width > map.width*0.8`) at 1440×900 and 1280×800; `demo-b-hero.png` |
 
-This pass is prepared for a **second independent cold visual review**; the scores
-above are the implementer's and are explicitly not a self-approval.
+The second independent review resolved P1-1 through P1-4 and retained only
+sphere/product depth and first-viewport decision hierarchy as merge blockers.
+
+### 10b. Final visual-product correction (P1-A / P1-B only)
+
+Starting point: `9beb70c53a30d2e17c416b3f64742b5541cd0478`. The four resolved
+semantic findings remain closed. This patch changes presentation in
+`OrbitalField`, `Inspector`, the related readouts/styles, and Demo B tests.
+It changes no scoring, routing, execution request, adapter, scheduler, K8,
+K10/K11, or Cockpit code.
+
+**Layered volume.** The sphere keeps its existing radius and allocation. An
+asymmetric cool atmosphere surrounds a dark directionally lit volume. Three
+tapered internal blue/violet ribbons have separate soft light spill and crisp
+surfaces, with finer curved filaments inside. Three broad, partial translucent
+shells overlap those ribbons; a mask loses their far surfaces behind the core.
+A cool upper-left rim opposes a visible gold reflection on the lower-right.
+A tilted orbit is drawn behind the opaque volume and again across its near
+side, where a dark under-stroke separates it from the energy. Candidate bodies
+increase from 18 to 28 px, retaining their existing solid/dashed/dotted semantic
+styles; missing-prior and exclusion status text wraps. All artwork remains
+SVG/CSS, without canvas, WebGL, bitmap textures, dependencies, or JavaScript animation loops.
+
+**First viewport.** The same ACTUAL/SHADOW truth panels now appear immediately
+beneath the mission summary, on every Inspector tab. ACTUAL keeps its real
+assistant, explicit requested-model/unspecified identity, and lifecycle wording.
+SHADOW says “would choose” and remains advisory. WHY uses the recorded
+recommendation reason, without recomputing or inventing an explanation. The
+solid teal / dashed amber / muted dotted relationship key follows immediately.
+Routing metadata, assistant eligibility, dimension scores, n/k/weight,
+provenance, benchmark evidence, and activation gates remain accessible under
+“Routing and model evidence” on the Decision tab. The earlier Decided/Because/Next
+strip is retained there, or in its original position when no recommendation exists.
+
+**Native screenshot comparison.** Open [reference / starting head / final](assets/demo-b-final/reference-start-final.png)
+at 100%, alongside the individual [starting hero](assets/demo-b-final/demo-b-start-9beb70c.png)
+and [final hero](assets/demo-b-final/demo-b-hero.png). Each application pane is
+an unscaled 1440×900 viewport. The supplied reference is actually 1448×1086;
+it is fitted with aspect ratio preserved into a 1440×900 comparison pane,
+without cropping or stretching. The original reference was also inspected.
+
+The starting capture has a smooth diffuse globe and uses the first viewport
+for routing metadata; its ACTUAL/SHADOW panels start around y=1185 and the
+relationship legend around y=987 (second review measurements). In the final
+capture, the dark interior is visibly separated from curved luminous surfaces,
+the gold reflection survives native-size viewing, and the decision/key occupy
+the left column beside the sphere. Same-model paths remain separately visible,
+“Quota exhausted” remains readable, and `nightly` says prior unavailable.
+This is screenshot evidence for final independent verification, not a new
+self-assigned score or approval.
+
+| Element | 1440×900 top → bottom | 1280×800 top → bottom |
+|---|---:|---:|
+| ACTUAL summary | 585.48 → 665.06 | 585.48 → 680.45 |
+| SHADOW summary | 585.48 → 665.06 | 585.48 → 680.45 |
+| WHY | 679.06 → 697.06 | 694.45 → 712.45 |
+| Relationship key | 709.06 → 724.81 | 724.45 → 740.20 |
+| Composer | 199.59 → 280.59 | 199.59 → 280.59 |
+| Orbital width / workspace width | 634 / 1364 = 46.48% | 554 / 1204 = 46.01% |
+| Document scroll width | 1440 | 1280 |
+
+Full-precision measurements: [1440×900](assets/demo-b-final/layout-1440x900.json)
+and [1280×800](assets/demo-b-final/layout-1280x800.json). Tests require the
+ACTUAL, SHADOW, WHY, and relationship-key boxes to be fully inside the viewport,
+with their bottoms below its height, before opening technical evidence.
+They also require the composer in view, Orbital width above 44%, no desktop
+horizontal overflow, and no running sphere animations under reduced motion.
+There are no pixel-exact artwork assertions.
+
+**Screenshots retained for review:**
+
+- [Hero](assets/demo-b-final/demo-b-hero.png) and [1280×800](assets/demo-b-final/demo-b-hero-1280x800.png)
+- [ACTUAL vs SHADOW](assets/demo-b-final/demo-b-1-shadow-vs-actual.png)
+- [Hard filter](assets/demo-b-final/demo-b-2-hard-filter.png)
+- [Missing prior](assets/demo-b-final/demo-b-3-missing-prior.png)
+- [Same model, executing CSS state](assets/demo-b-final/demo-b-running-same-model.png)
+- [Cancelled](assets/demo-b-final/demo-b-cancelled.png)
+- [Reduced motion](assets/demo-b-final/demo-b-reduced-motion.png)
+
+The running capture uses the existing deterministic CSS execution-state fixture;
+it proves relationship styling, not a new provider execution. Demo B separately
+checks real fake-provider requests and their persisted NULL requested model.
+Historical telemetry in the existing isolated fixture is synthetic test evidence,
+not a production shadow soak.
+
+**Validation completed:** `pnpm typecheck`, `pnpm lint`, `pnpm test` (116 core,
+21 adapters, 730 API, 37 web; 904 total), `pnpm build`, `pnpm test:harness-on`
+(730), `pnpm test:recovery-chaos` (56), `pnpm demo:a` (1), `pnpm demo:a5` (1),
+`pnpm demo:b` (all 5 preserved scenarios plus the layout assertions), and
+`pnpm eval` (9 fake scenarios passed; 3 real-provider scenarios skipped because
+the opt-in credentials were unavailable). The real-eval completion gate remains
+unmet; no real-run evidence is claimed.
+
+The first Harness-on attempt timed out at the existing five-second limit in
+`project-verification-cutover.test.ts` while other validation was running.
+The complete isolated rerun passed 730/730 without backend or test-timeout
+changes. Demo B reports no browser console/page errors; 1440×900 and 1280×800
+have no horizontal overflow, and reduced motion stops the sphere animations.
+The secret scan found no credentials; its only matches were commit hashes and
+comment dividers.
+
+**Remaining P2 only:** the existing mobile layout stacks the sphere below the
+Inspector and hides orbital model labels. It is not the desktop composition.
+At 390×844, both the starting head and final render have a 390 px document
+scroll width after the ResizeObserver updates the orbit path; the mobile
+regression assertion now waits for that resize to settle. The mission truth
+panels remain available in the single-column fallback. See the
+[mobile capture](assets/demo-b-final/demo-b-mobile-p2.png) and
+[measurement](assets/demo-b-final/mobile-layout.json). No mobile product redesign
+is included.
+
+K13 remains SHADOW. No activation attestations, production selection flags,
+backdated soak data, or shadow-soak start were added. This pass does not merge PR #35.
 
 ## 11. What Demo B proves
 
@@ -260,7 +376,7 @@ above are the implementer's and are explicitly not a self-approval.
 | A hard-filtered candidate can never be recommended, however good its prior | Demo B/2: `fake-a/premium-max` (0.92 + full cohort) excluded, `total` undefined, `fake-b/swift-mini` (0.55) recommended |
 | A missing prior is shown, not guessed | Demo B/3: `fake-c/nightly` → `priorMissing:{coding,speed,cost}`, no fuzzy match, still eligible, still executes |
 | The shadow winner never alters execution (CR-33) | `execution_requests.model` and `runs.model_requested` are NULL after a run whose shadow winner was `fake-a/premium-max`; `execution.decidedBy: "unchanged"` |
-| The Orbital cannot imply the shadow winner ran | `.model-node.is-shadow` (dashed amber, `SHADOW · would choose`) is rendered alongside the teal `.model-actual-chip`; `line.rel-shadow` is dashed amber, `line.rel-actual` solid teal; `.model-node.is-shadow.is-actual` count is 0 |
+| The Orbital cannot imply the shadow winner ran | `.model-node.is-shadow` (dashed amber, `SHADOW · would choose`) is rendered alongside the teal `.model-actual-chip`; `path.rel-shadow` is dashed amber, `path.rel-actual` solid teal; an unspecified actual model has its own chip, while a shared concrete model has one node with both relationships |
 | The Orbital represents models, not just assistants | `modelNodes()` projects `modelRecommendation.candidates`; the SHADOW node is `fake-a/premium-max` and `fake-a/swift-mini` (same assistant) does not inherit the style — `apps/web/src/orbital.test.ts` |
 | Activation stays closed | 1/6 gates pass; `models.selection.enabled` is never set; no attestation is written or backdated |
 | The soak report does not mutate activation state | `apps/api/test/model-shadow-report.test.ts` — identical output on re-run, row count unchanged, no write path to selection state |

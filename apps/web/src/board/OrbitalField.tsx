@@ -148,53 +148,60 @@ export function OrbitalField({
     >
       <svg className="sphere-svg" viewBox={`0 0 ${SCENE} ${SCENE}`} aria-hidden="true">
         <defs>
-          {/* Blue → violet core, deep but luminous. */}
-          <radialGradient id="sph-body" cx="38%" cy="32%" r="74%">
-            <stop offset="0" stopColor="#5b78e6" />
-            <stop offset="0.34" stopColor="#354ac0" />
-            <stop offset="0.6" stopColor="#241f78" />
-            <stop offset="0.82" stopColor="#0f0e3a" />
-            <stop offset="1" stopColor="#05061c" />
+          {/* Directional volume: cool upper-left, dark interior, warm lower-right. */}
+          <radialGradient id="sph-body" cx="28%" cy="24%" r="82%">
+            <stop offset="0" stopColor="#637be7" />
+            <stop offset="0.28" stopColor="#303b91" />
+            <stop offset="0.55" stopColor="#121834" />
+            <stop offset="0.8" stopColor="#080d20" />
+            <stop offset="1" stopColor="#241932" />
           </radialGradient>
-          {/* Strong inner light so the core reads as a source, not a ball. */}
-          <radialGradient id="sph-core" cx="45%" cy="43%" r="46%">
-            <stop offset="0" stopColor="#eef2ff" stopOpacity="0.9" />
-            <stop offset="0.26" stopColor="#93a6ff" stopOpacity="0.42" />
-            <stop offset="0.62" stopColor="#5566e0" stopOpacity="0.1" />
-            <stop offset="1" stopColor="#5566e0" stopOpacity="0" />
-          </radialGradient>
-          <radialGradient id="sph-shade" cx="68%" cy="74%" r="62%">
-            <stop offset="0.3" stopColor="#000" stopOpacity="0" />
-            <stop offset="1" stopColor="#03041a" stopOpacity="0.82" />
-          </radialGradient>
-          <radialGradient id="sph-halo" cx="50%" cy="50%" r="50%">
-            <stop offset="0.5" stopColor="#7f95ff" stopOpacity="0" />
-            <stop offset="0.6" stopColor="#7f95ff" stopOpacity="0.18" />
-            <stop offset="1" stopColor="#7f95ff" stopOpacity="0" />
+          <radialGradient id="sph-halo">
+            <stop offset="0" stopColor="#667dff" stopOpacity="0.48" />
+            <stop offset="0.58" stopColor="#5144d9" stopOpacity="0.15" />
+            <stop offset="1" stopColor="#5144d9" stopOpacity="0" />
           </radialGradient>
           <linearGradient id="sph-rim" x1="0" y1="0" x2="1" y2="1">
-            <stop offset="0" stopColor="#e3e9ff" stopOpacity="0.9" />
-            <stop offset="0.45" stopColor="#9fb0ff" stopOpacity="0.14" />
-            <stop offset="1" stopColor="#9fb0ff" stopOpacity="0" />
+            <stop offset="0" stopColor="#e0f0ff" />
+            <stop offset="0.3" stopColor="#7d92ff" />
+            <stop offset="0.65" stopColor="#7561ee" stopOpacity="0.12" />
+            <stop offset="1" stopColor="#ffd79c" stopOpacity="0.7" />
           </linearGradient>
-          <radialGradient id="sph-spec" cx="50%" cy="50%" r="50%">
-            <stop offset="0" stopColor="#ffffff" stopOpacity="0.6" />
-            <stop offset="1" stopColor="#ffffff" stopOpacity="0" />
-          </radialGradient>
-          <radialGradient id="sph-energy" cx="50%" cy="50%" r="50%">
-            <stop offset="0" stopColor="#9a7bff" stopOpacity="0.55" />
-            <stop offset="1" stopColor="#9a7bff" stopOpacity="0" />
-          </radialGradient>
-          {/* Restrained amber/gold accent — a warm counter-light, not a theme. */}
-          <radialGradient id="sph-amber" cx="50%" cy="50%" r="50%">
-            <stop offset="0" stopColor="#ffce8a" stopOpacity="0.5" />
-            <stop offset="1" stopColor="#ffce8a" stopOpacity="0" />
+          <linearGradient id="sph-ribbon" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0" stopColor="#d6e8ff" />
+            <stop offset="0.25" stopColor="#8daaff" />
+            <stop offset="0.55" stopColor="#7654ff" />
+            <stop offset="0.8" stopColor="#394bca" stopOpacity="0.5" />
+            <stop offset="1" stopColor="#91cfff" stopOpacity="0" />
+          </linearGradient>
+          <linearGradient id="sph-shell" x1="0" y1="0" x2="0.8" y2="1">
+            <stop offset="0" stopColor="#e0edff" stopOpacity="0.72" />
+            <stop offset="0.24" stopColor="#97a1ff" stopOpacity="0.4" />
+            <stop offset="0.55" stopColor="#6d53d7" stopOpacity="0.06" />
+            <stop offset="0.85" stopColor="#5a7eff" stopOpacity="0.32" />
+            <stop offset="1" stopColor="#c5d7ff" stopOpacity="0.65" />
+          </linearGradient>
+          <linearGradient id="sph-gold" x1="0" y1="0" x2="1" y2="0.6">
+            <stop offset="0" stopColor="#c87840" stopOpacity="0" />
+            <stop offset="0.45" stopColor="#bf793d" stopOpacity="0.24" />
+            <stop offset="0.78" stopColor="#f6b969" stopOpacity="0.8" />
+            <stop offset="0.92" stopColor="#fff0cc" />
+            <stop offset="1" stopColor="#e7a861" stopOpacity="0.4" />
+          </linearGradient>
+          <radialGradient id="sph-amber">
+            <stop offset="0" stopColor="#ffb85c" stopOpacity="0.7" />
+            <stop offset="1" stopColor="#dd813c" stopOpacity="0" />
           </radialGradient>
           <linearGradient id="sph-arc" x1="0" y1="0" x2="1" y2="0">
-            <stop offset="0" stopColor="#ffd79b" stopOpacity="0" />
-            <stop offset="0.5" stopColor="#ffd79b" stopOpacity="0.8" />
-            <stop offset="1" stopColor="#c9b6ff" stopOpacity="0" />
+            <stop offset="0" stopColor="#93adff" stopOpacity="0.1" />
+            <stop offset="0.45" stopColor="#dceeff" />
+            <stop offset="0.75" stopColor="#91aaff" stopOpacity="0.8" />
+            <stop offset="1" stopColor="#b6c5ff" stopOpacity="0.2" />
           </linearGradient>
+          {/* Tapered ribbons, reused only for a soft light spill and a crisp surface. */}
+          <path id="sph-flow-a" d="M 240 470 C 214 287 455 156 617 268 C 733 348 692 517 572 635 C 461 744 314 719 313 620 C 278 733 457 794 601 650 C 757 495 773 329 637 240 C 452 119 179 293 240 470 Z" />
+          <path id="sph-flow-b" d="M 291 690 C 410 799 737 598 739 403 C 742 302 643 293 548 333 C 672 258 778 304 762 422 C 735 646 426 838 291 690 Z" />
+          <path id="sph-flow-c" d="M 285 369 C 435 205 674 405 627 592 C 603 690 490 730 418 690 C 530 728 632 612 607 504 C 577 372 387 254 285 369 Z" />
           <clipPath id="sph-clip">
             <circle cx={SCENE / 2} cy={SCENE / 2} r={SPHERE_R} />
           </clipPath>
@@ -204,49 +211,69 @@ export function OrbitalField({
           <filter id="sph-blur" x="-30%" y="-30%" width="160%" height="160%">
             <feGaussianBlur stdDeviation="26" />
           </filter>
-          <filter id="sph-grain">
-            <feTurbulence type="fractalNoise" baseFrequency="0.85" numOctaves="2" stitchTiles="stitch" />
-            <feColorMatrix values="0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 0.14 0" />
-            <feComposite in2="SourceGraphic" operator="in" />
+          <filter id="sph-soft" x="-20%" y="-20%" width="140%" height="140%">
+            <feGaussianBlur stdDeviation="8" />
           </filter>
+          <mask id="sph-shell-depth">
+            <rect width={SCENE} height={SCENE} fill="white" />
+            <ellipse cx="535" cy="465" rx="157" ry="206" transform="rotate(32 535 465)" fill="black" filter="url(#sph-soft)" />
+          </mask>
         </defs>
 
-        {/* atmosphere */}
-        <circle className="sph-atmos" cx={SCENE / 2} cy={SCENE / 2} r={SPHERE_R + 150} fill="url(#sph-halo)" />
+        {/* Asymmetric atmosphere extends beyond the physical volume. */}
+        <g className="sph-atmos">
+          <ellipse cx="420" cy="440" rx="418" ry="360" transform="rotate(-32 420 440)" fill="url(#sph-halo)" />
+          <ellipse cx="708" cy="635" rx="156" ry="225" transform="rotate(32 708 635)" fill="url(#sph-amber)" opacity="0.35" />
+        </g>
 
-        {/* layered translucent orbital shells — depth around the core */}
-        {[1.07, 1.16, 1.28].map((k) => (
-          <circle key={`shell${k}`} className="sph-shell" cx={SCENE / 2} cy={SCENE / 2} r={SPHERE_R * k} />
-        ))}
-
-        {/* orbits — back halves sit behind the sphere, front halves over it */}
+        {/* Full orbital paths go behind the opaque core; their near halves
+            are drawn after the volume. No relationship semantics change. */}
         {[0, 1, 2].map((r) => (
           <path key={`b${r}`} className={`orbit orbit-${r} orbit-back`} d={ringPath(r as Ring)} />
         ))}
+        <ellipse cx="500" cy="500" rx="397" ry="155" transform="rotate(-32 500 500)" fill="none" stroke="url(#sph-arc)" strokeWidth="3" opacity="0.55" />
 
-        {/* one gold arc passing BEHIND the core */}
-        <path className="sph-arc sph-arc-back" d={arcPath(1, 0.52, 0.4)} stroke="url(#sph-arc)" />
-
-        {/* sphere */}
         <circle cx={SCENE / 2} cy={SCENE / 2} r={SPHERE_R} fill="url(#sph-body)" />
-        <g clipPath="url(#sph-clip)" className="sph-grid">
-          {[0.18, 0.42, 0.7, 0.92].map((k) => (
-            <ellipse key={`m${k}`} cx={SCENE / 2} cy={SCENE / 2} rx={SPHERE_R * k} ry={SPHERE_R} transform={`rotate(-18 ${SCENE / 2} ${SCENE / 2})`} />
-          ))}
-          {[-0.72, -0.4, 0, 0.4, 0.72].map((k) => (
-            <ellipse key={`p${k}`} cx={SCENE / 2} cy={SCENE / 2 + SPHERE_R * k} rx={SPHERE_R * Math.sqrt(1 - k * k)} ry={SPHERE_R * 0.24 * Math.sqrt(1 - k * k)} transform={`rotate(-18 ${SCENE / 2} ${SCENE / 2})`} />
-          ))}
+        <g clipPath="url(#sph-clip)">
+          {/* Rear shell: broad glass surface, softened where it turns away. */}
+          <path d="M 210 464 C 180 253 494 126 682 270 C 538 188 292 356 348 606 C 300 596 232 538 210 464 Z" fill="url(#sph-shell)" opacity="0.42" />
+          <g fill="url(#sph-ribbon)" filter="url(#sph-soft)" opacity="0.8">
+            <use href="#sph-flow-a" />
+            <use href="#sph-flow-b" />
+            <use href="#sph-flow-c" />
+          </g>
+          <g fill="url(#sph-ribbon)">
+            <use href="#sph-flow-a" />
+            <use href="#sph-flow-b" opacity="0.75" />
+            <use href="#sph-flow-c" opacity="0.6" />
+          </g>
+          {/* Inner filaments trace curved energy, leaving a dark readable core. */}
+          <g fill="none" stroke="url(#sph-ribbon)" strokeWidth="1.6">
+            <path d="M 249 447 C 248 258 507 204 640 322 S 617 705 404 718" />
+            <path d="M 267 465 C 226 304 462 206 609 315 S 650 629 491 704" />
+            <path d="M 315 353 C 464 250 686 460 598 621 S 382 752 337 662" />
+            <path d="M 333 347 C 484 290 633 465 581 586 S 432 723 382 686" />
+            <path d="M 259 614 C 316 777 662 622 722 434" />
+          </g>
+          {/* Opposite light is a surface reflection as well as a soft spill. */}
+          <ellipse cx="731" cy="621" rx="130" ry="202" transform="rotate(30 731 621)" fill="url(#sph-amber)" />
+          <path d="M 443 766 C 642 799 798 549 736 388 C 854 539 700 821 514 806 Z" fill="url(#sph-gold)" />
+          <path d="M 463 780 C 657 779 792 550 751 421" fill="none" stroke="url(#sph-gold)" strokeWidth="5" />
+          {/* Two near shells cross the inner ribbons; the mask loses their
+              far surfaces behind the core instead of drawing concentric rings. */}
+          <g mask="url(#sph-shell-depth)">
+            <path d="M 248 552 C 226 405 373 214 543 224 C 398 277 322 451 338 591 C 351 711 493 775 667 715 C 466 856 276 757 248 552 Z" fill="url(#sph-shell)" />
+            <path d="M 299 693 C 482 789 793 523 758 363 C 849 542 517 844 332 738 Z" fill="url(#sph-shell)" opacity="0.8" />
+          </g>
+          <path d="M 240 440 C 234 319 373 208 512 207" fill="none" stroke="#bbd7ff" strokeWidth="4" filter="url(#sph-soft)" />
+          <path d="M 240 440 C 234 319 373 208 512 207" fill="none" stroke="url(#sph-rim)" strokeWidth="2.5" />
         </g>
-        <ellipse className="sph-energy" cx={SCENE / 2 + 40} cy={SCENE / 2 + 60} rx={SPHERE_R * 0.55} ry={SPHERE_R * 0.32} fill="url(#sph-energy)" filter="url(#sph-blur)" clipPath="url(#sph-clip)" />
-        <ellipse className="sph-amber" cx={SCENE / 2 - 70} cy={SCENE / 2 + 110} rx={SPHERE_R * 0.42} ry={SPHERE_R * 0.3} fill="url(#sph-amber)" filter="url(#sph-blur)" clipPath="url(#sph-clip)" />
-        <circle cx={SCENE / 2} cy={SCENE / 2} r={SPHERE_R} fill="url(#sph-shade)" />
-        <circle cx={SCENE / 2} cy={SCENE / 2} r={SPHERE_R} fill="#fff" filter="url(#sph-grain)" opacity="0.45" clipPath="url(#sph-clip)" />
-        <circle className="sph-corelight" cx={SCENE / 2} cy={SCENE / 2} r={SPHERE_R} fill="url(#sph-core)" clipPath="url(#sph-clip)" />
-        <ellipse cx={SCENE / 2 - 84} cy={SCENE / 2 - 104} rx="104" ry="60" fill="url(#sph-spec)" filter="url(#sph-blur)" transform={`rotate(-30 ${SCENE / 2 - 84} ${SCENE / 2 - 104})`} />
-        <circle cx={SCENE / 2} cy={SCENE / 2} r={SPHERE_R} fill="none" stroke="url(#sph-rim)" strokeWidth="1.75" />
+        <circle cx={SCENE / 2} cy={SCENE / 2} r={SPHERE_R} fill="none" stroke="url(#sph-rim)" strokeWidth="2.5" />
 
-        {/* one gold arc passing IN FRONT of the core */}
-        <path className="sph-arc sph-arc-front" d={arcPath(0, 0.02, 0.42)} stroke="url(#sph-arc)" clipPath="url(#sph-front)" />
+        {/* Near side of the tilted orbit crosses in front, with an opaque
+            dark under-stroke that separates it from the inner energy. */}
+        <path d="M 163 710 A 397 155 -32 0 0 837 290" fill="none" stroke="#0b122a" strokeWidth="9" opacity="0.65" />
+        <path className="sph-arc sph-arc-front" d="M 163 710 A 397 155 -32 0 0 837 290" stroke="url(#sph-arc)" />
 
         {/* core ring: workload composition */}
         <circle className="core-track" cx={SCENE / 2} cy={SCENE / 2} r={SPHERE_R + 14} />

@@ -206,49 +206,18 @@
   transition: opacity var(--t-med);
 }
 /* Idle atmosphere may breathe; nothing here animates work or events. */
-.sph-atmos,
-.sph-energy {
+.sph-atmos {
   animation: breathe 7s ease-in-out infinite;
 }
-.is-executing .sph-atmos,
-.is-executing .sph-energy {
+.is-executing .sph-atmos {
   animation-duration: 5s;
-}
-.sph-energy {
-  opacity: 0.52;
-}
-.is-executing .sph-energy {
-  opacity: 0.95;
-}
-/* Restrained warm gold/amber counter-light on the opposite side to the cool
-   rim — clearly perceptible, still not a theme. */
-.sph-amber {
-  opacity: 0.82;
-}
-/* Layered translucent shells give the core visible volume, not one disc. */
-.sph-shell {
-  fill: none;
-  stroke: rgba(150, 168, 255, 0.2);
-  stroke-width: 1.4;
-}
-.sph-corelight {
-  mix-blend-mode: screen;
 }
 .sph-arc {
   fill: none;
   stroke-width: 3;
   stroke-linecap: round;
-  opacity: 0.72;
 }
-.sph-arc-front {
-  opacity: 0.92;
-  stroke-width: 3.4;
-}
-.sph-grid ellipse {
-  fill: none;
-  stroke: rgba(180, 200, 255, 0.2);
-  stroke-width: 1;
-}
+.sph-arc-front { stroke-width: 3.5; }
 .orbit {
   fill: none;
   stroke-width: 1;
@@ -601,7 +570,7 @@
   align-items: center;
   gap: 9px;
   z-index: 3;
-  max-width: 208px;
+  max-width: 224px;
 }
 .model-node.flip {
   transform: translate(-100%, -50%);
@@ -612,12 +581,12 @@
   justify-items: end;
 }
 .model-node > i {
-  width: 18px;
-  height: 18px;
+  width: 28px;
+  height: 28px;
   border-radius: 50%;
   flex-shrink: 0;
   border: 2px solid var(--line-strong);
-  background: radial-gradient(circle at 38% 32%, rgba(146, 178, 200, 0.32), rgba(8, 13, 19, 0.95) 72%);
+  background: radial-gradient(circle at 38% 32%, #b5c7e4, #344668 34%, #080d1b 76%);
   box-shadow:
     0 0 0 4px rgba(4, 7, 11, 0.85),
     inset 0 0 6px rgba(0, 0, 0, 0.6);
@@ -643,10 +612,11 @@
 }
 .model-node strong em {
   font-style: normal;
+  font-weight: 600;
   color: var(--text);
 }
 .model-node small {
-  font-size: 10.5px;
+  font-size: 11px;
   letter-spacing: 0.03em;
   color: var(--text-3);
 }
@@ -680,7 +650,7 @@
 .model-node.is-shadow > i {
   border-style: dashed;
   border-color: var(--tone-human);
-  background: radial-gradient(circle at 40% 35%, rgba(243, 181, 101, 0.2), rgba(6, 10, 15, 0.9) 70%);
+  background: radial-gradient(circle at 35% 28%, #fff0d3, #a8763e 30%, #211c20 66%, #0a101b);
   box-shadow: 0 0 0 4px rgba(4, 7, 11, 0.85);
 }
 
@@ -743,6 +713,8 @@
 
 /* Eligible-but-unproven — present, neutral, honestly "prior unavailable". */
 .model-node.is-unproven small {
+  white-space: normal;
+  overflow: visible;
   color: var(--text-3);
   font-style: italic;
 }

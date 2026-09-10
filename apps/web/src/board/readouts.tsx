@@ -254,6 +254,49 @@ export function ContextReadout({ context }: { context: TaskContext | null }) {
   );
 }
 
+type RecommendationActual = { assistantId: string | null; running: boolean; lifecycle?: ActualLifecycle };
+
+/** The recorded decision, readable before its supporting engineering evidence. */
+export function DecisionSummary({ recommendation, actual }: {
+  recommendation: ModelRecommendation;
+  actual: RecommendationActual;
+}) {
+  const applied = recommendation.mode === "applied";
+  return (
+    <section className="mission-decision" aria-label="Decision summary">
+      <h3>Decision summary</h3>
+      {/* Two truths, side by side and never merged: what runs vs what K13 would
+          choose. In shadow mode the shadow column can never be the executing one. */}
+      <div className="truth-split">
+        <div className="truth truth-actual">
+          <span className="truth-tag">ACTUAL</span>
+          <strong className="mono">{actual?.assistantId ?? "Not routed"}</strong>
+          <small>
+            {actual?.lifecycle
+              ? actualStatusLine(actual.lifecycle)
+              : actual?.running
+                ? "Executing"
+                : "Routed · execution unchanged"}{" "}
+            · {recommendation.execution.requestedModelSelector ?? "Model: unspecified"}
+          </small>
+        </div>
+        <div className={`truth ${applied ? "truth-applied" : "truth-shadow"}`}>
+          <span className="truth-tag">{applied ? "APPLIED" : "SHADOW · would choose"}</span>
+          <strong className="mono">{recommendation.recommended ?? "no candidate"}</strong>
+          <small>{applied ? "Carried into execution" : "K13 advisory · not executing"}</small>
+        </div>
+      </div>
+
+      <p className="decision-why"><span>Why</span>{recommendation.reason}.</p>
+      <ul className="relationship-key" aria-label="Model relationship key">
+        <li className="key-actual"><i />Solid teal · ACTUAL</li>
+        <li className="key-shadow"><i />Dashed amber · SHADOW</li>
+        <li className="key-excluded"><i />Muted / dotted · EXCLUDED</li>
+      </ul>
+    </section>
+  );
+}
+
 /**
  * K13 shadow model recommendation. It must be impossible to read this panel and
  * think the recommendation affected the run: the heading says SHADOW, the
@@ -262,12 +305,8 @@ export function ContextReadout({ context }: { context: TaskContext | null }) {
  */
 export function ModelRecommendationReadout({
   recommendation,
-  actual,
 }: {
   recommendation: ModelRecommendation | null | undefined;
-  /** What is really executing / routed for this mission, from the run + routing
-   *  record. Lets the panel state ACTUAL and SHADOW side by side. */
-  actual?: { assistantId: string | null; running: boolean; lifecycle?: ActualLifecycle };
 }) {
   if (!recommendation) {
     return (
@@ -296,28 +335,6 @@ export function ModelRecommendationReadout({
         <span className={applied ? "tone-complete" : "tone-limit"}>
           {applied ? "APPLIED" : "SHADOW"}
         </span>
-      </div>
-
-      {/* Two truths, side by side and never merged: what runs vs what K13 would
-          choose. In shadow mode the shadow column can never be the executing one. */}
-      <div className="truth-split">
-        <div className="truth truth-actual">
-          <span className="truth-tag">ACTUAL</span>
-          <strong className="mono">{actual?.assistantId ?? "Not routed"}</strong>
-          <small>
-            {actual?.lifecycle
-              ? actualStatusLine(actual.lifecycle)
-              : actual?.running
-                ? "Executing"
-                : "Routed · execution unchanged"}{" "}
-            · {recommendation.execution.requestedModelSelector ?? "Model: unspecified"}
-          </small>
-        </div>
-        <div className={`truth ${applied ? "truth-applied" : "truth-shadow"}`}>
-          <span className="truth-tag">{applied ? "APPLIED" : "SHADOW · would choose"}</span>
-          <strong className="mono">{recommendation.recommended ?? "no candidate"}</strong>
-          <small>{applied ? "Carried into execution" : "K13 advisory · not executing"}</small>
-        </div>
       </div>
 
       <p>

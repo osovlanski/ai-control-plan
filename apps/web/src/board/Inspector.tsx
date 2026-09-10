@@ -10,7 +10,7 @@ import {
   type SchedulerStatus,
 } from "../api.js";
 import { actualLifecycle, describeState, modelIdentityView, nextStep, observedModel, waitKindLabel } from "../orbital.js";
-import { QuotaReadout, ContextReadout, ModelRecommendationReadout } from "./readouts.js";
+import { QuotaReadout, ContextReadout, ModelRecommendationReadout, DecisionSummary } from "./readouts.js";
 import { executionRead, missionState, type Mission } from "./execution.js";
 
 export type Snapshot = {
@@ -133,6 +133,56 @@ export function Inspector({
     }
   };
 
+  const routingSummary = (
+    <dl className="decision-strip" aria-label="Decision summary">
+      <div>
+        <dt>Decided</dt>
+        <dd>
+          {latestRun ? (
+            <>
+              Last run on <span className="mono">{latestRun.assistant_id}</span>
+            </>
+          ) : routing?.chosen ? (
+            <>
+              Route to <span className="mono">{routing.chosen}</span>
+            </>
+          ) : routing ? (
+            "No eligible assistant"
+          ) : (
+            "Not routed yet"
+          )}
+        </dd>
+      </div>
+      <div>
+        <dt>Because</dt>
+        <dd>
+          {routing ? (
+            <>
+              <span className="mono">{routing.explanation.ruleFired}</span>
+              {routing.explanation.userOverride ? " · operator override" : ""}
+            </>
+          ) : wait ? (
+            wait.reason
+          ) : (
+            "No routing decision recorded"
+          )}
+        </dd>
+      </div>
+      <div>
+        <dt>Next</dt>
+        <dd>
+          {nextStep({
+            state: effectiveState,
+            wait,
+            schedulerEnabled,
+            assistant: currentExecution?.assistants.join(", ") || undefined,
+            pauseKind: (snapshot?.detail as { pause_kind?: string | null } | undefined)?.pause_kind,
+          })}
+        </dd>
+      </div>
+    </dl>
+  );
+
   return (
     <section className="inspector" aria-label="Selected task inspector">
       <div className="inspector-top">
@@ -142,53 +192,17 @@ export function Inspector({
       <h2>{task.goal}</h2>
       <code className="task-id">{task.id}</code>
       <p className="state-reason">{state.reason}</p>
-      <dl className="decision-strip" aria-label="Decision summary">
-        <div>
-          <dt>Decided</dt>
-          <dd>
-            {latestRun ? (
-              <>
-                Last run on <span className="mono">{latestRun.assistant_id}</span>
-              </>
-            ) : routing?.chosen ? (
-              <>
-                Route to <span className="mono">{routing.chosen}</span>
-              </>
-            ) : routing ? (
-              "No eligible assistant"
-            ) : (
-              "Not routed yet"
-            )}
-          </dd>
-        </div>
-        <div>
-          <dt>Because</dt>
-          <dd>
-            {routing ? (
-              <>
-                <span className="mono">{routing.explanation.ruleFired}</span>
-                {routing.explanation.userOverride ? " · operator override" : ""}
-              </>
-            ) : wait ? (
-              wait.reason
-            ) : (
-              "No routing decision recorded"
-            )}
-          </dd>
-        </div>
-        <div>
-          <dt>Next</dt>
-          <dd>
-            {nextStep({
-              state: effectiveState,
-              wait,
-              schedulerEnabled,
-              assistant: currentExecution?.assistants.join(", ") || undefined,
-              pauseKind: (snapshot?.detail as { pause_kind?: string | null } | undefined)?.pause_kind,
-            })}
-          </dd>
-        </div>
-      </dl>
+      {routing?.explanation.modelRecommendation ? (
+        <DecisionSummary
+          recommendation={routing.explanation.modelRecommendation}
+          actual={{
+            assistantId: latestRun?.assistant_id ?? routing.chosen ?? null,
+            running: (currentExecution?.assistants.length ?? 0) > 0,
+            lifecycle: actualLifecycle(missionState(task)),
+          }}
+        />
+      ) : routingSummary}
+
       <button className="open-task" onClick={onOpen}>
         Open full controls & diagnostics <span>↗</span>
       </button>
@@ -303,54 +317,53 @@ export function Inspector({
       )}
       {snapshot && tab === "decision" && (
         <div className="inspector-content">
-          <div className="section-label">
-            Recorded task routing <span>Implemented</span>
-          </div>
-          <p>
-            {routing
-              ? `The router selected ${routing.chosen ?? "no eligible assistant"} using ${routing.explanation.ruleFired}.`
-              : "No routing decision recorded."}
-          </p>
-          {routing && (
-            <>
-              <p className="fine-print">
-                {new Date(routing.at).toLocaleString()} · Latest task decision;
-                not a per-run CompositionDecision.
-              </p>
-              {routing.explanation.userOverride && (
-                <p>User override: {routing.explanation.userOverride}</p>
-              )}
-              {routing.explanation.tieBreaker && (
-                <p>Tie-break: {routing.explanation.tieBreaker}</p>
-              )}
-              <ul className="candidate-list">
-                {routing.explanation.candidates.map((c) => (
-                  <li key={c.assistantId}>
-                    <strong>{c.assistantId}</strong>
-                    <span
-                      className={
-                        c.passedFilters ? "tone-complete" : "tone-failed"
-                      }
-                    >
-                      {c.passedFilters ? "Eligible" : "Excluded"}
-                    </span>
-                    <small>
-                      {c.filterFailures.join(" · ") ||
-                        "Passed recorded hard filters"}
-                    </small>
-                  </li>
-                ))}
-              </ul>
-            </>
-          )}
-          <ModelRecommendationReadout
-            recommendation={routing?.explanation.modelRecommendation}
-            actual={{
-              assistantId: latestRun?.assistant_id ?? routing?.chosen ?? null,
-              running: (currentExecution?.assistants.length ?? 0) > 0,
-              lifecycle: actualLifecycle(missionState(task)),
-            }}
-          />
+          <details className="decision-evidence">
+            <summary>Routing and model evidence</summary>
+            {routing?.explanation.modelRecommendation ? routingSummary : null}
+            <div className="section-label">
+              Recorded task routing <span>Implemented</span>
+            </div>
+            <p>
+              {routing
+                ? `The router selected ${routing.chosen ?? "no eligible assistant"} using ${routing.explanation.ruleFired}.`
+                : "No routing decision recorded."}
+            </p>
+            {routing && (
+              <>
+                <p className="fine-print">
+                  {new Date(routing.at).toLocaleString()} · Latest task decision;
+                  not a per-run CompositionDecision.
+                </p>
+                {routing.explanation.userOverride && (
+                  <p>User override: {routing.explanation.userOverride}</p>
+                )}
+                {routing.explanation.tieBreaker && (
+                  <p>Tie-break: {routing.explanation.tieBreaker}</p>
+                )}
+                <ul className="candidate-list">
+                  {routing.explanation.candidates.map((c) => (
+                    <li key={c.assistantId}>
+                      <strong>{c.assistantId}</strong>
+                      <span
+                        className={
+                          c.passedFilters ? "tone-complete" : "tone-failed"
+                        }
+                      >
+                        {c.passedFilters ? "Eligible" : "Excluded"}
+                      </span>
+                      <small>
+                        {c.filterFailures.join(" · ") ||
+                          "Passed recorded hard filters"}
+                      </small>
+                    </li>
+                  ))}
+                </ul>
+              </>
+            )}
+            <ModelRecommendationReadout
+              recommendation={routing?.explanation.modelRecommendation}
+            />
+          </details>
           <details>
             <summary>
               Composition{" "}
