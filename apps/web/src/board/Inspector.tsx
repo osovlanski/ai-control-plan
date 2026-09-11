@@ -9,7 +9,7 @@ import {
   type SessionSummary,
   type SchedulerStatus,
 } from "../api.js";
-import { actualLifecycle, describeState, modelIdentityView, nextStep, observedModel, waitKindLabel } from "../orbital.js";
+import { actualLifecycle, describeState, modelIdentityView, nextStep, observedModel, resourceNextStep, waitKindLabel } from "../orbital.js";
 import { QuotaReadout, ContextReadout, ModelRecommendationReadout, DecisionSummary } from "./readouts.js";
 import { executionRead, missionState, type Mission } from "./execution.js";
 
@@ -118,6 +118,9 @@ export function Inspector({
   const currentExecution = snapshot ? executionRead(snapshot.detail, snapshot.sessions) : undefined;
   const routing = snapshot?.routing.at(-1);
   const wait = snapshot?.detail.wait;
+  // K4b derived pool truth. Present only while the task holds an active resource wait.
+  const resourceWait = snapshot?.detail.resourceWait ?? null;
+  const resourceClaim = snapshot?.detail.resourceClaim ?? null;
   const schedulerEnabled = snapshot?.detail.schedulerEnabled !== false;
 
   const act = async (fn: () => Promise<unknown>) => {
@@ -177,6 +180,7 @@ export function Inspector({
             schedulerEnabled,
             assistant: currentExecution?.assistants.join(", ") || undefined,
             pauseKind: (snapshot?.detail as { pause_kind?: string | null } | undefined)?.pause_kind,
+            resourceWait,
           })}
         </dd>
       </div>
@@ -428,7 +432,7 @@ export function Inspector({
       {snapshot && tab === "schedule" && (
         <div className="inspector-content">
           <div className="section-label">
-            Durable wait condition <span>K1 / K2 / K4 · Implemented</span>
+            Durable wait condition <span>K1 / K2 / K4 / K4b · Implemented</span>
           </div>
           {wait ? (
             <>
@@ -470,10 +474,60 @@ export function Inspector({
                   <dd>
                     {wait.kind === "dependency"
                       ? `${wait.dependsOn?.join(", ") || "—"} · on failure: ${wait.onDependencyFailure ?? "wait-input"}`
-                      : wait.assistants?.join(", ") || "—"}
+                      : wait.kind === "resource"
+                        ? `${wait.resource ?? "—"} · ${wait.units ?? 1} unit(s)`
+                        : wait.assistants?.join(", ") || "—"}
                   </dd>
                 </div>
               </dl>
+              {(resourceWait || resourceClaim) && (
+                <>
+                  <div className="section-label">
+                    Resource slot <span>K4b · as of now</span>
+                  </div>
+                  <dl className="identity-grid">
+                    <div>
+                      <dt>Pool</dt>
+                      <dd>{resourceWait?.resource ?? resourceClaim?.resource}</dd>
+                    </div>
+                    <div>
+                      <dt>Requested units</dt>
+                      <dd>{resourceWait?.units ?? resourceClaim?.units}</dd>
+                    </div>
+                    <div>
+                      <dt>Availability</dt>
+                      <dd>
+                        {!resourceWait
+                          ? "Not waiting — this task holds its slot"
+                          : resourceWait.capacity === undefined
+                            ? "Pool not declared — capacity unknown"
+                            : `${resourceWait.availableUnits} of ${resourceWait.capacity} free · ${resourceWait.claimedUnits} claimed`}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Queue position</dt>
+                      <dd>
+                        {resourceWait
+                          ? `${resourceWait.queuePosition} of ${resourceWait.queueLength} · durable FIFO by wait creation`
+                          : "Not queued"}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Why waiting</dt>
+                      <dd>{resourceWait?.blockedBy ?? "not waiting"}</dd>
+                    </div>
+                    <div>
+                      <dt>Claim state</dt>
+                      <dd>
+                        {resourceClaim
+                          ? `Holds ${resourceClaim.units} unit(s) of ${resourceClaim.resource} since ${new Date(resourceClaim.claimed_at).toLocaleString()}`
+                          : "No slot claimed"}
+                      </dd>
+                    </div>
+                  </dl>
+                  {resourceWait && <p className="fine-print">{resourceNextStep(resourceWait)}</p>}
+                </>
+              )}
               <p className="fine-print">
                 Reason: {wait.reason} · Routing happens at wake, not now. The
                 map position is an index, not this time.

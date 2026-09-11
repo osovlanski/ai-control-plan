@@ -1,5 +1,5 @@
 import type { ModelRecommendation } from "@agent-plane/core";
-import type { TaskEvent, TaskWait } from "./api.js";
+import type { ResourceWaitStatus, TaskEvent, TaskWait } from "./api.js";
 import { missionState, type ExecutionRead } from "./board/execution.js";
 
 /** Presentation vocabulary only; this does not extend the kernel state machine. */
@@ -98,7 +98,9 @@ export function waitKindLabel(wait: Pick<TaskWait, "kind">): string {
       ? "Time wait · K1"
       : wait.kind === "dependency"
         ? "Dependency wait · K4"
-        : `Wait · ${wait.kind}`;
+        : wait.kind === "resource"
+          ? "Resource wait · K4b"
+          : `Wait · ${wait.kind}`;
 }
 
 /** Coarse freshness bucket for an idle quota probe attempt age (K3). */
@@ -339,6 +341,20 @@ export function fieldPulse(tasks: Array<{ state: string; execution?: ExecutionRe
   return pulse;
 }
 
+/**
+ * K4b next action for a pool wait. Says what the task needs and what event frees
+ * it; it never invents an availability number the API did not report.
+ */
+export function resourceNextStep(status?: ResourceWaitStatus | null): string {
+  if (!status) return "Waits for a resource slot; pool occupancy is not available.";
+  const need = `${status.units} unit${status.units === 1 ? "" : "s"} of ${status.resource}`;
+  if (status.blockedBy === "undeclared") return `Needs ${need}, but that pool is not declared; an operator must restore it in scheduler.resources.`;
+  if (status.blockedBy === "unsatisfiable") return `Needs ${need}, above the pool capacity of ${status.capacity ?? 0}; an operator must raise capacity or reduce the request.`;
+  if (status.blockedBy === "queue") return `Needs ${need}; it is ${status.queuePosition} of ${status.queueLength} in the pool queue and wakes when the tasks ahead release.`;
+  if (status.blockedBy === "capacity") return `Needs ${need}; ${status.availableUnits} of ${status.capacity ?? 0} free. Wakes when a holder releases.`;
+  return `Needs ${need}; the pool can satisfy it now, so the next wake claims the slot and dispatches.`;
+}
+
 /** "What happens next" — derived only from persisted K1–K3 truth. */
 export function nextStep(input: {
   state: string;
@@ -346,6 +362,8 @@ export function nextStep(input: {
   schedulerEnabled?: boolean;
   assistant?: string | null;
   pauseKind?: string | null;
+  /** K4b derived pool truth, when the task waits on a pool. */
+  resourceWait?: ResourceWaitStatus | null;
 }): string {
   const { state, wait } = input;
   if (state === "AWAITING_APPROVAL") return "Waits for your approval; open full controls, then Sessions to review the pending request.";
@@ -353,6 +371,7 @@ export function nextStep(input: {
   if (state === "WAITING_RESOURCE" && wait) {
     if (input.schedulerEnabled === false) return "Scheduling is disabled; waits until an operator runs it now.";
     const at = new Date(wait.notBefore).toLocaleString();
+    if (wait.kind === "resource") return resourceNextStep(input.resourceWait);
     return wait.kind === "quota"
       ? `Wakes at ${at}, revalidates quota evidence, then re-routes from its checkpoint.`
       : `Scheduler wakes it at ${at} and dispatches once.`;

@@ -18,6 +18,7 @@ import {
   ringOf,
   ringPath,
   shortFilterReason,
+  resourceNextStep,
   waitKindLabel,
   type ActualExecution,
 } from "./orbital.js";
@@ -55,6 +56,7 @@ describe("operator presentation boundaries", () => {
     expect(waitKindLabel({ kind: "time" })).toBe("Time wait · K1");
     expect(waitKindLabel({ kind: "quota" })).toBe("Quota wait · K2");
     expect(waitKindLabel({ kind: "dependency" })).toBe("Dependency wait · K4");
+    expect(waitKindLabel({ kind: "resource" })).toBe("Resource wait · K4b");
   });
 
   it("buckets idle-probe attempt age into freshness", () => {
@@ -165,6 +167,14 @@ describe("orbital field geometry", () => {
     expect(nextStep({ state: "WAITING_RESOURCE", wait })).toMatch(/Scheduler wakes it at .* and dispatches once/);
     expect(nextStep({ state: "WAITING_RESOURCE", wait: { ...wait, kind: "quota" } })).toMatch(/revalidates quota evidence/);
     expect(nextStep({ state: "WAITING_RESOURCE", wait, schedulerEnabled: false })).toMatch(/disabled/);
+    // K4b: a resource wait reports the pool, not a wake time it does not control.
+    const resourceWait = { resource: "gpu", units: 1, capacity: 2, claimedUnits: 2, availableUnits: 0, queuePosition: 1, queueLength: 3, blockedBy: "capacity" } as const;
+    expect(nextStep({ state: "WAITING_RESOURCE", wait: { ...wait, kind: "resource" }, resourceWait })).toMatch(/0 of 2 free/);
+    expect(nextStep({ state: "WAITING_RESOURCE", wait: { ...wait, kind: "resource" } })).toMatch(/not available/);
+    expect(resourceNextStep({ ...resourceWait, blockedBy: "queue", queuePosition: 2 })).toMatch(/2 of 3 in the pool queue/);
+    expect(resourceNextStep({ ...resourceWait, blockedBy: "unsatisfiable" })).toMatch(/above the pool capacity/);
+    expect(resourceNextStep({ ...resourceWait, blockedBy: "undeclared", capacity: undefined })).toMatch(/not declared/);
+    expect(resourceNextStep({ ...resourceWait, blockedBy: "eligible", availableUnits: 2 })).toMatch(/claims the slot/);
     expect(nextStep({ state: "WAITING_INPUT" })).toMatch(/will not wake it/);
     expect(nextStep({ state: "RUNNING", assistant: "fake-a" })).toMatch(/fake-a/);
     expect(nextStep({ state: "MYSTERY" })).toMatch(/Unknown state/);

@@ -338,6 +338,9 @@ export function buildServer(deps: ServerDeps): BuiltServer {
       })),
       active: orchestrator.isActive(req.params.id),
       wait: scheduler.condition(req.params.id),
+      /** K4b: derived pool truth for the Orbital Inspector; null unless the task waits on one. */
+      resourceWait: scheduler.resourceWaitStatus(req.params.id) ?? null,
+      resourceClaim: scheduler.claim(req.params.id) ?? null,
       dispatches: scheduler.dispatches(req.params.id),
       schedulerEvents: scheduler.events(req.params.id),
       schedulerEnabled: scheduler.enabled,
@@ -363,6 +366,10 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     if (!tasks.get(req.params.id)) return reply.status(404).send({ error: 'not found' });
     return { condition: scheduler.condition(req.params.id) ?? null,
       openDispatch: scheduler.dispatches(req.params.id).find(d => ['reserved','start_attempted'].includes(d.phase)) ?? null,
+      // K4b: derived pool truth (why this task waits, who holds the slot). Computed
+      // per request — a stored occupancy number would be stale on arrival.
+      resourceWait: scheduler.resourceWaitStatus(req.params.id) ?? null,
+      resourceClaim: scheduler.claim(req.params.id) ?? null,
       schedulerEnabled: scheduler.enabled };
   });
 

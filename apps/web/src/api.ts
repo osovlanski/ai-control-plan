@@ -35,7 +35,7 @@ export interface WaitHistoryEntry { at: string; actor: string; outcome: string; 
 export interface TaskWait {
   generation: number;
   state: string;
-  kind: "time" | "quota" | "dependency";
+  kind: "time" | "quota" | "dependency" | "resource";
   reason: string;
   notBefore: string;
   checkpointId?: string;
@@ -44,6 +44,9 @@ export interface TaskWait {
   /** K4 dependency subjects — the tasks that must be terminal before a wake. */
   dependsOn?: string[];
   onDependencyFailure?: "cancel" | "wake-anyway" | "wait-input";
+  /** K4b — the named pool and unit count this wait needs. */
+  resource?: string;
+  units?: number;
   history?: WaitHistoryEntry[];
   blockers?: QuotaBlocker[];
 }
@@ -63,6 +66,29 @@ export interface SchedulerStatus {
     ageMs: number;
     detail?: string;
   }>;
+  /** K4b pools: configured capacity, live claims and the FIFO wait queue. */
+  resources?: Array<{ resource: string; capacity?: number; claimedUnits: number; availableUnits: number; waitingTaskIds: string[] }>;
+}
+
+/** K4b derived pool truth for one waiting task. Computed per request, never stored. */
+export interface ResourceWaitStatus {
+  resource: string;
+  units: number;
+  capacity?: number;
+  claimedUnits: number;
+  availableUnits: number;
+  queuePosition: number;
+  queueLength: number;
+  blockedBy: "capacity" | "queue" | "undeclared" | "unsatisfiable" | "eligible";
+}
+
+/** A granted K4b slot claim. */
+export interface ResourceClaim {
+  claim_id: number;
+  resource: string;
+  units: number;
+  dispatch_id: string;
+  claimed_at: string;
 }
 
 export interface Dispatch {
@@ -123,6 +149,9 @@ export interface TaskDetail {
   schedulerEvents?: Array<{ id: number; at: string; type: string; payload: Record<string, unknown> }>;
   dispatches?: Dispatch[];
   wait?: TaskWait;
+  /** K4b: why this task waits on a pool, and the slot it holds. */
+  resourceWait?: ResourceWaitStatus | null;
+  resourceClaim?: ResourceClaim | null;
   schedulerEnabled?: boolean;
   id: string;
   goal: string;

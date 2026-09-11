@@ -1,10 +1,11 @@
 # Agentic OS — Kernel Services (M12–M15)
 
 **Implementation update:** K1 durable dispatch, K2 quota retry, K3 optional quota probes,
-K4 dependency waits and K5 recurring schedules are implemented and regression-verified; see the
-acceptance records for [K1](agentic-os-k1-implementation.md) and
-[K3](agentic-os-k3-implementation.md). K4b resource slots and `overlap: queue` stay deferred, and
-K6+ and the other proposed Agentic OS services are not implemented by those slices.
+K4 dependency waits, K4b resource slots and K5 recurring schedules are implemented and
+regression-verified; see the acceptance records for [K1](agentic-os-k1-implementation.md),
+[K3](agentic-os-k3-implementation.md) and [K4b](agentic-os-k4b-resource-slots.md).
+`overlap: queue` stays deferred, and K6+ and the other proposed Agentic OS services are not
+implemented by those slices.
 
 **Status:** Proposed — revision 2 (planning only; no production implementation in this pass).
 Revision 2 reconciles the adversarial review of revision 1 (2026-09-05): it makes the design
@@ -442,7 +443,7 @@ interface WaitCondition {
   /** Monotone per task. Every wake names the generation it consumes (CAS). */
   generation: number;
   state: "active" | "consumed" | "replaced" | "cancelled" | "expired";
-  kind: "time" | "quota" | "dependency";          // "resource" deferred (K4b)
+  kind: "time" | "quota" | "dependency" | "resource";
   /** Retry instant. kind=time: the requested instant. Every kind: earliest re-check. */
   notBefore: string;
   /** kind=quota: wait SUBJECTS (which assistants' blockers must clear); empty = any eligible
@@ -453,6 +454,11 @@ interface WaitCondition {
   /** kind=dependency: wake when every listed task is terminal. Validated acyclic at attach. */
   dependsOn?: TaskId[];
   onDependencyFailure?: "cancel" | "wake-anyway" | "wait-input";
+  /** K4b: the named pool and unit count this wait must hold before it dispatches.
+   *  Independent of `kind` — a quota or time wait carries it forward when the task
+   *  already needed a slot (§4.2.7). Capacity is config, re-read at every wake. */
+  resource?: string;
+  units?: number;
   createdBy: "user" | "scheduler" | "failover" | "operator";
   createdAt: string;
   /** Execution wake attempts that re-parked (CR-29). Probe attempts are NOT counted here. */
@@ -771,15 +777,67 @@ interface ScheduleOccurrence {
   evaluated; `WAITING_RESOURCE` tasks remain, the UI shows a "scheduler disabled" banner, and
   operator run-now still works (it is the same `wake` operation).
 
-#### 4.2.7 Dependency waits (K4) and deferred resource slots (K4b)
+#### 4.2.7 Dependency waits (K4) and resource slots (K4b)
 
 - `dependency` waits ship in K4 with **self-dependency and cycle rejection at attach time**
   (walk `dependsOn` across non-terminal tasks' active conditions). A dependency that does not
   exist or is deleted is treated as `FAILED` for `onDependencyFailure`. Wake is event-driven
   (task terminal) with the same `wake(generation)` operation.
-- **Resource slots (`kind: "resource"`, `maxConcurrent`) are deferred (K4b)** until every
-  launch path — legacy `orchestrator.ts`, Harness `SessionRunner`, parallel compare — shares
-  one reservation/release protocol. Until then a slot count cannot be honest.
+- **Resource slots ship in K4b.** The deferral gate — "every launch path shares one
+  reservation/release protocol" — is satisfied on the shipped code: `orchestrator.startTask()`
+  is the sole launch funnel (legacy, Harness bridge, dispatch replay and every parallel
+  competitor route through it), and `runs` + `dispatches` is the one durable ownership record
+  that both paths write. A claim therefore hangs off **that** record rather than on a per-path
+  hook, which is what makes a slot count honest.
+- **Model.** Named generic pools, `scheduler.resources: { <pool>: capacity }` in workspace
+  config. No provider-specific GPU/CPU semantics. An undeclared pool cannot be waited on and a
+  request above capacity is rejected at attach: an invented capacity is worse than none.
+- **The requirement is independent of `kind`.** A wait row may name a pool whatever else it
+  waits for, because the requirement outlives any one condition: a task that claimed a slot and
+  then re-parks on quota or yields on context still needs that slot to run, and its successor
+  condition carries the requirement forward and must **re-acquire**. `kind: "resource"` means
+  the slot is the only thing it waits for. Without this, a continuation would dispatch outside
+  the pool it was admitted through.
+- **Claim safety.** `resource_claims` holds one row per grant, and the claim is committed in the
+  **same transaction** as the wake's condition-consume and `dispatches` reservation. That single
+  boundary, plus `uq_claim_live` (one live claim per task), `uq_claim_dispatch` (one claim per
+  dispatch ever) and the in-transaction capacity sum, is the whole over-allocation defence: two
+  concurrent wakes cannot both see the last slot free, and a crash leaves either both the claim
+  and its dispatch or neither. No process-local lock is load-bearing; single-process SQLite
+  ownership (§4.2.8) is.
+- **Release** is not a list of call sites but one ownership test, `releaseIfIdle(taskId)`: the
+  claim goes when the task is terminal **or** `hasOwner(taskId)` is false — the same test
+  `WAITING_RESOURCE` itself is defined by (CR-16). Every park, abort, cancel, settle and boot
+  path already ends with no owner, so a leak is not expressible; the timer sweep re-checks any
+  claim whose release event was missed, bounding a leak to one tick. A claim is **held**
+  through an approval or verification pause, because a paused session is still a live owner.
+  Release on a start-ambiguous re-park follows exactly the evidence the re-park itself acted on
+  (no session row on the Harness path, or an operator-confirmed non-start on the legacy path);
+  it never guesses that a provider is idle. **Known ceiling:** a task that goes terminal while
+  its provider is still winding down releases its slot at the plane's terminal boundary, not the
+  provider's — the plane has no owner at that point, and holding the slot against a provider
+  that may ignore cancellation would strand it indefinitely.
+- **Fairness** is durable FIFO by wait creation (`created_at`, `task_id` tie-break) among the
+  conditions for that pool **whose other preconditions are already satisfied** — a quota wait
+  that also needs a slot but is not yet retryable is not in the queue, so it cannot hold the
+  head of line against ready work, and it re-enters at its original creation time so waiting
+  longer never loses a place. Strict FIFO: a smaller request does not overtake the front
+  waiter, so a large request cannot starve. No priority scheduler. An operator run-now may skip
+  the **queue** (choosing what runs is an operator decision) but never the **capacity**.
+- **Capacity change.** A decrease never preempts a live claim; new claims wait until usage drops
+  below the new capacity. A request the pool can no longer satisfy (capacity cut below it, or the
+  pool undeclared) **expires to `WAITING_INPUT(intervention_required)`** with a
+  `resource.unsatisfiable` event, so one impossible request cannot hang every task behind it.
+  An increase is picked up by the next wake evaluation.
+- **Operator truth.** Pool occupancy is **derived at read time** (`capacity` from config,
+  `claimedUnits` from live claims, queue position from the FIFO scan) and never stored: a
+  persisted slot count goes stale the moment another task claims, and a stale count is worse
+  than none (the K9 lesson). `resource.claimed` / `resource.released` /
+  `resource.unsatisfiable` scheduler events are the durable record of who held what and why
+  another task won.
+- **Known ceiling (deliberate).** Only tasks that **declare** a resource wait claim units; a
+  plain start consumes nothing. Per-launch accounting would require every caller to declare
+  intent, which is a larger slice than K4b.
 
 #### 4.2.8 Scheduler service, ownership, persistence, API
 
@@ -1226,6 +1284,17 @@ whose endpoint is unavailable changes nothing.
 `FAILED` applies `onDependencyFailure`; self-dependency and a 3-task cycle are rejected at
 attach with a named error; a dependency deleted after attach is treated as `FAILED`.
 
+**K4b — resource slots.** One task and one free slot dispatches; with none it stays
+`WAITING_RESOURCE` with a derived reason; two concurrent wakes for the last slot produce exactly
+one owner; a duplicate or stale wake never double-claims; cancellation before and after the claim
+leaks nothing; a restart at the reservation boundary keeps exactly one claim and a restart whose
+owner is gone sweeps it; terminal release wakes the next FIFO waiter through the ordinary
+`wake(generation)`; a smaller request never overtakes the front waiter and every waiter
+eventually runs; a capacity increase wakes eligible work, a decrease preempts nothing, and an
+unsatisfiable request becomes an operator decision; quota re-parks and context-yield
+continuations carry the requirement forward and re-acquire; approval/verification/comparison
+pauses are not deferrable onto a resource wait (CR-32); routing is still recomputed at the wake.
+
 **K5 — recurring schedules.** One task per occurrence; a duplicate tick for the same
 `occurrenceAt` violates the unique constraint and creates nothing; `overlap: skip` records
 `skipped-overlap`; after restart at most one missed occurrence within the catch-up window
@@ -1238,6 +1307,7 @@ creating a schedule without `commands.write` fails closed.
 Tests: `packages/core/test/state-machine.test.ts` (every new edge legal with its precondition,
 every non-listed edge illegal, CR-32 rejections); `apps/api/test/scheduler.test.ts` (fake
 clock, generation CAS, dispatch phases); `apps/api/test/harness/boot-recovery` dispatch cases;
+`apps/api/test/resource-slots.test.ts` (K4b claim/release, race, FIFO, capacity change);
 `apps/api/test/failover.test.ts` all-blocked case on both paths; `quota-projection.test.ts`;
 `eval/scenarios/quota-wait-and-resume.ts`; Cockpit `schedule` unit tests (K6).
 
@@ -1390,7 +1460,8 @@ or runtime work to finish before unrelated increments.
 
 | # | Slice | Repo | Demonstrable outcome | Depends on |
 |---|---|---|---|---|
-| K4 | `dependency` kind with cycle/self rejection and missing-dependency semantics; scheduler event hook on task terminal. **K4b (resource slots) deferred** until all launch paths share reservation/release | ai-control-plan | "run reviewer after implementation finishes" | K1; before increment 11 |
+| K4 | `dependency` kind with cycle/self rejection and missing-dependency semantics; scheduler event hook on task terminal | ai-control-plan | "run reviewer after implementation finishes" | K1; before increment 11 |
+| K4b | `resource` kind + named config pools + `resource_claims` co-committed with the wake reservation + FIFO release wake + derived pool truth | ai-control-plan | two tasks, one slot: one runs, the other waits and wakes on release | K4; one launch funnel (`startTask`) |
 | K5 | Recurring `Schedule` + `schedule_occurrences` + cron dependency + atomic firing + catch-up + skip-only overlap + `GET/POST /api/schedules`; `schedules.read` | ai-control-plan | nightly template creates exactly one task per occurrence | K1 soaked (time waits in use) |
 | K6 | Cockpit Schedule tab third source (read) + create via `commands.write`; `WAITING_RESOURCE` in managed views | cockpit | plane schedules and waiting tasks visible beside Cockpit jobs | K5, Cockpit auth follow-up |
 
@@ -1398,7 +1469,6 @@ or runtime work to finish before unrelated increments.
 
 | # | Slice | Reason |
 |---|---|---|
-| K4b | Resource slots (`kind: resource`, `maxConcurrent`) | needs one reservation/release protocol across legacy, Harness and parallel-compare launch paths |
 | K15 | Typed `harness.runtime` enum, `enforcement.runtime`, import-boundary test | speculative abstraction with one implementation; boundary test only after increment 6 retires the legacy launch path |
 | K16 | Fold `jobs.ts` daily jobs into `system` schedules | no demonstrated operational need |
 | — | Second/third benchmark sources (LiveBench, BenchLM), Archify asset, `DshAdapter`, herdr backend, generic pruning, Codex app-server transport for compaction | on demonstrated need / after the named gate |
