@@ -55,7 +55,7 @@ wake(taskId, expectedGeneration, actor)                        ← one transacti
   generation CAS · WAITING_RESOURCE · settled predecessor · no open dispatch
   if the condition names a pool:
       capacity (config) − SUM(live claim units)  ≥  requested units
-      and this task is the FIFO front of that pool's due queue (operator may skip the queue)
+      this task is READY (§4.1) and is the FIFO front of that pool's queue (operator may skip the queue)
       otherwise: visible stale no-op, or expire to WAITING_INPUT if unsatisfiable
   consume condition · INSERT dispatches(reserved) · INSERT resource_claims · → ROUTING
 COMMIT
@@ -105,21 +105,62 @@ and holding the slot against a provider that may ignore cancellation would stran
 
 ## 4. Fairness
 
-Durable FIFO by wait creation (`created_at`, `task_id` tie-break) among the conditions naming that
-pool **whose other preconditions are already satisfied** (`not_before <= now`). Consequences:
+Durable FIFO by **requirement age** (`resource_queued_at`, `task_id` tie-break) among the conditions
+naming that pool **whose other preconditions are already satisfied**.
 
-- A quota wait that also needs a slot but is not yet retryable is not in the queue, so it cannot
-  hold the head of line against ready work. It re-enters at its original creation time, so waiting
-  longer never loses a place.
+### 4.1 Readiness — who is in the queue
+
+One side-effect-free rule, `Scheduler.resourceReady(condition)`, answers "may this requirement
+compete for units now?". It drives the FIFO, the grant in `resourceGate`, the pool status and the
+per-task readout, so those four cannot tell an operator different stories. Every clause defers to
+the authority the wake path already uses — there is no second dependency or quota policy:
+
+| carried by | ready when |
+| --- | --- |
+| `resource` (pool only) | `not_before <= now` |
+| `time` + resource | `not_before <= now` |
+| `dependency` + resource | no pending subject, and no failed subject unless the policy is `wake-anyway` |
+| `quota` + resource | the retry is due **and** `quotaPlan().quotaBlocked` is false |
+
+The requirement is independent of `kind`, so a task can be at the head of the pool's line while its
+dependency is unfinished or its quota evidence still blocks every candidate. Such a requirement
+would refuse the slot at every sweep, so leaving it in the queue would hold free capacity idle
+behind a task that cannot use it (P1-A). It is therefore out of the queue and out of the grant path,
+and reported as `blockedBy: "condition"` rather than as a queue position it does not have.
+
+What that rule deliberately does **not** do:
+
+- A failed dependency under `cancel` / `wait-input` is not decided by the pool. The task's own wake
+  performs that transition; until it does, the requirement simply is not competing.
+- `quotaBlocked` means *every* candidate this task could use carries a live blocker. Unknown or
+  stale evidence is not "blocked", so K2's bounded revalidation (wake, re-route, re-park) is
+  unchanged. No eligible candidate at all is not quota evidence either, and still routes and
+  re-parks through the existing path.
+- An operator run-now skips readiness along with the queue, and never the capacity.
+
+### 4.2 Seniority — where it re-enters
+
+`resource_queued_at` is when THIS requirement started waiting for the pool, which is not when the
+condition carrying it was written. Carrying the same pool and the same units across a quota re-park,
+a context continuation, a recovery re-park or an operator wait replacement preserves it; a genuinely
+different request starts at now; a task with no requirement has NULL. `created_at` is untouched and
+still means when that row was written — nothing is falsified to express seniority (P1-B).
+
+Without it, every re-park would mint a new `created_at` and make the same requirement younger than
+work that arrived while it was ineligible, so repeated re-parks could lose a place indefinitely.
+
+### 4.3 Remaining properties
+
 - Strict FIFO: a 1-unit request does not overtake a 2-unit front waiter. A large request therefore
   cannot starve, at the cost of deliberate head-of-line blocking.
 - No priority scheduler. An operator run-now may skip the **queue** — choosing what runs is an
   operator decision — but never the **capacity**: over-allocation is not something an operator can
   ask for, because the slot count would stop being true.
 
-Evidence an operator can read: the claim rows (who holds what, since when), the condition
-`created_at` ordering, and the `resource.claimed` / `resource.released` / `resource.unsatisfiable`
-scheduler events.
+Evidence an operator can read: the claim rows (who holds what, since when), the
+`resource_queued_at` ordering, the pool status split into `waitingTaskIds` (ready, in FIFO order)
+and `notReadyTaskIds` (carrying a requirement, held out of the queue), and the `resource.claimed` /
+`resource.released` / `resource.unsatisfiable` scheduler events.
 
 ## 5. Capacity change
 
@@ -142,17 +183,22 @@ wake(taskId, generation, 'event')    ← the same single wake operation
 reservation (+ claim) → routeTask() → materialize → start
 ```
 
-Resource waits never set the timer deadline (their `notBefore` is an earliest re-check and is
-normally already past, which would spin the timer); the existing 60 s cap sweeps them, exactly as
-for dependency waits. A missed release event therefore costs one tick, never a hang.
+Neither resource waits nor any wait CARRYING a requirement sets the timer deadline (their
+`notBefore` is an earliest re-check and is normally already past, which would re-arm the timer at
+1 ms: a withheld requirement stays active and due for as long as the pool withholds it, which a
+time or quota wait without one never does); the existing 60 s cap sweeps them, exactly as for
+dependency waits. A missed release event therefore costs one tick, never a hang.
 
 ## 7. Operator surface
 
 - `POST /api/tasks/:id/wait` accepts `{ kind: "resource", resource, units? }` — no new route.
 - `GET /api/tasks/:id/wait` and `GET /api/tasks/:id` add `resourceWait` (pool, requested units,
-  capacity/availability when known, queue position, `blockedBy`) and `resourceClaim`.
-- `GET /api/scheduler/status` adds `resources[]`: capacity, claimed units, available units and the
-  FIFO wait queue per pool.
+  capacity/availability when known, queue position — 0 when it is not in the queue —, `blockedBy`
+  including `condition`, the blocking reason, and the kind of wait carrying the requirement) and
+  `resourceClaim`.
+- `GET /api/scheduler/status` adds `resources[]`: capacity, claimed units, available units, the
+  ready FIFO wait queue (`waitingTaskIds`) and the requirements held out of it (`notReadyTaskIds`)
+  per pool.
 - Orbital Inspector renders a "Resource slot" panel in the existing schedule tab: pool, requested
   units, availability, queue position, why waiting, claim state, next action. Orbital is not
   redesigned and the Demo B sphere/product visuals are untouched.
@@ -169,7 +215,9 @@ Migration `023_resource_slots.sql`, forward-only:
   `pragma_foreign_key_check`, then clear the deferral) to widen the `kind` CHECK with `resource`
   and add `resource` / `resource_units`, with `CHECK((resource IS NULL) = (resource_units IS NULL))`
   and `CHECK(kind != 'resource' OR resource IS NOT NULL)`.
-- `idx_wait_resource(resource, created_at, task_id) WHERE state='active' AND resource IS NOT NULL`
+- `wait_conditions.resource_queued_at` — the requirement's age, NULL exactly when `resource` is
+  NULL (CHECK-enforced). Backfilled to NULL: no row before 023 ever held a pool requirement.
+- `idx_wait_resource(resource, resource_queued_at, task_id) WHERE state='active' AND resource IS NOT NULL`
   serves the FIFO scan.
 - New `resource_claims` table with `uq_claim_live` / `uq_claim_dispatch` / `idx_claim_live_resource`
   and foreign keys to `tasks`, `dispatches` and `(task_id, generation)` on `wait_conditions`.
@@ -179,7 +227,7 @@ backfilled for work that never recorded any.
 
 ## 9. Tests
 
-`apps/api/test/resource-slots.test.ts` (27 cases, injected clock and the scheduler's own
+`apps/api/test/resource-slots.test.ts` (39 cases, injected clock and the scheduler's own
 tick/event paths; no wall-time sleeps). A holder occupies its slot with a real live session — the
 fake adapter parks on an approval nobody answers — so the hold is the actual ownership record
 rather than a stub. Unexpected scheduler errors fail the test: a swallowed wake failure would
@@ -198,8 +246,19 @@ an approval pause; capacity increase wakes eligible work; capacity decrease pree
 unsatisfiable request becomes an operator decision; quota re-park, context-yield continuation and
 operator wait-replacement all carry the requirement forward; start-ambiguous re-park release.
 
-`apps/web/src/orbital.test.ts` covers the `Resource wait · K4b` label and every `blockedBy`
-next-action string.
+Fairness (`describe('K4b pool fairness')`), each written to fail before the readiness rule and the
+requirement age existed: a pending dependency at the front does not hold a ready waiter behind it,
+and re-enters at its original seniority once it clears; a failed dependency awaiting an operator
+does not hold the pool while its own wake performs the transition; a due-but-still-quota-blocked
+requirement does not hold the pool, and re-enters at its original seniority once the evidence
+clears; the age survives a context-yield continuation and a no-candidate re-park; run-now still
+skips the queue and never the capacity; the pool status, the per-task readout and the grant agree
+on readiness; a not-yet-due requirement is never reported "eligible"; and a due requirement the
+pool withholds does not re-arm the timer at 1 ms.
+
+`apps/web/src/orbital.test.ts` covers the `Resource wait · K4b` label, every `blockedBy`
+next-action string, and the wording for a pool requirement carried under a dependency or quota
+wait.
 
 ## 10. Deferred, still
 

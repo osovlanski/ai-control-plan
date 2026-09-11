@@ -1,4 +1,5 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -22,11 +23,12 @@ let instant = Date.parse('2030-01-01T00:00:00Z');
 const now = () => new Date(instant);
 const A = 'fake-a' as AssistantId; const B = 'fake-b' as AssistantId;
 
-async function boot(resources: Record<string, number> = { gpu: 1 }) {
+async function boot(resources: Record<string, number> = { gpu: 1 }, prepare?: (c: ResolvedConfig) => void) {
   home = mkdtempSync(join(tmpdir(), 'k4b-'));
   config = loadConfig({ AGENT_PLANE_HOME: home });
   config.assistants = { [A]: { provider: 'fake' }, [B]: { provider: 'fake' } };
   config.scheduler = { ...config.scheduler, enabled: true, resources };
+  prepare?.(config);
   db = openDb(config.dbPath); built = buildServer({ config, db, now });
   built.registry.init(); await built.registry.syncAll();
 }
@@ -113,7 +115,7 @@ describe('K4b resource slots', () => {
     expect(s.dispatches(waiter)).toHaveLength(0);
     expect(s.claim(waiter)).toBeUndefined();
     expect(s.resourceWaitStatus(waiter)).toMatchObject({ availableUnits: 0, queuePosition: 1, blockedBy: 'capacity' });
-    expect(s.pools()).toEqual([{ resource: 'gpu', capacity: 1, claimedUnits: 1, availableUnits: 0, waitingTaskIds: [waiter] }]);
+    expect(s.pools()).toEqual([{ resource: 'gpu', capacity: 1, claimedUnits: 1, availableUnits: 0, waitingTaskIds: [waiter], notReadyTaskIds: [] }]);
   });
 
   /* C + I — release wakes the next waiter through the ordinary wake protocol. */
@@ -378,7 +380,7 @@ describe('K4b resource slots', () => {
     expect(db.prepare('SELECT COUNT(*) AS n FROM resource_claims').get()).toMatchObject({ n: 0 });
     expect(s.resourceWaitStatus(timed.taskId)).toBeUndefined();
     expect(s.resourceWaitStatus(dep.taskId)).toBeUndefined();
-    expect(s.pools()).toEqual([{ resource: 'gpu', capacity: 1, claimedUnits: 0, availableUnits: 1, waitingTaskIds: [] }]);
+    expect(s.pools()).toEqual([{ resource: 'gpu', capacity: 1, claimedUnits: 0, availableUnits: 1, waitingTaskIds: [], notReadyTaskIds: [] }]);
   });
 
   /* The requirement outlives one condition: a quota re-park must re-acquire. */
@@ -452,5 +454,249 @@ describe('K4b resource slots', () => {
       expect(recommendation.execution.decidedBy).toBe('unchanged');
     }
     expect(config.models.selection.enabled).toBe(false);
+  });
+});
+
+/**
+ * K4b fairness — the FIFO is among requirements whose OTHER preconditions are
+ * already satisfied, and a requirement keeps the age it has been waiting with.
+ *
+ * Both properties are about liveness, so every test here drives real wakes
+ * through the ordinary protocol and asserts what actually got a slot; none of
+ * them sleeps on wall time.
+ */
+function makeRepo(): string {
+  const dir = mkdtempSync(join(tmpdir(), 'k4b-repo-'));
+  const git = (...args: string[]) => execFileSync('git', ['-C', dir, ...args], { stdio: 'pipe' });
+  git('init', '-q', '-b', 'main');
+  git('config', 'user.email', 'k4b@agent-plane.test');
+  git('config', 'user.name', 'K4b Test');
+  writeFileSync(join(dir, 'README.md'), 'fixture\n');
+  git('add', '-A'); git('commit', '-qm', 'initial');
+  return dir;
+}
+/** The pool queue and the tasks a pool holds out of it, as the API reports them. */
+function pool(s: Scheduler, resource = 'gpu') { return s.pools().find(p => p.resource === resource)!; }
+
+describe('K4b pool fairness', () => {
+  /* A — a pending dependency at the front must not hold the line. */
+  it('keeps a requirement whose dependency is unfinished out of the pool queue', async () => {
+    await boot(); const s = scheduler();
+    const upstream = built.tasks.create({ goal: 'upstream work' });
+    const blocked = rtask(s);
+    s.attach(blocked, { kind: 'dependency', dependsOn: [upstream.taskId], reason: 'needs the upstream result' });
+    instant += 1;
+    const ready = rtask(s);
+    // The requirement survived the replacement, and the requirement is the OLDER one.
+    expect(s.condition(blocked)).toMatchObject({ kind: 'dependency', resource: 'gpu', units: 1 });
+    expect(Date.parse(s.condition(blocked)!.resourceQueuedAt!)).toBeLessThan(Date.parse(s.condition(ready)!.resourceQueuedAt!));
+    // Out of the queue, but still visibly waiting on the pool.
+    expect(pool(s)).toMatchObject({ waitingTaskIds: [ready], notReadyTaskIds: [blocked] });
+    expect(s.resourceWaitStatus(blocked)).toMatchObject({ blockedBy: 'condition', queuePosition: 0, waitKind: 'dependency' });
+    // Free capacity behind it is used rather than held for a task that would refuse it.
+    const done = settled(ready);
+    expect(await s.wake(ready, 1, 'timer')).toMatchObject({ outcome: 'dispatched' });
+    await done; await drain();
+    expect(s.dispatches(ready)[0]).toMatchObject({ phase: 'started' });
+    expect(built.tasks.get(blocked)?.state).toBe('WAITING_RESOURCE');
+    expect(claimRows(blocked)).toHaveLength(0);
+  });
+
+  /* B — the dependency clears and the older requirement re-enters where it was. */
+  it('re-enters a cleared dependency at its original resource seniority', async () => {
+    await boot(); const s = scheduler();
+    const upstream = built.tasks.create({ goal: 'upstream work' });
+    const holder = rtask(s, { goal: HOLD });
+    const senior = rtask(s, { goal: HOLD });
+    const junior = rtask(s, { goal: HOLD });
+    s.attach(senior, { kind: 'dependency', dependsOn: [upstream.taskId], reason: 'needs the upstream result' });
+    instant += 1;
+    // The senior task's CONDITION is now younger than the junior task's; its
+    // REQUIREMENT is not, and the requirement is what the queue orders by.
+    expect(Date.parse(s.condition(senior)!.createdAt)).toBeGreaterThan(Date.parse(s.condition(junior)!.createdAt));
+    expect(Date.parse(s.condition(senior)!.resourceQueuedAt!)).toBeLessThan(Date.parse(s.condition(junior)!.resourceQueuedAt!));
+    const held = holding(holder); await s.tick(); await held; await drain();
+    expect(claims().map(c => c.task_id)).toEqual([holder]);
+    expect(pool(s)).toMatchObject({ waitingTaskIds: [junior], notReadyTaskIds: [senior] });
+    // Dependency clears: the requirement re-enters AHEAD of the task that arrived
+    // while it was ineligible.
+    built.tasks.transition(upstream.taskId, 'ROUTING'); built.tasks.transition(upstream.taskId, 'RUNNING');
+    built.tasks.transition(upstream.taskId, 'COMPLETED');
+    await drain();
+    expect(pool(s).waitingTaskIds).toEqual([senior, junior]);
+    const seniorHeld = holding(senior);
+    await s.cancel(holder); await drain(); await seniorHeld;
+    expect(claims().map(c => c.task_id)).toEqual([senior]);
+    expect(built.tasks.get(junior)?.state).toBe('WAITING_RESOURCE');
+  });
+
+  /* C — a failed dependency is the waiting task's own business, not the pool's. */
+  it('does not let a failed dependency awaiting an operator hold the pool', async () => {
+    await boot(); const s = scheduler();
+    const upstream = built.tasks.create({ goal: 'upstream work' });
+    built.tasks.transition(upstream.taskId, 'ROUTING'); built.tasks.transition(upstream.taskId, 'FAILED');
+    const blocked = rtask(s);
+    s.attach(blocked, { kind: 'dependency', dependsOn: [upstream.taskId], reason: 'needs the upstream result' });
+    instant += 1;
+    const ready = rtask(s);
+    expect(s.resourceWaitStatus(blocked)).toMatchObject({ blockedBy: 'condition', queuePosition: 0 });
+    const done = settled(ready);
+    expect(await s.wake(ready, 1, 'timer')).toMatchObject({ outcome: 'dispatched' });
+    await done; await drain();
+    expect(s.dispatches(ready)[0]).toMatchObject({ phase: 'started' });
+    // The ordinary wake path still performs the wait-input transition for it.
+    expect(await s.wake(blocked, 2, 'timer')).toMatchObject({ outcome: 'stale', reason: expect.stringContaining('Dependency failed') });
+    expect(built.tasks.get(blocked)).toMatchObject({ state: 'WAITING_INPUT', pause_kind: 'dependency_failed' });
+    expect(claimRows(blocked)).toHaveLength(0);
+  });
+
+  /* D — a due quota retry whose evidence still blocks every candidate. */
+  it('keeps a due but still quota-blocked requirement out of the pool queue', async () => {
+    await boot(); const s = scheduler();
+    const blocked = rtask(s, { pin: A });
+    s.attach(blocked, { kind: 'quota', notBefore: new Date(instant).toISOString(), reason: 'quota retry' });
+    instant += 1;
+    built.cooldowns.penalize(A, 'limit', 'pinned candidate is out', new Date(instant + 600_000).toISOString());
+    const ready = rtask(s, { pin: B });
+    // Due, so the timestamp says nothing; the live evidence does.
+    expect(Date.parse(s.condition(blocked)!.notBefore)).toBeLessThanOrEqual(instant);
+    expect(pool(s)).toMatchObject({ waitingTaskIds: [ready], notReadyTaskIds: [blocked] });
+    expect(s.resourceWaitStatus(blocked)).toMatchObject({ blockedBy: 'condition', queuePosition: 0, waitKind: 'quota' });
+    const done = settled(ready);
+    expect(await s.wake(ready, 1, 'timer')).toMatchObject({ outcome: 'dispatched' });
+    await done; await drain();
+    expect(s.dispatches(ready)[0]).toMatchObject({ phase: 'started' });
+    // It never took a slot it could not have used.
+    expect(await s.wake(blocked, 2, 'timer')).toMatchObject({ outcome: 'stale', reason: expect.stringContaining('Quota evidence') });
+    expect(claimRows(blocked)).toHaveLength(0);
+  });
+
+  /* E — quota clears, and the requirement re-enters at its original place. */
+  it('re-enters a cleared quota retry at its original resource seniority', async () => {
+    await boot(); const s = scheduler();
+    const holder = rtask(s, { goal: HOLD });
+    const senior = rtask(s, { pin: A, goal: HOLD });
+    const junior = rtask(s, { goal: HOLD });
+    s.attach(senior, { kind: 'quota', notBefore: new Date(instant).toISOString(), reason: 'quota retry' });
+    instant += 1;
+    built.cooldowns.penalize(A, 'limit', 'pinned candidate is out', new Date(instant + 600_000).toISOString());
+    const held = holding(holder); await s.tick(); await held; await drain();
+    expect(claims().map(c => c.task_id)).toEqual([holder]);
+    expect(pool(s)).toMatchObject({ waitingTaskIds: [junior], notReadyTaskIds: [senior] });
+    built.cooldowns.clear(A);
+    expect(pool(s).waitingTaskIds).toEqual([senior, junior]);
+    const seniorHeld = holding(senior);
+    await s.cancel(holder); await drain(); await seniorHeld;
+    expect(claims().map(c => c.task_id)).toEqual([senior]);
+    expect(built.tasks.get(junior)?.state).toBe('WAITING_RESOURCE');
+  });
+
+  /* F — a context-yield continuation is the same requirement, still waiting. */
+  it('keeps the resource age across a context-yield continuation', async () => {
+    const repo = makeRepo();
+    await boot({ gpu: 1 }, c => { c.execution.harnessModes.single = true; c.repoAllowlist = [...c.repoAllowlist, repo]; });
+    const s = scheduler();
+    const t = built.tasks.create({ goal: 'implement the change [FAKE:CONTEXT:0.96>0.3]', repoPath: repo, overrides: { assistantId: A } });
+    s.attach(t.taskId, { kind: 'resource', resource: 'gpu', reason: 'needs a slot' });
+    const queuedAt = s.condition(t.taskId)!.resourceQueuedAt!;
+    instant += 1_000;
+    const done = settled(t.taskId); await s.tick(); await done; await drain();
+    const continuation = db.prepare("SELECT * FROM dispatches WHERE task_id = ? AND origin = 'context-yield'").all(t.taskId);
+    expect(continuation).toHaveLength(1);
+    const carried = db.prepare('SELECT resource, resource_units, resource_queued_at, created_at FROM wait_conditions WHERE task_id = ? AND generation = 2')
+      .get(t.taskId) as { resource: string; resource_units: number; resource_queued_at: string; created_at: string };
+    expect(carried).toMatchObject({ resource: 'gpu', resource_units: 1, resource_queued_at: queuedAt });
+    // The row is new; only the requirement's age is old.
+    expect(Date.parse(carried.created_at)).toBeGreaterThan(Date.parse(queuedAt));
+    rmSync(repo, { recursive: true, force: true });
+  });
+
+  /* G — a no-candidate re-park is a retry of the same requirement. */
+  it('keeps the resource age across a no-candidate re-park', async () => {
+    await boot();
+    const s = scheduler(async phase => {
+      if (phase !== 'reserved') return;
+      const until = new Date(instant + 600_000).toISOString();
+      built.cooldowns.penalize(A, 'limit', 'out', until); built.cooldowns.penalize(B, 'limit', 'out', until);
+    });
+    const id = rtask(s);
+    const queuedAt = s.condition(id)!.resourceQueuedAt!;
+    await s.wake(id, 1, 'timer'); await drain();
+    expect(s.condition(id)).toMatchObject({ generation: 2, kind: 'resource', resource: 'gpu', autoWakes: 1, resourceQueuedAt: queuedAt });
+    expect(Date.parse(s.condition(id)!.createdAt)).toBeGreaterThan(Date.parse(queuedAt));
+    // The re-park gave the slot back: a retry re-acquires, it does not keep one.
+    expect(claims()).toHaveLength(0);
+  });
+
+  /* J — an operator may pick who runs; nobody may pick how many units exist. */
+  it('lets run-now skip the queue but never the capacity', async () => {
+    await boot(); const s = scheduler();
+    const front = rtask(s);
+    const behind = rtask(s, { goal: HOLD });
+    const held = holding(behind);
+    expect(await s.runNow(behind)).toMatchObject({ outcome: 'dispatched' });
+    await held; await drain();
+    expect(claims().map(c => c.task_id)).toEqual([behind]);
+    // The pool is full, and an operator wake is refused on capacity alone.
+    expect(await s.runNow(front)).toMatchObject({ outcome: 'stale', reason: expect.stringContaining('units free') });
+    expect(claimRows(front)).toHaveLength(0);
+  });
+
+  /* K — one readiness rule behind all three views. */
+  it('reports the same readiness in the pool status, the task readout and the gate', async () => {
+    await boot(); const s = scheduler();
+    const upstream = built.tasks.create({ goal: 'upstream work' });
+    const blocked = rtask(s);
+    s.attach(blocked, { kind: 'dependency', dependsOn: [upstream.taskId], reason: 'needs the upstream result' });
+    instant += 1;
+    const ready = rtask(s);
+    const later = rtask(s);
+    s.attach(later, { kind: 'time', notBefore: new Date(instant + 60_000).toISOString(), reason: 'operator deferred' });
+    instant += 1;
+    const p = pool(s);
+    for (const id of [blocked, ready, later]) {
+      const status = s.resourceWaitStatus(id)!;
+      expect(p.waitingTaskIds.includes(id)).toBe(status.blockedBy !== 'condition');
+      expect(p.notReadyTaskIds.includes(id)).toBe(status.blockedBy === 'condition');
+      expect(status.queuePosition > 0).toBe(p.waitingTaskIds.includes(id));
+    }
+    // The grant path agrees with both: neither not-ready wait can take the slot.
+    expect(await s.wake(blocked, 2, 'timer')).toMatchObject({ outcome: 'stale' });
+    expect(await s.wake(later, 2, 'timer')).toMatchObject({ outcome: 'stale' });
+    expect(claims()).toHaveLength(0);
+  });
+
+  /* A withheld requirement stays active and due, which must not spin the timer. */
+  it('does not re-arm the timer at 1ms for a due requirement it cannot grant', async () => {
+    await boot(); const s = scheduler();
+    const holder = rtask(s, { goal: HOLD });
+    const waiter = rtask(s);
+    // A carried requirement under a TIME wait: due, and withheld by the pool, so
+    // unlike an ordinary time wait its condition is not consumed and stays due.
+    s.attach(waiter, { kind: 'time', notBefore: new Date(instant + 1_000).toISOString(), reason: 'operator deferred' });
+    const held = holding(holder); await s.tick(); await held; await drain();
+    instant += 2_000;
+    expect(s.resourceWaitStatus(waiter)).toMatchObject({ blockedBy: 'capacity' });
+    const ticks = vi.spyOn(s, 'tick');
+    vi.useFakeTimers({ shouldAdvanceTime: false });
+    s.startTimer();
+    await vi.advanceTimersByTimeAsync(5_000);
+    s.stop(); vi.useRealTimers();
+    // 5 s of timer at a 1 ms re-arm would be thousands of sweeps; the 60 s cap is one.
+    expect(ticks.mock.calls.length).toBeLessThan(5);
+  });
+
+  /* L — a requirement that is not due yet is not "eligible". */
+  it('never calls a not-yet-due requirement eligible', async () => {
+    await boot(); const s = scheduler();
+    const later = rtask(s);
+    s.attach(later, { kind: 'time', notBefore: new Date(instant + 60_000).toISOString(), reason: 'operator deferred' });
+    // Capacity is free, and that is not the question being asked.
+    expect(s.resourceWaitStatus(later)).toMatchObject({ availableUnits: 1, blockedBy: 'condition', queuePosition: 0, queueLength: 0 });
+    expect(pool(s)).toMatchObject({ waitingTaskIds: [], notReadyTaskIds: [later] });
+    await s.tick(); await drain();
+    expect(claims()).toHaveLength(0);
+    instant += 60_001;
+    expect(s.resourceWaitStatus(later)).toMatchObject({ blockedBy: 'eligible', queuePosition: 1 });
   });
 });

@@ -67,7 +67,7 @@ export interface SchedulerStatus {
     detail?: string;
   }>;
   /** K4b pools: configured capacity, live claims and the FIFO wait queue. */
-  resources?: Array<{ resource: string; capacity?: number; claimedUnits: number; availableUnits: number; waitingTaskIds: string[] }>;
+  resources?: Array<{ resource: string; capacity?: number; claimedUnits: number; availableUnits: number; waitingTaskIds: string[]; notReadyTaskIds: string[] }>;
 }
 
 /** K4b derived pool truth for one waiting task. Computed per request, never stored. */
@@ -77,9 +77,14 @@ export interface ResourceWaitStatus {
   capacity?: number;
   claimedUnits: number;
   availableUnits: number;
+  /** 0 when the task is not in the pool queue at all (another condition blocks it). */
   queuePosition: number;
   queueLength: number;
-  blockedBy: "capacity" | "queue" | "undeclared" | "unsatisfiable" | "eligible";
+  blockedBy: "capacity" | "queue" | "undeclared" | "unsatisfiable" | "condition" | "eligible";
+  /** Why another condition keeps it out of the queue; set only for blockedBy "condition". */
+  blockedReason?: string;
+  /** The kind of the wait carrying the requirement — it is often not "resource". */
+  waitKind: TaskWait["kind"];
 }
 
 /** A granted K4b slot claim. */

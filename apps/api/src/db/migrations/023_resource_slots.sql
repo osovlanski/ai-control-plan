@@ -22,7 +22,16 @@ CREATE TABLE wait_conditions_k4b (
  -- requirement forward and must re-acquire. `kind = 'resource'` means the slot is
  -- the ONLY thing it waits for.
  resource TEXT, resource_units INTEGER CHECK(resource_units IS NULL OR resource_units > 0),
+ -- When THIS requirement first started waiting for the pool, which is not when
+ -- this condition was created: a requirement carried across a quota re-park, a
+ -- context continuation or a recovery re-park keeps the age it has been waiting
+ -- with, so re-parking can never make it younger than work that arrived later.
+ -- `created_at` keeps meaning what it always meant (when this row was written),
+ -- and a genuinely new requirement starts at now. Nothing is backfilled: no row
+ -- before this migration ever held a pool requirement.
+ resource_queued_at TEXT,
  CHECK((resource IS NULL) = (resource_units IS NULL)),
+ CHECK((resource IS NULL) = (resource_queued_at IS NULL)),
  CHECK(kind != 'resource' OR resource IS NOT NULL),
  PRIMARY KEY(task_id,generation)
 );
@@ -33,8 +42,9 @@ ALTER TABLE wait_conditions_k4b RENAME TO wait_conditions;
 CREATE UNIQUE INDEX uq_wait_active ON wait_conditions(task_id) WHERE state = 'active';
 CREATE INDEX idx_wait_due ON wait_conditions(not_before) WHERE state = 'active';
 CREATE INDEX idx_wait_dependency ON wait_conditions(kind) WHERE state = 'active' AND kind = 'dependency';
--- Serves the FIFO queue scan: active waits naming one pool, oldest first.
-CREATE INDEX idx_wait_resource ON wait_conditions(resource, created_at, task_id) WHERE state = 'active' AND resource IS NOT NULL;
+-- Serves the FIFO queue scan: active waits naming one pool, oldest REQUIREMENT
+-- first (resource_queued_at, not the condition's own created_at).
+CREATE INDEX idx_wait_resource ON wait_conditions(resource, resource_queued_at, task_id) WHERE state = 'active' AND resource IS NOT NULL;
 
 -- One row per granted claim. The claim is committed in the SAME transaction as
 -- the wake's condition-consume and `dispatches` insert, so two concurrent wakes

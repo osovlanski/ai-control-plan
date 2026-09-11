@@ -183,7 +183,13 @@ export class Orchestrator {
       resetProvenance: 'fallback', reason: `auth ${a.manifestParsed!.core.auth.state}`,
     }));
     return { blockers: [...blockers, ...interventions], notBefore: controllingRetry(blockers, projections.map(p => p.id)),
-      interventionRequired: eligible.length === 0 && interventions.length > 0 };
+      interventionRequired: eligible.length === 0 && interventions.length > 0,
+      // K4b: every candidate this task could actually use is quota-blocked right
+      // now. `notBefore` cannot answer that — it is the earliest retry among the
+      // BLOCKED candidates, and stays set while another candidate is free. No
+      // eligible candidate at all is not quota evidence, so it is not this flag:
+      // that case still routes and re-parks through the existing K2 path.
+      quotaBlocked: projections.length > 0 && projections.every(p => p.blockers.length > 0) };
   }
 
   constructor(

@@ -344,15 +344,30 @@ export function fieldPulse(tasks: Array<{ state: string; execution?: ExecutionRe
 /**
  * K4b next action for a pool wait. Says what the task needs and what event frees
  * it; it never invents an availability number the API did not report.
+ *
+ * A requirement is carried independently of `wait.kind`, so this also has to be
+ * honest about the case where the POOL is not what the task is waiting for: a
+ * dependency or a quota retry can hold a task that still owes the pool a claim
+ * before it can route, and saying "the pool can satisfy it now" there would be
+ * an answer to a question nobody asked.
  */
 export function resourceNextStep(status?: ResourceWaitStatus | null): string {
   if (!status) return "Waits for a resource slot; pool occupancy is not available.";
   const need = `${status.units} unit${status.units === 1 ? "" : "s"} of ${status.resource}`;
+  const slot = `${status.resource}/${status.units}`;
   if (status.blockedBy === "undeclared") return `Needs ${need}, but that pool is not declared; an operator must restore it in scheduler.resources.`;
   if (status.blockedBy === "unsatisfiable") return `Needs ${need}, above the pool capacity of ${status.capacity ?? 0}; an operator must raise capacity or reduce the request.`;
-  if (status.blockedBy === "queue") return `Needs ${need}; it is ${status.queuePosition} of ${status.queueLength} in the pool queue and wakes when the tasks ahead release.`;
-  if (status.blockedBy === "capacity") return `Needs ${need}; ${status.availableUnits} of ${status.capacity ?? 0} free. Wakes when a holder releases.`;
-  return `Needs ${need}; the pool can satisfy it now, so the next wake claims the slot and dispatches.`;
+  if (status.blockedBy === "condition") {
+    if (status.waitKind === "dependency") return `Waiting for dependency; the resource requirement remains ${slot} and is re-evaluated after the dependency clears.`;
+    if (status.waitKind === "quota") return `Quota retry must clear first; then the task must reacquire ${slot} before routing.`;
+    return `Not due yet; the resource requirement remains ${slot} and re-enters the pool queue at its original place once it is due.`;
+  }
+  // Ready for the pool, but the wake it is waiting for still re-checks its own kind.
+  const also = status.waitKind === "quota" ? " Quota evidence is revalidated at that same wake."
+    : status.waitKind === "dependency" ? " The dependencies are re-checked at that same wake." : "";
+  if (status.blockedBy === "queue") return `Needs ${need}; it is ${status.queuePosition} of ${status.queueLength} in the pool queue and wakes when the tasks ahead release.${also}`;
+  if (status.blockedBy === "capacity") return `Needs ${need}; ${status.availableUnits} of ${status.capacity ?? 0} free. Wakes when a holder releases.${also}`;
+  return `Needs ${need}; the pool can satisfy it now, so the next wake claims the slot and dispatches.${also}`;
 }
 
 /** "What happens next" — derived only from persisted K1–K3 truth. */
@@ -371,7 +386,9 @@ export function nextStep(input: {
   if (state === "WAITING_RESOURCE" && wait) {
     if (input.schedulerEnabled === false) return "Scheduling is disabled; waits until an operator runs it now.";
     const at = new Date(wait.notBefore).toLocaleString();
-    if (wait.kind === "resource") return resourceNextStep(input.resourceWait);
+    // The requirement outlives one condition, so a pool prerequisite is reported
+    // whenever the task has one — not only when `kind` happens to be "resource".
+    if (wait.kind === "resource" || input.resourceWait) return resourceNextStep(input.resourceWait);
     return wait.kind === "quota"
       ? `Wakes at ${at}, revalidates quota evidence, then re-routes from its checkpoint.`
       : `Scheduler wakes it at ${at} and dispatches once.`;

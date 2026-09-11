@@ -74,18 +74,62 @@ export class Scheduler {
   }
 
   /**
-   * FIFO order a release wakes in: oldest active wait first, stable id tie-break.
+   * The one readiness rule (CR-34): may this requirement compete for pool units
+   * right now? It asks only about the conditions OTHER than the pool — the pool
+   * itself is `resourceGate` — and it has no side effects, so the FIFO, the grant
+   * and both read surfaces can call it and cannot disagree.
    *
-   * Only conditions whose OTHER preconditions are already satisfied compete — a
-   * quota wait that also needs a slot but is not yet retryable is not in the queue,
-   * so it cannot hold the pool's head of line against tasks that are ready. It
-   * re-enters at its original creation time, so waiting longer never loses a place.
+   * A requirement whose other preconditions are unmet could not be granted if it
+   * were at the head of the line, so it must not hold that head: otherwise free
+   * capacity sits idle behind a task that is going to refuse it every sweep.
+   *
+   * Every clause defers to the authority the wake path already uses — there is no
+   * second dependency or quota policy here:
+   *  - not due yet: the same `notBefore` test `wake` applies.
+   *  - dependency: `dependencyStatus`. Pending subjects are not ready. A FAILED
+   *    subject under cancel/wait-input is not ready either — the task's own wake
+   *    performs that transition, and until it does the requirement is not
+   *    competing. `wake-anyway` is ready, because that wake does dispatch.
+   *  - quota: `quotaPlan().quotaBlocked` — every candidate this task could use is
+   *    blocked by live evidence. Unknown or stale evidence is NOT blocked, so K2's
+   *    bounded revalidation (wake, re-route, re-park) is unchanged.
+   * An operator wake skips the FIFO, so it skips these too — but never capacity.
    */
-  private queue(resource: string): { task_id: string; generation: number; resource_units: number }[] {
-    return this.d.db.prepare(`SELECT task_id, generation, resource_units FROM wait_conditions
-      WHERE state = 'active' AND resource = ? AND not_before <= ? ORDER BY created_at, task_id`)
-      .all(resource, this.iso()) as { task_id: string; generation: number; resource_units: number }[];
+  private resourceReady(c: WaitCondition, actor: Actor = 'timer'): { ready: true } | { ready: false; reason: string } {
+    if (actor === 'operator') return { ready: true };
+    if (Date.parse(c.notBefore) > this.now().getTime()) return { ready: false, reason: `Not due until ${c.notBefore}` };
+    if (c.kind === 'dependency') {
+      const { pending, failed } = this.dependencyStatus(c.dependsOn ?? []);
+      if (pending.length) return { ready: false, reason: `Waiting on ${pending.length} unfinished ${pending.length === 1 ? 'dependency' : 'dependencies'}` };
+      const policy = c.onDependencyFailure ?? DEFAULT_ON_DEPENDENCY_FAILURE;
+      if (failed.length && policy !== 'wake-anyway') return { ready: false, reason: `Dependency failed; awaiting ${policy}` };
+    }
+    if (c.kind === 'quota' && this.d.orchestrator.quotaPlan(c.taskId).quotaBlocked) {
+      return { ready: false, reason: 'Quota evidence still blocks every candidate' };
+    }
+    return { ready: true };
   }
+
+  /**
+   * FIFO order a release wakes in: the pool's READY requirements, oldest
+   * requirement first (`resource_queued_at`, not this condition's `created_at`),
+   * stable id tie-break.
+   *
+   * Ordering by the requirement's own age is what makes a re-park free: a quota
+   * re-park, a context continuation or a recovery re-park writes a NEW condition
+   * but carries the same age, so it re-enters exactly where it was rather than
+   * behind everything that arrived while it was ineligible.
+   */
+  private queued(resource: string): { ready: WaitCondition[]; notReady: WaitCondition[] } {
+    const ready: WaitCondition[] = []; const notReady: WaitCondition[] = [];
+    for (const r of this.d.db.prepare(`SELECT * FROM wait_conditions
+      WHERE state = 'active' AND resource = ? ORDER BY resource_queued_at, task_id`).all(resource) as Record<string, unknown>[]) {
+      const c = this.toCondition(r);
+      (this.resourceReady(c).ready ? ready : notReady).push(c);
+    }
+    return { ready, notReady };
+  }
+  private queue(resource: string): WaitCondition[] { return this.queued(resource).ready; }
 
   /** Every pool an operator can see: declared pools plus any pool with live claims or waiters. */
   pools(): ResourcePool[] {
@@ -95,9 +139,13 @@ export class Scheduler {
     return [...names].sort().map(resource => {
       const capacity = this.capacity(resource);
       const claimedUnits = this.claimed(resource);
+      // The same readiness split the grant path uses, so the pool panel and the
+      // per-task readout can never tell the operator different stories.
+      const q = this.queued(resource);
       return { resource, capacity, claimedUnits,
         availableUnits: Math.max(0, (capacity ?? 0) - claimedUnits),
-        waitingTaskIds: this.queue(resource).map(r => r.task_id) };
+        waitingTaskIds: q.ready.map(c => c.taskId),
+        notReadyTaskIds: q.notReady.map(c => c.taskId) };
     });
   }
 
@@ -105,8 +153,13 @@ export class Scheduler {
    * Why this task is not running, as of now. Derived, never stored: a persisted
    * occupancy number goes stale the moment another task claims, and a stale slot
    * count is worse than no slot count.
+   *
+   * `condition` means the pool is not what is holding this task: another
+   * precondition is, so the task is outside the queue and has no position in it.
+   * Reporting `eligible` there because capacity happens to be free would be a
+   * lie the operator would act on.
    */
-  resourceWaitStatus(taskId: string): { resource: string; units: number; capacity?: number; claimedUnits: number; availableUnits: number; queuePosition: number; queueLength: number; blockedBy: 'capacity' | 'queue' | 'undeclared' | 'unsatisfiable' | 'eligible' } | undefined {
+  resourceWaitStatus(taskId: string): { resource: string; units: number; capacity?: number; claimedUnits: number; availableUnits: number; queuePosition: number; queueLength: number; blockedBy: 'capacity' | 'queue' | 'undeclared' | 'unsatisfiable' | 'condition' | 'eligible'; blockedReason?: string; waitKind: WaitCondition['kind'] } | undefined {
     const c = this.condition(taskId);
     if (!c || c.state !== 'active' || !c.resource) return undefined;
     const units = c.units ?? 1;
@@ -114,12 +167,15 @@ export class Scheduler {
     const claimedUnits = this.claimed(c.resource);
     const availableUnits = Math.max(0, (capacity ?? 0) - claimedUnits);
     const q = this.queue(c.resource);
-    const queuePosition = q.findIndex(r => r.task_id === taskId) + 1;
+    const ready = this.resourceReady(c);
+    const queuePosition = q.findIndex(r => r.taskId === taskId) + 1;
     const blockedBy = capacity === undefined ? 'undeclared'
       : units > capacity ? 'unsatisfiable'
+      : !ready.ready ? 'condition'
       : queuePosition > 1 ? 'queue'
       : availableUnits < units ? 'capacity' : 'eligible';
-    return { resource: c.resource, units, capacity, claimedUnits, availableUnits, queuePosition, queueLength: q.length, blockedBy };
+    return { resource: c.resource, units, capacity, claimedUnits, availableUnits, queuePosition, queueLength: q.length, blockedBy,
+      blockedReason: ready.ready ? undefined : ready.reason, waitKind: c.kind };
   }
 
   /** Live claim for a task, if it holds one. */
@@ -181,9 +237,15 @@ export class Scheduler {
     const capacity = this.capacity(resource);
     if (capacity === undefined) return { outcome: 'unsatisfiable', reason: `Resource pool ${resource} is no longer declared` };
     if (units > capacity) return { outcome: 'unsatisfiable', reason: `Resource pool ${resource} capacity ${capacity} is below the ${units} units requested` };
+    // The one readiness rule again, on the grant side: a requirement that may not
+    // compete for the pool may not be granted from it either. Without this, a
+    // condition the FIFO excludes could still take units the moment its own wake
+    // fired, and the queue would stop describing what actually happens.
+    const ready = this.resourceReady(c, actor);
+    if (!ready.ready) return { outcome: 'wait', reason: `Resource ${resource}: ${ready.reason}` };
     const front = this.queue(resource)[0];
-    if (actor !== 'operator' && front && front.task_id !== c.taskId) {
-      return { outcome: 'wait', reason: `Resource ${resource}: task ${front.task_id} is ahead in the wait queue` };
+    if (actor !== 'operator' && front && front.taskId !== c.taskId) {
+      return { outcome: 'wait', reason: `Resource ${resource}: task ${front.taskId} is ahead in the wait queue` };
     }
     const claimedUnits = this.claimed(resource);
     if (capacity - claimedUnits < units) {
@@ -201,7 +263,7 @@ export class Scheduler {
     if (!this.enabled) return;
     const front = this.queue(resource)[0];
     if (!front) return;
-    queueMicrotask(() => { void this.wake(front.task_id, front.generation, 'event').catch(error => this.d.onError?.(error)); });
+    queueMicrotask(() => { void this.wake(front.taskId, front.generation, 'event').catch(error => this.d.onError?.(error)); });
   }
 
   validate(input: WaitInput): WaitInput {
@@ -236,12 +298,22 @@ export class Scheduler {
 
   condition(taskId: string): WaitCondition | undefined {
     const r = this.d.db.prepare('SELECT * FROM wait_conditions WHERE task_id = ? ORDER BY generation DESC LIMIT 1').get(taskId) as Record<string, unknown> | undefined;
-    return r ? { schemaVersion: 1, taskId, generation: r.generation as number, state: r.state as WaitCondition['state'], kind: r.kind as WaitCondition['kind'], checkpointId: (r.checkpoint_id ?? undefined) as string | undefined, origin: (r.origin ?? undefined) as WaitCondition['origin'], blockers: JSON.parse(r.blockers as string), assistants: JSON.parse(r.assistants as string),
+    return r ? this.toCondition(r) : undefined;
+  }
+  /**
+   * One row, one condition. The pool queue reads whole conditions through this too,
+   * so the queue and the wake that grants from it judge the same object rather
+   * than two hand-rolled projections of the same row.
+   */
+  private toCondition(r: Record<string, unknown>): WaitCondition {
+    const taskId = r.task_id as string;
+    return { schemaVersion: 1, taskId, generation: r.generation as number, state: r.state as WaitCondition['state'], kind: r.kind as WaitCondition['kind'], checkpointId: (r.checkpoint_id ?? undefined) as string | undefined, origin: (r.origin ?? undefined) as WaitCondition['origin'], blockers: JSON.parse(r.blockers as string), assistants: JSON.parse(r.assistants as string),
       dependsOn: JSON.parse(r.depends_on as string) as string[], onDependencyFailure: (r.on_dependency_failure ?? undefined) as OnDependencyFailure | undefined,
       resource: (r.resource ?? undefined) as string | undefined, units: (r.resource_units ?? undefined) as number | undefined,
+      resourceQueuedAt: (r.resource_queued_at ?? undefined) as string | undefined,
       notBefore: r.not_before as string, createdBy: r.created_by as string, createdAt: r.created_at as string,
       autoWakes: r.auto_wakes as number, history: JSON.parse(r.history as string) as WaitCondition['history'],
-      consumedAt: (r.consumed_at ?? undefined) as string | undefined, consumedBy: (r.consumed_by ?? undefined) as string | undefined, reason: r.reason as string } : undefined;
+      consumedAt: (r.consumed_at ?? undefined) as string | undefined, consumedBy: (r.consumed_by ?? undefined) as string | undefined, reason: r.reason as string };
   }
   dispatch(id: string): Dispatch { return this.d.db.prepare('SELECT * FROM dispatches WHERE dispatch_id = ?').get(id) as Dispatch; }
   dispatches(taskId: string): Dispatch[] { return this.d.db.prepare('SELECT * FROM dispatches WHERE task_id = ? ORDER BY created_at, rowid').all(taskId) as Dispatch[]; }
@@ -270,12 +342,20 @@ export class Scheduler {
   private insert(taskId: string, input: WaitInput, actor: string, autoWakes = 0, history: WaitCondition['history'] = [], checkpointId?: string, blockers: WaitCondition['blockers'] = [], origin?: DispatchOrigin,
     /** A resource requirement carried forward from the condition being replaced. */
     carry?: { resource?: string; units?: number }): void {
-    const generation = (this.condition(taskId)?.generation ?? 0) + 1;
-    this.d.db.prepare(`INSERT INTO wait_conditions(task_id,generation,state,kind,not_before,created_by,created_at,auto_wakes,history,reason,checkpoint_id,blockers,assistants,depends_on,on_dependency_failure,origin,resource,resource_units)
-      VALUES(?,?,'active',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(taskId, generation, input.kind, input.notBefore!, actor, this.iso(), autoWakes, JSON.stringify(history.slice(-10)), redactValue(input.reason ?? 'Scheduled wait'), checkpointId ?? null, JSON.stringify(redactValue(blockers)), JSON.stringify(redactValue(input.kind === 'quota' ? input.assistants ?? [] : [])),
+    const previous = this.condition(taskId);
+    const generation = (previous?.generation ?? 0) + 1;
+    const resource = (input.kind === 'resource' ? input.resource : carry?.resource) ?? null;
+    const units = resource === null ? null : input.kind === 'resource' ? input.units ?? 1 : carry?.units ?? 1;
+    // Seniority is the REQUIREMENT's, not the row's: the same pool and the same
+    // units means the same requirement, still waiting, so it keeps the age it has
+    // waited with across a quota re-park, a continuation or a recovery re-park. A
+    // different request is a new one and starts now. `created_at` below is
+    // untouched and still means when THIS condition was written.
+    const carriedAge = resource !== null && previous?.resource === resource && (previous.units ?? 1) === units ? previous.resourceQueuedAt : undefined;
+    this.d.db.prepare(`INSERT INTO wait_conditions(task_id,generation,state,kind,not_before,created_by,created_at,auto_wakes,history,reason,checkpoint_id,blockers,assistants,depends_on,on_dependency_failure,origin,resource,resource_units,resource_queued_at)
+      VALUES(?,?,'active',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(taskId, generation, input.kind, input.notBefore!, actor, this.iso(), autoWakes, JSON.stringify(history.slice(-10)), redactValue(input.reason ?? 'Scheduled wait'), checkpointId ?? null, JSON.stringify(redactValue(blockers)), JSON.stringify(redactValue(input.kind === 'quota' ? input.assistants ?? [] : [])),
       JSON.stringify(input.kind === 'dependency' ? input.dependsOn : []), input.kind === 'dependency' ? (input.onDependencyFailure ?? DEFAULT_ON_DEPENDENCY_FAILURE) : null, origin ?? null,
-      input.kind === 'resource' ? input.resource : carry?.resource ?? null,
-      input.kind === 'resource' ? (input.units ?? 1) : carry?.resource ? carry.units ?? 1 : null);
+      resource, units, resource === null ? null : carriedAge ?? this.iso());
   }
   attach(taskId: string, input: WaitInput): WaitCondition {
     input = this.validate(input);
@@ -426,6 +506,9 @@ export class Scheduler {
       }
       if (actor !== 'operator' && Date.parse(c.notBefore) > this.now().getTime()) return { outcome: 'stale', reason: 'Condition is not due' };
       if (c.kind === 'dependency' && actor !== 'operator') {
+        // The same `dependencyStatus` truth `resourceReady` reads; this branch adds
+        // the side effects (the record and the failure transition) that a readiness
+        // question must not have. Keep the two in step.
         const { pending, failed } = this.dependencyStatus(c.dependsOn ?? []);
         // Every required dependency must be terminal before any of them decides anything.
         if (pending.length) return { outcome: 'stale', reason: `Waiting on ${pending.length} unfinished ${pending.length === 1 ? 'dependency' : 'dependencies'}` };
@@ -669,10 +752,13 @@ export class Scheduler {
     if (this.timer) clearTimeout(this.timer);
     if (this.stopped || !this.enabled) return;
     // A capped next deadline also revisits failed ticks and ambiguous Harness windows.
-    // Dependency and resource waits are event-driven and their notBefore is only an
-    // earliest re-check, so they never set the deadline; the 60 s cap still sweeps
-    // them. Letting an already-past resource re-check set it would spin the timer.
-    const next = this.d.db.prepare("SELECT MIN(not_before) AS at FROM wait_conditions WHERE state = 'active' AND kind NOT IN ('dependency','resource')").get() as { at: string | null };
+    // Dependency waits and anything carrying a pool requirement are event-driven and
+    // their notBefore is only an earliest re-check, so they never set the deadline;
+    // the 60 s cap still sweeps them. Letting an already-past re-check set it would
+    // spin the timer at 1 ms — and a requirement can stay active and due for as long
+    // as the pool (or a carried quota/dependency) withholds it, which a time or quota
+    // wait without one never does.
+    const next = this.d.db.prepare("SELECT MIN(not_before) AS at FROM wait_conditions WHERE state = 'active' AND kind NOT IN ('dependency','resource') AND resource IS NULL").get() as { at: string | null };
     // One timer for both waits and schedules (I-S3): the earlier of the two wins.
     const fire = this.schedules.nextDeadline();
     const at = [next.at, fire].filter((v): v is string => !!v).sort()[0];

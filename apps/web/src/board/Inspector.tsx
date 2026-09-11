@@ -507,14 +507,20 @@ export function Inspector({
                     <div>
                       <dt>Queue position</dt>
                       <dd>
-                        {resourceWait
-                          ? `${resourceWait.queuePosition} of ${resourceWait.queueLength} · durable FIFO by wait creation`
-                          : "Not queued"}
+                        {!resourceWait
+                          ? "Not queued"
+                          : resourceWait.queuePosition === 0
+                            ? `Outside the queue · ${resourceWait.queueLength} ready ahead of it`
+                            : `${resourceWait.queuePosition} of ${resourceWait.queueLength} · durable FIFO by requirement age`}
                       </dd>
                     </div>
                     <div>
                       <dt>Why waiting</dt>
-                      <dd>{resourceWait?.blockedBy ?? "not waiting"}</dd>
+                      <dd>
+                        {resourceWait
+                          ? `${resourceWait.blockedBy}${resourceWait.blockedReason ? ` · ${resourceWait.blockedReason}` : ""}`
+                          : "not waiting"}
+                      </dd>
                     </div>
                     <div>
                       <dt>Claim state</dt>

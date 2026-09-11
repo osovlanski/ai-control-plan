@@ -61,8 +61,15 @@ export interface ResourcePool {
   capacity?: number;
   claimedUnits: number;
   availableUnits: number;
-  /** Active resource waits for this pool, oldest first — the FIFO order wakes use. */
+  /** Ready resource waits for this pool, oldest requirement first — the FIFO order wakes use. */
   waitingTaskIds: string[];
+  /**
+   * Tasks that carry a requirement on this pool but whose OTHER preconditions are
+   * not satisfied yet. They are deliberately outside the FIFO — they could not be
+   * granted, so they must not hold its head of line — but they are still waiting
+   * on the pool, and a status that hid them would not be true.
+   */
+  notReadyTaskIds: string[];
 }
 export interface WaitCondition {
   schemaVersion: 1;
@@ -77,6 +84,13 @@ export interface WaitCondition {
   /** kind=resource: the named pool and unit count this wait needs (K4b). */
   resource?: string;
   units?: number;
+  /**
+   * When this REQUIREMENT started waiting for the pool — the K4b FIFO key. A
+   * requirement carried across a quota re-park, a context continuation or a
+   * recovery re-park keeps its original age, so re-parking never costs it a
+   * place. `createdAt` still means when this condition row was written.
+   */
+  resourceQueuedAt?: string;
   blockers?: QuotaBlocker[];
   assistants?: AssistantId[];
   notBefore: string;

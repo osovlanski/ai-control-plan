@@ -459,6 +459,10 @@ interface WaitCondition {
    *  already needed a slot (§4.2.7). Capacity is config, re-read at every wake. */
   resource?: string;
   units?: number;
+  /** K4b: when this REQUIREMENT started waiting for the pool — the FIFO key.
+   *  Preserved when the same requirement is carried forward, so a re-park never
+   *  makes it younger; `createdAt` still means when this row was written. */
+  resourceQueuedAt?: string;
   createdBy: "user" | "scheduler" | "failover" | "operator";
   createdAt: string;
   /** Execution wake attempts that re-parked (CR-29). Probe attempts are NOT counted here. */
@@ -817,20 +821,36 @@ interface ScheduleOccurrence {
   its provider is still winding down releases its slot at the plane's terminal boundary, not the
   provider's — the plane has no owner at that point, and holding the slot against a provider
   that may ignore cancellation would strand it indefinitely.
-- **Fairness** is durable FIFO by wait creation (`created_at`, `task_id` tie-break) among the
-  conditions for that pool **whose other preconditions are already satisfied** — a quota wait
-  that also needs a slot but is not yet retryable is not in the queue, so it cannot hold the
-  head of line against ready work, and it re-enters at its original creation time so waiting
-  longer never loses a place. Strict FIFO: a smaller request does not overtake the front
+- **Fairness** is durable FIFO by **requirement age** (`resource_queued_at`, `task_id`
+  tie-break) among the conditions for that pool **whose other preconditions are already
+  satisfied**. Because the requirement is independent of `kind`, "already satisfied" is a real
+  question with a single answer: one side-effect-free readiness rule
+  (`Scheduler.resourceReady`) drives the FIFO, the grant, the pool status and the per-task
+  readout together, so they cannot disagree. It reuses the authority each condition already
+  has — `not_before` for time, `dependencyStatus` for K4 subjects, `quotaPlan().quotaBlocked`
+  for K2 evidence — and adds no second dependency or quota policy. A requirement whose other
+  preconditions are unmet would refuse the slot at every sweep, so it is out of the queue
+  entirely rather than holding its head of line: a pending dependency, a failed dependency
+  awaiting `cancel`/`wait-input` (its own wake performs that transition) and a retry whose
+  quota evidence still blocks every candidate all step aside for ready work. Unknown or stale
+  quota evidence is **not** blocked, so K2's bounded revalidation is unchanged.
+  `resource_queued_at` is when the **requirement** started waiting, not when the condition
+  carrying it was written: carrying the same pool and units across a quota re-park, a context
+  continuation, a recovery re-park or a wait replacement preserves it, a genuinely different
+  request starts at now, and `created_at` keeps its own meaning — seniority is expressed
+  without falsifying any timestamp. Strict FIFO: a smaller request does not overtake the front
   waiter, so a large request cannot starve. No priority scheduler. An operator run-now may skip
-  the **queue** (choosing what runs is an operator decision) but never the **capacity**.
+  the **queue** and the readiness rule (choosing what runs is an operator decision) but never
+  the **capacity**.
 - **Capacity change.** A decrease never preempts a live claim; new claims wait until usage drops
   below the new capacity. A request the pool can no longer satisfy (capacity cut below it, or the
   pool undeclared) **expires to `WAITING_INPUT(intervention_required)`** with a
   `resource.unsatisfiable` event, so one impossible request cannot hang every task behind it.
   An increase is picked up by the next wake evaluation.
 - **Operator truth.** Pool occupancy is **derived at read time** (`capacity` from config,
-  `claimedUnits` from live claims, queue position from the FIFO scan) and never stored: a
+  `claimedUnits` from live claims, queue position from the FIFO scan — 0 when the task is not
+  in the queue, with `blockedBy: "condition"` and the blocking reason instead of a position it
+  does not have) and never stored: a
   persisted slot count goes stale the moment another task claims, and a stale count is worse
   than none (the K9 lesson). `resource.claimed` / `resource.released` /
   `resource.unsatisfiable` scheduler events are the durable record of who held what and why
@@ -1294,6 +1314,12 @@ eventually runs; a capacity increase wakes eligible work, a decrease preempts no
 unsatisfiable request becomes an operator decision; quota re-parks and context-yield
 continuations carry the requirement forward and re-acquire; approval/verification/comparison
 pauses are not deferrable onto a resource wait (CR-32); routing is still recomputed at the wake.
+Fairness: a requirement whose dependency is pending, whose dependency failed under
+`cancel`/`wait-input`, or whose quota evidence still blocks every candidate does not hold the
+pool's head of line against a ready waiter, and re-enters at its ORIGINAL requirement age once it
+clears; that age survives a context-yield continuation and a no-candidate re-park; run-now skips
+the queue and never the capacity; the pool status, the per-task readout and the grant report the
+same readiness; a not-yet-due requirement is never reported "eligible".
 
 **K5 — recurring schedules.** One task per occurrence; a duplicate tick for the same
 `occurrenceAt` violates the unique constraint and creates nothing; `overlap: skip` records
@@ -1307,7 +1333,8 @@ creating a schedule without `commands.write` fails closed.
 Tests: `packages/core/test/state-machine.test.ts` (every new edge legal with its precondition,
 every non-listed edge illegal, CR-32 rejections); `apps/api/test/scheduler.test.ts` (fake
 clock, generation CAS, dispatch phases); `apps/api/test/harness/boot-recovery` dispatch cases;
-`apps/api/test/resource-slots.test.ts` (K4b claim/release, race, FIFO, capacity change);
+`apps/api/test/resource-slots.test.ts` (K4b claim/release, race, FIFO readiness and requirement
+seniority, capacity change);
 `apps/api/test/failover.test.ts` all-blocked case on both paths; `quota-projection.test.ts`;
 `eval/scenarios/quota-wait-and-resume.ts`; Cockpit `schedule` unit tests (K6).
 
@@ -1461,7 +1488,7 @@ or runtime work to finish before unrelated increments.
 | # | Slice | Repo | Demonstrable outcome | Depends on |
 |---|---|---|---|---|
 | K4 | `dependency` kind with cycle/self rejection and missing-dependency semantics; scheduler event hook on task terminal | ai-control-plan | "run reviewer after implementation finishes" | K1; before increment 11 |
-| K4b | `resource` kind + named config pools + `resource_claims` co-committed with the wake reservation + FIFO release wake + derived pool truth | ai-control-plan | two tasks, one slot: one runs, the other waits and wakes on release | K4; one launch funnel (`startTask`) |
+| K4b | `resource` kind + named config pools + `resource_claims` co-committed with the wake reservation + FIFO release wake over ready requirements by `resource_queued_at` + derived pool truth | ai-control-plan | two tasks, one slot: one runs, the other waits and wakes on release | K4; one launch funnel (`startTask`) |
 | K5 | Recurring `Schedule` + `schedule_occurrences` + cron dependency + atomic firing + catch-up + skip-only overlap + `GET/POST /api/schedules`; `schedules.read` | ai-control-plan | nightly template creates exactly one task per occurrence | K1 soaked (time waits in use) |
 | K6 | Cockpit Schedule tab third source (read) + create via `commands.write`; `WAITING_RESOURCE` in managed views | cockpit | plane schedules and waiting tasks visible beside Cockpit jobs | K5, Cockpit auth follow-up |
 
