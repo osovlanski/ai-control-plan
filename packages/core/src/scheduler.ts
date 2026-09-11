@@ -71,6 +71,17 @@ export interface ResourcePool {
    */
   notReadyTaskIds: string[];
 }
+/** Operator/failover continuation intent carried across a K4b pool deferral. */
+export interface ContinuationIntent {
+  /** The `handoffs.trigger` audit label this continuation belongs to. */
+  trigger: 'manual' | 'quota' | 'failure';
+  /** Operator-named target assistant, applied as the routing override at the grant. */
+  to?: AssistantId;
+  /** The assistant handed off FROM: excluded at the grant and named in the prompt. */
+  from?: AssistantId;
+  /** Reason rendered into the receiving agent's handoff prompt. */
+  reason?: string;
+}
 export interface WaitCondition {
   schemaVersion: 1;
   taskId: string;
@@ -91,6 +102,16 @@ export interface WaitCondition {
    * place. `createdAt` still means when this condition row was written.
    */
   resourceQueuedAt?: string;
+  /**
+   * K4b: the continuation this wait must produce when it is finally granted.
+   * A manual handoff (or an automatic failover) for a task that still owes the
+   * pool a claim cannot start execution itself — it re-enters the ordinary wake
+   * funnel — so the operator's target, the assistant being handed off FROM and
+   * the reason the receiving agent is shown are recorded here rather than lost
+   * in the deferral. Routing still happens fresh at the grant, so a target that
+   * has since become ineligible is re-decided, not replayed.
+   */
+  continuation?: ContinuationIntent;
   blockers?: QuotaBlocker[];
   assistants?: AssistantId[];
   notBefore: string;

@@ -143,6 +143,29 @@ export interface ResolvedConfig extends Omit<WorkspaceConfig, "execution" | "mod
   warnings: string[];
 }
 
+/**
+ * Pool declarations as a null-prototype map of OWN keys only.
+ *
+ * A pool name is durable TASK data — it arrives from a wait row, not from the
+ * config file — so the map it is looked up in must not be able to answer for a
+ * name nobody declared. A plain object spread cannot give that guarantee twice
+ * over: `{...x}` invokes the `__proto__` SETTER, so one crafted key silently
+ * re-parents the whole map, and every inherited member (`constructor`,
+ * `toString`, `valueOf`) then reads back as a declaration. A null-prototype
+ * target has no setter and nothing to inherit, so an own key is the only key.
+ *
+ * Values are copied unvalidated on purpose: `validate` below reports a bad
+ * capacity by name rather than silently dropping it, and `Scheduler.capacity`
+ * fails closed on anything that is not a finite integer.
+ */
+function pools(declared?: Record<string, number>): Record<string, number> {
+  const resources = Object.create(null) as Record<string, number>;
+  if (declared && typeof declared === 'object') {
+    for (const name of Object.getOwnPropertyNames(declared)) resources[name] = (declared as Record<string, number>)[name]!;
+  }
+  return resources;
+}
+
 const PERSONAL_DEFAULTS: Omit<WorkspaceConfig, "workspace"> = {
   api: { host: "127.0.0.1", port: 4176, auth: { bootstrapTtlSeconds: 10, sessionTtlSeconds: 43200, rotationGraceSeconds: 300 } },
   assistants: {
@@ -164,7 +187,7 @@ const PERSONAL_DEFAULTS: Omit<WorkspaceConfig, "workspace"> = {
     softThresholdPct: 85,
     triggers: ["quota", "rate_limit", "provider_unavailable"],
   },
-  scheduler: { enabled: true, maxAutoWakes: 3, quotaProbe: false, resources: {} },
+  scheduler: { enabled: true, maxAutoWakes: 3, quotaProbe: false, resources: pools() },
   sync: { dailyHour: 7 },
   execution: { harnessModes: { single: false } },
   // K13 ships in shadow. Turning this on is an explicit operator act that still
@@ -239,7 +262,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ResolvedConfig
     policy: { ...defaults.policy, ...file.policy },
     failover: { ...defaults.failover, ...file.failover },
     sync: { ...defaults.sync, ...file.sync },
-    scheduler: { enabled: file.scheduler?.enabled ?? true, maxAutoWakes: file.scheduler?.maxAutoWakes ?? 3, quotaProbe: file.scheduler?.quotaProbe ?? false, resources: { ...file.scheduler?.resources } },
+    scheduler: { enabled: file.scheduler?.enabled ?? true, maxAutoWakes: file.scheduler?.maxAutoWakes ?? 3, quotaProbe: file.scheduler?.quotaProbe ?? false, resources: pools(file.scheduler?.resources) },
     execution,
   };
 

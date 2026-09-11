@@ -539,7 +539,11 @@ describe('K4b pool fairness', () => {
     s.attach(blocked, { kind: 'dependency', dependsOn: [upstream.taskId], reason: 'needs the upstream result' });
     instant += 1;
     const ready = rtask(s);
-    expect(s.resourceWaitStatus(blocked)).toMatchObject({ blockedBy: 'condition', queuePosition: 0 });
+    // The readout carries the DERIVED truth the operator has to act on: this
+    // dependency has already failed, so the next wake applies the policy rather
+    // than waiting for something that will never clear.
+    expect(s.resourceWaitStatus(blocked)).toMatchObject({ blockedBy: 'condition', queuePosition: 0,
+      dependencyFailure: { failed: [upstream.taskId], policy: 'wait-input' } });
     const done = settled(ready);
     expect(await s.wake(ready, 1, 'timer')).toMatchObject({ outcome: 'dispatched' });
     await done; await drain();
@@ -548,6 +552,13 @@ describe('K4b pool fairness', () => {
     expect(await s.wake(blocked, 2, 'timer')).toMatchObject({ outcome: 'stale', reason: expect.stringContaining('Dependency failed') });
     expect(built.tasks.get(blocked)).toMatchObject({ state: 'WAITING_INPUT', pause_kind: 'dependency_failed' });
     expect(claimRows(blocked)).toHaveLength(0);
+
+    // wake-anyway is the opposite report: the policy continues, so the
+    // requirement really is competing for the slot.
+    const continues = rtask(s);
+    s.attach(continues, { kind: 'dependency', dependsOn: [upstream.taskId], onDependencyFailure: 'wake-anyway', reason: 'continue regardless' });
+    expect(s.resourceWaitStatus(continues)).toMatchObject({ blockedBy: 'eligible', queuePosition: 1,
+      dependencyFailure: { failed: [upstream.taskId], policy: 'wake-anyway' } });
   });
 
   /* D — a due quota retry whose evidence still blocks every candidate. */
@@ -698,5 +709,367 @@ describe('K4b pool fairness', () => {
     expect(claims()).toHaveLength(0);
     instant += 60_001;
     expect(s.resourceWaitStatus(later)).toMatchObject({ blockedBy: 'eligible', queuePosition: 1 });
+  });
+});
+
+/** Runs of a task, oldest first. */
+function runsOf(taskId: string) {
+  return db.prepare('SELECT id, assistant_id, dispatch_id FROM runs WHERE task_id = ? ORDER BY started_at, rowid').all(taskId) as { id: string; assistant_id: string; dispatch_id: string | null }[];
+}
+function handoffRows(taskId: string) {
+  return db.prepare('SELECT trigger, to_run_id, checkpoint_id FROM handoffs WHERE task_id = ? ORDER BY at, rowid').all(taskId) as { trigger: string; to_run_id: string | null; checkpoint_id: string }[];
+}
+
+/**
+ * P1-1 — an operator may bypass the FIFO, never the capacity.
+ *
+ * A task that entered execution through a resource requirement, settled to a
+ * pause and had its claim swept still NEEDS that slot to run. `startTask` is a
+ * launch path, not an acquisition path, so a manual handoff must re-enter the
+ * wake funnel instead of handing the successor a provider. Both execution modes
+ * run the same scenario, because the defect was in the shared launch boundary.
+ */
+describe.each([['legacy', false], ['harness', true]] as const)('K4b manual handoff (%s execution)', (_label, harness) => {
+  /**
+   * A task that ran on its slot, hit a limit with automatic failover off and
+   * lost its claim to the idle sweep — with a second task now holding the only
+   * slot. The holder is parked at the reservation boundary, so it owns its
+   * dispatch (and therefore its claim) until the test hands the slot back: no
+   * wall-time hold, and the same record every other release path reads.
+   */
+  async function pausedWithoutItsSlot() {
+    await boot({ gpu: 1 }, c => { c.execution.harnessModes.single = harness; c.failover.auto = false; });
+    const slot: { holder?: string } = {};
+    let release!: () => void;
+    const slotHeld = new Promise<void>(resolve => { release = resolve; });
+    const s = scheduler(async (phase, d) => { if (phase === 'reserved' && d.task_id === slot.holder) await slotHeld; });
+
+    const runner = rtask(s, { goal: 'continue [FAKE:LIMIT]' });
+    const paused = settled(runner, ['WAITING_INPUT']);
+    await s.tick(); await paused; await drain();
+    expect(built.tasks.get(runner)).toMatchObject({ state: 'WAITING_INPUT', pause_kind: 'limit' });
+    // The claim outlives the run only until the next sweep finds it has no owner.
+    await s.tick(); await drain();
+    expect(claims()).toHaveLength(0);
+    expect(s.requirement(runner)).toEqual({ resource: 'gpu', units: 1 });
+
+    const holder = rtask(s);
+    slot.holder = holder;
+    await s.tick(); await until(() => claims().length === 1, 'the holder to take the only slot');
+    expect(claims().map(c => c.task_id)).toEqual([holder]);
+    return { s, runner, holder, release, queuedAt: s.condition(runner)!.resourceQueuedAt! };
+  }
+
+  it('defers the successor instead of starting it outside the pool', async () => {
+    const { s, runner, holder, release, queuedAt } = await pausedWithoutItsSlot();
+    const before = runsOf(runner).length;
+
+    expect(await built.orchestrator.handoff(runner)).toEqual({ deferred: 'resource', resource: 'gpu', units: 1 });
+    await drain();
+    // F — nothing started, and no execution exists without a claim.
+    expect(runsOf(runner)).toHaveLength(before);
+    expect(s.claim(runner)).toBeUndefined();
+    expect(claims().map(c => c.task_id)).toEqual([holder]);
+    expect(built.tasks.get(runner)?.state).toBe('WAITING_RESOURCE');
+    const waiting = s.condition(runner)!;
+    expect(waiting).toMatchObject({ state: 'active', kind: 'resource', resource: 'gpu', units: 1 });
+    // I — the continuation anchor, the operator's intent and the requirement's
+    // seniority all survived the deferral.
+    expect(waiting.checkpointId).toEqual(expect.any(String));
+    expect(waiting.resourceQueuedAt).toBe(queuedAt);
+    expect(waiting.continuation).toMatchObject({ trigger: 'manual', reason: expect.stringContaining('manual handoff') });
+    expect(s.resourceWaitStatus(runner)).toMatchObject({ blockedBy: 'capacity', queuePosition: 1 });
+
+    // G/H — one release, exactly one successor, holding the claim it runs on.
+    const ran = settled(runner, ['COMPLETED', 'FAILED']);
+    release(); await drain(); await ran; await drain();
+    const runs = runsOf(runner);
+    expect(runs).toHaveLength(before + 1);
+    expect(runs.at(-1)!.assistant_id).not.toBe(runs[0]!.assistant_id);
+    const dispatch = s.dispatches(runner).at(-1)!;
+    expect(dispatch).toMatchObject({ phase: 'started', origin: 'failover', checkpoint_id: waiting.checkpointId });
+    // The claim this dispatch was granted is the one the launch boundary demanded.
+    expect(claimRows(runner).at(-1)).toMatchObject({ dispatch_id: dispatch.dispatch_id });
+    // Handoff provenance: one manual row, closed by the successor that ran.
+    const manual = handoffRows(runner).filter(h => h.trigger === 'manual');
+    expect(manual).toHaveLength(1);
+    expect(manual[0]).toMatchObject({ to_run_id: runs.at(-1)!.id, checkpoint_id: waiting.checkpointId });
+  });
+
+  it('cannot produce two successors from a duplicate handoff or a stale wake', async () => {
+    const { s, runner, holder, release } = await pausedWithoutItsSlot();
+    const before = runsOf(runner).length;
+
+    expect(await built.orchestrator.handoff(runner)).toMatchObject({ deferred: 'resource' });
+    await drain();
+    const generation = s.condition(runner)!.generation;
+    // The scheduler owns the deferred task: a second handoff is refused outright,
+    // and an operator run-now still cannot take a slot that is not free.
+    await expect(built.orchestrator.handoff(runner)).rejects.toThrow(/Scheduler owns task/);
+    expect(await s.runNow(runner)).toMatchObject({ outcome: 'stale', reason: expect.stringContaining('units free') });
+    expect(await s.wake(runner, generation - 1, 'operator')).toMatchObject({ outcome: 'stale' });
+    await drain();
+    expect(runsOf(runner)).toHaveLength(before);
+    expect(claims().map(c => c.task_id)).toEqual([holder]);
+
+    const ran = settled(runner, ['COMPLETED', 'FAILED']);
+    release(); await drain(); await ran; await drain();
+    expect(runsOf(runner)).toHaveLength(before + 1);
+    expect(s.dispatches(runner).filter(d => d.phase === 'started')).toHaveLength(2);
+    expect(handoffRows(runner).filter(h => h.trigger === 'manual')).toHaveLength(1);
+  });
+
+  it('still hands off a task that is holding its slot', async () => {
+    // The gate refuses execution with NO claim, not every start without a
+    // dispatch: a task holding its one slot may still be moved to another
+    // assistant, and the pool arithmetic is unchanged by which of its own
+    // sessions runs. Refusing here would make a live pool task unhandoffable.
+    await boot({ gpu: 1 }, c => {
+      c.execution.harnessModes.single = harness; c.failover.auto = false;
+      // Harness single mode auto-approves, so the hold has to be a real pending
+      // decision in both modes for the task to still be RUNNING at the handoff.
+      c.policy.approvalMode = 'prompt-on-escalation';
+    });
+    const s = scheduler();
+    const id = rtask(s, { goal: HOLD });
+    const held = holding(id); await s.tick(); await held; await drain();
+    const claimId = claimRows(id)[0];
+    expect(s.claim(id)).toMatchObject({ resource: 'gpu' });
+
+    const handed = await built.orchestrator.handoff(id);
+    expect(handed).toMatchObject({ assistantId: expect.any(String) });
+    await drain();
+    // One claim throughout: the successor inherits the slot the task already had.
+    expect(claimRows(id)).toHaveLength(1);
+    expect(claimRows(id)[0]).toMatchObject({ dispatch_id: claimId!.dispatch_id, released_at: null });
+    expect(claims().map(c => c.task_id)).toEqual([id]);
+  });
+
+  it('fails a resource-bearing start closed when no claim backs it', async () => {
+    const { s, runner, release } = await pausedWithoutItsSlot();
+    const before = runsOf(runner).length;
+    // The launch funnel is defence in depth: it refuses, it never acquires.
+    await expect(built.orchestrator.startTask(runner, B, { continuation: { kind: 'fresh' } }))
+      .rejects.toThrow(/needs 1 unit\(s\) of gpu/);
+    expect(runsOf(runner)).toHaveLength(before);
+    expect(s.claim(runner)).toBeUndefined();
+    expect(claims().map(c => c.task_id)).not.toContain(runner);
+    release(); await drain();
+  });
+});
+
+/**
+ * P1-2 — the bounded fallback sweep is an ABSOLUTE deadline.
+ *
+ * Waits carrying a pool requirement are deliberately excluded from exact timer
+ * deadlines (an already-past re-check would spin the timer at 1 ms), so the
+ * sweep is the only thing that re-evaluates them. A deadline recomputed from
+ * "now" on every `arm()` is a deadline ordinary traffic can postpone forever,
+ * which is how "bounded" quietly became "never".
+ */
+describe('K4b bounded sweep', () => {
+  /** Steps the injected clock and the fake timers together. */
+  async function elapse(ms: number) { instant += ms; await vi.advanceTimersByTimeAsync(ms); }
+  /** A capacity-blocked waiter whose release event is then LOST, so only a sweep can free it. */
+  async function blockedWaiter(s: Scheduler) {
+    const holder = rtask(s, { goal: HOLD });
+    const waiter = rtask(s);
+    const held = holding(holder); await s.tick(); await held; await drain();
+    expect(s.resourceWaitStatus(waiter)).toMatchObject({ blockedBy: 'capacity' });
+    return { waiter, loseTheRelease: () => db.prepare("UPDATE resource_claims SET released_at = ?, release_reason = 'test: release event never delivered' WHERE task_id = ?").run(new Date(instant).toISOString(), holder) };
+  }
+
+  it('still sweeps when unrelated waits are attached more often than the cadence', async () => {
+    await boot(); const s = scheduler();
+    const { waiter, loseTheRelease } = await blockedWaiter(s);
+    const idle = [rtask(s, { resource: 'gpu' }), rtask(s, { resource: 'gpu' })].map((id, i) => {
+      s.attach(id, { kind: 'time', notBefore: new Date(instant + 3_600_000 + i).toISOString(), reason: 'far future' });
+      return id;
+    });
+    expect(idle).toHaveLength(2);
+    loseTheRelease();
+    const ticks = vi.spyOn(s, 'tick');
+    vi.useFakeTimers({ shouldAdvanceTime: false });
+    s.startTimer();
+    // Unrelated attaches at half the cadence: each one re-arms the timer.
+    for (let i = 0; i < 4; i++) {
+      await elapse(30_000);
+      const noise = built.tasks.create({ goal: `unrelated ${i}` }).taskId;
+      s.attach(noise, { kind: 'time', notBefore: new Date(instant + 3_600_000).toISOString(), reason: 'unrelated' });
+    }
+    s.stop(); vi.useRealTimers(); await drain();
+    // 120 s of traffic at 30 s intervals still produced two sweeps, and the waiter
+    // took the slot that the lost release event never told it about.
+    expect(ticks.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(s.condition(waiter)).toMatchObject({ state: 'consumed', consumedBy: 'timer' });
+    expect(claimRows(waiter)).toHaveLength(1);
+    expect(s.dispatches(waiter)[0]).toMatchObject({ phase: 'started' });
+  });
+
+  it('is not postponed by repeated stale wakes', async () => {
+    await boot(); const s = scheduler();
+    const { waiter, loseTheRelease } = await blockedWaiter(s);
+    const generation = s.condition(waiter)!.generation;
+    loseTheRelease();
+    vi.useFakeTimers({ shouldAdvanceTime: false });
+    s.startTimer();
+    for (let i = 0; i < 4; i++) {
+      await elapse(15_000);
+      // A wake that changes nothing still re-arms; it must not buy another cadence.
+      if (s.condition(waiter)?.state === 'active') await s.wake(waiter, generation - 1, 'timer');
+    }
+    s.stop(); vi.useRealTimers(); await drain();
+    expect(s.condition(waiter)).toMatchObject({ state: 'consumed', consumedBy: 'timer' });
+    expect(claimRows(waiter)).toHaveLength(1);
+  });
+
+  it('arms a fresh process one cadence out, not on a past deadline', async () => {
+    await boot(); const s = scheduler();
+    await blockedWaiter(s);
+    const ticks = vi.spyOn(s, 'tick');
+    vi.useFakeTimers({ shouldAdvanceTime: false });
+    // A restart: a scheduler that has never ticked must not busy-loop on a
+    // deadline it has no record of.
+    s.startTimer();
+    await elapse(1_000);
+    expect(ticks).not.toHaveBeenCalled();
+    await elapse(59_500);
+    expect(ticks.mock.calls.length).toBe(1);
+    // ... and the next one is a cadence later, not immediately after.
+    await elapse(1_000);
+    expect(ticks.mock.calls.length).toBe(1);
+    s.stop(); vi.useRealTimers();
+  });
+});
+
+/**
+ * SAFETY — a pool name is durable TASK data, so the map it is looked up in must
+ * not answer for a name nobody declared. An inherited `constructor` (a function)
+ * turns every capacity comparison into `NaN`, and `NaN` is false for both `>`
+ * and `<`: the request is neither "too large" nor "larger than what is free", so
+ * the gate grants it. That is a capacity bypass, not a capacity failure.
+ */
+describe('K4b pool declaration safety', () => {
+  const inherited = ['constructor', '__proto__', 'prototype', 'toString', 'valueOf', 'hasOwnProperty'];
+
+  it('refuses to attach a wait on an inherited property name', async () => {
+    await boot({ gpu: 1 }); const s = scheduler();
+    for (const resource of inherited) {
+      const t = built.tasks.create({ goal: `wants ${resource}` });
+      expect(() => s.attach(t.taskId, { kind: 'resource', resource })).toThrow(/Unknown resource pool/);
+      expect(built.tasks.get(t.taskId)?.state).toBe('CREATED');
+    }
+    expect(claims()).toHaveLength(0);
+  });
+
+  it('never grants a durable wait that names an inherited property', async () => {
+    await boot({ gpu: 1 }); const s = scheduler();
+    for (const resource of inherited) {
+      const id = rtask(s);
+      // Forged past the attach guard, exactly as a config edit between two
+      // releases would leave it: an active requirement naming an undeclared pool.
+      db.prepare("UPDATE wait_conditions SET resource = ?, resource_units = 1 WHERE task_id = ? AND state = 'active'").run(resource, id);
+      const status = s.resourceWaitStatus(id)!;
+      expect(status).toMatchObject({ resource, capacity: undefined, availableUnits: 0, blockedBy: 'undeclared' });
+      expect(Number.isNaN(status.availableUnits)).toBe(false);
+      expect(await s.wake(id, 1, 'timer')).toMatchObject({ outcome: 'stale', reason: expect.stringContaining('no longer declared') });
+      expect(await s.runNow(id, 1)).toMatchObject({ outcome: 'stale' });
+      expect(built.tasks.get(id)).toMatchObject({ state: 'WAITING_INPUT', pause_kind: 'intervention_required' });
+      expect(s.dispatches(id)).toHaveLength(0);
+      expect(claims()).toHaveLength(0);
+    }
+  });
+
+  it('treats a declared but non-integer capacity as undeclared', async () => {
+    await boot({ gpu: 1 }); const s = scheduler();
+    const bad = [Number.NaN, 1.5, -1, Infinity, '2' as unknown as number, undefined as unknown as number];
+    // Parked while the pool was still honestly declared; the config breaks after.
+    const ids = bad.map(() => rtask(s));
+    for (const [i, capacity] of bad.entries()) {
+      (config.scheduler!.resources as Record<string, number>).gpu = capacity;
+      expect(s.resourceWaitStatus(ids[i]!)).toMatchObject({ capacity: undefined, blockedBy: 'undeclared', availableUnits: 0 });
+      expect((await s.wake(ids[i]!, 1, 'timer')).outcome).toBe('stale');
+      expect(claims()).toHaveLength(0);
+    }
+  });
+
+  it('keeps an own key that only looks inherited working normally', async () => {
+    // The policy is OWN key, not "a name we like": a pool genuinely declared
+    // under an awkward name still works, and its capacity is still honoured.
+    await boot({ toString: 1 }); const s = scheduler();
+    const first = rtask(s, { resource: 'toString', goal: HOLD });
+    const second = rtask(s, { resource: 'toString' });
+    const held = holding(first); await s.tick(); await held; await drain();
+    expect(claims('toString').map(c => c.task_id)).toEqual([first]);
+    expect(s.resourceWaitStatus(second)).toMatchObject({ capacity: 1, availableUnits: 0, blockedBy: 'capacity' });
+  });
+});
+
+/**
+ * P2 — an unsatisfiable request must be repairable.
+ *
+ * Capacity falling below a parked request is a CONFIG fault: the task cannot fix
+ * it by waiting, and the queue must not be held by a request that can never be
+ * granted. The scheduler therefore expires it to an operator — and that pause is
+ * the one `intervention_required` whose repair is itself a wait.
+ */
+describe('K4b unsatisfiable repair', () => {
+  /** A task whose request outgrew the pool while it waited. */
+  async function unsatisfiable(s: Scheduler, units = 2) {
+    const id = rtask(s, { units });
+    config.scheduler!.resources!.gpu = 1;
+    await s.tick(); await drain();
+    expect(built.tasks.get(id)).toMatchObject({ state: 'WAITING_INPUT', pause_kind: 'intervention_required' });
+    expect(s.condition(id)).toMatchObject({ state: 'expired', resource: 'gpu', units });
+    return id;
+  }
+
+  it('accepts a reduced request and re-enters the queue as a new requirement', async () => {
+    await boot({ gpu: 2 }); const s = scheduler();
+    const id = await unsatisfiable(s);
+    const originalAge = s.condition(id)!.resourceQueuedAt;
+    expect(s.resourceRepairable(id)).toBe(true);
+
+    // A repair is a RESOURCE wait; the pause is not generically wait-eligible.
+    expect(() => s.attach(id, { kind: 'time', notBefore: new Date(instant + 1_000).toISOString(), reason: 'not a repair' }))
+      .toThrow(/Pause requires an operator decision/);
+    // Nor can it ask for more than the pool now has.
+    expect(() => s.attach(id, { kind: 'resource', resource: 'gpu', units: 3 })).toThrow(/can never be granted/);
+
+    instant += 5_000;
+    s.attach(id, { kind: 'resource', resource: 'gpu', units: 1, reason: 'operator reduced the request' });
+    expect(built.tasks.get(id)).toMatchObject({ state: 'WAITING_RESOURCE', pause_kind: null });
+    // A changed request is a NEW requirement, so it queues from now.
+    expect(s.condition(id)!.resourceQueuedAt).not.toBe(originalAge);
+    expect(s.resourceWaitStatus(id)).toMatchObject({ units: 1, capacity: 1, blockedBy: 'eligible' });
+
+    const done = settled(id); await s.tick(); await done; await drain();
+    expect(s.dispatches(id)[0]).toMatchObject({ phase: 'started' });
+    expect(claimRows(id)[0]).toMatchObject({ released_at: expect.any(String) });
+  });
+
+  it('restores the original seniority when the config is repaired instead', async () => {
+    await boot({ gpu: 2 }); const s = scheduler();
+    const id = await unsatisfiable(s);
+    const originalAge = s.condition(id)!.resourceQueuedAt;
+    // Same pool, same units: the SAME requirement, which has been waiting all
+    // along. Only the configuration was wrong, so its age is not the task's fault.
+    config.scheduler!.resources!.gpu = 2;
+    instant += 5_000;
+    s.attach(id, { kind: 'resource', resource: 'gpu', units: 2, reason: 'operator restored the pool' });
+    expect(s.condition(id)!.resourceQueuedAt).toBe(originalAge);
+    const done = settled(id); await s.tick(); await done; await drain();
+    expect(s.dispatches(id)[0]).toMatchObject({ phase: 'started' });
+  });
+
+  it('does not make intervention_required generically repairable', async () => {
+    await boot({ gpu: 2 }); const s = scheduler();
+    const id = await unsatisfiable(s);
+    // Without the durable evidence that THIS pause came from an unsatisfiable
+    // resource request, the pause is an ordinary human decision again.
+    db.prepare("DELETE FROM scheduler_events WHERE task_id = ? AND type = 'resource.unsatisfiable'").run(id);
+    expect(s.resourceRepairable(id)).toBe(false);
+    expect(() => s.attach(id, { kind: 'resource', resource: 'gpu', units: 1 })).toThrow(/Pause requires an operator decision/);
+    expect(built.tasks.get(id)?.state).toBe('WAITING_INPUT');
   });
 });

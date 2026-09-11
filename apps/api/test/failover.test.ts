@@ -9,10 +9,17 @@ import { bootHarnessOrchestrator, loadHarnessTestConfig } from "./helpers/boot-o
 import { openDb, type Db } from "../src/db/index.js";
 import { CheckpointService } from "../src/modules/checkpoint.js";
 import { CooldownStore } from "../src/modules/cooldown.js";
-import type { Orchestrator } from "../src/modules/orchestrator.js";
+import type { HandoffResult, Orchestrator } from "../src/modules/orchestrator.js";
 import { Registry } from "../src/modules/registry.js";
 import { TaskEventBus, type TaskStreamPayload } from "../src/modules/sse.js";
 import { TaskStore } from "../src/modules/tasks.js";
+
+/** No pool is configured in these tests, so a handoff always starts a successor. */
+async function started(result: Promise<HandoffResult>): Promise<{ runId: string; assistantId: string }> {
+  const settled = await result;
+  if ('deferred' in settled) throw new Error(`handoff deferred for ${settled.resource}`);
+  return settled;
+}
 
 let home: string;
 let db: Db;
@@ -230,7 +237,7 @@ describe("manual handoff", () => {
     expect(await orchestrator.waitForSettled(envelope.taskId)).toBe("WAITING_INPUT");
 
     cooldowns.clear(BACKUP); // the backup's window reset
-    const result = await orchestrator.handoff(envelope.taskId);
+    const result = await started(orchestrator.handoff(envelope.taskId));
     expect(result.assistantId).toBe(BACKUP);
     await orchestrator.waitForSettled(envelope.taskId);
 
@@ -259,7 +266,7 @@ describe("manual handoff", () => {
     await orchestrator.startTask(envelope.taskId, PRIMARY);
     await pollFor(() => (requested ? true : undefined));
 
-    const result = await orchestrator.handoff(envelope.taskId, BACKUP);
+    const result = await started(orchestrator.handoff(envelope.taskId, BACKUP));
     expect(result.assistantId).toBe(BACKUP);
     const runs = runsOf(envelope.taskId);
     expect(runs).toHaveLength(2);

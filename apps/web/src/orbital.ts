@@ -357,13 +357,26 @@ export function resourceNextStep(status?: ResourceWaitStatus | null): string {
   const slot = `${status.resource}/${status.units}`;
   if (status.blockedBy === "undeclared") return `Needs ${need}, but that pool is not declared; an operator must restore it in scheduler.resources.`;
   if (status.blockedBy === "unsatisfiable") return `Needs ${need}, above the pool capacity of ${status.capacity ?? 0}; an operator must raise capacity or reduce the request.`;
+  // A FAILED dependency is not a wait: the next wake applies the recorded policy.
+  // Describing it as "waiting for the dependency to clear" would tell the operator
+  // to wait for something that has already happened and will never change.
+  const failed = status.dependencyFailure;
   if (status.blockedBy === "condition") {
+    // Only cancel/wait-input hold the requirement out of the pool. Under
+    // wake-anyway the requirement is competing and something else (a future
+    // re-check) is what "condition" means here, so the ordinary wording applies.
+    if (failed && failed.policy !== "wake-anyway") {
+      return failed.policy === "cancel"
+        ? `Dependency failed; the next wake cancels this task. The resource requirement is not competing for a slot.`
+        : `Dependency failed; the next wake moves this task to operator input. The resource requirement is not competing for a slot.`;
+    }
     if (status.waitKind === "dependency") return `Waiting for dependency; the resource requirement remains ${slot} and is re-evaluated after the dependency clears.`;
     if (status.waitKind === "quota") return `Quota retry must clear first; then the task must reacquire ${slot} before routing.`;
     return `Not due yet; the resource requirement remains ${slot} and re-enters the pool queue at its original place once it is due.`;
   }
   // Ready for the pool, but the wake it is waiting for still re-checks its own kind.
   const also = status.waitKind === "quota" ? " Quota evidence is revalidated at that same wake."
+    : failed?.policy === "wake-anyway" ? " The failed dependency policy allows continuation, so the resource requirement is competing for the slot."
     : status.waitKind === "dependency" ? " The dependencies are re-checked at that same wake." : "";
   if (status.blockedBy === "queue") return `Needs ${need}; it is ${status.queuePosition} of ${status.queueLength} in the pool queue and wakes when the tasks ahead release.${also}`;
   if (status.blockedBy === "capacity") return `Needs ${need}; ${status.availableUnits} of ${status.capacity ?? 0} free. Wakes when a holder releases.${also}`;

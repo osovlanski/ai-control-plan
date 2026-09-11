@@ -176,7 +176,9 @@ describe("Orchestrator characterization", () => {
     await orchestrator.startTask(env.taskId, A);
     await waitForApproval(env.taskId);
 
-    const { assistantId } = await orchestrator.handoff(env.taskId, B);
+    const handed = await orchestrator.handoff(env.taskId, B);
+    if ('deferred' in handed) throw new Error('no pool is configured here');
+    const { assistantId } = handed;
     expect(assistantId).toBe(B);
     // handoff() awaits startTask(B), so the second run row exists on return.
     const assistants = runsOf(env.taskId).map((r) => r.assistant_id).sort();

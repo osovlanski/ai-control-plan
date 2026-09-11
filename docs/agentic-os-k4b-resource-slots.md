@@ -171,6 +171,29 @@ and `notReadyTaskIds` (carrying a requirement, held out of the queue), and the `
   `WAITING_INPUT(intervention_required)` with a `resource.unsatisfiable` event, so one impossible
   request cannot hang every task behind it.
 
+### 5.1 Repairing an unsatisfiable request
+
+Expiring the request stops it blocking the queue, but the task still has to be recoverable, and the
+only repair for "the pool cannot satisfy this" is another wait. That pause is therefore the ONE
+`intervention_required` an operator may replace with a resource wait (`CR-35`):
+
+- **Evidence, not pause kind.** `Scheduler.resourceRepairable` requires the durable pair the expiry
+  itself wrote — an `expired` condition that still names the pool, plus a `resource.unsatisfiable`
+  scheduler event at that generation. Delete the event and the pause is an ordinary human decision
+  again. Nothing makes `intervention_required` generically wait-eligible, and approval,
+  verification and comparison pauses are exactly as non-deferrable as before.
+- **Resource waits only.** A time or quota wait is still refused with `Pause requires an operator
+  decision`; the repair IS the new request.
+- **`validate` still applies.** A repair that still exceeds capacity is refused at attach rather
+  than parked forever.
+- **Seniority follows the requirement, not the row.** A changed pool or unit count is a NEW
+  requirement and queues from now. The SAME pool and unit count restored after the configuration
+  is fixed keeps its original `resource_queued_at`: it is the same requirement, it has been waiting
+  all along, and the configuration error was not the task's fault.
+
+The transition is authorized by an explicit `TransitionGrant` passed from `attach`, so the
+state-machine guard stays closed for every other caller rather than being widened.
+
 ## 6. Scheduler integration
 
 No new timer, no second queue, no new routing entry point:
@@ -186,8 +209,109 @@ reservation (+ claim) → routeTask() → materialize → start
 Neither resource waits nor any wait CARRYING a requirement sets the timer deadline (their
 `notBefore` is an earliest re-check and is normally already past, which would re-arm the timer at
 1 ms: a withheld requirement stays active and due for as long as the pool withholds it, which a
-time or quota wait without one never does); the existing 60 s cap sweeps them, exactly as for
-dependency waits. A missed release event therefore costs one tick, never a hang.
+time or quota wait without one never does); the 60 s sweep covers them, exactly as for dependency
+waits. A missed release event therefore costs one tick, never a hang.
+
+### 6.1 The sweep deadline is absolute
+
+Because those waits are excluded from exact deadlines, the sweep is the ONLY thing that
+re-evaluates them — so its cadence has to be bounded by construction, not by luck. A single timer
+still fires the earliest of three deadlines:
+
+```
+arm() → min( earliest exact wait deadline ,   ← time/quota waits carrying no requirement
+             earliest schedule deadline   ,   ← K5
+             nextSweepAt )                    ← ABSOLUTE, = lastTick + 60 s
+```
+
+`nextSweepAt` advances **when a tick happens**, never when `arm()` is called. `arm()` runs on
+attach, publish, a stale wake, a schedule edit and every resource notification; a deadline
+recomputed from "now" on each of those is a deadline ordinary traffic can postpone indefinitely,
+and a busy instance would sweep zero times per hour. Unrelated activity now re-arms the same timer
+onto the same absolute deadline, so it can only make the next sweep sooner, never later.
+
+A fresh process has no sweep history, so the first `arm()` sets `nextSweepAt = now + 60 s`: a
+restart schedules its first sweep rather than busy-looping on a deadline it never recorded. Still
+one `setTimeout`, no second timer, no wall-clock sleeps, and schedule/time deadlines can still fire
+earlier than the sweep.
+
+## 6.2 One launch funnel, one acquisition path
+
+A claim is granted in exactly one place: the wake transaction. Every other way a task can reach a
+provider is a LAUNCH path, and a launch path must not be able to acquire capacity — which is
+precisely the hole a manual handoff went through:
+
+```
+task enters execution through a resource requirement
+  → hits a limit, automatic failover off → WAITING_INPUT
+  → releaseIfIdle releases the claim (no owner)     ← correct
+  → another task takes the pool's last slot          ← correct
+  → operator requests a handoff
+  → Orchestrator.handoff → startTask → RUNNING       ← execution with no claim
+```
+
+The requirement outlives the condition that carried it: a consumed, expired or replaced condition
+that still names a pool still describes what the task needs in order to run
+(`Scheduler.requirement`). Two mechanisms close this, and they are deliberately different:
+
+**1. The gate (defence in depth).** `Scheduler.assertLaunchClaim(taskId, dispatchId)`, called at the
+top of `Orchestrator.startTask`, refuses to start a task that carries a requirement unless a live
+claim for that pool exists — and, when the start belongs to a dispatch, unless that claim is the one
+THIS dispatch owns. It only ever refuses; it never acquires.
+
+**2. The re-entry (the actual correction).** `Orchestrator.deferResourceContinuation` →
+`Scheduler.deferForResource` puts the continuation back through the ordinary funnel:
+
+```
+WAITING_RESOURCE
+  → wake(taskId, generation, 'operator')
+  → capacity check                       ← never skipped
+  → claim + dispatch reservation (one transaction)
+  → routeTask() → materialize → start
+```
+
+An operator skips the FIFO (choosing what runs next is an operator decision) and never the
+capacity. If the pool is full the handoff returns `{ deferred: 'resource', resource, units }`,
+nothing starts, and the release of the holder wakes the task through the same FIFO every other
+waiter uses — exactly one successor, holding the claim it runs on.
+
+Carried across the deferral: the continuation anchor (the latest checkpoint of the settled
+predecessor run, which is what a `WAITING_RESOURCE` transition already demands), the requirement,
+its `resource_queued_at` seniority (same pool + same units = the same requirement), and the
+operator's own intent — target, the assistant being handed off from, the reason rendered into the
+receiving agent's prompt, and the `handoffs.trigger` the eventual start closes out — stored durably
+in `wait_conditions.continuation` and applied by `Scheduler.start` at the grant.
+
+Deliberately NOT carried: the routing decision. Routing runs fresh at the grant, because a target
+chosen minutes ago may be in cooldown or at a limit by the time the slot frees; replaying it would
+trade a correctness property for a stale answer. The operator's `to` is applied as the routing
+OVERRIDE at that fresh decision, not as a pre-resolved choice.
+
+The automatic failover path re-enters the same way (it pins no target — its own re-route runs at
+the grant), so the invariant has one implementation rather than one per caller.
+
+A second handoff request on a deferred task is refused by the pre-existing `Scheduler owns task;
+use run-now` guard, so duplicate operator actions cannot produce duplicate successors; an operator
+`run-now` on it is still capacity-checked, and a stale generation is inert.
+
+## 6.3 A pool exists only if it is declared
+
+`Scheduler.capacity` is the single definition of "this pool exists", and it fails closed twice:
+
+- **Own property only.** A pool name is durable TASK data read out of a wait row, not a config key
+  the code controls, so an ordinary lookup lets `constructor`, `toString`, `valueOf` or an injected
+  prototype answer for a pool nobody declared. An inherited answer is not a declaration.
+- **A validated non-negative integer, or nothing.** `Object.prototype.constructor` is a *function*:
+  every capacity comparison against it is `NaN`, and `NaN` is false for BOTH `>` and `<`, so the
+  request is neither "larger than capacity" nor "larger than what is free" — the gate GRANTS it.
+  That is a capacity bypass, not a capacity failure.
+
+Anything else is `undefined`: undeclared, which `validate` rejects at attach and `resourceGate`
+treats as unsatisfiable. `loadConfig` additionally normalizes `scheduler.resources` into a
+null-prototype map of own keys (a plain `{...spread}` invokes the `__proto__` SETTER, so one
+crafted key re-parents the whole map), and the existing name/range validation still reports a bad
+declaration by name rather than silently dropping it. A genuinely declared pool whose name merely
+LOOKS inherited keeps working — the policy is "own key", not "a name we like".
 
 ## 7. Operator surface
 
@@ -199,6 +323,13 @@ dependency waits. A missed release event therefore costs one tick, never a hang.
 - `GET /api/scheduler/status` adds `resources[]`: capacity, claimed units, available units, the
   ready FIFO wait queue (`waitingTaskIds`) and the requirements held out of it (`notReadyTaskIds`)
   per pool.
+- `resourceWait` also carries `dependencyFailure` (`{ failed, policy }`) when the wait carrying the
+  requirement is a dependency wait whose subjects have already FAILED. A failed dependency never
+  "clears", so the operator surface reports the action the next wake will take — cancel, move to
+  operator input, or (under `wake-anyway`) continue and compete for the slot — instead of a wait
+  that will never end.
+- `POST /api/tasks/:id/handoff` returns either `{ runId, assistantId }` or, when the task still owes
+  the pool a claim, `{ deferred: "resource", resource, units }`.
 - Orbital Inspector renders a "Resource slot" panel in the existing schedule tab: pool, requested
   units, availability, queue position, why waiting, claim state, next action. Orbital is not
   redesigned and the Demo B sphere/product visuals are untouched.
@@ -219,6 +350,8 @@ Migration `023_resource_slots.sql`, forward-only:
   NULL (CHECK-enforced). Backfilled to NULL: no row before 023 ever held a pool requirement.
 - `idx_wait_resource(resource, resource_queued_at, task_id) WHERE state='active' AND resource IS NOT NULL`
   serves the FIFO scan.
+- `wait_conditions.continuation` — the operator/failover continuation intent a deferral carried
+  (trigger, target, from-assistant, reason). NULL for every row that carries no requirement.
 - New `resource_claims` table with `uq_claim_live` / `uq_claim_dispatch` / `idx_claim_live_resource`
   and foreign keys to `tasks`, `dispatches` and `(task_id, generation)` on `wait_conditions`.
 
@@ -227,7 +360,7 @@ backfilled for work that never recorded any.
 
 ## 9. Tests
 
-`apps/api/test/resource-slots.test.ts` (39 cases, injected clock and the scheduler's own
+`apps/api/test/resource-slots.test.ts` (57 cases, injected clock and the scheduler's own
 tick/event paths; no wall-time sleeps). A holder occupies its slot with a real live session — the
 fake adapter parks on an approval nobody answers — so the hold is the actual ownership record
 rather than a stub. Unexpected scheduler errors fail the test: a swallowed wake failure would
@@ -256,9 +389,42 @@ skips the queue and never the capacity; the pool status, the per-task readout an
 on readiness; a not-yet-due requirement is never reported "eligible"; and a due requirement the
 pool withholds does not re-arm the timer at 1 ms.
 
+Capacity is not operator-bypassable (`describe.each(['legacy','harness'])('K4b manual handoff')`),
+the whole scenario run under BOTH execution modes because the defect was in the shared launch
+boundary. A task runs on its slot, hits a limit with automatic failover off, has its claim swept,
+and another task takes the only slot; then the operator asks for a handoff. Asserted: nothing
+starts and no unclaimed execution exists; the requirement, the continuation anchor, the operator
+intent and the `resource_queued_at` seniority all survive the deferral; releasing the holder
+produces exactly ONE successor, whose dispatch owns the claim it runs on, with the `manual` handoff
+row closed by it; a duplicate handoff is refused, an operator run-now is still capacity-checked and
+a stale generation is inert; and a direct `startTask` of an unclaimed resource-bearing task fails
+closed before any provider call. The holder parks at the reservation boundary, so it owns its
+dispatch — and therefore its claim — until the test hands the slot back: no wall-time hold, and the
+same ownership record every release path reads. The gate is also tested for NOT over-refusing: a
+task that IS holding its slot is still handed off, on the one claim it already owns.
+
+Bounded sweep (`describe('K4b bounded sweep')`): with the release event deliberately LOST (the
+claim row released behind the scheduler's back), only a sweep can free the waiter — and it does,
+while unrelated waits are attached at half the cadence, and while stale wakes re-arm the timer
+repeatedly. A fresh scheduler arms one cadence out rather than busy-looping on a deadline it never
+recorded, and the pre-existing no-1 ms-spin test is retained unchanged.
+
+Pool declaration safety (`describe('K4b pool declaration safety')`): `constructor`, `__proto__`,
+`prototype`, `toString`, `valueOf` and `hasOwnProperty` are refused at attach, and a wait forged
+past that guard reports `undeclared`, is never granted by wake or run-now, produces no claim, no
+dispatch and no `NaN` arithmetic, and expires to an operator decision. A declared capacity that is
+`NaN`, fractional, negative, `Infinity`, a string or `undefined` reads as undeclared. A pool
+genuinely declared under an awkward own name still works and still enforces its capacity.
+
+Unsatisfiable repair (`describe('K4b unsatisfiable repair')`): a reduced request is accepted and
+re-enters the queue as a NEW requirement (new seniority); the SAME request restored after the
+config is fixed keeps its original seniority; a time wait onto the same pause is still refused; a
+repair that still exceeds capacity is refused at attach; and with the `resource.unsatisfiable`
+evidence removed the pause is an ordinary human decision again.
+
 `apps/web/src/orbital.test.ts` covers the `Resource wait · K4b` label, every `blockedBy`
-next-action string, and the wording for a pool requirement carried under a dependency or quota
-wait.
+next-action string, the wording for a pool requirement carried under a dependency or quota wait,
+and the three failed-dependency next actions (cancel, wait-input, wake-anyway).
 
 ## 10. Deferred, still
 

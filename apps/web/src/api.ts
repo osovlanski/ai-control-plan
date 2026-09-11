@@ -85,6 +85,12 @@ export interface ResourceWaitStatus {
   blockedReason?: string;
   /** The kind of the wait carrying the requirement — it is often not "resource". */
   waitKind: TaskWait["kind"];
+  /**
+   * Set only when the carrying wait is a dependency wait whose subjects have
+   * FAILED. A failed dependency never "clears", so the next action is the
+   * recorded policy, not more waiting.
+   */
+  dependencyFailure?: { failed: string[]; policy: "cancel" | "wake-anyway" | "wait-input" };
 }
 
 /** A granted K4b slot claim. */
@@ -309,7 +315,9 @@ export const api = {
       `/api/tasks/${id}/checkpoints`,
     ),
   handoff: (id: string, to?: string) =>
-    req<{ runId: string; assistantId: string }>(`/api/tasks/${id}/handoff`, {
+    // A task that still owes a K4b pool claim is not started by the handoff: it
+    // re-enters the scheduler and starts when the pool can grant the slot.
+    req<{ runId: string; assistantId: string } | { deferred: "resource"; resource: string; units: number }>(`/api/tasks/${id}/handoff`, {
       method: "POST",
       body: JSON.stringify({ to }),
     }),

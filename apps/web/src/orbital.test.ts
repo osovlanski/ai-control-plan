@@ -188,6 +188,20 @@ describe("orbital field geometry", () => {
       .toMatch(/Not due yet; the resource requirement remains gpu\/1/);
     // Ready for the pool, but the wake still re-checks the wait's own kind.
     expect(resourceNextStep({ ...resourceWait, waitKind: "quota" })).toMatch(/Quota evidence is revalidated at that same wake/);
+    // A FAILED dependency never "clears": the next wake applies the policy, and
+    // the operator needs to read the action, not a wait that will never end.
+    const depFailed = { ...resourceWait, waitKind: "dependency", blockedBy: "condition", queuePosition: 0 } as const;
+    expect(resourceNextStep({ ...depFailed, dependencyFailure: { failed: ["AG-1"], policy: "cancel" } }))
+      .toBe("Dependency failed; the next wake cancels this task. The resource requirement is not competing for a slot.");
+    expect(resourceNextStep({ ...depFailed, dependencyFailure: { failed: ["AG-1"], policy: "wait-input" } }))
+      .toBe("Dependency failed; the next wake moves this task to operator input. The resource requirement is not competing for a slot.");
+    // wake-anyway under a not-yet-due re-check is not the failure wording: the
+    // requirement is competing, so the ordinary "condition" message applies.
+    expect(resourceNextStep({ ...depFailed, waitKind: "time", dependencyFailure: { failed: ["AG-1"], policy: "wake-anyway" } }))
+      .toMatch(/Not due yet; the resource requirement remains gpu\/1/);
+    // wake-anyway continues, so the requirement IS competing for the slot.
+    expect(resourceNextStep({ ...resourceWait, waitKind: "dependency", dependencyFailure: { failed: ["AG-1"], policy: "wake-anyway" } }))
+      .toMatch(/failed dependency policy allows continuation, so the resource requirement is competing for the slot/);
     expect(nextStep({ state: "WAITING_INPUT" })).toMatch(/will not wake it/);
     expect(nextStep({ state: "RUNNING", assistant: "fake-a" })).toMatch(/fake-a/);
     expect(nextStep({ state: "MYSTERY" })).toMatch(/Unknown state/);

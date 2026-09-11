@@ -30,6 +30,12 @@ CREATE TABLE wait_conditions_k4b (
  -- and a genuinely new requirement starts at now. Nothing is backfilled: no row
  -- before this migration ever held a pool requirement.
  resource_queued_at TEXT,
+ -- The continuation intent a manual handoff or an automatic failover had when it
+ -- had to defer for a slot (operator target, assistant handed off from, reason,
+ -- handoffs audit label). Durable because the grant may be minutes and a restart
+ -- away, and an operator decision that survives neither is not a decision. It is
+ -- intent only: routing still runs fresh at the grant.
+ continuation TEXT,
  CHECK((resource IS NULL) = (resource_units IS NULL)),
  CHECK((resource IS NULL) = (resource_queued_at IS NULL)),
  CHECK(kind != 'resource' OR resource IS NOT NULL),

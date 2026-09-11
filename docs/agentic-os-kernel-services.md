@@ -846,7 +846,30 @@ interface ScheduleOccurrence {
   below the new capacity. A request the pool can no longer satisfy (capacity cut below it, or the
   pool undeclared) **expires to `WAITING_INPUT(intervention_required)`** with a
   `resource.unsatisfiable` event, so one impossible request cannot hang every task behind it.
-  An increase is picked up by the next wake evaluation.
+  An increase is picked up by the next wake evaluation. That pause is the ONE
+  `intervention_required` an operator may replace with a resource wait (CR-35), authorized by the
+  durable `resource.unsatisfiable` evidence at that generation rather than by the pause kind:
+  a changed pool or unit count is a new requirement and queues from now, while the same request
+  restored after the config is fixed keeps its original age. No other pause becomes deferrable.
+- **A pool exists only if it is declared.** Capacity is read through one helper that accepts an
+  OWN property whose value is a validated non-negative integer, and nothing else. A pool name is
+  durable task data, so an ordinary lookup would let inherited members (`constructor` is a
+  function, so every comparison against it is `NaN` — false for both `>` and `<`) answer for a
+  pool nobody declared and bypass the capacity check rather than fail it.
+- **One acquisition path, one launch gate.** A claim is granted only inside the wake transaction.
+  Any other continuation of a task that still carries a requirement — a manual handoff, an
+  automatic failover — re-enters `WAITING_RESOURCE → wake(taskId, generation, 'operator') →
+  capacity check → claim + dispatch reservation → route → start`, carrying the checkpoint anchor,
+  the requirement, its `resource_queued_at` seniority and the operator's intent; routing is
+  deliberately re-decided at the grant. `startTask` additionally asserts that a resource-bearing
+  task holds the live claim its dispatch owns, and fails closed before any provider call. That
+  assertion never acquires: it is a gate, not a second protocol.
+- **The fallback sweep is an absolute deadline.** Waits carrying a requirement are excluded from
+  exact timer deadlines (their `notBefore` is an earliest re-check, normally already past, which
+  would re-arm the timer at 1 ms), so the sweep is the only thing that re-evaluates them. Its
+  deadline advances when a tick HAPPENS, never when `arm()` is called, so attach/publish/stale
+  wake/schedule edit/resource notification traffic can only make the next sweep sooner. Still one
+  timer; schedule and time deadlines may still fire earlier.
 - **Operator truth.** Pool occupancy is **derived at read time** (`capacity` from config,
   `claimedUnits` from live claims, queue position from the FIFO scan — 0 when the task is not
   in the queue, with `blockedBy: "condition"` and the blocking reason instead of a position it
@@ -1319,7 +1342,20 @@ Fairness: a requirement whose dependency is pending, whose dependency failed und
 pool's head of line against a ready waiter, and re-enters at its ORIGINAL requirement age once it
 clears; that age survives a context-yield continuation and a no-candidate re-park; run-now skips
 the queue and never the capacity; the pool status, the per-task readout and the grant report the
-same readiness; a not-yet-due requirement is never reported "eligible".
+same readiness; a not-yet-due requirement is never reported "eligible". Capacity is not
+operator-bypassable, asserted under BOTH execution modes: a manual handoff of a task that still
+owes the pool a claim starts nothing, defers through the ordinary funnel preserving the checkpoint
+anchor, the requirement age and the operator intent, and yields exactly one successor — holding the
+claim its dispatch owns — when the holder releases; a duplicate handoff is refused, an operator
+run-now is still capacity-checked, and a direct `startTask` of an unclaimed resource-bearing task
+fails closed before any provider call. The bounded sweep still fires while unrelated attaches and
+repeated stale wakes re-arm the timer at half its cadence, and a fresh scheduler arms one cadence
+out instead of busy-looping. Inherited property names (`constructor`, `__proto__`, `prototype`,
+`toString`, `valueOf`, `hasOwnProperty`) and non-integer capacities read as undeclared — no claim,
+no dispatch, no `NaN` arithmetic — while a genuine own key of the same spelling still works. An
+unsatisfiable request is repairable: a reduced request queues as a new requirement, the same
+request restored after a config fix keeps its age, and without the `resource.unsatisfiable`
+evidence the pause is an ordinary human decision again.
 
 **K5 — recurring schedules.** One task per occurrence; a duplicate tick for the same
 `occurrenceAt` violates the unique constraint and creates nothing; `overlap: skip` records
@@ -1333,8 +1369,9 @@ creating a schedule without `commands.write` fails closed.
 Tests: `packages/core/test/state-machine.test.ts` (every new edge legal with its precondition,
 every non-listed edge illegal, CR-32 rejections); `apps/api/test/scheduler.test.ts` (fake
 clock, generation CAS, dispatch phases); `apps/api/test/harness/boot-recovery` dispatch cases;
-`apps/api/test/resource-slots.test.ts` (K4b claim/release, race, FIFO readiness and requirement
-seniority, capacity change);
+`apps/api/test/resource-slots.test.ts` (57 cases: K4b claim/release, race, FIFO readiness and
+requirement seniority, capacity change, manual-handoff reacquisition in both execution modes,
+absolute sweep cadence, pool declaration safety, unsatisfiable repair);
 `apps/api/test/failover.test.ts` all-blocked case on both paths; `quota-projection.test.ts`;
 `eval/scenarios/quota-wait-and-resume.ts`; Cockpit `schedule` unit tests (K6).
 
