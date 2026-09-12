@@ -54,6 +54,16 @@ export class ScheduleService {
     return value;
   }
 
+  /** Same shape check ordinary task creation trusts: undefined, or a positive integer minimum. */
+  private requirements(value: TaskIntent['requirements']): TaskIntent['requirements'] {
+    if (value === undefined) return undefined;
+    const { minContextTokens } = value;
+    if (minContextTokens !== undefined && (!Number.isInteger(minContextTokens) || minContextTokens <= 0)) {
+      throw new Error('requirements.minContextTokens must be a positive integer');
+    }
+    return value;
+  }
+
   /** Throws on an unusable cron expression or unknown IANA zone. */
   private cron(pattern: string, timezone: string): Cron {
     if (pattern.trim().split(/\s+/).length !== 5) throw new Error('A schedule requires a 5-field cron expression');
@@ -169,16 +179,28 @@ export class ScheduleService {
       const front = this.d.db.prepare("SELECT occurrence_at, intent_json FROM schedule_occurrences WHERE schedule_id = ? AND outcome = 'queued' ORDER BY occurrence_at LIMIT 1")
         .get(scheduleId) as { occurrence_at: string; intent_json: string | null } | undefined;
       if (!front) return undefined;
+      // FAIL CLOSED: the snapshot, and ONLY the snapshot. A row predating this
+      // slice is never 'queued' (the schema CHECK enforces it), so a queued row
+      // missing or corrupting its own intent is not legitimate history — it is
+      // a defect, and falling back to the CURRENT schedule intent would
+      // silently rewrite what already-queued work is claimed to have run.
+      // Throwing here rolls back the whole transaction before the row is ever
+      // touched, so the occurrence stays 'queued', auditable and un-promoted.
+      if (!front.intent_json) throw new Error(`Queued occurrence ${scheduleId}/${front.occurrence_at} has no intent snapshot; refusing to promote it from the current schedule intent`);
+      let intent: TaskIntent;
+      try { intent = JSON.parse(front.intent_json) as TaskIntent; }
+      catch (error) { throw new Error(`Queued occurrence ${scheduleId}/${front.occurrence_at} has a corrupt intent snapshot: ${error instanceof Error ? error.message : String(error)}`); }
       const at = this.iso();
-      const won = this.d.db.prepare("UPDATE schedule_occurrences SET outcome = 'created', promoted_at = ? WHERE schedule_id = ? AND occurrence_at = ? AND outcome = 'queued'")
-        .run(at, scheduleId, front.occurrence_at).changes;
-      if (!won) return undefined;
-      // The snapshot, never the schedule's current intent. `intent_json` is only
-      // null for rows predating this slice, which are never 'queued'.
-      const intent = JSON.parse(front.intent_json ?? row.intent_json) as TaskIntent;
       const taskId = this.createOccurrenceTask(intent, front.occurrence_at);
-      this.d.db.prepare('UPDATE schedule_occurrences SET task_id = ? WHERE schedule_id = ? AND occurrence_at = ?')
-        .run(taskId, scheduleId, front.occurrence_at);
+      // outcome, promoted_at and task_id move together in one statement: the
+      // schema CHECK never sees a 'created' row without a task, or a 'queued'
+      // row with one. The CAS is still `outcome = 'queued'` in the WHERE.
+      const won = this.d.db.prepare("UPDATE schedule_occurrences SET outcome = 'created', promoted_at = ?, task_id = ? WHERE schedule_id = ? AND occurrence_at = ? AND outcome = 'queued'")
+        .run(at, taskId, scheduleId, front.occurrence_at).changes;
+      // The task is already created inside this same transaction: a lost CAS
+      // must throw (rollback), never `return` (commit), or the loser's task
+      // would survive orphaned with no occurrence pointing at it.
+      if (!won) throw new Error(`Lost the promotion race for ${scheduleId}/${front.occurrence_at}`);
       this.d.db.prepare('UPDATE schedules SET last_fired_at = ?, last_task_id = ?, updated_at = ? WHERE schedule_id = ?')
         .run(front.occurrence_at, taskId, at, scheduleId);
       return taskId;
@@ -197,10 +219,16 @@ export class ScheduleService {
     return (this.d.db.prepare('SELECT schedule_id FROM schedule_occurrences WHERE task_id = ?').get(taskId) as { schedule_id: string } | undefined)?.schedule_id;
   }
 
-  /** The one task-creation path an occurrence has, in both modes. */
+  /**
+   * The one task-creation path an occurrence has, in both modes — immediate and
+   * promoted-from-queue alike, so the two can never disagree about what a
+   * TaskIntent produces. `repository` is path intent only: the task still gets
+   * its own ordinary branch/worktree identity at creation, never a frozen one.
+   */
   private createOccurrenceTask(intent: TaskIntent, occurrenceAt: string): string {
     const task = this.d.tasks.create({ goal: intent.goal, constraints: intent.constraints,
-      repoPath: intent.repository?.path, profile: intent.profile, overrides: intent.overrides });
+      repoPath: intent.repository?.path, profile: intent.profile, overrides: intent.overrides,
+      requirements: intent.requirements });
     this.d.park(task.taskId, occurrenceAt, `Scheduled occurrence ${occurrenceAt}`);
     return task.taskId;
   }
@@ -223,6 +251,19 @@ export class ScheduleService {
         taskId: r.task_id ?? undefined, queuedAt: r.queued_at ?? undefined, promotedAt: r.promoted_at ?? undefined,
         queuePosition: r.outcome === 'queued' ? queued.indexOf(r.occurrence_at) + 1 : undefined }));
   }
+  /**
+   * The FIFO backlog itself, oldest first, capped but never truncated from the
+   * front. `occurrences()` pages the RECENT history newest-first, so once a
+   * backlog outgrows that page the queue head (next to promote) is exactly the
+   * row a recency page pushes out first. This is the operator's independent
+   * view of "what actually runs next", not a re-derivation of a truncated page.
+   */
+  queuedOccurrences(scheduleId: string, limit = 50): ScheduleOccurrence[] {
+    return (this.d.db.prepare("SELECT * FROM schedule_occurrences WHERE schedule_id = ? AND outcome = 'queued' ORDER BY occurrence_at LIMIT ?")
+      .all(scheduleId, limit) as Array<{ schedule_id: string; occurrence_at: string; fired_at: string; queued_at: string | null }>)
+      .map((r, i) => ({ scheduleId: r.schedule_id, occurrenceAt: r.occurrence_at, firedAt: r.fired_at, outcome: 'queued' as const,
+        queuedAt: r.queued_at ?? undefined, queuePosition: i + 1 }));
+  }
 
   create(input: ScheduleInput): Schedule {
     input = redactValue(input);
@@ -235,7 +276,7 @@ export class ScheduleService {
     const now = this.iso();
     const intent: TaskIntent = { goal: input.goal, constraints: input.constraints ?? [],
       repository: input.repoPath ? { path: input.repoPath } : undefined,
-      profile: input.profile ?? 'auto', overrides: input.overrides };
+      profile: input.profile ?? 'auto', overrides: input.overrides, requirements: this.requirements(input.requirements) };
     this.d.db.prepare(`INSERT INTO schedules(schedule_id,kind,intent_json,cron,timezone,enabled,overlap,catch_up_window_minutes,next_fire_at,created_at,updated_at)
       VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run(scheduleId, input.kind ?? 'user', JSON.stringify(intent), input.cron, input.timezone,
       input.enabled === false ? 0 : 1, overlap, input.catchUpWindowMinutes ?? 1440, this.nextFireAt(input.cron, input.timezone, this.d.now()), now, now);
@@ -257,6 +298,7 @@ export class ScheduleService {
       repository: patch.repoPath !== undefined ? { path: patch.repoPath } : current.intent.repository,
       profile: patch.profile ?? current.intent.profile,
       overrides: patch.overrides !== undefined ? patch.overrides : current.intent.overrides,
+      requirements: patch.requirements !== undefined ? this.requirements(patch.requirements) : current.intent.requirements,
     };
     // Edits reach FUTURE occurrences only. An already-queued occurrence keeps
     // its own intent snapshot and its own occurrenceAt, so neither the work it

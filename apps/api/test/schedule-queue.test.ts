@@ -10,7 +10,7 @@ import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from 'node:
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { AssistantId, ScheduleInput } from '@agent-plane/core';
+import type { AssistantId, ModelRecommendation, ScheduleInput, TaskIntent } from '@agent-plane/core';
 import { loadConfig, type ResolvedConfig } from '../src/config.js';
 import Database from 'better-sqlite3';
 import { migrate, openDb, type Db } from '../src/db/index.js';
@@ -106,6 +106,8 @@ describe('K5 overlap: queue — migration 024', () => {
 
     copyFileSync(join(source, upgrade[0]!), join(migrations, upgrade[0]!));
     expect(migrate(old, migrations)).toEqual(upgrade);
+    // The rebuild proves relationship integrity, not just row survival.
+    expect(old.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
 
     // Every row survived, unchanged, and `overlap` is still skip.
     expect(old.prepare('SELECT * FROM schedules').all()).toMatchObject([{ schedule_id: 'sched_legacy', overlap: 'skip', last_task_id: 'task_legacy' }]);
@@ -122,6 +124,8 @@ describe('K5 overlap: queue — migration 024', () => {
     expect(old.prepare('SELECT COUNT(*) AS n FROM schedule_occurrences').get()).toEqual({ n: 0 });
     // The task the schedule created is an ordinary task and is NOT cascaded away.
     expect(old.prepare('SELECT COUNT(*) AS n FROM tasks').get()).toEqual({ n: 1 });
+    // Row survival alone would miss a rebuild that drops or misdirects an FK.
+    expect(old.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
     old.close();
     rmSync(dir, { recursive: true, force: true });
   });
@@ -463,6 +467,141 @@ describe('K5 overlap: queue', () => {
     // K13 stays SHADOW: nothing was applied, only observed.
     const applied = db.prepare("SELECT COUNT(*) AS n FROM routing_decisions WHERE json_extract(explanation, '$.modelRecommendation.applied') = 1").get() as { n: number };
     expect(applied.n).toBe(0);
+  });
+
+  // P1 — the queued snapshot is the COMPLETE TaskIntent, not just the goal.
+  it('P1 — a promoted occurrence carries its complete queued-time intent, including requirements; the next occurrence carries the new one', async () => {
+    await boot(); const s = scheduler();
+    const intentA: ScheduleInput = { ...daily, goal: 'goal A', constraints: ['c-A'], repoPath: '/tmp/repo-a',
+      profile: 'fastest', overrides: { model: 'selector-A' }, requirements: { minContextTokens: 111_000 } };
+    const [id, running] = await firstOccurrenceRunning(s, intentA);
+
+    // The FIRST occurrence (immediate creation) already went through the SAME
+    // helper: it must carry the complete intent too, requirements included.
+    const first = occurrences(s, id).find(o => o.outcome === 'created')!;
+    const firstIntent = JSON.parse(built.tasks.get(first.taskId!)!.intent_json) as TaskIntent;
+    // `repository.branch` is the task's OWN fresh identity, stamped at creation
+    // by the ordinary task-creation path — not something K5 invents or freezes.
+    expect(firstIntent).toEqual({ goal: 'goal A', constraints: ['c-A'], repository: { path: '/tmp/repo-a', branch: `task/${first.taskId}` },
+      profile: 'fastest', overrides: { model: 'selector-A' }, requirements: { minContextTokens: 111_000 } });
+
+    at('2030-01-02T07:30:00Z'); await s.tick();   // occurrence #2 queued with intent A
+
+    at('2030-01-02T09:00:00Z');
+    const intentB: Partial<ScheduleInput> = { goal: 'goal B', constraints: ['c-B'], repoPath: '/tmp/repo-b',
+      profile: 'best-quality', overrides: { model: 'selector-B' }, requirements: { minContextTokens: 222_000 } };
+    s.schedules.update(id, intentB);
+    await settle(running);   // promotes occurrence #2 from ITS OWN snapshot, not the edit
+
+    const promoted = occurrences(s, id).find(o => o.occurrenceAt === '2030-01-02T07:30:00.000Z')!;
+    const promotedIntent = JSON.parse(built.tasks.get(promoted.taskId!)!.intent_json) as TaskIntent;
+    expect(promotedIntent).toEqual({ goal: 'goal A', constraints: ['c-A'], repository: { path: '/tmp/repo-a', branch: `task/${promoted.taskId}` },
+      profile: 'fastest', overrides: { model: 'selector-A' }, requirements: { minContextTokens: 111_000 } });
+    // The task's OWN branch identity is fresh at creation — never frozen from the schedule.
+    const promotedTask = built.tasks.get(promoted.taskId!)!;
+    expect(JSON.parse(promotedTask.envelope).repository).toMatchObject({ path: '/tmp/repo-a', branch: `task/${promoted.taskId}` });
+
+    // The NEXT occurrence — fired after the edit — carries the NEW complete intent.
+    hold(promoted.taskId!); await settle(promoted.taskId!);
+    at('2030-01-03T07:30:00Z'); await s.tick();
+    const next = occurrences(s, id).find(o => o.occurrenceAt === '2030-01-03T07:30:00.000Z')!;
+    const nextIntent = JSON.parse(built.tasks.get(next.taskId!)!.intent_json) as TaskIntent;
+    expect(nextIntent).toEqual({ goal: 'goal B', constraints: ['c-B'], repository: { path: '/tmp/repo-b', branch: `task/${next.taskId}` },
+      profile: 'best-quality', overrides: { model: 'selector-B' }, requirements: { minContextTokens: 222_000 } });
+  });
+
+  // K13 — requirements are a hard filter; queueing must not weaken or delay that.
+  it('K13 — a promoted occurrence\'s declared requirement hard-filters candidates exactly like an ordinary task\'s, and stays SHADOW', async () => {
+    await boot(); const s = scheduler();
+    const requirements = { minContextTokens: 5_000_000 }; // far past anything the fake catalog reports
+    const [id, running] = await firstOccurrenceRunning(s, { ...daily, requirements });
+    const decisionsBefore = (db.prepare('SELECT COUNT(*) AS n FROM routing_decisions').get() as { n: number }).n;
+    at('2030-01-02T07:30:00Z'); await s.tick();   // queued: no recommendation exists yet
+    expect((db.prepare('SELECT COUNT(*) AS n FROM routing_decisions').get() as { n: number }).n).toBe(decisionsBefore);
+
+    await settle(running);   // promotes; routing happens at the WAKE, the ordinary K1 protocol
+    const promoted = occurrences(s, id).find(o => o.occurrenceAt === '2030-01-02T07:30:00.000Z')!;
+    await s.tick(); await flush();
+    const persisted = db.prepare('SELECT explanation FROM routing_decisions WHERE task_id = ? ORDER BY id DESC LIMIT 1')
+      .get(promoted.taskId!) as { explanation: string };
+    const promotedRecommendation = JSON.parse(persisted.explanation).modelRecommendation as ModelRecommendation;
+    const promotedCandidate = promotedRecommendation.candidates.find(c => c.assistantId === A)!;
+
+    // An ordinary task carrying the identical requirement, for parity.
+    const ordinary = built.tasks.create({ goal: 'ordinary requirements parity', requirements });
+    const { explanation: ordinaryExplanation } = built.orchestrator.routeTask(ordinary.taskId, 'intake');
+    const ordinaryCandidate = ordinaryExplanation.modelRecommendation!.candidates.find(c => c.assistantId === A)!;
+
+    expect(promotedCandidate.eligible).toBe(false);
+    expect(promotedCandidate.eligible).toBe(ordinaryCandidate.eligible);
+    expect(promotedCandidate.filterFailures).toEqual(ordinaryCandidate.filterFailures);
+    expect(promotedCandidate.filterFailures.join(' ')).toContain('declares a minimum of 5000000 tokens');
+    // SHADOW: a hard requirement excludes a candidate; nothing here APPLIES a choice.
+    expect((promotedRecommendation as unknown as { applied?: boolean }).applied).toBeFalsy();
+  });
+
+  // FAIL CLOSED — a queued snapshot that cannot be trusted must never fall back
+  // to the current schedule intent, and must never disappear from the backlog.
+  it('FAIL CLOSED — a corrupted queued intent snapshot promotes nothing, stays queued, and is reported', async () => {
+    await boot();
+    const onError = vi.fn();
+    const s = new Scheduler({ db, config, tasks: built.tasks, orchestrator: built.orchestrator, bus: built.bus, now, onError });
+    const [id, running] = await firstOccurrenceRunning(s);
+    at('2030-01-02T07:30:00Z'); await s.tick();
+    // The schema's NOT NULL keeps a legitimate writer from ever producing this;
+    // this simulates byte corruption in the stored snapshot itself.
+    db.prepare("UPDATE schedule_occurrences SET intent_json = '{not-json' WHERE schedule_id = ? AND outcome = 'queued'").run(id);
+    // The process died before delivering the terminal event (as in test H/V),
+    // so a direct promote() call is the one that must hit the corrupt row.
+    db.prepare("UPDATE tasks SET state = 'COMPLETED' WHERE id = ?").run(running);
+
+    expect(() => s.schedules.promote(id)).toThrow(/corrupt intent snapshot/);
+    // Never silently promoted from the current schedule intent, and never dropped.
+    expect(queued(s, id).map(o => o.occurrenceAt)).toEqual(['2030-01-02T07:30:00.000Z']);
+    expect(taskCount()).toBe(1);
+
+    // The bounded fallback sweep hits the same defect and reports it, rather
+    // than crashing the sweep or quietly promoting from the wrong intent.
+    s.schedules.drain();
+    expect(onError).toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringContaining('corrupt intent snapshot') }));
+    expect(taskCount()).toBe(1);
+    expect(queued(s, id)).toHaveLength(1);
+  });
+
+  // Schema — the strengthened CHECK keeps queued/promoted/immediate rows distinguishable.
+  it('schema — schedule_occurrences CHECK rejects a queued row missing its provenance halves', async () => {
+    await boot(); const s = scheduler();
+    const [id, running] = await firstOccurrenceRunning(s);
+    const insert = (queuedAt: string | null, intentJson: string | null, taskId: string | null, promotedAt: string | null) =>
+      db.prepare(`INSERT INTO schedule_occurrences(schedule_id,occurrence_at,fired_at,outcome,queued_at,intent_json,task_id,promoted_at)
+        VALUES(?,?,?,'queued',?,?,?,?)`).run(id, '2099-01-01T00:00:00.000Z', 't', queuedAt, intentJson, taskId, promotedAt);
+    expect(() => insert(null, '{}', null, null)).toThrow();          // queued without queued_at
+    expect(() => insert('t', null, null, null)).toThrow();           // queued without a snapshot
+    expect(() => insert('t', '{}', running, null)).toThrow();        // queued rows carry no task yet
+    expect(() => insert('t', '{}', null, 't')).toThrow();            // queued rows are never promoted
+    expect(() => insert('t', '{}', null, null)).not.toThrow();       // well-formed queued row
+  });
+
+  // P2 — the operator must be able to see the queue HEAD, not just recent history.
+  it('P2 — queuedOccurrences is the FIFO head, independent of the recent-history page', async () => {
+    await boot(); const s = scheduler();
+    const [id] = await firstOccurrenceRunning(s);
+    for (const day of ['02', '03', '04']) { at(`2030-01-${day}T07:30:00Z`); await s.tick(); }
+    // A single-row recency page surfaces the NEWEST queued occurrence
+    // (position 3) — exactly the one an operator must NOT mistake for "next
+    // to run". The actual queue head (position 1) is nowhere in this page.
+    const page = occurrences(s, id, 1);
+    expect(page[0]).toMatchObject({ occurrenceAt: '2030-01-04T07:30:00.000Z', queuePosition: 3 });
+
+    const backlog = s.schedules.queuedOccurrences(id);
+    expect(backlog.map(o => o.occurrenceAt)).toEqual([
+      '2030-01-02T07:30:00.000Z', '2030-01-03T07:30:00.000Z', '2030-01-04T07:30:00.000Z']);
+    expect(backlog.map(o => o.queuePosition)).toEqual([1, 2, 3]);
+    expect(backlog.every(o => o.outcome === 'queued')).toBe(true);
+
+    // The API detail read exposes it independently of `occurrences`.
+    const detail = await built.app.inject({ method: 'GET', url: `/api/schedules/${id}`, headers: headers() });
+    expect((detail.json().queuedOccurrences as typeof backlog).map(o => o.occurrenceAt)).toEqual(backlog.map(o => o.occurrenceAt));
   });
 
   // §18. Fairness under everything that could plausibly reorder a queue.

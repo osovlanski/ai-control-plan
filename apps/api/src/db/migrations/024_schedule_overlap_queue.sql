@@ -52,7 +52,18 @@ CREATE TABLE schedule_occurrences (
   -- own instant described. Intent only (I-S1) — never a resolved assistant,
   -- provider, model or routing decision, so nothing about execution is frozen.
   intent_json   TEXT,
-  PRIMARY KEY(schedule_id, occurrence_at)
+  PRIMARY KEY(schedule_id, occurrence_at),
+  -- Keeps the three truths distinguishable at the schema level, not just by
+  -- convention: a queued row always carries its own snapshot and no task yet;
+  -- a promoted row carries both halves of its provenance; an immediately-
+  -- created row (pre-dating this slice, or from `overlap: skip`) carries
+  -- neither. No combination silently claims work happened that didn't.
+  CHECK(
+    (outcome = 'queued' AND queued_at IS NOT NULL AND intent_json IS NOT NULL AND task_id IS NULL AND promoted_at IS NULL)
+    OR (outcome = 'created' AND queued_at IS NULL AND promoted_at IS NULL AND task_id IS NOT NULL)
+    OR (outcome = 'created' AND queued_at IS NOT NULL AND promoted_at IS NOT NULL AND task_id IS NOT NULL)
+    OR (outcome IN ('skipped-overlap','skipped-catch-up','skipped-disabled') AND queued_at IS NULL AND promoted_at IS NULL AND task_id IS NULL)
+  )
 );
 -- Existing rows keep NULL in all three: no historical queue state is invented.
 INSERT INTO schedule_occurrences(schedule_id, occurrence_at, fired_at, outcome, task_id)

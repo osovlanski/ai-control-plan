@@ -207,6 +207,8 @@ export interface ScheduleInput {
   repoPath?: string;
   profile?: RoutingProfile;
   overrides?: TaskIntent['overrides'];
+  /** Declared hard requirements — a minimum context window excludes candidates (K13). */
+  requirements?: TaskIntent['requirements'];
   kind?: 'user' | 'system';
   enabled?: boolean;
   overlap?: ScheduleOverlap;

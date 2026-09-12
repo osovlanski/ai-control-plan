@@ -282,7 +282,7 @@ export const api = {
   // K5. Queue order, backlog count and the active occurrence task all come from
   // the plane — the browser renders the order it is given and computes none.
   schedules: () => req<Schedule[]>("/api/schedules"),
-  schedule: (id: string) => req<Schedule & { occurrences: ScheduleOccurrence[] }>(`/api/schedules/${id}`),
+  schedule: (id: string) => req<Schedule & { occurrences: ScheduleOccurrence[]; queuedOccurrences: ScheduleOccurrence[] }>(`/api/schedules/${id}`),
   setOverlap: (id: string, overlap: ScheduleOverlap) =>
     req<Schedule>(`/api/schedules/${id}`, { method: "PATCH", body: JSON.stringify({ overlap }) }),
   attachWait: (id: string, wait: { kind: "time" | "quota"; notBefore: string; reason?: string }) =>

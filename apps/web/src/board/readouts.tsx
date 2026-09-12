@@ -501,28 +501,40 @@ export function ModelRecommendationReadout({
  * queue POSITION all arrive already decided. The browser orders nothing: a
  * second opinion about who runs next is exactly what must not exist.
  */
+/** Matches Inspector's own polling cadence — no second, independently-paced loop. */
+const QUEUE_POLL_MS = 4000;
+
 export function ScheduleQueueReadout() {
   const [schedules, setSchedules] = useState<Schedule[] | null>(null);
   const [occurrences, setOccurrences] = useState<Record<string, ScheduleOccurrence[]>>({});
+  const [queuedOccurrences, setQueuedOccurrences] = useState<Record<string, ScheduleOccurrence[]>>({});
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [nonce, setNonce] = useState(0);
 
   useEffect(() => {
     let disposed = false;
-    void (async () => {
+    let timer: ReturnType<typeof setTimeout>;
+    const load = async () => {
       try {
         const rows = await api.schedules();
         const detail = await Promise.all(rows.map((s) => api.schedule(s.scheduleId)));
         if (disposed) return;
         setSchedules(rows);
         setOccurrences(Object.fromEntries(detail.map((d) => [d.scheduleId, d.occurrences])));
+        setQueuedOccurrences(Object.fromEntries(detail.map((d) => [d.scheduleId, d.queuedOccurrences])));
         setError(null);
       } catch (e) {
         if (!disposed) setError(e instanceof Error ? e.message : String(e));
+      } finally {
+        // Server truth (promotion, a terminal task, a new queued occurrence, the
+        // fallback sweep) can change while this panel stays mounted and idle;
+        // this bounded poll is how it eventually catches up without a remount.
+        if (!disposed) timer = setTimeout(() => void load(), QUEUE_POLL_MS);
       }
-    })();
-    return () => { disposed = true; };
+    };
+    void load();
+    return () => { disposed = true; clearTimeout(timer); };
   }, [nonce]);
 
   async function setOverlap(id: string, overlap: ScheduleOverlap) {
@@ -562,7 +574,12 @@ export function ScheduleQueueReadout() {
             </select>
           </label>
           <ol className="event-list">
-            {(occurrences[s.scheduleId] ?? []).slice(0, 6).map((o) => (
+            {/* The queue head first, always — `occurrences` pages RECENT history
+                newest-first, so a backlog past that page would otherwise hide
+                exactly the occurrence that runs next. */}
+            {[...(queuedOccurrences[s.scheduleId] ?? []),
+              ...(occurrences[s.scheduleId] ?? []).filter((o) => o.outcome !== "queued")]
+              .slice(0, 6).map((o) => (
               <li key={o.occurrenceAt}>
                 <time>{new Date(o.occurrenceAt).toLocaleString()}</time>
                 <div>

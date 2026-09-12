@@ -74,6 +74,23 @@ snapshot: it reads the live schedule intent exactly as it does today, and its
 `intent_json` stays `NULL`. Snapshots exist to survive a delay; an occurrence
 with no delay has nothing to survive.
 
+Immediate creation and promotion call the **same** private helper,
+`createOccurrenceTask(intent, occurrenceAt)`, so the two paths cannot drift
+apart on what a `TaskIntent` produces — `requirements` included. `repository`
+in the intent is path intent only: the task it produces still gets its own
+fresh branch/worktree identity at creation, exactly like any other task. A
+schedule never freezes a task-generated branch into itself.
+
+**Fail closed on a missing or corrupt snapshot.** A row with `outcome =
+'queued'` is schema-guaranteed to carry a non-NULL `intent_json` (§4), so a
+queued row that fails to parse is a defect, not a legitimate gap. Promotion
+never falls back to the schedule's *current* intent in that case — doing so
+would silently rewrite what already-queued work is claimed to have run.
+Instead it throws before touching the row, which rolls back the whole
+promotion transaction: the occurrence stays `queued`, auditable, and un-
+promoted, and the caller's `onError` observes a message naming the schedule
+and occurrence.
+
 ## 4. Occurrence provenance — the smallest truthful representation
 
 `outcome` alone cannot carry this: an occurrence that was queued and later
@@ -97,6 +114,24 @@ Rows written before this slice keep `NULL` in all three columns. No historical
 queue state is invented for them — a pre-existing `created` row means "created
 immediately", which is what it was.
 
+A schema `CHECK` makes exactly these four rows the only representable ones —
+not a convention but an enforced invariant:
+
+```sql
+CHECK(
+  (outcome = 'queued'  AND queued_at IS NOT NULL AND intent_json IS NOT NULL AND task_id IS NULL     AND promoted_at IS NULL)
+  OR (outcome = 'created' AND queued_at IS NULL     AND promoted_at IS NULL     AND task_id IS NOT NULL)
+  OR (outcome = 'created' AND queued_at IS NOT NULL AND promoted_at IS NOT NULL AND task_id IS NOT NULL)
+  OR (outcome IN ('skipped-overlap','skipped-catch-up','skipped-disabled')
+      AND queued_at IS NULL AND promoted_at IS NULL AND task_id IS NULL)
+)
+```
+
+Because of this, promotion cannot move a row through outcome/promoted_at/
+task_id one column at a time — the transient state "`created`, no `task_id`
+yet" would itself violate the CHECK. §6 writes all three together, in the
+task's own creation transaction, in one statement.
+
 ## 5. Crash recovery
 
 The queue is a query, not a cache:
@@ -117,36 +152,44 @@ Promotion is one synchronous `better-sqlite3` transaction:
 
 ```
 BEGIN
-  1. front  = oldest 'queued' occurrence for this schedule       (FIFO, §2)
-  2. guard  = schedule enabled AND scheduler enabled AND
-              this schedule has NO non-terminal occurrence task  (§10)
-  3. CAS    = UPDATE ... SET outcome='created', promoted_at=?
-              WHERE schedule_id=? AND occurrence_at=? AND outcome='queued'
-              -- 0 rows changed → someone else won → abort, promote nothing
-  4. task   = tasks.create(front.intent_json)                    (§3)
-  5. park   = attach(task, { kind:'time', notBefore: occurrence_at })
-              -- the EXISTING K1 wake path; K5 still owns no execution path
-  6. link   = UPDATE ... SET task_id = ? WHERE (schedule_id, occurrence_at)
-  7. UPDATE schedules SET last_fired_at, last_task_id (display only)
+  1. front   = oldest 'queued' occurrence for this schedule       (FIFO, §2)
+  2. guard   = schedule enabled AND scheduler enabled AND
+               this schedule has NO non-terminal occurrence task  (§10)
+  3. intent  = parse front.intent_json, or THROW (fail closed, §3)
+               -- never falls back to the schedule's current intent
+  4. task    = createOccurrenceTask(intent, front.occurrence_at)  (§3)
+               -- tasks.create(...) + attach(task, { kind:'time',
+               -- notBefore: occurrence_at }) — the EXISTING K1 wake path;
+               -- K5 still owns no execution path
+  5. CAS     = UPDATE ... SET outcome='created', promoted_at=?, task_id=?
+               WHERE schedule_id=? AND occurrence_at=? AND outcome='queued'
+               -- 0 rows changed → someone else won → THROW (never commit an
+               -- orphaned task with no occurrence pointing at it)
+  6. UPDATE schedules SET last_fired_at, last_task_id (display only)
 COMMIT
 ```
 
+`outcome`, `promoted_at` and `task_id` move together in the single UPDATE at
+step 5, never one column at a time: the schema `CHECK` (§4) does not allow a
+`created` row with no `task_id`, so nothing in this transaction may ever write
+that combination, even transiently within it.
+
 **The crash boundary is the commit, and there is only one.** SQLite commits
-steps 3–7 together or none of them, so neither failure mode is reachable:
+steps 3–6 together or none of them, so neither failure mode is reachable:
 
 - **A — task created but the occurrence is still promotable.** Impossible: the
-  CAS in step 3 and the task in step 4 are in the same transaction. A crash
-  before the commit rolls back the task with the CAS.
+  task in step 4 and the CAS in step 5 are in the same transaction. A crash
+  before the commit rolls back the task with the occurrence.
 - **B — occurrence marked promoted but no task exists.** Impossible for the same
   reason, in the other direction.
 
-Step 3 is also the concurrency answer. SQLite serialises writers, so of two
-racing promoters exactly one sees `outcome = 'queued'` and flips it; the other's
-`UPDATE` matches zero rows and promotes nothing. A cron tick, a terminal event,
-the fallback sweep and boot recovery all call the same function and all lose to
-each other the same way.
+Step 5 is also the concurrency answer. SQLite serialises writers, so of two
+racing promoters exactly one sees `outcome = 'queued'` and flips it; the other
+throws and rolls back its own just-created task, promoting nothing. A cron
+tick, a terminal event, the fallback sweep and boot recovery all call the same
+function and all lose to each other the same way.
 
-Step 5 reuses `Scheduler.attach`, which is how an occurrence has always been
+Step 4 reuses `Scheduler.attach`, which is how an occurrence has always been
 launched. No second task-launch path exists.
 
 ## 7. Wake protocol — event-driven, with the existing bounded fallback
@@ -289,13 +332,31 @@ never orders the queue:
 - per occurrence: `occurrenceAt`, `outcome`, `queuedAt`, `promotedAt`, `taskId`
 - per **queued** occurrence: `queuePosition` — 1-based FIFO rank
 
+`GET /api/schedules/:id` returns two occurrence views, not one:
+
+- `occurrences` — recent history, newest first, capped at 50. Good for "what
+  just happened", wrong for "what's next": once a backlog outgrows the page,
+  the queue HEAD (the oldest queued row, next to promote) is exactly the row a
+  newest-first cap pushes out first.
+- `queuedOccurrences` — the FIFO backlog itself, oldest first, capped but never
+  truncated from the front, so position 1 is always in the response regardless
+  of how large the backlog or the schedule's total history has grown. Same
+  server-computed `queuePosition`; the browser still sorts nothing.
+
 Schedule **creation** still lives in Cockpit's Schedule tab (K6); this repo's
 operator UI has no intake form for one and does not gain one here. What it does
 have is the Orbital Inspector's Schedule tab, and that is where the queue is
 rendered: each schedule with its cron, timezone, next fire, active occurrence
 task and backlog count, a Skip/Queue selector that issues the ordinary
-`PATCH /api/schedules/:id`, and its recent occurrences labelled with what
-actually happened to them — "Queued — waiting for the previous occurrence" with
-its position, "Promoted from the queue" with the promotion time and task, plain
+`PATCH /api/schedules/:id`, and its occurrence list — the queue head from
+`queuedOccurrences` first, then recent non-queued history — labelled with what
+actually happened: "Queued — waiting for the previous occurrence" with its
+position, "Promoted from the queue" with the promotion time and task, plain
 "created" with its task, and the unchanged `skipped-overlap`. Every one of those
 values arrives decided from the reads above; the browser sorts nothing.
+
+The readout polls on the same bounded cadence as the rest of the Inspector
+panel (4s) so a promotion, a terminal task, a new queued occurrence or the
+fallback sweep — none of which the browser initiates — eventually becomes
+visible without remounting the panel; an overlap-mode change still refreshes
+immediately, on top of that poll.
