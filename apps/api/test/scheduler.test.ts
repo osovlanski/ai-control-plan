@@ -488,7 +488,7 @@ describe('K4 dependency waits', () => {
     const id = built.tasks.create({ goal: 'x' }).taskId;
     expect(() => s.attach(id, { kind: 'dependency', dependsOn: [] })).toThrow(/at least one dependency/);
     expect(() => s.attach(id, { kind: 'dependency', dependsOn: ['a'], onDependencyFailure: 'explode' as never })).toThrow(/onDependencyFailure/);
-    expect(() => s.attach(id, { kind: 'nonsense' as never, notBefore: now().toISOString() })).toThrow(/time, quota or dependency/);
+    expect(() => s.attach(id, { kind: 'nonsense' as never, notBefore: now().toISOString() })).toThrow(/time, quota, dependency or resource/);
     s.attach(id, { kind: 'time', notBefore: new Date(instant + 1000).toISOString() });
     expect(s.condition(id)).toMatchObject({ kind: 'time', dependsOn: [] });
   });

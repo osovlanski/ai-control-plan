@@ -18,6 +18,7 @@ import {
   ringOf,
   ringPath,
   shortFilterReason,
+  resourceNextStep,
   waitKindLabel,
   type ActualExecution,
 } from "./orbital.js";
@@ -55,6 +56,7 @@ describe("operator presentation boundaries", () => {
     expect(waitKindLabel({ kind: "time" })).toBe("Time wait · K1");
     expect(waitKindLabel({ kind: "quota" })).toBe("Quota wait · K2");
     expect(waitKindLabel({ kind: "dependency" })).toBe("Dependency wait · K4");
+    expect(waitKindLabel({ kind: "resource" })).toBe("Resource wait · K4b");
   });
 
   it("buckets idle-probe attempt age into freshness", () => {
@@ -165,6 +167,41 @@ describe("orbital field geometry", () => {
     expect(nextStep({ state: "WAITING_RESOURCE", wait })).toMatch(/Scheduler wakes it at .* and dispatches once/);
     expect(nextStep({ state: "WAITING_RESOURCE", wait: { ...wait, kind: "quota" } })).toMatch(/revalidates quota evidence/);
     expect(nextStep({ state: "WAITING_RESOURCE", wait, schedulerEnabled: false })).toMatch(/disabled/);
+    // K4b: a resource wait reports the pool, not a wake time it does not control.
+    const resourceWait = { resource: "gpu", units: 1, capacity: 2, claimedUnits: 2, availableUnits: 0, queuePosition: 1, queueLength: 3, blockedBy: "capacity", waitKind: "resource" } as const;
+    expect(nextStep({ state: "WAITING_RESOURCE", wait: { ...wait, kind: "resource" }, resourceWait })).toMatch(/0 of 2 free/);
+    expect(nextStep({ state: "WAITING_RESOURCE", wait: { ...wait, kind: "resource" } })).toMatch(/not available/);
+    expect(resourceNextStep({ ...resourceWait, blockedBy: "queue", queuePosition: 2 })).toMatch(/2 of 3 in the pool queue/);
+    expect(resourceNextStep({ ...resourceWait, blockedBy: "unsatisfiable" })).toMatch(/above the pool capacity/);
+    expect(resourceNextStep({ ...resourceWait, blockedBy: "undeclared", capacity: undefined })).toMatch(/not declared/);
+    expect(resourceNextStep({ ...resourceWait, blockedBy: "eligible", availableUnits: 2 })).toMatch(/claims the slot/);
+    // K4b fairness: the requirement is carried independently of the wait kind, so
+    // a pool prerequisite is reported even when the task waits on something else.
+    expect(nextStep({ state: "WAITING_RESOURCE", wait: { ...wait, kind: "dependency" },
+      resourceWait: { ...resourceWait, blockedBy: "condition", queuePosition: 0, waitKind: "dependency" } }))
+      .toBe("Waiting for dependency; the resource requirement remains gpu/1 and is re-evaluated after the dependency clears.");
+    expect(nextStep({ state: "WAITING_RESOURCE", wait: { ...wait, kind: "quota" },
+      resourceWait: { ...resourceWait, blockedBy: "condition", queuePosition: 0, waitKind: "quota" } }))
+      .toBe("Quota retry must clear first; then the task must reacquire gpu/1 before routing.");
+    // Not due yet is never "eligible", whatever the pool has free.
+    expect(resourceNextStep({ ...resourceWait, blockedBy: "condition", queuePosition: 0, availableUnits: 2, waitKind: "time" }))
+      .toMatch(/Not due yet; the resource requirement remains gpu\/1/);
+    // Ready for the pool, but the wake still re-checks the wait's own kind.
+    expect(resourceNextStep({ ...resourceWait, waitKind: "quota" })).toMatch(/Quota evidence is revalidated at that same wake/);
+    // A FAILED dependency never "clears": the next wake applies the policy, and
+    // the operator needs to read the action, not a wait that will never end.
+    const depFailed = { ...resourceWait, waitKind: "dependency", blockedBy: "condition", queuePosition: 0 } as const;
+    expect(resourceNextStep({ ...depFailed, dependencyFailure: { failed: ["AG-1"], policy: "cancel" } }))
+      .toBe("Dependency failed; the next wake cancels this task. The resource requirement is not competing for a slot.");
+    expect(resourceNextStep({ ...depFailed, dependencyFailure: { failed: ["AG-1"], policy: "wait-input" } }))
+      .toBe("Dependency failed; the next wake moves this task to operator input. The resource requirement is not competing for a slot.");
+    // wake-anyway under a not-yet-due re-check is not the failure wording: the
+    // requirement is competing, so the ordinary "condition" message applies.
+    expect(resourceNextStep({ ...depFailed, waitKind: "time", dependencyFailure: { failed: ["AG-1"], policy: "wake-anyway" } }))
+      .toMatch(/Not due yet; the resource requirement remains gpu\/1/);
+    // wake-anyway continues, so the requirement IS competing for the slot.
+    expect(resourceNextStep({ ...resourceWait, waitKind: "dependency", dependencyFailure: { failed: ["AG-1"], policy: "wake-anyway" } }))
+      .toMatch(/failed dependency policy allows continuation, so the resource requirement is competing for the slot/);
     expect(nextStep({ state: "WAITING_INPUT" })).toMatch(/will not wake it/);
     expect(nextStep({ state: "RUNNING", assistant: "fake-a" })).toMatch(/fake-a/);
     expect(nextStep({ state: "MYSTERY" })).toMatch(/Unknown state/);

@@ -35,7 +35,7 @@ export interface WaitHistoryEntry { at: string; actor: string; outcome: string; 
 export interface TaskWait {
   generation: number;
   state: string;
-  kind: "time" | "quota" | "dependency";
+  kind: "time" | "quota" | "dependency" | "resource";
   reason: string;
   notBefore: string;
   checkpointId?: string;
@@ -44,6 +44,9 @@ export interface TaskWait {
   /** K4 dependency subjects — the tasks that must be terminal before a wake. */
   dependsOn?: string[];
   onDependencyFailure?: "cancel" | "wake-anyway" | "wait-input";
+  /** K4b — the named pool and unit count this wait needs. */
+  resource?: string;
+  units?: number;
   history?: WaitHistoryEntry[];
   blockers?: QuotaBlocker[];
 }
@@ -63,6 +66,40 @@ export interface SchedulerStatus {
     ageMs: number;
     detail?: string;
   }>;
+  /** K4b pools: configured capacity, live claims and the FIFO wait queue. */
+  resources?: Array<{ resource: string; capacity?: number; claimedUnits: number; availableUnits: number; waitingTaskIds: string[]; notReadyTaskIds: string[] }>;
+}
+
+/** K4b derived pool truth for one waiting task. Computed per request, never stored. */
+export interface ResourceWaitStatus {
+  resource: string;
+  units: number;
+  capacity?: number;
+  claimedUnits: number;
+  availableUnits: number;
+  /** 0 when the task is not in the pool queue at all (another condition blocks it). */
+  queuePosition: number;
+  queueLength: number;
+  blockedBy: "capacity" | "queue" | "undeclared" | "unsatisfiable" | "condition" | "eligible";
+  /** Why another condition keeps it out of the queue; set only for blockedBy "condition". */
+  blockedReason?: string;
+  /** The kind of the wait carrying the requirement — it is often not "resource". */
+  waitKind: TaskWait["kind"];
+  /**
+   * Set only when the carrying wait is a dependency wait whose subjects have
+   * FAILED. A failed dependency never "clears", so the next action is the
+   * recorded policy, not more waiting.
+   */
+  dependencyFailure?: { failed: string[]; policy: "cancel" | "wake-anyway" | "wait-input" };
+}
+
+/** A granted K4b slot claim. */
+export interface ResourceClaim {
+  claim_id: number;
+  resource: string;
+  units: number;
+  dispatch_id: string;
+  claimed_at: string;
 }
 
 export interface Dispatch {
@@ -123,6 +160,9 @@ export interface TaskDetail {
   schedulerEvents?: Array<{ id: number; at: string; type: string; payload: Record<string, unknown> }>;
   dispatches?: Dispatch[];
   wait?: TaskWait;
+  /** K4b: why this task waits on a pool, and the slot it holds. */
+  resourceWait?: ResourceWaitStatus | null;
+  resourceClaim?: ResourceClaim | null;
   schedulerEnabled?: boolean;
   id: string;
   goal: string;
@@ -275,7 +315,9 @@ export const api = {
       `/api/tasks/${id}/checkpoints`,
     ),
   handoff: (id: string, to?: string) =>
-    req<{ runId: string; assistantId: string }>(`/api/tasks/${id}/handoff`, {
+    // A task that still owes a K4b pool claim is not started by the handoff: it
+    // re-enters the scheduler and starts when the pool can grant the slot.
+    req<{ runId: string; assistantId: string } | { deferred: "resource"; resource: string; units: number }>(`/api/tasks/${id}/handoff`, {
       method: "POST",
       body: JSON.stringify({ to }),
     }),

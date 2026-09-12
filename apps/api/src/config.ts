@@ -63,6 +63,17 @@ export interface WorkspaceConfig {
      * so the operator opts in per workspace.
      */
     quotaProbe?: boolean;
+    /**
+     * K4b named resource pools: pool name -> capacity in units. Empty by default;
+     * an undeclared pool cannot be waited on, because a slot count we invented
+     * would not be honest. Capacity is re-read at every wake, so an operator edit
+     * plus restart is the whole change protocol — no pool CRUD surface.
+     *
+     * ponytail: only tasks that DECLARE a resource wait claim units; a plain start
+     * consumes nothing. Per-launch accounting needs every caller to declare intent,
+     * which is a larger slice than K4b.
+     */
+    resources?: Record<string, number>;
   };
   sync: {
     /** Local hour (0-23) for the daily capability sync. */
@@ -132,6 +143,29 @@ export interface ResolvedConfig extends Omit<WorkspaceConfig, "execution" | "mod
   warnings: string[];
 }
 
+/**
+ * Pool declarations as a null-prototype map of OWN keys only.
+ *
+ * A pool name is durable TASK data — it arrives from a wait row, not from the
+ * config file — so the map it is looked up in must not be able to answer for a
+ * name nobody declared. A plain object spread cannot give that guarantee twice
+ * over: `{...x}` invokes the `__proto__` SETTER, so one crafted key silently
+ * re-parents the whole map, and every inherited member (`constructor`,
+ * `toString`, `valueOf`) then reads back as a declaration. A null-prototype
+ * target has no setter and nothing to inherit, so an own key is the only key.
+ *
+ * Values are copied unvalidated on purpose: `validate` below reports a bad
+ * capacity by name rather than silently dropping it, and `Scheduler.capacity`
+ * fails closed on anything that is not a finite integer.
+ */
+function pools(declared?: Record<string, number>): Record<string, number> {
+  const resources = Object.create(null) as Record<string, number>;
+  if (declared && typeof declared === 'object') {
+    for (const name of Object.getOwnPropertyNames(declared)) resources[name] = (declared as Record<string, number>)[name]!;
+  }
+  return resources;
+}
+
 const PERSONAL_DEFAULTS: Omit<WorkspaceConfig, "workspace"> = {
   api: { host: "127.0.0.1", port: 4176, auth: { bootstrapTtlSeconds: 10, sessionTtlSeconds: 43200, rotationGraceSeconds: 300 } },
   assistants: {
@@ -153,7 +187,7 @@ const PERSONAL_DEFAULTS: Omit<WorkspaceConfig, "workspace"> = {
     softThresholdPct: 85,
     triggers: ["quota", "rate_limit", "provider_unavailable"],
   },
-  scheduler: { enabled: true, maxAutoWakes: 3, quotaProbe: false },
+  scheduler: { enabled: true, maxAutoWakes: 3, quotaProbe: false, resources: pools() },
   sync: { dailyHour: 7 },
   execution: { harnessModes: { single: false } },
   // K13 ships in shadow. Turning this on is an explicit operator act that still
@@ -228,7 +262,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ResolvedConfig
     policy: { ...defaults.policy, ...file.policy },
     failover: { ...defaults.failover, ...file.failover },
     sync: { ...defaults.sync, ...file.sync },
-    scheduler: { enabled: file.scheduler?.enabled ?? true, maxAutoWakes: file.scheduler?.maxAutoWakes ?? 3, quotaProbe: file.scheduler?.quotaProbe ?? false },
+    scheduler: { enabled: file.scheduler?.enabled ?? true, maxAutoWakes: file.scheduler?.maxAutoWakes ?? 3, quotaProbe: file.scheduler?.quotaProbe ?? false, resources: pools(file.scheduler?.resources) },
     execution,
   };
 
@@ -358,6 +392,10 @@ function validate(config: WorkspaceConfig, path: string): void {
   if (typeof config.scheduler?.enabled !== "boolean") problems.push("scheduler.enabled must be a boolean");
   if (config.scheduler?.maxAutoWakes !== undefined && (!Number.isInteger(config.scheduler.maxAutoWakes) || config.scheduler.maxAutoWakes < 1 || config.scheduler.maxAutoWakes > 100)) problems.push("scheduler.maxAutoWakes must be an integer from 1 to 100");
   if (config.scheduler?.quotaProbe !== undefined && typeof config.scheduler.quotaProbe !== "boolean") problems.push("scheduler.quotaProbe must be a boolean");
+  for (const [name, capacity] of Object.entries(config.scheduler?.resources ?? {})) {
+    if (!/^[a-z0-9][a-z0-9._-]{0,63}$/i.test(name)) problems.push(`scheduler.resources key ${JSON.stringify(name)} must be 1-64 chars of letters, digits, dot, dash or underscore`);
+    if (!Number.isInteger(capacity) || capacity < 0 || capacity > 10_000) problems.push(`scheduler.resources.${name} must be an integer from 0 to 10000`);
+  }
   const loopbackHosts = new Set(["127.0.0.1", "::1", "localhost"]);
   if (!loopbackHosts.has(config.api.host)) {
     problems.push(`api.host must be a loopback address until authenticated remote mode exists, got ${config.api.host}`);

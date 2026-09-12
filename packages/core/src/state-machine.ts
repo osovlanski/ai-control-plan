@@ -62,9 +62,31 @@ export function isTerminal(state: TaskState): boolean {
   return TERMINAL_STATES.includes(state);
 }
 
-export function canTransition(from: TaskState, to: TaskState, pauseKind?: PauseKind): boolean {
+/**
+ * The two narrowly authorized exceptions to "a pause needs a human" (CR-35).
+ * Both are K4b: a pool claim is the one prerequisite an operator cannot grant
+ * by deciding, so the decision has to be able to wait for it.
+ *
+ * `resource-repair` — an operator repairing a resource request the pool can no
+ *   longer satisfy. That is a configuration fault, not a judgement, and it is
+ *   the only `intervention_required` pause whose repair is itself a wait.
+ * `resource-continuation` — an operator continuation (manual handoff) of a task
+ *   that still owes the pool a claim. `WAITING_INPUT → HANDING_OFF → RUNNING` is
+ *   already open to an operator from ANY pause kind, so parking that same
+ *   decision until a slot frees adds no authority; it removes the one path that
+ *   could have started execution without capacity.
+ *
+ * Neither is available to an automatic actor, and neither makes a pause
+ * generically wait-eligible: approval, verification and comparison pauses stay
+ * exactly as non-deferrable as they were.
+ */
+export type TransitionGrant = "resource-repair" | "resource-continuation";
+
+export function canTransition(from: TaskState, to: TaskState, pauseKind?: PauseKind, grant?: TransitionGrant): boolean {
   if (from === "WAITING_INPUT" && to === "WAITING_RESOURCE" &&
-      !["limit", "provider_unavailable", "no_candidate", "harness_error"].includes(pauseKind ?? "")) return false;
+      !["limit", "provider_unavailable", "no_candidate", "harness_error"].includes(pauseKind ?? "") &&
+      !(grant === "resource-repair" && pauseKind === "intervention_required") &&
+      grant !== "resource-continuation") return false;
   return TRANSITIONS[from].includes(to);
 }
 
@@ -79,8 +101,8 @@ export class InvalidTransitionError extends Error {
 }
 
 /** Returns `to` if the transition is legal, otherwise throws. */
-export function assertTransition(from: TaskState, to: TaskState, pauseKind?: PauseKind): TaskState {
-  if (!canTransition(from, to, pauseKind)) throw new InvalidTransitionError(from, to);
+export function assertTransition(from: TaskState, to: TaskState, pauseKind?: PauseKind, grant?: TransitionGrant): TaskState {
+  if (!canTransition(from, to, pauseKind, grant)) throw new InvalidTransitionError(from, to);
   return to;
 }
 

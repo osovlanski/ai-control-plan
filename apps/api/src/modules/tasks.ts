@@ -1,4 +1,4 @@
-import type { PauseKind, TaskIntent, RoutingProfile, TaskEnvelope, TaskId, TaskMode, TaskState } from "@agent-plane/core";
+import type { PauseKind, TransitionGrant, TaskIntent, RoutingProfile, TaskEnvelope, TaskId, TaskMode, TaskState } from "@agent-plane/core";
 import { assertTransition, isTaskState, isTerminal, newTaskId, redactValue } from "@agent-plane/core";
 import type { Db } from "../db/index.js";
 
@@ -98,11 +98,11 @@ export class TaskStore {
   }
 
   /** Guarded state transition; keeps row and envelope in sync. Returns the updated envelope. */
-  transition(taskId: string, to: TaskState, pauseKind?: PauseKind): TaskEnvelope {
+  transition(taskId: string, to: TaskState, pauseKind?: PauseKind, grant?: TransitionGrant): TaskEnvelope {
     const row = this.get(taskId);
     if (!row) throw new Error(`Unknown task ${taskId}`);
     if (!isTaskState(row.state)) throw new Error(`Corrupt state for ${taskId}: ${row.state}`);
-    assertTransition(row.state, to, row.pause_kind ?? undefined);
+    assertTransition(row.state, to, row.pause_kind ?? undefined, grant);
     if (row.state === "WAITING_RESOURCE" && to === "ROUTING") {
       if (!this.db.prepare("SELECT 1 FROM dispatches d JOIN wait_conditions w ON w.task_id = d.task_id AND w.generation = d.condition_generation WHERE d.task_id = ? AND d.phase = 'reserved' AND w.state = 'consumed'").get(taskId)) throw new Error("Only wake(generation) can release scheduler ownership");
     }

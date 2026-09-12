@@ -62,6 +62,7 @@ describe("migrations", () => {
       "quota_snapshots",
       "repository_identities",
       "repository_identity_observations",
+      "resource_claims",
       "routing_decisions",
       "runs",
       "schedule_occurrences",

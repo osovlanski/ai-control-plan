@@ -46,18 +46,72 @@ export type WaitInput = TimeWaitInput
   | { kind: 'quota'; notBefore: string; reason?: string; assistants?: AssistantId[] }
   /** K4. `notBefore` is the earliest re-check, not the wake instant: dependency wakes are
    *  event-driven and every wake re-reads the dependency states. Defaults to now. */
-  | { kind: 'dependency'; notBefore?: string; reason?: string; dependsOn: string[]; onDependencyFailure?: OnDependencyFailure };
+  | { kind: 'dependency'; notBefore?: string; reason?: string; dependsOn: string[]; onDependencyFailure?: OnDependencyFailure }
+  /** K4b. `notBefore` is the earliest re-check, not the wake instant: a release event wakes the
+   *  FIFO front waiter, and the timer sweep is the bounded fallback. Defaults to now. */
+  | { kind: 'resource'; notBefore?: string; reason?: string; resource: string; units?: number };
 export interface TimeWaitInput { kind: 'time'; notBefore: string; reason?: string }
+/**
+ * K4b derived pool truth. Capacity is config; usage is the live claim sum. Nothing
+ * here is stored: a stale occupancy number would be worse than none (K9 lesson).
+ */
+export interface ResourcePool {
+  resource: string;
+  /** Configured capacity, or undefined when the pool is no longer declared. */
+  capacity?: number;
+  claimedUnits: number;
+  availableUnits: number;
+  /** Ready resource waits for this pool, oldest requirement first — the FIFO order wakes use. */
+  waitingTaskIds: string[];
+  /**
+   * Tasks that carry a requirement on this pool but whose OTHER preconditions are
+   * not satisfied yet. They are deliberately outside the FIFO — they could not be
+   * granted, so they must not hold its head of line — but they are still waiting
+   * on the pool, and a status that hid them would not be true.
+   */
+  notReadyTaskIds: string[];
+}
+/** Operator/failover continuation intent carried across a K4b pool deferral. */
+export interface ContinuationIntent {
+  /** The `handoffs.trigger` audit label this continuation belongs to. */
+  trigger: 'manual' | 'quota' | 'failure';
+  /** Operator-named target assistant, applied as the routing override at the grant. */
+  to?: AssistantId;
+  /** The assistant handed off FROM: excluded at the grant and named in the prompt. */
+  from?: AssistantId;
+  /** Reason rendered into the receiving agent's handoff prompt. */
+  reason?: string;
+}
 export interface WaitCondition {
   schemaVersion: 1;
   taskId: string;
   generation: number;
   state: 'active' | 'consumed' | 'replaced' | 'cancelled' | 'expired';
-  kind: 'time' | 'quota' | 'dependency';
+  kind: 'time' | 'quota' | 'dependency' | 'resource';
   checkpointId?: string;
   /** kind=dependency: every listed task must be terminal before a wake dispatches. */
   dependsOn?: string[];
   onDependencyFailure?: OnDependencyFailure;
+  /** kind=resource: the named pool and unit count this wait needs (K4b). */
+  resource?: string;
+  units?: number;
+  /**
+   * When this REQUIREMENT started waiting for the pool — the K4b FIFO key. A
+   * requirement carried across a quota re-park, a context continuation or a
+   * recovery re-park keeps its original age, so re-parking never costs it a
+   * place. `createdAt` still means when this condition row was written.
+   */
+  resourceQueuedAt?: string;
+  /**
+   * K4b: the continuation this wait must produce when it is finally granted.
+   * A manual handoff (or an automatic failover) for a task that still owes the
+   * pool a claim cannot start execution itself — it re-enters the ordinary wake
+   * funnel — so the operator's target, the assistant being handed off FROM and
+   * the reason the receiving agent is shown are recorded here rather than lost
+   * in the deferral. Routing still happens fresh at the grant, so a target that
+   * has since become ineligible is re-decided, not replayed.
+   */
+  continuation?: ContinuationIntent;
   blockers?: QuotaBlocker[];
   assistants?: AssistantId[];
   notBefore: string;
@@ -139,7 +193,9 @@ export interface SchedulerEvent {
   dispatchId?: string;
   type: 'wait.attached' | 'wait.replaced' | 'dispatch.reserved' | 'dispatch.start_attempted'
     | 'dispatch.started' | 'dispatch.ambiguous' | 'dispatch.reparked' | 'dispatch.aborted' | 'wait.cancelled'
-    | 'dependency.failed';
+    | 'dependency.failed'
+    /** K4b: the durable audit trail of who holds a slot and why another task waited. */
+    | 'resource.claimed' | 'resource.released' | 'resource.unsatisfiable';
   at: string;
   payload: Record<string, unknown>;
 }

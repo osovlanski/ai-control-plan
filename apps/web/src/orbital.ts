@@ -1,5 +1,5 @@
 import type { ModelRecommendation } from "@agent-plane/core";
-import type { TaskEvent, TaskWait } from "./api.js";
+import type { ResourceWaitStatus, TaskEvent, TaskWait } from "./api.js";
 import { missionState, type ExecutionRead } from "./board/execution.js";
 
 /** Presentation vocabulary only; this does not extend the kernel state machine. */
@@ -98,7 +98,9 @@ export function waitKindLabel(wait: Pick<TaskWait, "kind">): string {
       ? "Time wait · K1"
       : wait.kind === "dependency"
         ? "Dependency wait · K4"
-        : `Wait · ${wait.kind}`;
+        : wait.kind === "resource"
+          ? "Resource wait · K4b"
+          : `Wait · ${wait.kind}`;
 }
 
 /** Coarse freshness bucket for an idle quota probe attempt age (K3). */
@@ -339,6 +341,48 @@ export function fieldPulse(tasks: Array<{ state: string; execution?: ExecutionRe
   return pulse;
 }
 
+/**
+ * K4b next action for a pool wait. Says what the task needs and what event frees
+ * it; it never invents an availability number the API did not report.
+ *
+ * A requirement is carried independently of `wait.kind`, so this also has to be
+ * honest about the case where the POOL is not what the task is waiting for: a
+ * dependency or a quota retry can hold a task that still owes the pool a claim
+ * before it can route, and saying "the pool can satisfy it now" there would be
+ * an answer to a question nobody asked.
+ */
+export function resourceNextStep(status?: ResourceWaitStatus | null): string {
+  if (!status) return "Waits for a resource slot; pool occupancy is not available.";
+  const need = `${status.units} unit${status.units === 1 ? "" : "s"} of ${status.resource}`;
+  const slot = `${status.resource}/${status.units}`;
+  if (status.blockedBy === "undeclared") return `Needs ${need}, but that pool is not declared; an operator must restore it in scheduler.resources.`;
+  if (status.blockedBy === "unsatisfiable") return `Needs ${need}, above the pool capacity of ${status.capacity ?? 0}; an operator must raise capacity or reduce the request.`;
+  // A FAILED dependency is not a wait: the next wake applies the recorded policy.
+  // Describing it as "waiting for the dependency to clear" would tell the operator
+  // to wait for something that has already happened and will never change.
+  const failed = status.dependencyFailure;
+  if (status.blockedBy === "condition") {
+    // Only cancel/wait-input hold the requirement out of the pool. Under
+    // wake-anyway the requirement is competing and something else (a future
+    // re-check) is what "condition" means here, so the ordinary wording applies.
+    if (failed && failed.policy !== "wake-anyway") {
+      return failed.policy === "cancel"
+        ? `Dependency failed; the next wake cancels this task. The resource requirement is not competing for a slot.`
+        : `Dependency failed; the next wake moves this task to operator input. The resource requirement is not competing for a slot.`;
+    }
+    if (status.waitKind === "dependency") return `Waiting for dependency; the resource requirement remains ${slot} and is re-evaluated after the dependency clears.`;
+    if (status.waitKind === "quota") return `Quota retry must clear first; then the task must reacquire ${slot} before routing.`;
+    return `Not due yet; the resource requirement remains ${slot} and re-enters the pool queue at its original place once it is due.`;
+  }
+  // Ready for the pool, but the wake it is waiting for still re-checks its own kind.
+  const also = status.waitKind === "quota" ? " Quota evidence is revalidated at that same wake."
+    : failed?.policy === "wake-anyway" ? " The failed dependency policy allows continuation, so the resource requirement is competing for the slot."
+    : status.waitKind === "dependency" ? " The dependencies are re-checked at that same wake." : "";
+  if (status.blockedBy === "queue") return `Needs ${need}; it is ${status.queuePosition} of ${status.queueLength} in the pool queue and wakes when the tasks ahead release.${also}`;
+  if (status.blockedBy === "capacity") return `Needs ${need}; ${status.availableUnits} of ${status.capacity ?? 0} free. Wakes when a holder releases.${also}`;
+  return `Needs ${need}; the pool can satisfy it now, so the next wake claims the slot and dispatches.${also}`;
+}
+
 /** "What happens next" — derived only from persisted K1–K3 truth. */
 export function nextStep(input: {
   state: string;
@@ -346,6 +390,8 @@ export function nextStep(input: {
   schedulerEnabled?: boolean;
   assistant?: string | null;
   pauseKind?: string | null;
+  /** K4b derived pool truth, when the task waits on a pool. */
+  resourceWait?: ResourceWaitStatus | null;
 }): string {
   const { state, wait } = input;
   if (state === "AWAITING_APPROVAL") return "Waits for your approval; open full controls, then Sessions to review the pending request.";
@@ -353,6 +399,9 @@ export function nextStep(input: {
   if (state === "WAITING_RESOURCE" && wait) {
     if (input.schedulerEnabled === false) return "Scheduling is disabled; waits until an operator runs it now.";
     const at = new Date(wait.notBefore).toLocaleString();
+    // The requirement outlives one condition, so a pool prerequisite is reported
+    // whenever the task has one — not only when `kind` happens to be "resource".
+    if (wait.kind === "resource" || input.resourceWait) return resourceNextStep(input.resourceWait);
     return wait.kind === "quota"
       ? `Wakes at ${at}, revalidates quota evidence, then re-routes from its checkpoint.`
       : `Scheduler wakes it at ${at} and dispatches once.`;

@@ -1,6 +1,6 @@
 import { HandoffService } from './harness/handoff.js';
 import { randomUUID } from 'node:crypto';
-import { canTransition, isTerminal, redactValue, type Dispatch, type DispatchOrigin, type TaskState, type OnDependencyFailure, type RoutingExplanation, type SchedulerEvent, type WaitInput, type WaitCondition } from '@agent-plane/core';
+import { canTransition, isTerminal, redactValue, type ContinuationIntent, type Dispatch, type DispatchOrigin, type TaskState, type OnDependencyFailure, type ResourcePool, type RoutingExplanation, type SchedulerEvent, type WaitInput, type WaitCondition } from '@agent-plane/core';
 import type { Db } from '../db/index.js';
 import type { ResolvedConfig } from '../config.js';
 import type { TaskStore } from './tasks.js';
@@ -15,7 +15,7 @@ const DEFAULT_MAX_AUTO_WAKES = 3;
 /** A failed dependency is not the scheduler's decision to make on its own. */
 const DEFAULT_ON_DEPENDENCY_FAILURE: OnDependencyFailure = 'wait-input';
 
-type Actor = 'timer' | 'event' | 'operator';
+export type Actor = 'timer' | 'event' | 'operator';
 type WakeResult = { outcome: 'stale'; reason: string } | { outcome: 'dispatched'; dispatchId: string };
 export interface SchedulerDeps {
   db: Db; tasks: TaskStore; orchestrator: Orchestrator; bus: TaskEventBus; config: ResolvedConfig;
@@ -55,13 +55,400 @@ export class Scheduler {
     const schedules = this.d.db.prepare('SELECT COUNT(*) AS count FROM schedules WHERE enabled = 1').get() as { count: number };
     return { enabled: this.enabled, armed: !this.stopped && this.enabled && this.timer !== undefined, dueConditions: due.count, openDispatches: open.count, lastTick: this.lastTick,
       enabledSchedules: schedules.count, nextScheduleFireAt: this.schedules.nextDeadline(),
-      probesEnabled: this.d.probes?.enabled ?? false, probes: this.d.probes?.status() ?? [] };
+      probesEnabled: this.d.probes?.enabled ?? false, probes: this.d.probes?.status() ?? [],
+      resources: this.pools() };
+  }
+
+  /* ------------------------------------------------------------------ K4b --
+   * Resource slots. Capacity is config; occupancy is the live claim sum. Both
+   * are read fresh inside the wake transaction, so nothing about a pool is ever
+   * cached or projected forward — an "available" number is only ever as of now.
+   * ---------------------------------------------------------------------- */
+
+  /**
+   * The ONE place a pool's capacity is read, and the only definition of "this
+   * pool exists". Fail closed on both halves:
+   *
+   *  - OWN property only. A pool name is durable task data, not a config key, so
+   *    an ordinary lookup would let `constructor`, `toString` or a prototype an
+   *    earlier merge injected answer for a pool nobody declared. An inherited
+   *    answer is not a declaration.
+   *  - a validated non-negative integer, or nothing. A non-numeric value would
+   *    turn every capacity comparison into `NaN` — false for BOTH `>` and `<` —
+   *    which is exactly how a capacity check gets bypassed rather than failed.
+   *
+   * Anything else is `undefined`: the pool is undeclared, which `validate`
+   * rejects at attach and `resourceGate` treats as unsatisfiable. No claim, no
+   * dispatch, no arithmetic on a value that was never a number.
+   */
+  private capacity(resource: string): number | undefined {
+    const resources = this.d.config.scheduler?.resources;
+    if (!resources || !Object.prototype.hasOwnProperty.call(resources, resource)) return undefined;
+    const declared: unknown = (resources as Record<string, unknown>)[resource];
+    return Number.isInteger(declared) && (declared as number) >= 0 ? declared as number : undefined;
+  }
+
+  /** Live claimed units for a pool. Inside a wake transaction this is the authority. */
+  private claimed(resource: string): number {
+    return ((this.d.db.prepare('SELECT COALESCE(SUM(units),0) AS units FROM resource_claims WHERE resource = ? AND released_at IS NULL')
+      .get(resource) as { units: number }).units);
+  }
+
+  /**
+   * The one readiness rule (CR-34): may this requirement compete for pool units
+   * right now? It asks only about the conditions OTHER than the pool — the pool
+   * itself is `resourceGate` — and it has no side effects, so the FIFO, the grant
+   * and both read surfaces can call it and cannot disagree.
+   *
+   * A requirement whose other preconditions are unmet could not be granted if it
+   * were at the head of the line, so it must not hold that head: otherwise free
+   * capacity sits idle behind a task that is going to refuse it every sweep.
+   *
+   * Every clause defers to the authority the wake path already uses — there is no
+   * second dependency or quota policy here:
+   *  - not due yet: the same `notBefore` test `wake` applies.
+   *  - dependency: `dependencyStatus`. Pending subjects are not ready. A FAILED
+   *    subject under cancel/wait-input is not ready either — the task's own wake
+   *    performs that transition, and until it does the requirement is not
+   *    competing. `wake-anyway` is ready, because that wake does dispatch.
+   *  - quota: `quotaPlan().quotaBlocked` — every candidate this task could use is
+   *    blocked by live evidence. Unknown or stale evidence is NOT blocked, so K2's
+   *    bounded revalidation (wake, re-route, re-park) is unchanged.
+   * An operator wake skips the FIFO, so it skips these too — but never capacity.
+   */
+  private resourceReady(c: WaitCondition, actor: Actor = 'timer'): { ready: true } | { ready: false; reason: string } {
+    if (actor === 'operator') return { ready: true };
+    if (Date.parse(c.notBefore) > this.now().getTime()) return { ready: false, reason: `Not due until ${c.notBefore}` };
+    if (c.kind === 'dependency') {
+      const { pending, failed } = this.dependencyStatus(c.dependsOn ?? []);
+      if (pending.length) return { ready: false, reason: `Waiting on ${pending.length} unfinished ${pending.length === 1 ? 'dependency' : 'dependencies'}` };
+      const policy = c.onDependencyFailure ?? DEFAULT_ON_DEPENDENCY_FAILURE;
+      if (failed.length && policy !== 'wake-anyway') return { ready: false, reason: `Dependency failed; awaiting ${policy}` };
+    }
+    if (c.kind === 'quota' && this.d.orchestrator.quotaPlan(c.taskId).quotaBlocked) {
+      return { ready: false, reason: 'Quota evidence still blocks every candidate' };
+    }
+    return { ready: true };
+  }
+
+  /**
+   * FIFO order a release wakes in: the pool's READY requirements, oldest
+   * requirement first (`resource_queued_at`, not this condition's `created_at`),
+   * stable id tie-break.
+   *
+   * Ordering by the requirement's own age is what makes a re-park free: a quota
+   * re-park, a context continuation or a recovery re-park writes a NEW condition
+   * but carries the same age, so it re-enters exactly where it was rather than
+   * behind everything that arrived while it was ineligible.
+   */
+  private queued(resource: string): { ready: WaitCondition[]; notReady: WaitCondition[] } {
+    const ready: WaitCondition[] = []; const notReady: WaitCondition[] = [];
+    for (const r of this.d.db.prepare(`SELECT * FROM wait_conditions
+      WHERE state = 'active' AND resource = ? ORDER BY resource_queued_at, task_id`).all(resource) as Record<string, unknown>[]) {
+      const c = this.toCondition(r);
+      (this.resourceReady(c).ready ? ready : notReady).push(c);
+    }
+    return { ready, notReady };
+  }
+  private queue(resource: string): WaitCondition[] { return this.queued(resource).ready; }
+
+  /** Every pool an operator can see: declared pools plus any pool with live claims or waiters. */
+  pools(): ResourcePool[] {
+    const names = new Set<string>(Object.keys(this.d.config.scheduler?.resources ?? {}));
+    for (const r of this.d.db.prepare("SELECT DISTINCT resource FROM resource_claims WHERE released_at IS NULL").all() as { resource: string }[]) names.add(r.resource);
+    for (const r of this.d.db.prepare("SELECT DISTINCT resource FROM wait_conditions WHERE state = 'active' AND resource IS NOT NULL").all() as { resource: string }[]) names.add(r.resource);
+    return [...names].sort().map(resource => {
+      const capacity = this.capacity(resource);
+      const claimedUnits = this.claimed(resource);
+      // The same readiness split the grant path uses, so the pool panel and the
+      // per-task readout can never tell the operator different stories.
+      const q = this.queued(resource);
+      return { resource, capacity, claimedUnits,
+        availableUnits: Math.max(0, (capacity ?? 0) - claimedUnits),
+        waitingTaskIds: q.ready.map(c => c.taskId),
+        notReadyTaskIds: q.notReady.map(c => c.taskId) };
+    });
+  }
+
+  /**
+   * Why this task is not running, as of now. Derived, never stored: a persisted
+   * occupancy number goes stale the moment another task claims, and a stale slot
+   * count is worse than no slot count.
+   *
+   * `condition` means the pool is not what is holding this task: another
+   * precondition is, so the task is outside the queue and has no position in it.
+   * Reporting `eligible` there because capacity happens to be free would be a
+   * lie the operator would act on.
+   */
+  resourceWaitStatus(taskId: string): { resource: string; units: number; capacity?: number; claimedUnits: number; availableUnits: number; queuePosition: number; queueLength: number; blockedBy: 'capacity' | 'queue' | 'undeclared' | 'unsatisfiable' | 'condition' | 'eligible'; blockedReason?: string; waitKind: WaitCondition['kind'];
+    /** Set only when the carrying wait is a dependency wait whose subjects FAILED. */
+    dependencyFailure?: { failed: string[]; policy: OnDependencyFailure } } | undefined {
+    const c = this.condition(taskId);
+    if (!c || c.state !== 'active' || !c.resource) return undefined;
+    const units = c.units ?? 1;
+    const capacity = this.capacity(c.resource);
+    const claimedUnits = this.claimed(c.resource);
+    const availableUnits = Math.max(0, (capacity ?? 0) - claimedUnits);
+    const q = this.queue(c.resource);
+    const ready = this.resourceReady(c);
+    const queuePosition = q.findIndex(r => r.taskId === taskId) + 1;
+    const blockedBy = capacity === undefined ? 'undeclared'
+      : units > capacity ? 'unsatisfiable'
+      : !ready.ready ? 'condition'
+      : queuePosition > 1 ? 'queue'
+      : availableUnits < units ? 'capacity' : 'eligible';
+    // A failed dependency is NOT "waiting for the dependency to clear": the next
+    // wake cancels, parks or continues by the recorded policy, and the operator
+    // reading this needs the action, not a wait that will never end. Derived from
+    // the same `dependencyStatus` authority the wake itself applies.
+    const failed = c.kind === 'dependency' ? this.dependencyStatus(c.dependsOn ?? []) : undefined;
+    return { resource: c.resource, units, capacity, claimedUnits, availableUnits, queuePosition, queueLength: q.length, blockedBy,
+      blockedReason: ready.ready ? undefined : ready.reason, waitKind: c.kind,
+      ...(failed?.failed.length && !failed.pending.length
+        ? { dependencyFailure: { failed: failed.failed, policy: c.onDependencyFailure ?? DEFAULT_ON_DEPENDENCY_FAILURE } } : {}) };
+  }
+
+  /**
+   * The pool requirement a task still CARRIES, which outlives any one condition:
+   * a condition that was consumed by a dispatch, expired by an unsatisfiable
+   * request or replaced by an operator still records what the task needs in
+   * order to run. Only a task whose latest condition names no pool owes the pool
+   * nothing.
+   */
+  requirement(taskId: string): { resource: string; units: number } | undefined {
+    const c = this.condition(taskId);
+    return c?.resource ? { resource: c.resource, units: c.units ?? 1 } : undefined;
+  }
+
+  /**
+   * The launch-funnel invariant (defence in depth): a task that carries a pool
+   * requirement must not reach a provider unless the live claim backing it is
+   * the one THIS start's dispatch owns. A claim belongs to the dispatch it was
+   * granted to, and that dispatch ends with the session it launched — so a
+   * claim left behind by a settled predecessor is not capacity a successor may
+   * run on, and a start that owns no dispatch owns no claim at all.
+   *
+   * That is why there is no dispatchless exception here: a continuation of a
+   * task that still owes the pool a slot re-enters `deferForResource`, which
+   * releases the predecessor's claim with the predecessor's ownership and lets
+   * the successor acquire its own inside the wake transaction.
+   *
+   * It is a closed gate, never an acquisition path — the only place a claim is
+   * ever granted is the wake transaction — so anything that arrives here
+   * unclaimed fails before a provider is called rather than quietly running
+   * outside the pool's capacity.
+   */
+  assertLaunchClaim(taskId: string, dispatchId?: string): void {
+    const need = this.requirement(taskId);
+    if (!need) return;
+    const held = this.claim(taskId);
+    if (!held || held.resource !== need.resource || held.units < need.units) {
+      throw new Error(`Task ${taskId} needs ${need.units} unit(s) of ${need.resource}; execution cannot start without a live resource claim`);
+    }
+    if (held.dispatch_id !== dispatchId) {
+      throw new Error(`Task ${taskId} holds ${need.resource} for dispatch ${held.dispatch_id}; ${dispatchId ? `dispatch ${dispatchId}` : 'a start that owns no dispatch'} does not own that claim`);
+    }
+  }
+
+  /**
+   * The continuation anchor a `WAITING_RESOURCE` transition will accept: the
+   * latest checkpoint belonging to the settled predecessor run, which is exactly
+   * what `TaskStore` enforces. A checkpoint written without a run (a manual
+   * handoff of a task that is not running) is not a continuation anchor.
+   */
+  private anchor(taskId: string): string | undefined {
+    return (this.d.db.prepare(`SELECT c.id FROM checkpoints c
+      WHERE c.task_id = ? AND c.run_id = (SELECT id FROM runs WHERE task_id = ? ORDER BY started_at DESC, rowid DESC LIMIT 1)
+      ORDER BY c.at DESC, c.rowid DESC LIMIT 1`).get(taskId, taskId) as { id: string } | undefined)?.id;
+  }
+
+  /**
+   * A continuation (manual handoff, automatic quota/failure failover) of a task
+   * that still carries a pool requirement. It does NOT start anything: it
+   * re-enters the one funnel that can grant a slot —
+   *
+   *   release the predecessor's claim -> WAITING_RESOURCE
+   *     -> wake(taskId, generation, actor)
+   *     -> capacity check -> claim + dispatch reservation (one transaction)
+   *     -> route -> materialize -> start
+   *
+   * Two rules decide everything here.
+   *
+   * OWNERSHIP. A claim belongs to the dispatch it was granted to, and that
+   * dispatch ends when its session settles. So the predecessor's claim is
+   * released HERE, by the ownership truth `releaseIfIdle` already applies — not
+   * carried into the successor. Inheriting it looked cheaper and was not: the
+   * idle sweep releases exactly that claim the moment the predecessor settles,
+   * so a successor built on it is a successor whose capacity a routine tick can
+   * remove between the check and the start. The successor acquires its own
+   * claim, inside the wake transaction, backed by its own dispatch.
+   *
+   * AUTHORITY. `actor` is the caller's, not a constant. An operator picking a
+   * task to continue may skip the FIFO — choosing what runs next is an operator
+   * decision — and never the capacity. An automatic failover is ordinary
+   * scheduler work: it waits its turn like every other waiter (`resourceReady`,
+   * FIFO, capacity), and it is recorded as `scheduler`, never as an operator.
+   *
+   * Returns `undefined` when the task owes the pool nothing, and the caller
+   * starts normally. The requirement, its `resource_queued_at` seniority, the
+   * continuation anchor and the caller's intent all survive the deferral; only
+   * the routing decision is left to the grant, where it is made from current
+   * evidence rather than replayed from a target that may have become ineligible
+   * while waiting.
+   */
+  async deferForResource(taskId: string, options: { reason: string; intent: ContinuationIntent; actor: Actor; checkpointId?: string; onPark?: () => void }): Promise<WakeResult | undefined> {
+    const need = this.requirement(taskId);
+    if (!need) return undefined;
+    // The predecessor's claim ends with the predecessor. `releaseIfIdle` is the
+    // same ownership test the sweep and every settle path use, so this releases
+    // exactly when a live session no longer owns the slot and never while one does.
+    this.releaseIfIdle(taskId, `continuation: ${options.intent.trigger} handoff, predecessor settled`);
+    const generation = this.d.db.transaction((): number => {
+      const row = this.d.tasks.get(taskId);
+      if (!row || isTerminal(row.state)) throw new Error(`Task ${taskId} is ${row?.state ?? 'unknown'}; there is nothing to continue`);
+      if (this.hasOwner(taskId)) throw new Error('Existing execution prevents a resource deferral');
+      // One durable continuation per task, decided by the condition row itself:
+      // whoever writes the intent owns the successor. A second concurrent
+      // continuation loses here, before it can replace the winner's target or
+      // add a second pending handoff record — no process-local lock involved.
+      const active = this.condition(taskId);
+      if (active?.state === 'active' && active.continuation) {
+        throw new Error(`Task ${taskId} already has a pending ${active.continuation.trigger} continuation waiting for ${active.units ?? 1} unit(s) of ${active.resource}`);
+      }
+      this.d.db.prepare("UPDATE wait_conditions SET state = 'replaced' WHERE task_id = ? AND state = 'active'").run(taskId);
+      this.insert(taskId, { kind: 'resource', notBefore: this.iso(), reason: options.reason, resource: need.resource, units: need.units },
+        // The caller's own continuation checkpoint when it has one: the record it
+        // wrote and the condition it parked must name the SAME anchor, or the
+        // continuation would be closed against a checkpoint nobody is waiting on.
+        options.actor === 'operator' ? 'operator' : 'scheduler', 0, this.condition(taskId)?.history ?? [], options.checkpointId ?? this.anchor(taskId), [], 'failover',
+        { resource: need.resource, units: need.units, continuation: options.intent });
+      // The grant is an operator exception only when an operator asked for it;
+      // an automatic continuation parks from LIMIT_PAUSED, which needs none.
+      if (row.state !== 'WAITING_RESOURCE') this.d.tasks.transition(taskId, 'WAITING_RESOURCE', undefined, options.actor === 'operator' ? 'resource-continuation' : undefined);
+      const generation = this.condition(taskId)!.generation;
+      this.record(taskId, 'wait.attached', generation, undefined, { resource: need.resource, units: need.units, continuation: options.intent, reason: options.reason, actor: options.actor });
+      // Records the caller owes the parked continuation (the pending handoff row)
+      // commit with the intent that justifies them, or not at all.
+      options.onPark?.();
+      return generation;
+    })();
+    this.publish(taskId); this.arm();
+    return this.wake(taskId, generation, options.actor);
+  }
+
+  /**
+   * The ONE repairable intervention (CR-35): a resource request the pool can no
+   * longer satisfy. The scheduler expires such a request rather than letting it
+   * block the queue forever, and the operator's repair — a smaller request, a
+   * different pool, or the same request once the config is restored — is itself
+   * a wait, which is why this pause and no other may be replaced by one.
+   *
+   * The evidence is the durable pair the expiry itself wrote: an expired
+   * condition that still names the pool, and the `resource.unsatisfiable` event
+   * at that generation. Every other `intervention_required` pause, and every
+   * approval, verification or comparison pause, stays a human decision.
+   */
+  resourceRepairable(taskId: string): boolean {
+    const row = this.d.tasks.get(taskId);
+    if (row?.state !== 'WAITING_INPUT' || row.pause_kind !== 'intervention_required') return false;
+    const c = this.condition(taskId);
+    if (!c || c.state !== 'expired' || !c.resource) return false;
+    return !!this.d.db.prepare("SELECT 1 FROM scheduler_events WHERE task_id = ? AND generation = ? AND type = 'resource.unsatisfiable'")
+      .get(taskId, c.generation);
+  }
+
+  /** Live claim for a task, if it holds one. */
+  claim(taskId: string): { claim_id: number; resource: string; units: number; dispatch_id: string; claimed_at: string } | undefined {
+    return this.d.db.prepare('SELECT claim_id, resource, units, dispatch_id, claimed_at FROM resource_claims WHERE task_id = ? AND released_at IS NULL')
+      .get(taskId) as { claim_id: number; resource: string; units: number; dispatch_id: string; claimed_at: string } | undefined;
+  }
+
+  /**
+   * Releases the live claim once the task no longer needs the slot, and wakes the
+   * next FIFO waiter. A terminal task never runs again, so its claim goes
+   * regardless of how its run row settled; otherwise the existing `hasOwner`
+   * ownership test is the single authority — the same one `WAITING_RESOURCE`
+   * itself is defined by. That makes leaks impossible to express rather than
+   * merely unlikely: every park, abort, cancel, settle and boot path already ends
+   * with no owner, and the timer sweep re-checks anything that missed its event.
+   */
+  releaseIfIdle(taskId: string, reason: string): void {
+    const released = this.d.db.transaction((): { resource: string } | undefined => {
+      const held = this.claim(taskId);
+      if (!held) return undefined;
+      const row = this.d.tasks.get(taskId);
+      if (row && !isTerminal(row.state) && this.hasOwner(taskId)) return undefined;
+      this.d.db.prepare('UPDATE resource_claims SET released_at = ?, release_reason = ? WHERE claim_id = ? AND released_at IS NULL')
+        .run(this.iso(), reason, held.claim_id);
+      this.record(taskId, 'resource.released', undefined, held.dispatch_id, { resource: held.resource, units: held.units, reason });
+      return { resource: held.resource };
+    })();
+    if (released) { this.publish(taskId); this.notifyResource(released.resource); }
+  }
+
+  /**
+   * Release on a microtask. Several callers (settle paths, `runNow`'s ambiguity
+   * re-arm) run inside a transaction, and a release must neither nest inside that
+   * transaction nor be able to fail the caller it is a consequence of.
+   */
+  private releaseSoon(taskId: string, reason: string): void {
+    queueMicrotask(() => { try { this.releaseIfIdle(taskId, reason); } catch (error) { this.d.onError?.(error); } });
+  }
+
+  /** Sweeps every live claim. The bounded fallback for a release event we never got. */
+  private releaseIdleClaims(): void {
+    for (const r of this.d.db.prepare('SELECT task_id FROM resource_claims WHERE released_at IS NULL').all() as { task_id: string }[]) {
+      try { this.releaseIfIdle(r.task_id, 'sweep: no execution owner'); } catch (error) { this.d.onError?.(error); }
+    }
+  }
+
+  /**
+   * Whether this wait may take its units right now. Read inside the wake
+   * transaction so the answer and the claim commit together.
+   *
+   * An operator run-now may skip the QUEUE (picking which task runs is an operator
+   * decision) but never the CAPACITY: over-allocating is not a thing an operator
+   * can ask for, because the slot count would stop being true.
+   */
+  private resourceGate(c: WaitCondition, actor: Actor): { outcome: 'grant' } | { outcome: 'wait' | 'unsatisfiable'; reason: string } {
+    const resource = c.resource!;
+    const units = c.units ?? 1;
+    const capacity = this.capacity(resource);
+    if (capacity === undefined) return { outcome: 'unsatisfiable', reason: `Resource pool ${resource} is no longer declared` };
+    if (units > capacity) return { outcome: 'unsatisfiable', reason: `Resource pool ${resource} capacity ${capacity} is below the ${units} units requested` };
+    // The one readiness rule again, on the grant side: a requirement that may not
+    // compete for the pool may not be granted from it either. Without this, a
+    // condition the FIFO excludes could still take units the moment its own wake
+    // fired, and the queue would stop describing what actually happens.
+    const ready = this.resourceReady(c, actor);
+    if (!ready.ready) return { outcome: 'wait', reason: `Resource ${resource}: ${ready.reason}` };
+    const front = this.queue(resource)[0];
+    if (actor !== 'operator' && front && front.taskId !== c.taskId) {
+      return { outcome: 'wait', reason: `Resource ${resource}: task ${front.taskId} is ahead in the wait queue` };
+    }
+    const claimedUnits = this.claimed(resource);
+    if (capacity - claimedUnits < units) {
+      return { outcome: 'wait', reason: `Resource ${resource}: ${capacity - claimedUnits} of ${capacity} units free, ${units} needed` };
+    }
+    return { outcome: 'grant' };
+  }
+
+  /**
+   * A pool changed: wake the FIFO front waiter if the pool can now satisfy it.
+   * Strict FIFO — a smaller request behind the front waiter does not jump it, so
+   * a large request cannot starve. The timer sweep covers a missed notify.
+   */
+  private notifyResource(resource: string): void {
+    if (!this.enabled) return;
+    const front = this.queue(resource)[0];
+    if (!front) return;
+    queueMicrotask(() => { void this.wake(front.taskId, front.generation, 'event').catch(error => this.d.onError?.(error)); });
   }
 
   validate(input: WaitInput): WaitInput {
-    if (!input || !['time','quota','dependency'].includes(input.kind)) throw new Error('A wait requires kind time, quota or dependency');
-    // Dependency wakes are event-driven, so notBefore is an optional earliest re-check.
-    const notBefore = input.kind === 'dependency' ? (input.notBefore ?? this.iso()) : input.notBefore;
+    if (!input || !['time','quota','dependency','resource'].includes(input.kind)) throw new Error('A wait requires kind time, quota, dependency or resource');
+    // Dependency and resource wakes are event-driven, so notBefore is an optional earliest re-check.
+    const notBefore = input.kind === 'dependency' || input.kind === 'resource' ? (input.notBefore ?? this.iso()) : input.notBefore;
     if (typeof notBefore !== 'string' || !/T.*(?:Z|[+-]\d\d:\d\d)$/.test(notBefore) || !Number.isFinite(Date.parse(notBefore))) {
       throw new Error('A wait requires an ISO timestamp including timezone');
     }
@@ -70,17 +457,43 @@ export class Scheduler {
       if (!Array.isArray(input.dependsOn) || !input.dependsOn.length || input.dependsOn.some(id => typeof id !== 'string' || !id)) throw new Error('A dependency wait requires at least one dependency task id');
       if (input.onDependencyFailure !== undefined && !['cancel','wake-anyway','wait-input'].includes(input.onDependencyFailure)) throw new Error('onDependencyFailure must be cancel, wake-anyway or wait-input');
     }
+    if (input.kind === 'resource') {
+      // Fail closed on both halves: an undeclared pool has no honest capacity, and
+      // a request larger than capacity could never be granted, so it is a config
+      // error at attach rather than a task that waits forever.
+      if (typeof input.resource !== 'string' || !input.resource) throw new Error('A resource wait requires a resource pool name');
+      const capacity = this.capacity(input.resource);
+      if (capacity === undefined) throw new Error(`Unknown resource pool ${input.resource}; declare it in scheduler.resources`);
+      if (input.units !== undefined && (!Number.isInteger(input.units) || input.units < 1)) throw new Error('resource units must be a positive integer');
+      const units = input.units ?? 1;
+      if (units > capacity) throw new Error(`Resource pool ${input.resource} has capacity ${capacity}; ${units} units can never be granted`);
+    }
     if (input.reason !== undefined && typeof input.reason !== 'string') throw new Error('reason must be a string');
-    return { ...input, notBefore: new Date(notBefore).toISOString(), reason: input.reason ?? (input.kind === 'dependency' ? 'Waiting on dependencies' : 'Scheduled time wait') };
+    const fallback = input.kind === 'dependency' ? 'Waiting on dependencies'
+      : input.kind === 'resource' ? `Waiting for ${input.units ?? 1} unit(s) of ${input.resource}`
+      : 'Scheduled time wait';
+    return { ...input, notBefore: new Date(notBefore).toISOString(), reason: input.reason ?? fallback };
   }
 
   condition(taskId: string): WaitCondition | undefined {
     const r = this.d.db.prepare('SELECT * FROM wait_conditions WHERE task_id = ? ORDER BY generation DESC LIMIT 1').get(taskId) as Record<string, unknown> | undefined;
-    return r ? { schemaVersion: 1, taskId, generation: r.generation as number, state: r.state as WaitCondition['state'], kind: r.kind as WaitCondition['kind'], checkpointId: (r.checkpoint_id ?? undefined) as string | undefined, origin: (r.origin ?? undefined) as WaitCondition['origin'], blockers: JSON.parse(r.blockers as string), assistants: JSON.parse(r.assistants as string),
+    return r ? this.toCondition(r) : undefined;
+  }
+  /**
+   * One row, one condition. The pool queue reads whole conditions through this too,
+   * so the queue and the wake that grants from it judge the same object rather
+   * than two hand-rolled projections of the same row.
+   */
+  private toCondition(r: Record<string, unknown>): WaitCondition {
+    const taskId = r.task_id as string;
+    return { schemaVersion: 1, taskId, generation: r.generation as number, state: r.state as WaitCondition['state'], kind: r.kind as WaitCondition['kind'], checkpointId: (r.checkpoint_id ?? undefined) as string | undefined, origin: (r.origin ?? undefined) as WaitCondition['origin'], blockers: JSON.parse(r.blockers as string), assistants: JSON.parse(r.assistants as string),
       dependsOn: JSON.parse(r.depends_on as string) as string[], onDependencyFailure: (r.on_dependency_failure ?? undefined) as OnDependencyFailure | undefined,
+      resource: (r.resource ?? undefined) as string | undefined, units: (r.resource_units ?? undefined) as number | undefined,
+      resourceQueuedAt: (r.resource_queued_at ?? undefined) as string | undefined,
+      continuation: r.continuation ? JSON.parse(r.continuation as string) as ContinuationIntent : undefined,
       notBefore: r.not_before as string, createdBy: r.created_by as string, createdAt: r.created_at as string,
       autoWakes: r.auto_wakes as number, history: JSON.parse(r.history as string) as WaitCondition['history'],
-      consumedAt: (r.consumed_at ?? undefined) as string | undefined, consumedBy: (r.consumed_by ?? undefined) as string | undefined, reason: r.reason as string } : undefined;
+      consumedAt: (r.consumed_at ?? undefined) as string | undefined, consumedBy: (r.consumed_by ?? undefined) as string | undefined, reason: r.reason as string };
   }
   dispatch(id: string): Dispatch { return this.d.db.prepare('SELECT * FROM dispatches WHERE dispatch_id = ?').get(id) as Dispatch; }
   dispatches(taskId: string): Dispatch[] { return this.d.db.prepare('SELECT * FROM dispatches WHERE task_id = ? ORDER BY created_at, rowid').all(taskId) as Dispatch[]; }
@@ -106,11 +519,28 @@ export class Scheduler {
        NOT EXISTS (SELECT 1 FROM execution_results er WHERE er.session_id = r.id))))`).get(taskId) ||
       !!this.d.db.prepare("SELECT 1 FROM dispatches WHERE task_id = ? AND phase IN ('reserved','start_attempted')").get(taskId);
   }
-  private insert(taskId: string, input: WaitInput, actor: string, autoWakes = 0, history: WaitCondition['history'] = [], checkpointId?: string, blockers: WaitCondition['blockers'] = [], origin?: DispatchOrigin): void {
-    const generation = (this.condition(taskId)?.generation ?? 0) + 1;
-    this.d.db.prepare(`INSERT INTO wait_conditions(task_id,generation,state,kind,not_before,created_by,created_at,auto_wakes,history,reason,checkpoint_id,blockers,assistants,depends_on,on_dependency_failure,origin)
-      VALUES(?,?,'active',?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(taskId, generation, input.kind, input.notBefore!, actor, this.iso(), autoWakes, JSON.stringify(history.slice(-10)), redactValue(input.reason ?? 'Scheduled wait'), checkpointId ?? null, JSON.stringify(redactValue(blockers)), JSON.stringify(redactValue(input.kind === 'quota' ? input.assistants ?? [] : [])),
-      JSON.stringify(input.kind === 'dependency' ? input.dependsOn : []), input.kind === 'dependency' ? (input.onDependencyFailure ?? DEFAULT_ON_DEPENDENCY_FAILURE) : null, origin ?? null);
+  private insert(taskId: string, input: WaitInput, actor: string, autoWakes = 0, history: WaitCondition['history'] = [], checkpointId?: string, blockers: WaitCondition['blockers'] = [], origin?: DispatchOrigin,
+    /** A resource requirement (and its deferred continuation intent) carried forward. */
+    carry?: { resource?: string; units?: number; continuation?: ContinuationIntent }): void {
+    const previous = this.condition(taskId);
+    const generation = (previous?.generation ?? 0) + 1;
+    const resource = (input.kind === 'resource' ? input.resource : carry?.resource) ?? null;
+    const units = resource === null ? null : input.kind === 'resource' ? input.units ?? 1 : carry?.units ?? 1;
+    // Seniority is the REQUIREMENT's, not the row's: the same pool and the same
+    // units means the same requirement, still waiting, so it keeps the age it has
+    // waited with across a quota re-park, a continuation or a recovery re-park. A
+    // different request is a new one and starts now. `created_at` below is
+    // untouched and still means when THIS condition was written.
+    const carriedAge = resource !== null && previous?.resource === resource && (previous.units ?? 1) === units ? previous.resourceQueuedAt : undefined;
+    // The continuation intent is carried EXPLICITLY, never inherited: it describes
+    // a handoff that has not happened yet, so only a path that knows the
+    // continuation is still owed (the deferral itself, or a re-park of a dispatch
+    // that never started) passes it on.
+    const continuation = resource !== null && carry?.continuation ? JSON.stringify(redactValue(carry.continuation)) : null;
+    this.d.db.prepare(`INSERT INTO wait_conditions(task_id,generation,state,kind,not_before,created_by,created_at,auto_wakes,history,reason,checkpoint_id,blockers,assistants,depends_on,on_dependency_failure,origin,resource,resource_units,resource_queued_at,continuation)
+      VALUES(?,?,'active',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(taskId, generation, input.kind, input.notBefore!, actor, this.iso(), autoWakes, JSON.stringify(history.slice(-10)), redactValue(input.reason ?? 'Scheduled wait'), checkpointId ?? null, JSON.stringify(redactValue(blockers)), JSON.stringify(redactValue(input.kind === 'quota' ? input.assistants ?? [] : [])),
+      JSON.stringify(input.kind === 'dependency' ? input.dependsOn : []), input.kind === 'dependency' ? (input.onDependencyFailure ?? DEFAULT_ON_DEPENDENCY_FAILURE) : null, origin ?? null,
+      resource, units, resource === null ? null : carriedAge ?? this.iso(), continuation);
   }
   attach(taskId: string, input: WaitInput): WaitCondition {
     input = this.validate(input);
@@ -120,15 +550,22 @@ export class Scheduler {
       if (this.hasOwner(taskId)) throw new Error('Existing execution prevents a new time wait');
       if (input.kind === 'dependency') this.assertAcyclic(taskId, input.dependsOn);
       const old = this.condition(taskId);
+      const repair = input.kind === 'resource' && this.resourceRepairable(taskId);
       if (row.state === 'WAITING_RESOURCE' && old?.state !== 'active') throw new Error('No active condition to replace');
       this.d.db.prepare("UPDATE wait_conditions SET state = 'replaced' WHERE task_id = ? AND state = 'active'").run(taskId);
-      if (row.state === 'WAITING_INPUT' && !['limit','provider_unavailable','no_candidate','harness_error'].includes(row.pause_kind ?? '')) throw new Error('Pause requires an operator decision');
+      // The one authorized exception: an operator repairing a request the pool can
+      // no longer satisfy. It must be a RESOURCE wait — the repair is the new
+      // request — and `resourceRepairable` demands the durable evidence that this
+      // specific pause came from `resource.unsatisfiable`.
+      if (row.state === 'WAITING_INPUT' && !repair && !['limit','provider_unavailable','no_candidate','harness_error'].includes(row.pause_kind ?? '')) throw new Error('Pause requires an operator decision');
       const cp = this.d.db.prepare('SELECT id FROM checkpoints WHERE task_id = ? ORDER BY at DESC, rowid DESC LIMIT 1').get(taskId) as { id: string } | undefined;
       if (this.d.db.prepare('SELECT 1 FROM runs WHERE task_id = ?').get(taskId) && !cp) throw new Error('Continuation requires a checkpoint');
       this.insert(taskId, input, old ? 'operator' : 'user', old?.autoWakes, old?.history, old?.checkpointId ?? cp?.id,
-        input.kind === 'quota' ? this.d.orchestrator.quotaPlan(taskId).blockers : []);
-      if (row.state !== 'WAITING_RESOURCE') this.d.tasks.transition(taskId, 'WAITING_RESOURCE');
-      this.record(taskId, old ? 'wait.replaced' : 'wait.attached', this.condition(taskId)!.generation);
+        input.kind === 'quota' ? this.d.orchestrator.quotaPlan(taskId).blockers : [], undefined,
+        // Replacing a wait is not a way to drop a pool requirement the task still has.
+        { resource: old?.resource, units: old?.units });
+      if (row.state !== 'WAITING_RESOURCE') this.d.tasks.transition(taskId, 'WAITING_RESOURCE', undefined, repair ? 'resource-repair' : undefined);
+      this.record(taskId, old ? 'wait.replaced' : 'wait.attached', this.condition(taskId)!.generation, undefined, repair ? { repair: 'resource.unsatisfiable' } : {});
     })();
     this.publish(taskId); this.arm();
     return this.condition(taskId)!;
@@ -147,12 +584,13 @@ export class Scheduler {
         if (old) this.d.db.prepare("UPDATE wait_conditions SET state = 'expired', auto_wakes = ?, history = ? WHERE task_id = ? AND generation = ?").run(count, JSON.stringify(history), taskId, old.generation);
         return true;
       }
-      this.insert(taskId, { kind: 'quota', notBefore: plan.notBefore!, reason: 'Quota retry; revalidation required' }, 'failover', count, history, checkpointId, plan.blockers);
+      this.insert(taskId, { kind: 'quota', notBefore: plan.notBefore!, reason: 'Quota retry; revalidation required' }, 'failover', count, history, checkpointId, plan.blockers, undefined,
+        { resource: old?.resource, units: old?.units });
       this.d.tasks.transition(taskId, 'WAITING_RESOURCE');
       this.record(taskId, 'wait.attached', this.condition(taskId)!.generation, undefined, { blockers: plan.blockers });
       return true;
     })();
-    if (parked) { this.publish(taskId); this.arm(); }
+    if (parked) { this.publish(taskId); this.arm(); this.releaseSoon(taskId, 'parked on quota'); }
     return parked;
   }
 
@@ -175,12 +613,14 @@ export class Scheduler {
       // yield; parking is never worth forcing an illegal transition for.
       if (!row || row.mode !== 'single' || !canTransition(row.state as TaskState, 'WAITING_RESOURCE', row.pause_kind ?? undefined)) return false;
       this.d.db.prepare("UPDATE wait_conditions SET state = 'replaced' WHERE task_id = ? AND state = 'active'").run(taskId);
-      this.insert(taskId, { kind: 'time', notBefore: this.iso(), reason }, 'context-yield', 0, [], checkpointId, [], 'context-yield');
+      const old = this.condition(taskId);
+      this.insert(taskId, { kind: 'time', notBefore: this.iso(), reason }, 'context-yield', 0, [], checkpointId, [], 'context-yield',
+        { resource: old?.resource, units: old?.units });
       this.d.tasks.transition(taskId, 'WAITING_RESOURCE');
       this.record(taskId, 'wait.attached', this.condition(taskId)!.generation, undefined, { origin: 'context-yield', checkpointId, reason });
       return true;
     })();
-    if (parked) { this.publish(taskId); this.arm(); }
+    if (parked) { this.publish(taskId); this.arm(); this.releaseSoon(taskId, 'parked on context yield'); }
     return parked;
   }
 
@@ -227,6 +667,11 @@ export class Scheduler {
    * only after the (synchronous) enclosing transaction has committed.
    */
   private taskTerminal(taskId: string): void {
+    // A terminal task can never run again, so its slot goes back even with the
+    // scheduler disabled; only the wake that follows is gated on `enabled`. The
+    // transition may be inside a transaction, so both halves run on a microtask,
+    // which fires only after the (synchronous) enclosing transaction committed.
+    this.releaseSoon(taskId, 'task terminal');
     if (!this.enabled) return;
     const waiters = (this.d.db.prepare("SELECT task_id, generation, depends_on FROM wait_conditions WHERE kind = 'dependency' AND state = 'active'")
       .all() as { task_id: string; generation: number; depends_on: string }[])
@@ -239,6 +684,11 @@ export class Scheduler {
 
   async wake(taskId: string, expectedGeneration: number, actor: Actor): Promise<WakeResult> {
     await this.revalidateQuota(taskId, expectedGeneration);
+    // A stale wake that nevertheless MOVED the task (a failed dependency, an
+    // unsatisfiable resource request) still owes the board an update.
+    let stateChanged = false;
+    /** Set when this wake granted a claim, so the pool is re-evaluated after commit. */
+    let claimedResource: string | undefined;
     const result = this.d.db.transaction((): WakeResult => {
       const c = this.condition(taskId);
       if (!c || c.state !== 'active' || c.generation !== expectedGeneration || this.d.tasks.get(taskId)?.state !== 'WAITING_RESOURCE' || this.hasOwner(taskId)) {
@@ -246,6 +696,9 @@ export class Scheduler {
       }
       if (actor !== 'operator' && Date.parse(c.notBefore) > this.now().getTime()) return { outcome: 'stale', reason: 'Condition is not due' };
       if (c.kind === 'dependency' && actor !== 'operator') {
+        // The same `dependencyStatus` truth `resourceReady` reads; this branch adds
+        // the side effects (the record and the failure transition) that a readiness
+        // question must not have. Keep the two in step.
         const { pending, failed } = this.dependencyStatus(c.dependsOn ?? []);
         // Every required dependency must be terminal before any of them decides anything.
         if (pending.length) return { outcome: 'stale', reason: `Waiting on ${pending.length} unfinished ${pending.length === 1 ? 'dependency' : 'dependencies'}` };
@@ -263,16 +716,49 @@ export class Scheduler {
           }
         }
       }
+      if (c.resource) {
+        const gate = this.resourceGate(c, actor);
+        if (gate.outcome !== 'grant') {
+          if (gate.outcome === 'unsatisfiable') {
+            // Capacity fell below this request (or the pool was undeclared) while the
+            // task waited. Parking forever would also block every waiter behind it,
+            // so this becomes an operator decision and the queue moves on.
+            this.d.db.prepare("UPDATE wait_conditions SET state = 'expired', history = ? WHERE task_id = ? AND generation = ?")
+              .run(JSON.stringify([...c.history, { at: this.iso(), actor: 'scheduler', outcome: 'expired', reason: gate.reason }].slice(-10)), taskId, c.generation);
+            this.record(taskId, 'resource.unsatisfiable', c.generation, undefined, { resource: c.resource, units: c.units, reason: gate.reason });
+            this.d.tasks.transition(taskId, 'WAITING_INPUT', 'intervention_required');
+            stateChanged = true;
+          }
+          return { outcome: 'stale', reason: gate.reason };
+        }
+      }
       const id = `dispatch_${randomUUID()}`;
       this.d.db.prepare("UPDATE wait_conditions SET state = 'consumed', consumed_at = ?, consumed_by = ? WHERE task_id = ? AND generation = ?").run(this.iso(), actor, taskId, expectedGeneration);
       this.d.db.prepare(`INSERT INTO dispatches(dispatch_id,task_id,condition_generation,origin,execution_path,phase,created_at,updated_at,checkpoint_id)
         VALUES(?,?,?,?,?,'reserved',?,?,?)`).run(id, taskId, expectedGeneration, c.origin ?? (actor === 'operator' ? 'run-now' : 'wake'), this.d.config.execution.harnessModes.single ? 'harness' : 'legacy', this.iso(), this.iso(), c.checkpointId ?? null);
+      if (c.resource) {
+        // The claim commits in THIS transaction, with the condition consume and the
+        // dispatch reservation. That single boundary — plus `uq_claim_live` and the
+        // capacity sum read above — is the whole over-allocation defence: two
+        // concurrent wakes cannot both see the last slot free, and a crash leaves
+        // either both the claim and its dispatch or neither.
+        this.d.db.prepare('INSERT INTO resource_claims(task_id,dispatch_id,generation,resource,units,claimed_at) VALUES(?,?,?,?,?,?)')
+          .run(taskId, id, expectedGeneration, c.resource!, c.units ?? 1, this.iso());
+        this.record(taskId, 'resource.claimed', c.generation, id, { resource: c.resource, units: c.units ?? 1,
+          capacity: this.capacity(c.resource!), claimedUnitsAfter: this.claimed(c.resource!) });
+        claimedResource = c.resource;
+      }
       this.d.tasks.transition(taskId, 'ROUTING');
       this.record(taskId, 'dispatch.reserved', c.generation, id, { actor });
       return { outcome: 'dispatched', dispatchId: id };
     })();
-    if (result.outcome === 'stale' && result.reason.startsWith('Dependency failed')) this.publish(taskId);
+    if (result.outcome === 'stale' && (stateChanged || result.reason.startsWith('Dependency failed'))) this.publish(taskId);
     if (result.outcome === 'dispatched') {
+      // A release can free more units than the front waiter takes, and only the front
+      // waiter is woken per event. Re-evaluating after a grant drains the remaining
+      // headroom now instead of leaving it idle until the next tick. The queue shrinks
+      // with every grant, so the chain terminates.
+      if (claimedResource) this.notifyResource(claimedResource);
       this.publish(taskId);
       if (this.d.boundary) await this.d.boundary('reserved', this.dispatch(result.dispatchId));
       await this.continueDispatch(result.dispatchId);
@@ -331,13 +817,17 @@ export class Scheduler {
     if (dispatch.phase !== 'reserved') return;
     const taskId = dispatch.task_id;
     if (this.d.tasks.get(taskId)?.state === 'CANCELLED') { this.phase(id, 'cancelled'); return; }
+    // A continuation that had to defer for a slot: the operator's target and the
+    // assistant it is moving away from steer THIS routing decision, and the
+    // reason is what the receiving agent is shown. Routing itself still runs now.
+    const intent = this.intent(taskId, dispatch.condition_generation);
     const routed = this.d.db.transaction(() => {
       const current = this.dispatch(id);
       if (current.routing_decision_id !== null) {
         const row = this.d.db.prepare('SELECT explanation FROM routing_decisions WHERE id = ? AND task_id = ?').get(current.routing_decision_id, taskId) as { explanation: string };
         return { explanation: JSON.parse(row.explanation) as RoutingExplanation, routingDecisionId: current.routing_decision_id };
       }
-      const result = this.d.orchestrator.routeTask(taskId, dispatch.origin, { dispatchId: id });
+      const result = this.d.orchestrator.routeTask(taskId, dispatch.origin, { dispatchId: id, exclude: intent?.from, override: intent?.to });
       this.d.db.prepare('UPDATE dispatches SET routing_decision_id = ?, updated_at = ? WHERE dispatch_id = ?').run(result.routingDecisionId, this.iso(), id);
       return result;
     })();
@@ -349,6 +839,7 @@ export class Scheduler {
     try {
       const { runId } = await this.d.orchestrator.startTask(taskId, routed.explanation.chosen, {
         continuation: dispatch.checkpoint_id ? { kind: 'checkpoint', checkpointId: dispatch.checkpoint_id } : { kind: 'fresh' }, dispatchId: id, routingDecisionRef: String(routed.routingDecisionId),
+        ...(intent ? { reason: intent.reason, fromAssistantId: intent.from, handoffTrigger: intent.trigger } : {}),
         beforeStart: async () => {
           if (this.d.boundary) await this.d.boundary('materialized', this.dispatch(id));
           this.d.db.transaction(() => {
@@ -375,6 +866,12 @@ export class Scheduler {
       throw error;
     }
   }
+  /** The continuation intent recorded on the condition this dispatch consumed. */
+  private intent(taskId: string, generation: number): ContinuationIntent | undefined {
+    const r = this.d.db.prepare('SELECT continuation FROM wait_conditions WHERE task_id = ? AND generation = ?')
+      .get(taskId, generation) as { continuation: string | null } | undefined;
+    return r?.continuation ? JSON.parse(r.continuation) as ContinuationIntent : undefined;
+  }
   private phase(id: string, phase: Dispatch['phase'], reason?: string): void {
     this.d.db.prepare('UPDATE dispatches SET phase = ?, reason = ?, updated_at = ? WHERE dispatch_id = ?').run(phase, reason ?? null, this.iso(), id);
   }
@@ -397,13 +894,26 @@ export class Scheduler {
         // A consumed dependency condition had all its subjects terminal; what failed
         // is the dispatch, so the re-park is a bounded time retry, not a second
         // dependency wait (which would re-decide an already settled dependency set).
-        const kind = old.kind === 'dependency' ? 'time' : old.kind;
-        this.insert(dispatch.task_id, { kind, notBefore: plan.notBefore ?? new Date(this.now().getTime() + RECHECK_MS).toISOString(), reason }, 'scheduler', count, history, old.checkpointId, plan.blockers, old.origin);
+        const retry = plan.notBefore ?? new Date(this.now().getTime() + RECHECK_MS).toISOString();
+        // A resource re-park stays a resource wait and must RE-acquire: the claim this
+        // dispatch held is released below, so the successor re-enters the pool queue
+        // rather than inheriting a slot its dispatch no longer owns.
+        const next: WaitInput = old.kind === 'resource'
+          ? { kind: 'resource', notBefore: retry, reason, resource: old.resource!, units: old.units ?? 1 }
+          : old.kind === 'quota' ? { kind: 'quota', notBefore: retry, reason }
+          : { kind: 'time', notBefore: retry, reason };
+        this.insert(dispatch.task_id, next, 'scheduler', count, history, old.checkpointId, plan.blockers, old.origin,
+          // This dispatch never started, so a continuation it was carrying is still owed.
+          { resource: old.resource, units: old.units, continuation: old.continuation });
         this.d.tasks.transition(dispatch.task_id, 'WAITING_RESOURCE');
       }
       this.record(dispatch.task_id, 'dispatch.reparked', dispatch.condition_generation, dispatch.dispatch_id, { reason, autoWakes: count, history });
     })();
     this.publish(dispatch.task_id);
+    // The dispatch no longer owns the task, so it no longer owns the slot. This
+    // follows exactly the evidence the re-park itself acted on (no session row, or
+    // an operator-confirmed non-start) — it never guesses that a provider is idle.
+    this.releaseSoon(dispatch.task_id, `dispatch ${reason}`);
   }
 
   /** Called after Harness and legacy execution recovery, before arming the timer. */
@@ -430,23 +940,45 @@ export class Scheduler {
         this.publish(dispatch.task_id);
       } catch (error) { this.d.onError?.(error); }
     }
+    // A claim only ever means "this task's dispatch or session owns execution". A
+    // restart that ended either one leaves the claim with nothing behind it, and the
+    // sweep is the same ownership test every other release path uses.
+    this.releaseIdleClaims();
     if (this.enabled) await this.tick();
     // A disabled boot still has to leave the durable mark the next enable reads.
     else this.schedules.observeEnabled(false);
   }
   startTimer(): void { this.stopped = false; this.arm(); }
   stop(): void { this.stopped = true; if (this.timer) clearTimeout(this.timer); this.timer = undefined; }
+  /**
+   * Absolute deadline of the bounded fallback sweep. It advances because a TICK
+   * happened, never because `arm` was called: `arm` runs on attach, publish,
+   * stale wake, schedule edit and every resource notification, and a deadline
+   * recomputed from "now" on each of those is a deadline any busy instance can
+   * postpone forever — which is exactly how the waits that are deliberately
+   * excluded from exact deadlines below stopped being re-evaluated at all.
+   * 0 means "not established yet": the next `arm` sets it one cadence out, so a
+   * restart schedules its first sweep instead of busy-looping on a past one.
+   */
+  private nextSweepAt = 0;
   private arm(): void {
     if (this.timer) clearTimeout(this.timer);
     if (this.stopped || !this.enabled) return;
-    // A capped next deadline also revisits failed ticks and ambiguous Harness windows.
-    // Dependency waits are event-driven and their notBefore is only an earliest
-    // re-check, so they never set the deadline; the 60 s cap still sweeps them.
-    const next = this.d.db.prepare("SELECT MIN(not_before) AS at FROM wait_conditions WHERE state = 'active' AND kind != 'dependency'").get() as { at: string | null };
+    const now = this.now().getTime();
+    if (!this.nextSweepAt) this.nextSweepAt = now + RECHECK_MS;
+    // Exact deadlines may fire EARLIER than the sweep, never later. Dependency
+    // waits and anything carrying a pool requirement are event-driven and their
+    // notBefore is only an earliest re-check, so they never set an exact
+    // deadline — an already-past re-check would spin the timer at 1 ms, and a
+    // requirement can stay active and due for as long as the pool (or a carried
+    // quota/dependency) withholds it, which a time or quota wait without one
+    // never does. The absolute sweep below is what still re-evaluates them, and
+    // it is bounded by construction.
+    const next = this.d.db.prepare("SELECT MIN(not_before) AS at FROM wait_conditions WHERE state = 'active' AND kind NOT IN ('dependency','resource') AND resource IS NULL").get() as { at: string | null };
     // One timer for both waits and schedules (I-S3): the earlier of the two wins.
     const fire = this.schedules.nextDeadline();
-    const at = [next.at, fire].filter((v): v is string => !!v).sort()[0];
-    const delay = at ? Math.max(1, Math.min(60_000, Date.parse(at) - this.now().getTime())) : 60_000;
+    const at = [next.at, fire].filter((v): v is string => !!v).map(v => Date.parse(v));
+    const delay = Math.max(1, Math.min(this.nextSweepAt, ...at) - now);
     this.timer = setTimeout(() => { void this.tick().catch(e => this.d.onError?.(e)).finally(() => this.arm()); }, delay);
     this.timer.unref();
   }
@@ -459,6 +991,9 @@ export class Scheduler {
   }
 
   async tick(): Promise<void> {
+    // The sweep deadline advances HERE, on the sweep actually happening. Every
+    // wait excluded from an exact deadline depends on this cadence being bounded.
+    this.nextSweepAt = this.now().getTime() + RECHECK_MS;
     // Recorded even while disabled: the next enable needs to know it was off.
     const wasDisabled = this.schedules.observeEnabled(this.enabled);
     if (!this.enabled) return;
@@ -466,6 +1001,8 @@ export class Scheduler {
     // Schedules fire before the wake sweep, so an occurrence created now is
     // dispatched by this same tick rather than waiting for the next one.
     this.schedules.fireDue(wasDisabled ? 'disabled' : 'catch-up');
+    // Bounded re-evaluation: a missed release event costs one tick, never a hang.
+    this.releaseIdleClaims();
     for (const d of this.d.db.prepare("SELECT * FROM dispatches WHERE phase = 'reserved'").all() as Dispatch[]) {
       void this.continueDispatch(d.dispatch_id).catch(error => this.d.onError?.(error));
     }
