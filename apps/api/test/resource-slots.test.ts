@@ -716,6 +716,26 @@ describe('K4b pool fairness', () => {
 function runsOf(taskId: string) {
   return db.prepare('SELECT id, assistant_id, dispatch_id FROM runs WHERE task_id = ? ORDER BY started_at, rowid').all(taskId) as { id: string; assistant_id: string; dispatch_id: string | null }[];
 }
+/**
+ * Injects a full scheduler tick (sweep included) at every checkpoint taken from
+ * here on. A tick is a no-op while the predecessor still owns its slot, so this
+ * lands the sweep exactly in the window where nothing owns it — deterministically,
+ * without a timer.
+ */
+function sweepAtHandoffBoundary(s: Scheduler, taskId: string) {
+  const create = built.checkpoints.create.bind(built.checkpoints);
+  const liveRun = () => db.prepare('SELECT 1 FROM runs WHERE task_id = ? AND ended_at IS NULL').get(taskId);
+  let fired = false;
+  vi.spyOn(built.checkpoints, 'create').mockImplementation(async (...args: Parameters<typeof create>) => {
+    const checkpoint = await create(...args);
+    // The window: the predecessor has settled, the claim is still live, and no
+    // dispatch owns it. Exactly what the idle sweep is entitled to take.
+    if (!fired && !liveRun() && claimRows(taskId).some(r => r.released_at === null)) {
+      fired = true; await s.tick(); await drain();
+    }
+    return checkpoint;
+  });
+}
 function handoffRows(taskId: string) {
   return db.prepare('SELECT trigger, to_run_id, checkpoint_id FROM handoffs WHERE task_id = ? ORDER BY at, rowid').all(taskId) as { trigger: string; to_run_id: string | null; checkpoint_id: string }[];
 }
@@ -819,11 +839,13 @@ describe.each([['legacy', false], ['harness', true]] as const)('K4b manual hando
     expect(handoffRows(runner).filter(h => h.trigger === 'manual')).toHaveLength(1);
   });
 
-  it('still hands off a task that is holding its slot', async () => {
-    // The gate refuses execution with NO claim, not every start without a
-    // dispatch: a task holding its one slot may still be moved to another
-    // assistant, and the pool arithmetic is unchanged by which of its own
-    // sessions runs. Refusing here would make a live pool task unhandoffable.
+  it('gives the successor a new dispatch-backed claim, never the predecessor\'s', async () => {
+    // C — no sweep race, capacity free throughout. A live claim belongs to the
+    // dispatch it was granted to, and that dispatch ends with the session the
+    // handoff cancels. So the predecessor's claim goes back at the settle and
+    // the successor acquires its own: the handoff still completes immediately
+    // (the slot it just freed is the slot it takes), but it completes on
+    // capacity the pool granted it, not on capacity a sweep could remove.
     await boot({ gpu: 1 }, c => {
       c.execution.harnessModes.single = harness; c.failover.auto = false;
       // Harness single mode auto-approves, so the hold has to be a real pending
@@ -839,9 +861,19 @@ describe.each([['legacy', false], ['harness', true]] as const)('K4b manual hando
     const handed = await built.orchestrator.handoff(id);
     expect(handed).toMatchObject({ assistantId: expect.any(String) });
     await drain();
-    // One claim throughout: the successor inherits the slot the task already had.
-    expect(claimRows(id)).toHaveLength(1);
-    expect(claimRows(id)[0]).toMatchObject({ dispatch_id: claimId!.dispatch_id, released_at: null });
+    // Two claims: the predecessor's, released with its dispatch, and the
+    // successor's, granted to the dispatch that actually runs.
+    const rows = claimRows(id);
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toMatchObject({ dispatch_id: claimId!.dispatch_id, released_at: expect.any(String) });
+    expect(rows[1]!.dispatch_id).not.toBe(claimId!.dispatch_id);
+    expect(rows[1]).toMatchObject({ released_at: null });
+    // The claim the successor runs on is the one its own dispatch owns.
+    const dispatch = s.dispatches(id).at(-1)!;
+    expect(dispatch).toMatchObject({ phase: 'started', origin: 'failover' });
+    expect(rows[1]!.dispatch_id).toBe(dispatch.dispatch_id);
+    expect(runsOf(id).at(-1)!.dispatch_id).toBe(dispatch.dispatch_id);
+    // The pool never double-counted: exactly one live claim, still this task's.
     expect(claims().map(c => c.task_id)).toEqual([id]);
   });
 
@@ -855,6 +887,231 @@ describe.each([['legacy', false], ['harness', true]] as const)('K4b manual hando
     expect(s.claim(runner)).toBeUndefined();
     expect(claims().map(c => c.task_id)).not.toContain(runner);
     release(); await drain();
+  });
+
+  /**
+   * A — the sweep race itself. Between the predecessor settling and the
+   * successor claiming there is a moment with no live run and no open dispatch,
+   * and `releaseIdleClaims` is entitled to the claim in exactly that moment.
+   * Injecting a full tick at every checkpoint the handoff takes puts the sweep
+   * inside that window deterministically: the continuation must come out of it
+   * running on a claim of its own, or truthfully waiting — never stranded
+   * mid-handoff on capacity that was taken away from it.
+   */
+  it('survives a scheduler sweep between the predecessor settling and the successor claiming', async () => {
+    await boot({ gpu: 1 }, c => {
+      c.execution.harnessModes.single = harness; c.failover.auto = false;
+      c.policy.approvalMode = 'prompt-on-escalation';
+    });
+    const s = scheduler();
+    const id = rtask(s, { goal: HOLD });
+    const held = holding(id); await s.tick(); await held; await drain();
+    const predecessor = claimRows(id)[0]!.dispatch_id;
+
+    sweepAtHandoffBoundary(s, id);
+    const handed = await built.orchestrator.handoff(id);
+    await drain();
+
+    // The old claim is gone — released with the predecessor's ownership, by
+    // whichever of the sweep and the continuation got there first (both apply
+    // the same test, so they cannot disagree).
+    const rows = claimRows(id);
+    expect(rows[0]).toMatchObject({ dispatch_id: predecessor, released_at: expect.any(String) });
+    expect(rows.filter(r => r.released_at === null)).toHaveLength(1);
+    // The successor ran, on a NEW dispatch-owned claim.
+    expect(handed).toMatchObject({ runId: expect.any(String) });
+    const dispatch = s.dispatches(id).at(-1)!;
+    expect(dispatch.dispatch_id).not.toBe(predecessor);
+    expect(s.claim(id)).toMatchObject({ dispatch_id: dispatch.dispatch_id });
+    // Never stranded: no handoff left open in HANDING_OFF.
+    expect(built.tasks.get(id)?.state).not.toBe('HANDING_OFF');
+    expect(handoffRows(id).filter(h => h.trigger === 'manual' && h.to_run_id === null)).toHaveLength(0);
+  });
+
+  /**
+   * B — the same sweep, with another task in position to take the slot it
+   * frees. Losing the race is legitimate; starting anyway is not.
+   */
+  it('lets another waiter win the swept slot and keeps the successor honest', async () => {
+    await boot({ gpu: 1 }, c => {
+      c.execution.harnessModes.single = harness; c.failover.auto = false;
+      c.policy.approvalMode = 'prompt-on-escalation';
+    });
+    const s = scheduler();
+    const id = rtask(s, { goal: HOLD });
+    const held = holding(id); await s.tick(); await held; await drain();
+    const predecessor = claimRows(id)[0]!.dispatch_id;
+    const rival = rtask(s, { goal: HOLD });
+    const rivalHeld = holding(rival);
+    await s.tick(); await drain();
+    expect(claims().map(c => c.task_id)).toEqual([id]); // the pool is full
+
+    sweepAtHandoffBoundary(s, id);
+    // The sweep frees the slot mid-handoff and the rival, the only ready waiter
+    // at that instant, takes it. The continuation must then say so and wait.
+    expect(await built.orchestrator.handoff(id)).toEqual({ deferred: 'resource', resource: 'gpu', units: 1 });
+    await rivalHeld; await drain();
+    expect(claims().map(c => c.task_id)).toEqual([rival]);
+    expect(built.tasks.get(id)?.state).toBe('WAITING_RESOURCE');
+    expect(s.claim(id)).toBeUndefined();
+    expect(s.dispatches(id).filter(d => ['reserved', 'start_attempted', 'started'].includes(d.phase))).toHaveLength(1);
+    expect(claimRows(id).at(-1)).toMatchObject({ dispatch_id: predecessor, released_at: expect.any(String) });
+
+    // The rival gives the slot back; exactly one successor takes it, on a claim
+    // its own dispatch owns.
+    const successorHeld = holding(id);
+    await s.cancel(rival); await drain(); await successorHeld; await drain();
+    const dispatch = s.dispatches(id).at(-1)!;
+    expect(dispatch.dispatch_id).not.toBe(predecessor);
+    expect(runsOf(id).filter(r => r.dispatch_id === dispatch.dispatch_id)).toHaveLength(1);
+    expect(claimRows(id).filter(r => r.dispatch_id === dispatch.dispatch_id)).toHaveLength(1);
+    expect(claims()).toEqual([{ task_id: id, units: 1, dispatch_id: dispatch.dispatch_id }]);
+    expect(handoffRows(id).filter(h => h.trigger === 'manual')).toHaveLength(1);
+  });
+
+  /**
+   * P2 — two operators (or one operator twice) racing the same continuation.
+   * The winner is decided by the durable condition row, not by who ran last:
+   * one intent, one pending handoff record, one successor.
+   */
+  it('lets only one of two concurrent handoffs own the continuation', async () => {
+    const { s, runner, holder, release } = await pausedWithoutItsSlot();
+    const before = runsOf(runner).length;
+
+    // One operator names the assistant the task did NOT run on, the other names
+    // nobody: whoever wins, the successor must be the winner's intent.
+    const other = runsOf(runner)[0]!.assistant_id === A ? B : A;
+    const results = await Promise.allSettled([
+      built.orchestrator.handoff(runner, other),
+      built.orchestrator.handoff(runner),
+    ]);
+    await drain();
+    const won = results.filter(r => r.status === 'fulfilled');
+    const lost = results.filter(r => r.status === 'rejected') as PromiseRejectedResult[];
+    expect(won).toHaveLength(1);
+    expect((won[0] as PromiseFulfilledResult<unknown>).value).toEqual({ deferred: 'resource', resource: 'gpu', units: 1 });
+    // The loser is told, rather than silently replacing the winner's target.
+    expect(lost).toHaveLength(1);
+    expect(String(lost[0]!.reason)).toMatch(/already has a pending manual continuation|Scheduler owns task/);
+
+    const waiting = s.condition(runner)!;
+    expect(waiting).toMatchObject({ state: 'active', kind: 'resource' });
+    expect(db.prepare("SELECT COUNT(*) AS n FROM wait_conditions WHERE task_id = ? AND state = 'active'").get(runner)).toEqual({ n: 1 });
+    expect(handoffRows(runner).filter(h => h.trigger === 'manual')).toHaveLength(1);
+    expect(runsOf(runner)).toHaveLength(before);
+    expect(claims().map(c => c.task_id)).toEqual([holder]);
+
+    // One slot, one successor, on the target the winning operator chose.
+    const ran = settled(runner, ['COMPLETED', 'FAILED']);
+    release(); await drain(); await ran; await drain();
+    expect(runsOf(runner)).toHaveLength(before + 1);
+    if (waiting.continuation!.to) expect(runsOf(runner).at(-1)!.assistant_id).toBe(waiting.continuation!.to);
+    expect(handoffRows(runner).filter(h => h.trigger === 'manual')).toHaveLength(1);
+  });
+});
+
+/**
+ * P1-2 / P1-3 — an AUTOMATIC continuation is not an operator.
+ *
+ * `deferForResource` is the one funnel both continuations use, so the only
+ * thing that may differ between them is the authority they carry. A manual
+ * handoff is an operator decision and may skip the FIFO; a quota or failure
+ * failover is the scheduler's own work and takes its turn — and is recorded as
+ * the scheduler, so the audit trail never shows a human who was not there.
+ *
+ * The routing decision belongs to the dispatch that actually gets the slot, so
+ * parking must not produce one (nor, therefore, a K13 shadow recommendation for
+ * a successor that does not exist).
+ */
+describe('K4b automatic continuation', () => {
+  function decisions(taskId: string) {
+    return db.prepare('SELECT id, explanation FROM routing_decisions WHERE task_id = ? ORDER BY id')
+      .all(taskId) as { id: number; explanation: string }[];
+  }
+
+  /**
+   * gpu:2. A senior requirement for BOTH units is held out of the queue by an
+   * unfinished dependency until the runner is live, so the runner takes one unit
+   * first and the senior is ready, and ahead of it, by the time the runner's
+   * limit hits. One unit then frees: too few for the senior, enough for the
+   * runner — the exact case where FIFO and capacity disagree.
+   */
+  it('waits its turn where an operator would skip it, and is recorded as the scheduler', async () => {
+    await boot({ gpu: 2 }, c => { c.failover.auto = true; });
+    const live: { runner?: string } = {};
+    const upstream = built.tasks.create({ goal: 'upstream work' });
+    // The dependency clears while the runner is live: the senior requirement is
+    // ready, and ahead, by the time the runner gives its unit back.
+    const s = scheduler(async (phase, d) => {
+      if (phase === 'session_created' && d.task_id === live.runner && built.tasks.get(upstream.taskId)?.state === 'CREATED') {
+        built.tasks.transition(upstream.taskId, 'ROUTING');
+        built.tasks.transition(upstream.taskId, 'RUNNING');
+        built.tasks.transition(upstream.taskId, 'COMPLETED');
+      }
+    });
+    const senior = rtask(s, { units: 2, goal: HOLD });
+    s.attach(senior, { kind: 'dependency', dependsOn: [upstream.taskId], reason: 'needs the upstream result' });
+    instant += 1;
+    const runner = rtask(s, { goal: 'continue [FAKE:LIMIT]' });
+    live.runner = runner;
+    const holder = rtask(s, { goal: HOLD });
+
+    const parked = settled(runner, ['WAITING_RESOURCE']);
+    const held = holding(holder);
+    await s.tick(); await held; await parked; await drain();
+
+    // The automatic continuation gave its unit back and did NOT jump the senior
+    // request that was waiting for the pool before it.
+    expect(claims().map(c => c.task_id)).toEqual([holder]);
+    expect(built.tasks.get(runner)?.state).toBe('WAITING_RESOURCE');
+    expect(s.claim(runner)).toBeUndefined();
+    expect(s.resourceWaitStatus(runner)).toMatchObject({ blockedBy: 'queue', queuePosition: 2, availableUnits: 1 });
+    const waiting = s.condition(runner)!;
+    // Provenance: the scheduler's own work, recorded as the scheduler.
+    expect(waiting).toMatchObject({ kind: 'resource', createdBy: 'scheduler', state: 'active' });
+    expect(waiting.continuation).toMatchObject({ trigger: 'quota' });
+    expect(await s.wake(runner, waiting.generation, 'event')).toMatchObject({
+      outcome: 'stale', reason: expect.stringContaining(`task ${senior} is ahead in the wait queue`),
+    });
+    expect(handoffRows(runner).map(h => h.trigger)).toEqual(['quota']);
+    expect(db.prepare("SELECT COUNT(*) AS n FROM handoffs WHERE task_id = ? AND trigger = 'manual'").get(runner)).toEqual({ n: 0 });
+
+    // P1-3: parking produced no routing decision — the predecessor's own is all
+    // there is, and the successor's belongs to the dispatch that gets the slot.
+    const parkedDecisions = decisions(runner);
+    expect(parkedDecisions).toHaveLength(1);
+    expect(s.dispatches(runner)[0]!.routing_decision_id).toBe(parkedDecisions[0]!.id);
+
+    // The same state, asked by an operator: the FIFO is skipped, the capacity
+    // is not (1 free unit is enough for this request).
+    expect(await s.runNow(runner)).toMatchObject({ outcome: 'dispatched' });
+    await drain();
+    // The successor ran on a claim of its OWN dispatch (it may have given it
+    // back by now — what matters is whose it was).
+    const dispatch = s.dispatches(runner).at(-1)!;
+    expect(dispatch.dispatch_id).not.toBe(s.dispatches(runner)[0]!.dispatch_id);
+    expect(claimRows(runner).filter(r => r.dispatch_id === dispatch.dispatch_id)).toHaveLength(1);
+    expect(claimRows(runner).filter(r => r.released_at === null).length).toBeLessThanOrEqual(1);
+
+    // One routing decision per dispatch and no other: parking produced none, and
+    // the successor's belongs to the dispatch that got the slot. K13 stays
+    // shadow with the execution request's model untouched.
+    const all = s.dispatches(runner);
+    const after = decisions(runner);
+    expect(all.map(d => d.routing_decision_id).filter(id => id !== null)).toHaveLength(all.length);
+    expect(new Set(all.map(d => d.routing_decision_id)).size).toBe(all.length);
+    expect(after).toHaveLength(all.length);
+    expect(dispatch.routing_decision_id).not.toBe(parkedDecisions[0]!.id);
+    for (const d of after) {
+      const recommendation = (JSON.parse(d.explanation) as { modelRecommendation?: { mode: string; execution: { decidedBy: string } } }).modelRecommendation;
+      if (recommendation) {
+        expect(recommendation.mode).toBe('shadow');
+        expect(recommendation.execution.decidedBy).toBe('unchanged');
+      }
+    }
+    expect(config.models.selection.enabled).toBe(false);
+    const request = db.prepare('SELECT request_json FROM execution_requests WHERE id = ?').get(dispatch.dispatch_id) as { request_json: string | null } | undefined;
+    if (request?.request_json) expect((JSON.parse(request.request_json) as { model?: unknown }).model).toBeUndefined();
   });
 });
 

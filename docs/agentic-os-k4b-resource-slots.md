@@ -89,7 +89,7 @@ Per lifecycle outcome:
 | healthy context yield (K11) | released; the continuation condition carries the requirement and re-acquires |
 | quota re-park (K2) | released; the quota condition carries the requirement and re-acquires |
 | `WAITING_INPUT` (operator) | released once no session is live; re-acquired on the next wake |
-| handoff | held while the session is live, released when it settles |
+| handoff / failover continuation | held while the source session is live, released when it settles — the successor acquires its OWN claim |
 | failed start / no candidate re-park | released with the dispatch |
 | start ambiguity | **held** until the recovery window or operator confirmation settles it |
 | crash recovery | swept by the boot reconciliation using the same ownership test |
@@ -263,17 +263,35 @@ THIS dispatch owns. It only ever refuses; it never acquires.
 `Scheduler.deferForResource` puts the continuation back through the ordinary funnel:
 
 ```
-WAITING_RESOURCE
-  → wake(taskId, generation, 'operator')
+source settles (cancelled/drained for a handoff, limit-settled for a failover)
+  → release the PREDECESSOR's claim, by the predecessor's ownership
+  → persist the continuation intent → WAITING_RESOURCE
+  → wake(taskId, generation, actor)
   → capacity check                       ← never skipped
   → claim + dispatch reservation (one transaction)
   → routeTask() → materialize → start
 ```
 
-An operator skips the FIFO (choosing what runs next is an operator decision) and never the
-capacity. If the pool is full the handoff returns `{ deferred: 'resource', resource, units }`,
-nothing starts, and the release of the holder wakes the task through the same FIFO every other
-waiter uses — exactly one successor, holding the claim it runs on.
+**The predecessor's claim ends with the predecessor.** A claim belongs to the dispatch it was
+granted to, and that dispatch ends with the session it launched, so a successor never inherits one.
+Letting a dispatchless successor reuse a live claim looked cheaper and was not: the moment the
+source settles there is no live run and no open dispatch, which is exactly the state
+`releaseIdleClaims` is entitled to act on — a routine tick between the check and the start could
+take the capacity away and strand the task mid-handoff. So the release is explicit, it uses the
+same `releaseIfIdle` ownership test every other release path uses, and the successor acquires a new
+claim inside the wake transaction: `resource_claims.dispatch_id == successor dispatch_id`, always.
+`assertLaunchClaim` therefore has no dispatchless exception left — it demands the claim be the one
+this start's dispatch owns, and it still only ever refuses.
+
+**Wake authority is the caller's, not a constant.** A manual handoff is an operator decision: it
+may skip the FIFO (choosing what runs next is an operator decision) and never the capacity. An
+automatic quota/failure continuation is ordinary scheduler work: it wakes as `event` and respects
+`resourceReady`, the resource FIFO and the capacity like every other waiter — and it is recorded as
+`scheduler`, never as an operator, so the audit trail never shows a human who was not there.
+
+If the pool is full the continuation returns `{ deferred: 'resource', resource, units }`, nothing
+starts, and the release of the holder wakes the task through the same FIFO every other waiter uses
+— exactly one successor, holding the claim its own dispatch was granted.
 
 Carried across the deferral: the continuation anchor (the latest checkpoint of the settled
 predecessor run, which is what a `WAITING_RESOURCE` transition already demands), the requirement,
@@ -288,11 +306,22 @@ trade a correctness property for a stale answer. The operator's `to` is applied 
 OVERRIDE at that fresh decision, not as a pre-resolved choice.
 
 The automatic failover path re-enters the same way (it pins no target — its own re-route runs at
-the grant), so the invariant has one implementation rather than one per caller.
+the grant), so the invariant has one implementation rather than one per caller. It also re-enters
+BEFORE routing: `failoverTask` checkpoints, gives the quota park its existing first refusal (every
+candidate blocked is not a pool problem, and that park carries the requirement forward), and then
+defers — so a continuation that parks produces NO routing decision. One resource-deferred
+continuation, one routing decision, made by the dispatch that actually gets the slot, and therefore
+one K13 shadow recommendation rather than an unused pre-grant one polluting the evidence. Only
+resource-bearing tasks take this order; every other failover keeps the one it had.
 
-A second handoff request on a deferred task is refused by the pre-existing `Scheduler owns task;
-use run-now` guard, so duplicate operator actions cannot produce duplicate successors; an operator
-`run-now` on it is still capacity-checked, and a stale generation is inert.
+**One continuation per task, decided durably.** The parking transaction refuses to overwrite an
+active condition that already carries a continuation intent, so two concurrent handoff requests
+cannot both park: the winner owns the intent, the pending `handoffs` row commits with that intent
+(or not at all), and the loser is told `already has a pending manual continuation` rather than
+silently replacing the winner's target. A sequential second request on an already-deferred task is
+still refused earlier by the pre-existing `Scheduler owns task; use run-now` guard; an operator
+`run-now` on it is still capacity-checked, and a stale generation is inert. No process-local lock
+is involved — the durable condition row is the arbiter.
 
 ## 6.3 A pool exists only if it is declared
 
@@ -360,7 +389,7 @@ backfilled for work that never recorded any.
 
 ## 9. Tests
 
-`apps/api/test/resource-slots.test.ts` (57 cases, injected clock and the scheduler's own
+`apps/api/test/resource-slots.test.ts` (64 cases, injected clock and the scheduler's own
 tick/event paths; no wall-time sleeps). A holder occupies its slot with a real live session — the
 fake adapter parks on an approval nobody answers — so the hold is the actual ownership record
 rather than a stub. Unexpected scheduler errors fail the test: a swallowed wake failure would
@@ -389,19 +418,50 @@ skips the queue and never the capacity; the pool status, the per-task readout an
 on readiness; a not-yet-due requirement is never reported "eligible"; and a due requirement the
 pool withholds does not re-arm the timer at 1 ms.
 
-Capacity is not operator-bypassable (`describe.each(['legacy','harness'])('K4b manual handoff')`),
-the whole scenario run under BOTH execution modes because the defect was in the shared launch
-boundary. A task runs on its slot, hits a limit with automatic failover off, has its claim swept,
-and another task takes the only slot; then the operator asks for a handoff. Asserted: nothing
-starts and no unclaimed execution exists; the requirement, the continuation anchor, the operator
-intent and the `resource_queued_at` seniority all survive the deferral; releasing the holder
-produces exactly ONE successor, whose dispatch owns the claim it runs on, with the `manual` handoff
-row closed by it; a duplicate handoff is refused, an operator run-now is still capacity-checked and
-a stale generation is inert; and a direct `startTask` of an unclaimed resource-bearing task fails
-closed before any provider call. The holder parks at the reservation boundary, so it owns its
-dispatch — and therefore its claim — until the test hands the slot back: no wall-time hold, and the
-same ownership record every release path reads. The gate is also tested for NOT over-refusing: a
-task that IS holding its slot is still handed off, on the one claim it already owns.
+Capacity is not operator-bypassable, and a successor never inherits a claim
+(`describe.each(['legacy','harness'])('K4b manual handoff')`, 7 cases run under BOTH execution
+modes because the defect was in the shared launch boundary).
+
+A task runs on its slot, hits a limit with automatic failover off, has its claim swept, and another
+task takes the only slot; then the operator asks for a handoff. Asserted: nothing starts and no
+unclaimed execution exists; the requirement, the continuation anchor, the operator intent and the
+`resource_queued_at` seniority all survive the deferral; releasing the holder produces exactly ONE
+successor, whose dispatch owns the claim it runs on, with the `manual` handoff row closed by it; a
+duplicate handoff is refused, an operator run-now is still capacity-checked and a stale generation
+is inert; and a direct `startTask` of an unclaimed resource-bearing task fails closed before any
+provider call. The holder parks at the reservation boundary, so it owns its dispatch — and
+therefore its claim — until the test hands the slot back: no wall-time hold, and the same ownership
+record every release path reads.
+
+The three continuation-ownership races, each with a full scheduler tick (sweep included) injected
+deterministically at the checkpoint the handoff takes — the exact window where the predecessor has
+settled, the claim is still live and no dispatch owns it:
+
+- **A — sweep at the boundary.** The sweep takes the predecessor's claim mid-handoff. The old claim
+  is released with the predecessor's dispatch, the successor runs on a NEW dispatch-owned claim,
+  and the task is never left stranded in `HANDING_OFF` with an unresolved handoff.
+- **B — another task takes the swept slot.** The rival legitimately wins the capacity; the handoff
+  answers `{ deferred: 'resource' }` and the task waits in `WAITING_RESOURCE` with no claim and no
+  new execution. When the rival gives the slot back, exactly one successor takes it, on exactly one
+  claim owned by exactly one new dispatch, with exactly one `manual` handoff row.
+- **C — no race at all.** Capacity free throughout, a task holding its own slot handed off: it
+  still releases the predecessor's claim and acquires a new one for the successor's dispatch
+  (two claim rows: the first released, the second live and owned by the dispatch that runs).
+
+Concurrent duplicate handoff (P2): two `handoff()` calls entered before either parks. Exactly one
+wins with `{ deferred: 'resource' }`, exactly one active condition and one continuation intent
+exist, exactly one pending `manual` handoff row is written, one successor runs, and the loser is
+rejected with an explicit already-owned error rather than silently replacing the winner's target.
+
+Automatic continuation (`describe('K4b automatic continuation')`): a resource-bearing task hits a
+quota limit with automatic failover ON while a SENIOR two-unit requirement is ready and ahead of
+it, and one unit frees. Asserted: the automatic continuation does not take the unit it could have
+had — `task <senior> is ahead in the wait queue` — it parks as `createdBy: 'scheduler'` with a
+`quota` continuation intent and a `quota` handoff row (never `manual`, never `operator`); parking
+persists NO routing decision; and the same state asked by an operator (`run-now`) skips the FIFO
+but not the capacity, producing exactly one new dispatch whose claim it owns, exactly one routing
+decision per dispatch and none spare, with K13 still `shadow`/`unchanged` and the execution
+request's model untouched.
 
 Bounded sweep (`describe('K4b bounded sweep')`): with the release event deliberately LOST (the
 claim row released behind the scheduler's back), only a sweep can free the waiter — and it does,

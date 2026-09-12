@@ -858,12 +858,22 @@ interface ScheduleOccurrence {
   pool nobody declared and bypass the capacity check rather than fail it.
 - **One acquisition path, one launch gate.** A claim is granted only inside the wake transaction.
   Any other continuation of a task that still carries a requirement — a manual handoff, an
-  automatic failover — re-enters `WAITING_RESOURCE → wake(taskId, generation, 'operator') →
-  capacity check → claim + dispatch reservation → route → start`, carrying the checkpoint anchor,
-  the requirement, its `resource_queued_at` seniority and the operator's intent; routing is
-  deliberately re-decided at the grant. `startTask` additionally asserts that a resource-bearing
-  task holds the live claim its dispatch owns, and fails closed before any provider call. That
-  assertion never acquires: it is a gate, not a second protocol.
+  automatic failover — re-enters `release the predecessor's claim → WAITING_RESOURCE →
+  wake(taskId, generation, actor) → capacity check → claim + dispatch reservation → route →
+  start`, carrying the checkpoint anchor, the requirement, its `resource_queued_at` seniority and
+  the caller's intent; routing is deliberately re-decided at the grant, and for a resource-deferred
+  automatic failover that grant-time decision is the ONLY routing decision (parking makes none).
+  A claim belongs to the dispatch it was granted to and ends with it, so a successor after a
+  settled predecessor always acquires a NEW dispatch-backed claim rather than inheriting one a
+  routine idle sweep is entitled to take. `startTask` additionally asserts that a resource-bearing
+  task holds the live claim ITS dispatch owns — no dispatchless exception — and fails closed before
+  any provider call. That assertion never acquires: it is a gate, not a second protocol.
+- **Continuation authority is the caller's.** A manual handoff is an operator decision: it may skip
+  the FIFO, never the capacity. An automatic quota/failure continuation wakes as an ordinary event
+  and respects readiness, FIFO and capacity, and is recorded as `scheduler` — an automatic failover
+  is never written to the record as an operator. One continuation intent per task wins, decided by
+  the durable condition row, so concurrent handoff requests cannot produce two intents, two pending
+  handoff records or two successors.
 - **The fallback sweep is an absolute deadline.** Waits carrying a requirement are excluded from
   exact timer deadlines (their `notBefore` is an earliest re-check, normally already past, which
   would re-arm the timer at 1 ms), so the sweep is the only thing that re-evaluates them. Its
@@ -1348,7 +1358,17 @@ owes the pool a claim starts nothing, defers through the ordinary funnel preserv
 anchor, the requirement age and the operator intent, and yields exactly one successor — holding the
 claim its dispatch owns — when the holder releases; a duplicate handoff is refused, an operator
 run-now is still capacity-checked, and a direct `startTask` of an unclaimed resource-bearing task
-fails closed before any provider call. The bounded sweep still fires while unrelated attaches and
+fails closed before any provider call. Continuation ownership, with a full scheduler tick injected
+at the settled-predecessor/unclaimed-successor boundary: the sweep may take the old claim and the
+successor still runs on a new dispatch-owned one and is never stranded in `HANDING_OFF`; another
+waiter may legitimately win the freed slot, in which case the continuation truthfully waits and
+exactly one successor later takes it; and even with capacity free throughout, a task handed off
+while holding its own slot releases that claim and acquires a new one. Two concurrent handoffs
+produce one intent, one pending handoff row and one successor, with an explicit already-owned
+error for the loser. An automatic quota continuation waits behind a senior larger request an
+operator would skip, is recorded as `scheduler` with a `quota` intent, and persists no routing
+decision from parking — exactly one per dispatch, K13 still shadow and the request model
+unchanged. The bounded sweep still fires while unrelated attaches and
 repeated stale wakes re-arm the timer at half its cadence, and a fresh scheduler arms one cadence
 out instead of busy-looping. Inherited property names (`constructor`, `__proto__`, `prototype`,
 `toString`, `valueOf`, `hasOwnProperty`) and non-integer capacities read as undeclared — no claim,
@@ -1369,8 +1389,9 @@ creating a schedule without `commands.write` fails closed.
 Tests: `packages/core/test/state-machine.test.ts` (every new edge legal with its precondition,
 every non-listed edge illegal, CR-32 rejections); `apps/api/test/scheduler.test.ts` (fake
 clock, generation CAS, dispatch phases); `apps/api/test/harness/boot-recovery` dispatch cases;
-`apps/api/test/resource-slots.test.ts` (57 cases: K4b claim/release, race, FIFO readiness and
-requirement seniority, capacity change, manual-handoff reacquisition in both execution modes,
+`apps/api/test/resource-slots.test.ts` (64 cases: K4b claim/release, race, FIFO readiness and
+requirement seniority, capacity change, manual-handoff reacquisition and the sweep/rival/concurrent
+continuation races in both execution modes, automatic-continuation fairness and provenance,
 absolute sweep cadence, pool declaration safety, unsatisfiable repair);
 `apps/api/test/failover.test.ts` all-blocked case on both paths; `quota-projection.test.ts`;
 `eval/scenarios/quota-wait-and-resume.ts`; Cockpit `schedule` unit tests (K6).

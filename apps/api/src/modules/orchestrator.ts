@@ -905,6 +905,21 @@ export class Orchestrator {
     const attempt = wait?.state === 'consumed' ? wait.autoWakes + 1 : 0;
     this.cooldowns.penalize(assistantId, trigger === "quota" ? "limit" : "failure", reasonText, resetsAt, attempt);
 
+    // K4b, before any routing: a task that still owes the pool a slot re-enters
+    // the scheduler here, and routing is re-decided AT THE GRANT. A decision made
+    // now would belong to a successor that does not exist yet, and the dispatch
+    // that eventually gets the slot routes again — leaving two routing decisions
+    // (and two K13 shadow recommendations) for one continuation. Confined to
+    // resource-bearing tasks: every other failover keeps the order it had.
+    if (this.scheduler?.requirement(taskId)) {
+      // Quota first, exactly as the no-candidate branch below would: every
+      // candidate blocked is not a pool problem, and the quota park carries the
+      // requirement forward rather than parking a task on a pool queue it would
+      // only refuse. This is the same K2 park, reached without a routing decision.
+      if (this.quotaPlan(taskId).quotaBlocked && this.scheduler.parkQuota(taskId, checkpoint.id)) return;
+      if (await this.deferResourceContinuation(taskId, { trigger, reason: reasonText, from: assistantId as AssistantId, checkpointId: checkpoint.id })) return;
+    }
+
     const { explanation, routingDecisionId } = this.routeTask(taskId, "failover", { exclude: assistantId });
 
     if (!explanation.chosen) {
@@ -920,10 +935,6 @@ export class Orchestrator {
     }
 
     const target = explanation.chosen;
-    // Same funnel for the automatic path: a swept claim must be re-acquired, not
-    // assumed. No target is pinned here — the failover's own re-route runs at the
-    // grant, from the evidence that is current then.
-    if (await this.deferResourceContinuation(taskId, { trigger, reason: reasonText, from: assistantId as AssistantId, checkpointId: checkpoint.id })) return;
     this.tasks.transition(taskId, "HANDING_OFF");
     this.publishState(taskId, this.tasks.envelope(taskId), target);
     this.notice(
@@ -1134,51 +1145,65 @@ export class Orchestrator {
   }
 
   /**
-   * K4b: a continuation (manual handoff, automatic failover) of a task that
-   * still carries a pool requirement and holds no live claim.
+   * K4b: a continuation (manual handoff, automatic quota/failure failover) of a
+   * task that still carries a pool requirement.
    *
    * Root cause this closes: `startTask` is a launch path, not an acquisition
-   * path. A task that entered execution through a resource requirement, settled
-   * to a pause and had its claim released is still a task that needs a slot —
-   * and every non-scheduler start was handing it a provider anyway. Rather than
-   * bolting a second reservation protocol into the orchestrator, the
-   * continuation re-enters the only funnel that can grant a slot:
+   * path. A task that entered execution through a resource requirement and then
+   * settled — to a pause, to a limit, to a cancelled handoff source — is still a
+   * task that needs a slot, and the claim it was running on belonged to the
+   * dispatch that has now ended. Rather than bolting a second reservation
+   * protocol into the orchestrator, the continuation re-enters the only funnel
+   * that can grant one:
    *
-   *   WAITING_RESOURCE → wake(taskId, generation, 'operator') → capacity check
+   *   release the predecessor's claim → WAITING_RESOURCE
+   *     → wake(taskId, generation, actor) → capacity check
    *     → claim + dispatch reservation (one transaction) → route → start
    *
-   * An operator therefore skips the FIFO and never the capacity. The
-   * checkpoint anchor, the requirement, its `resource_queued_at` seniority and
-   * the operator's own intent all survive the deferral; the routing decision is
+   * The wake's authority is the caller's, and it is the difference between the
+   * two triggers: a manual handoff is an operator decision and may skip the
+   * FIFO (never the capacity); an automatic failover is ordinary scheduler work
+   * and takes its turn. Both are recorded as what they are.
+   *
+   * The checkpoint anchor, the requirement, its `resource_queued_at` seniority
+   * and the caller's intent all survive the deferral; the routing decision is
    * deliberately left to the grant, where it is made from current evidence.
    *
    * Returns `undefined` when the task owes the pool nothing and the caller
-   * should start normally.
+   * should start normally. Call it only once the predecessor has settled — a
+   * live execution owner makes the deferral throw rather than strand the task.
    */
   private async deferResourceContinuation(
     taskId: string,
     options: { trigger: 'manual' | 'quota' | 'failure'; reason: string; to?: AssistantId; from?: AssistantId; checkpointId?: string },
   ): Promise<HandoffResult | undefined> {
     const need = this.scheduler?.requirement(taskId);
-    if (!need || !this.scheduler || this.scheduler.claim(taskId)) return undefined;
+    if (!need || !this.scheduler) return undefined;
     const from = options.from ?? (this.lastAssistant(taskId) as AssistantId | undefined);
-    // No live claim plus a requirement means no live execution owner, so the run
+    // The predecessor has settled by the time a continuation defers, so the run
     // this continues from is the last one recorded.
     const fromRunId = (this.db.prepare('SELECT id FROM runs WHERE task_id = ? ORDER BY started_at DESC, rowid DESC LIMIT 1')
       .get(taskId) as { id: string } | undefined)?.id ?? null;
     const checkpointId = options.checkpointId ?? (await this.checkpoints.create(taskId, fromRunId, 'handoff')).id;
-    this.db
-      .prepare('INSERT INTO handoffs (id, task_id, from_run_id, to_run_id, checkpoint_id, trigger, at) VALUES (?, ?, ?, NULL, ?, ?, ?)')
-      .run(newHandoffId(), taskId, fromRunId, checkpointId, options.trigger, new Date().toISOString());
-    this.notice(taskId, 'info', `${options.reason} It needs ${need.units} unit(s) of ${need.resource} first, and starts as soon as the pool can grant them.`);
     const wake = await this.scheduler.deferForResource(taskId, {
       reason: `Continuation waiting for ${need.units} unit(s) of ${need.resource}`,
       intent: { trigger: options.trigger, to: options.to, from, reason: options.reason },
+      // Manual is an operator decision; quota/failure is the scheduler's own work.
+      actor: options.trigger === 'manual' ? 'operator' : 'event',
+      checkpointId,
+      // The pending handoff record commits with the continuation intent that
+      // justifies it, so a continuation that loses the race writes neither.
+      onPark: () => {
+        this.db
+          .prepare('INSERT INTO handoffs (id, task_id, from_run_id, to_run_id, checkpoint_id, trigger, at) VALUES (?, ?, ?, NULL, ?, ?, ?)')
+          .run(newHandoffId(), taskId, fromRunId, checkpointId, options.trigger, new Date().toISOString());
+      },
     });
     if (wake?.outcome === 'dispatched') {
       const run = this.db.prepare('SELECT id, assistant_id FROM runs WHERE dispatch_id = ?').get(wake.dispatchId) as { id: string; assistant_id: string } | undefined;
       if (run) return { runId: run.id, assistantId: run.assistant_id };
     }
+    this.notice(taskId, 'info', `${options.reason} It needs ${need.units} unit(s) of ${need.resource} first, and starts as soon as the pool can grant them.`);
     return { deferred: 'resource', resource: need.resource, units: need.units };
   }
 
@@ -1194,13 +1219,6 @@ export class Orchestrator {
       );
     }
 
-    // Before either execution mode does anything: a task that still owes the pool
-    // a claim may not be started by an operator action, only re-entered.
-    const deferred = await this.deferResourceContinuation(taskId, {
-      trigger: 'manual', to, reason: 'A manual handoff was requested by the user.',
-    });
-    if (deferred) return deferred;
-
     if (this.harnessOwns(taskId)) return this.harnessHandoff(taskId, to);
 
     const current = this.soleRun(taskId);
@@ -1213,6 +1231,17 @@ export class Orchestrator {
       await current.adapter.cancel(current.handle);
       await this.waitUntilInactive(taskId);
     }
+
+    // The source has settled, so its claim is the predecessor's to give back: a
+    // task that still owes the pool a slot re-enters the wake funnel here and
+    // acquires a NEW dispatch-backed claim, rather than a successor being
+    // launched on capacity a routine sweep is entitled to take away. Its own
+    // checkpoint is the continuation anchor, so it is taken before this one.
+    const deferred = await this.deferResourceContinuation(taskId, {
+      trigger: 'manual', to, reason: 'A manual handoff was requested by the user.',
+      from: fromAssistantId as AssistantId | undefined,
+    });
+    if (deferred) return deferred;
 
     const checkpoint = await this.checkpoints.create(taskId, current?.runId ?? null, "handoff");
 
@@ -1256,7 +1285,7 @@ export class Orchestrator {
    * does NOT transition the task, then start a fresh Harness session on the
    * target with a handoff-rendered prompt.
    */
-  private async harnessHandoff(taskId: string, to?: AssistantId): Promise<{ runId: string; assistantId: string }> {
+  private async harnessHandoff(taskId: string, to?: AssistantId): Promise<HandoffResult> {
     const sid = this.harnessBridge!.liveSessionId(taskId);
     const fromAssistantId = this.lastAssistant(taskId);
 
@@ -1278,6 +1307,15 @@ export class Orchestrator {
         throw new Error(`harness session ${sid} did not settle for handoff`);
       }
     }
+
+    // Same boundary as the legacy path: the source session has settled, so the
+    // predecessor's claim goes back and the successor acquires its own through
+    // the wake funnel. (Shared code, because the defect was shared.)
+    const deferred = await this.deferResourceContinuation(taskId, {
+      trigger: 'manual', to, reason: 'A manual handoff was requested by the user.',
+      from: fromAssistantId as AssistantId | undefined,
+    });
+    if (deferred) return deferred;
 
     // Session-scoped checkpoint on the captured harness sid — the target's
     // handoff-prompt render reads checkpoints.latest(taskId). (The runner's own

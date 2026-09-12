@@ -15,7 +15,7 @@ const DEFAULT_MAX_AUTO_WAKES = 3;
 /** A failed dependency is not the scheduler's decision to make on its own. */
 const DEFAULT_ON_DEPENDENCY_FAILURE: OnDependencyFailure = 'wait-input';
 
-type Actor = 'timer' | 'event' | 'operator';
+export type Actor = 'timer' | 'event' | 'operator';
 type WakeResult = { outcome: 'stale'; reason: string } | { outcome: 'dispatched'; dispatchId: string };
 export interface SchedulerDeps {
   db: Db; tasks: TaskStore; orchestrator: Orchestrator; bus: TaskEventBus; config: ResolvedConfig;
@@ -222,14 +222,16 @@ export class Scheduler {
 
   /**
    * The launch-funnel invariant (defence in depth): a task that carries a pool
-   * requirement must not reach a provider unless a live claim backs it — and,
-   * when the start belongs to a dispatch, unless THAT dispatch owns the claim,
-   * because a claim granted to another dispatch is not this dispatch's capacity.
+   * requirement must not reach a provider unless the live claim backing it is
+   * the one THIS start's dispatch owns. A claim belongs to the dispatch it was
+   * granted to, and that dispatch ends with the session it launched — so a
+   * claim left behind by a settled predecessor is not capacity a successor may
+   * run on, and a start that owns no dispatch owns no claim at all.
    *
-   * A continuation that is not a dispatch (a manual handoff of a task that is
-   * still holding its slot) is not refused: `uq_claim_live` means the task holds
-   * exactly one claim, so the pool's arithmetic is unchanged by which of the
-   * task's own sessions is running. What is refused is starting with NO claim.
+   * That is why there is no dispatchless exception here: a continuation of a
+   * task that still owes the pool a slot re-enters `deferForResource`, which
+   * releases the predecessor's claim with the predecessor's ownership and lets
+   * the successor acquire its own inside the wake transaction.
    *
    * It is a closed gate, never an acquisition path — the only place a claim is
    * ever granted is the wake transaction — so anything that arrives here
@@ -243,8 +245,8 @@ export class Scheduler {
     if (!held || held.resource !== need.resource || held.units < need.units) {
       throw new Error(`Task ${taskId} needs ${need.units} unit(s) of ${need.resource}; execution cannot start without a live resource claim`);
     }
-    if (dispatchId && held.dispatch_id !== dispatchId) {
-      throw new Error(`Task ${taskId} holds ${need.resource} for dispatch ${held.dispatch_id}; dispatch ${dispatchId} does not own that claim`);
+    if (held.dispatch_id !== dispatchId) {
+      throw new Error(`Task ${taskId} holds ${need.resource} for dispatch ${held.dispatch_id}; ${dispatchId ? `dispatch ${dispatchId}` : 'a start that owns no dispatch'} does not own that claim`);
     }
   }
 
@@ -261,42 +263,77 @@ export class Scheduler {
   }
 
   /**
-   * An operator or failover continuation for a task that still carries a pool
-   * requirement and holds no claim. It does NOT start anything: it re-enters the
-   * one funnel that can grant a slot —
+   * A continuation (manual handoff, automatic quota/failure failover) of a task
+   * that still carries a pool requirement. It does NOT start anything: it
+   * re-enters the one funnel that can grant a slot —
    *
-   *   WAITING_RESOURCE -> wake(taskId, generation, 'operator')
+   *   release the predecessor's claim -> WAITING_RESOURCE
+   *     -> wake(taskId, generation, actor)
    *     -> capacity check -> claim + dispatch reservation (one transaction)
    *     -> route -> materialize -> start
    *
-   * so an operator skips the FIFO (choosing what runs next is an operator
-   * decision) and never the capacity (over-allocating is not something anyone
-   * can ask for). Returns `undefined` when the task owes the pool nothing, and
-   * the caller starts normally.
+   * Two rules decide everything here.
    *
-   * The requirement, its `resource_queued_at` seniority, the continuation anchor
-   * and the operator's own intent all survive the deferral; only the routing
-   * decision is left to the grant, where it is made from current evidence rather
-   * than replayed from a target that may have become ineligible while waiting.
+   * OWNERSHIP. A claim belongs to the dispatch it was granted to, and that
+   * dispatch ends when its session settles. So the predecessor's claim is
+   * released HERE, by the ownership truth `releaseIfIdle` already applies — not
+   * carried into the successor. Inheriting it looked cheaper and was not: the
+   * idle sweep releases exactly that claim the moment the predecessor settles,
+   * so a successor built on it is a successor whose capacity a routine tick can
+   * remove between the check and the start. The successor acquires its own
+   * claim, inside the wake transaction, backed by its own dispatch.
+   *
+   * AUTHORITY. `actor` is the caller's, not a constant. An operator picking a
+   * task to continue may skip the FIFO — choosing what runs next is an operator
+   * decision — and never the capacity. An automatic failover is ordinary
+   * scheduler work: it waits its turn like every other waiter (`resourceReady`,
+   * FIFO, capacity), and it is recorded as `scheduler`, never as an operator.
+   *
+   * Returns `undefined` when the task owes the pool nothing, and the caller
+   * starts normally. The requirement, its `resource_queued_at` seniority, the
+   * continuation anchor and the caller's intent all survive the deferral; only
+   * the routing decision is left to the grant, where it is made from current
+   * evidence rather than replayed from a target that may have become ineligible
+   * while waiting.
    */
-  async deferForResource(taskId: string, options: { reason: string; intent: ContinuationIntent }): Promise<WakeResult | undefined> {
+  async deferForResource(taskId: string, options: { reason: string; intent: ContinuationIntent; actor: Actor; checkpointId?: string; onPark?: () => void }): Promise<WakeResult | undefined> {
     const need = this.requirement(taskId);
-    if (!need || this.claim(taskId)) return undefined;
+    if (!need) return undefined;
+    // The predecessor's claim ends with the predecessor. `releaseIfIdle` is the
+    // same ownership test the sweep and every settle path use, so this releases
+    // exactly when a live session no longer owns the slot and never while one does.
+    this.releaseIfIdle(taskId, `continuation: ${options.intent.trigger} handoff, predecessor settled`);
     const generation = this.d.db.transaction((): number => {
       const row = this.d.tasks.get(taskId);
       if (!row || isTerminal(row.state)) throw new Error(`Task ${taskId} is ${row?.state ?? 'unknown'}; there is nothing to continue`);
       if (this.hasOwner(taskId)) throw new Error('Existing execution prevents a resource deferral');
+      // One durable continuation per task, decided by the condition row itself:
+      // whoever writes the intent owns the successor. A second concurrent
+      // continuation loses here, before it can replace the winner's target or
+      // add a second pending handoff record — no process-local lock involved.
+      const active = this.condition(taskId);
+      if (active?.state === 'active' && active.continuation) {
+        throw new Error(`Task ${taskId} already has a pending ${active.continuation.trigger} continuation waiting for ${active.units ?? 1} unit(s) of ${active.resource}`);
+      }
       this.d.db.prepare("UPDATE wait_conditions SET state = 'replaced' WHERE task_id = ? AND state = 'active'").run(taskId);
       this.insert(taskId, { kind: 'resource', notBefore: this.iso(), reason: options.reason, resource: need.resource, units: need.units },
-        'operator', 0, this.condition(taskId)?.history ?? [], this.anchor(taskId), [], 'failover',
+        // The caller's own continuation checkpoint when it has one: the record it
+        // wrote and the condition it parked must name the SAME anchor, or the
+        // continuation would be closed against a checkpoint nobody is waiting on.
+        options.actor === 'operator' ? 'operator' : 'scheduler', 0, this.condition(taskId)?.history ?? [], options.checkpointId ?? this.anchor(taskId), [], 'failover',
         { resource: need.resource, units: need.units, continuation: options.intent });
-      if (row.state !== 'WAITING_RESOURCE') this.d.tasks.transition(taskId, 'WAITING_RESOURCE', undefined, 'resource-continuation');
+      // The grant is an operator exception only when an operator asked for it;
+      // an automatic continuation parks from LIMIT_PAUSED, which needs none.
+      if (row.state !== 'WAITING_RESOURCE') this.d.tasks.transition(taskId, 'WAITING_RESOURCE', undefined, options.actor === 'operator' ? 'resource-continuation' : undefined);
       const generation = this.condition(taskId)!.generation;
-      this.record(taskId, 'wait.attached', generation, undefined, { resource: need.resource, units: need.units, continuation: options.intent, reason: options.reason });
+      this.record(taskId, 'wait.attached', generation, undefined, { resource: need.resource, units: need.units, continuation: options.intent, reason: options.reason, actor: options.actor });
+      // Records the caller owes the parked continuation (the pending handoff row)
+      // commit with the intent that justifies them, or not at all.
+      options.onPark?.();
       return generation;
     })();
     this.publish(taskId); this.arm();
-    return this.wake(taskId, generation, 'operator');
+    return this.wake(taskId, generation, options.actor);
   }
 
   /**
