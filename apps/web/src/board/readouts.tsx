@@ -501,7 +501,11 @@ export function ModelRecommendationReadout({
  * queue POSITION all arrive already decided. The browser orders nothing: a
  * second opinion about who runs next is exactly what must not exist.
  */
-/** Matches Inspector's own polling cadence — no second, independently-paced loop. */
+/**
+ * Uses the same 4 s cadence as Inspector, but this readout runs its OWN bounded
+ * schedule refresh while mounted — it is an independent loop at a matching
+ * interval, not a shared one.
+ */
 const QUEUE_POLL_MS = 4000;
 
 export function ScheduleQueueReadout() {

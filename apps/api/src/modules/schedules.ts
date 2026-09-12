@@ -5,9 +5,13 @@ import type { Db } from '../db/index.js';
 import type { TaskStore } from './tasks.js';
 
 /**
- * A catch-up sweep never enumerates more than this many missed occurrences.
- * At most one of them fires either way; the cap bounds the audit rows a
- * per-minute schedule can write after a long outage.
+ * How many OLDER missed occurrences one reconciliation records as
+ * `skipped-catch-up`. This is an AUDIT bound and nothing else: the occurrence
+ * that may still run is chosen from `now` backwards (see `missed`), so it is
+ * never one of these rows and changing this number cannot change what executes
+ * — only how much history a long outage writes. Audit history is therefore
+ * deliberately bounded: after a very long outage the oldest misses have no
+ * individual row.
  */
 const MAX_CATCH_UP_ROWS = 200;
 
@@ -332,21 +336,41 @@ export class ScheduleService {
   }
 
   /**
-   * Missed occurrences from the stored `nextFireAt` up to now, newest last. The
-   * walk never reaches further back than the catch-up window, so an older gap
-   * costs a resync rather than a row per instant.
+   * The catch-up decision for ONE reconciliation: `latest` is the newest real
+   * occurrence in the catch-up window, and `older` is the audit tail behind it,
+   * oldest first.
+   *
+   * These are two separate questions and the cap answers only the second one.
+   * Which occurrence may still run is semantic, so it is derived from `now`
+   * BACKWARDS and is found whether the outage missed three occurrences or three
+   * thousand. Walking forward and taking the last row enumerated made the audit
+   * cap pick the winner: a per-minute schedule down for a day resynced onto its
+   * 200th miss, stayed overdue, and turned one downtime interval into a fresh
+   * durable occurrence on every tick. Going backwards, one downtime interval
+   * yields exactly one candidate and `resync` then moves `nextFireAt` past the
+   * entire interval, so repeating the same reconciliation produces nothing.
    */
-  private missed(row: Row, nowMs: number): Date[] {
+  private missed(row: Row, nowMs: number): { latest: Date | null; older: Date[] } {
     const windowStart = nowMs - row.catch_up_window_minutes * 60_000;
     const from = Math.max(Date.parse(row.next_fire_at!), windowStart);
     const job = new Cron(row.cron, { timezone: row.timezone });
-    const out: Date[] = [];
-    let t = job.nextRun(new Date(from - 1));
-    while (t && t.getTime() <= nowMs && out.length < MAX_CATCH_UP_ROWS) {
-      if (this.localTimeExists(row.cron, row.timezone, t)) out.push(t);
-      t = job.nextRun(t);
+    // ONE backward enumeration, newest first. It has to be one call: on a
+    // spring-forward day the cron library answers a nonexistent local time with
+    // the shifted instant, and feeding that instant back as the next reference
+    // returns it again forever. Croner strips milliseconds and enumerates
+    // strictly before the reference, so the reference is nudged past `now` to
+    // keep an occurrence landing exactly on `now` in scope; anything after
+    // `now` is filtered below. The 32 extra candidates are DST slack, so a gap
+    // cannot consume the audit budget.
+    const found: Date[] = [];
+    for (const candidate of job.previousRuns(MAX_CATCH_UP_ROWS + 32, new Date(nowMs + 1000))) {
+      if (candidate.getTime() < from) break;
+      // The same real-local-time truth the forward walk used: a nonexistent
+      // spring-forward instant is not an occurrence in either direction.
+      if (candidate.getTime() <= nowMs && this.localTimeExists(row.cron, row.timezone, candidate)) found.push(candidate);
+      if (found.length > MAX_CATCH_UP_ROWS) break;
     }
-    return out;
+    return { latest: found[0] ?? null, older: found.slice(1).reverse() };
   }
 
   /**
@@ -363,20 +387,21 @@ export class ScheduleService {
 
   private advance(row: Row, mode: 'catch-up' | 'disabled'): void {
     const nowMs = this.d.now().getTime();
-    const missed = this.missed(row, nowMs);
-    if (!missed.length) { this.resync(row, new Date(nowMs)); return; }
-    const last = missed.pop()!;
+    const { latest, older } = this.missed(row, nowMs);
+    if (!latest) { this.resync(row, new Date(nowMs)); return; }
     this.d.db.transaction(() => {
       // Re-read inside the transaction: a concurrent edit or fire wins.
       const current = this.d.db.prepare('SELECT * FROM schedules WHERE schedule_id = ?').get(row.schedule_id) as Row | undefined;
       if (!current || !current.enabled || current.next_fire_at !== row.next_fire_at) return;
       if (mode === 'disabled') {
-        this.occurrence(row.schedule_id, last.toISOString(), 'skipped-disabled');
+        this.occurrence(row.schedule_id, latest.toISOString(), 'skipped-disabled');
       } else {
-        for (const skipped of missed) this.occurrence(row.schedule_id, skipped.toISOString(), 'skipped-catch-up');
-        this.fire(current, last);
+        for (const skipped of older) this.occurrence(row.schedule_id, skipped.toISOString(), 'skipped-catch-up');
+        this.fire(current, latest);
       }
-      this.resync(current, last);
+      // Strictly past the whole downtime interval: `latest` is the newest real
+      // occurrence at or before now, so the next one after it is after now too.
+      this.resync(current, latest);
     })();
   }
 
@@ -388,13 +413,16 @@ export class ScheduleService {
     // running? Answered from durable occurrence/task state (`last_task_id` is
     // a display field), so the two modes can never disagree about overlap.
     const busy = !!this.activeTaskId(row.schedule_id);
-    if (row.overlap === 'queue') {
-      // Fairness: an occurrence fires immediately ONLY when nothing is running
-      // AND the queue is empty. Otherwise it goes to the back of the line, so
-      // no later occurrence can ever overtake an earlier queued one.
-      if (busy || this.queuedCount(row.schedule_id)) { this.enqueue(row, occurrenceAt); return; }
-    } else if (busy) {
-      this.occurrence(row.schedule_id, occurrenceAt, 'skipped-overlap');
+    // Durable queued work outranks every later occurrence, in BOTH modes. An
+    // existing backlog is already-accepted work, and `overlap` is future policy
+    // about the NEW occurrence: it decides whether that occurrence queues up
+    // behind the backlog or is skipped, never whether it may run ahead of it.
+    // Editing `queue` -> `skip` therefore cannot let a newer occurrence overtake
+    // an older queued one, and it rewrites no queued row to achieve that.
+    const blocked = busy || this.queuedCount(row.schedule_id) > 0;
+    if (blocked) {
+      if (row.overlap === 'queue') this.enqueue(row, occurrenceAt);
+      else this.occurrence(row.schedule_id, occurrenceAt, 'skipped-overlap');
       return;
     }
     const taskId = this.createOccurrenceTask(JSON.parse(row.intent_json) as TaskIntent, occurrenceAt);

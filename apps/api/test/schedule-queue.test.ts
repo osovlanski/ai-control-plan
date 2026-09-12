@@ -50,6 +50,30 @@ function queued(s: Scheduler, id: string) {
   return occurrences(s, id).filter(o => o.outcome === 'queued').sort((a, b) => a.occurrenceAt.localeCompare(b.occurrenceAt));
 }
 function taskCount() { return (db.prepare('SELECT COUNT(*) AS n FROM tasks').get() as { n: number }).n; }
+function countOutcome(id: string, outcome: string) {
+  return (db.prepare('SELECT COUNT(*) AS n FROM schedule_occurrences WHERE schedule_id = ? AND outcome = ?').get(id, outcome) as { n: number }).n;
+}
+/** Occurrence tasks of one schedule that are still non-terminal. The no-overlap invariant. */
+function liveOccurrenceTasks(id: string) {
+  return (db.prepare(`SELECT COUNT(*) AS n FROM schedule_occurrences o JOIN tasks t ON t.id = o.task_id
+    WHERE o.schedule_id = ? AND t.state NOT IN ('COMPLETED','FAILED','CANCELLED')`).get(id) as { n: number }).n;
+}
+/**
+ * A restart with a genuinely cold SQLite connection AND a fresh service
+ * composition. `scheduler()` reuses this process's connection, so it cannot
+ * prove reconciliation reads durable state rather than in-process state.
+ */
+async function coldRestart(): Promise<{ s: Scheduler; close: () => Promise<void> }> {
+  const cold = openDb(config.dbPath);
+  const server = buildServer({ config, db: cold, now });
+  server.registry.init(); await server.registry.syncAll();
+  return {
+    s: new Scheduler({ db: cold, config, tasks: server.tasks, orchestrator: server.orchestrator, bus: server.bus, now }),
+    close: async () => { await server.orchestrator.shutdown(); await server.app.close(); cold.close(); },
+  };
+}
+/** Per-minute schedule, 24 h catch-up window: the >200-miss shape. */
+const perMinute: ScheduleInput = { goal: 'per-minute sweep', cron: '* * * * *', timezone: 'UTC', overlap: 'queue', catchUpWindowMinutes: 24 * 60 };
 
 /** Fires the first occurrence and holds its task open. Returns [scheduleId, taskId]. */
 async function firstOccurrenceRunning(s: Scheduler, input: ScheduleInput = daily): Promise<[string, string]> {
@@ -687,5 +711,231 @@ describe('K5 overlap: queue', () => {
     expect((await built.app.inject({ method: 'PATCH', url: `/api/schedules/${id}`, headers: headers(), payload: { overlap: 'sometimes' } })).statusCode).toBe(400);
     await settle(first.taskId!);
     expect(s.schedules.get(id)?.queuedCount).toBe(1);
+  });
+});
+
+/**
+ * P1-1. An existing queue backlog is already-accepted durable work, and
+ * `overlap` is policy about the NEXT occurrence. Editing the mode may decide
+ * whether a newly-due occurrence queues or is skipped; it may never let that
+ * occurrence become a task ahead of an older queued one, and it may never
+ * rewrite the backlog to make that true.
+ */
+describe('K5 overlap: queue — backlog outranks a later occurrence in BOTH modes', () => {
+  it('A — queue -> skip, disabled, predecessor settles, re-enabled: the OLD queued occurrence is the only new task', async () => {
+    await boot(); const s = scheduler();
+    const [id, running] = await firstOccurrenceRunning(s);
+    at('2030-01-02T07:30:00Z'); await s.tick();            // O2 queued behind the running task
+    expect(queued(s, id).map(o => o.occurrenceAt)).toEqual(['2030-01-02T07:30:00.000Z']);
+
+    s.schedules.update(id, { overlap: 'skip' });           // FUTURE policy only
+    s.schedules.update(id, { enabled: false });
+    await settle(running);                                 // T1 terminates while disabled
+    expect(queued(s, id)).toHaveLength(1);                 // backlog survives, un-promoted
+
+    at('2030-01-03T07:29:59Z'); s.schedules.update(id, { enabled: true });
+    at('2030-01-03T07:30:00Z'); await s.tick();
+
+    // Exactly one new task, and it is the OLDER queued occurrence.
+    expect(taskCount()).toBe(2);
+    const rows = occurrences(s, id);
+    const promoted = rows.find(o => o.occurrenceAt === '2030-01-02T07:30:00.000Z')!;
+    expect(promoted).toMatchObject({ outcome: 'created' });
+    expect(promoted.taskId).toBeTruthy();
+    // The newly-due occurrence was skipped, not run, and owns no task.
+    const fresh = rows.find(o => o.occurrenceAt === '2030-01-03T07:30:00.000Z')!;
+    expect(fresh.outcome).toBe('skipped-overlap');
+    expect(fresh.taskId).toBeUndefined();
+    expect(liveOccurrenceTasks(id)).toBe(1);
+    expect(queued(s, id)).toEqual([]);
+  });
+
+  it('B — queue -> skip with a backlog and no active task: a newly-due occurrence still cannot overtake it', async () => {
+    await boot(); const s = scheduler();
+    const [id, running] = await firstOccurrenceRunning(s);
+    at('2030-01-02T07:30:00Z'); await s.tick();
+    s.schedules.update(id, { overlap: 'skip' });
+    // The predecessor dies without its terminal event ever being delivered.
+    db.prepare("UPDATE tasks SET state = 'COMPLETED' WHERE id = ?").run(running);
+
+    at('2030-01-03T07:30:00Z'); await s.tick();
+    expect(taskCount()).toBe(2);
+    expect(occurrences(s, id).find(o => o.occurrenceAt === '2030-01-03T07:30:00.000Z'))
+      .toMatchObject({ outcome: 'skipped-overlap', taskId: undefined });
+    expect(occurrences(s, id).find(o => o.occurrenceAt === '2030-01-02T07:30:00.000Z'))
+      .toMatchObject({ outcome: 'created' });
+    expect(liveOccurrenceTasks(id)).toBe(1);
+  });
+
+  it('C — skip -> queue with no backlog leaves ordinary queue semantics untouched', async () => {
+    await boot(); const s = scheduler();
+    const [id] = await firstOccurrenceRunning(s, { ...daily, overlap: 'skip' });
+    s.schedules.update(id, { overlap: 'queue' });
+    at('2030-01-02T07:30:00Z'); await s.tick();
+    expect(queued(s, id).map(o => o.occurrenceAt)).toEqual(['2030-01-02T07:30:00.000Z']);
+    expect(taskCount()).toBe(1);
+  });
+
+  it('D — repeated overlap edits change no queued occurrenceAt, no snapshot and no FIFO order', async () => {
+    await boot(); const s = scheduler();
+    const [id] = await firstOccurrenceRunning(s);
+    at('2030-01-02T07:30:00Z'); await s.tick();
+    at('2030-01-03T07:30:00Z'); await s.tick();
+    const snapshot = () => db.prepare("SELECT occurrence_at, intent_json, queued_at FROM schedule_occurrences WHERE schedule_id = ? AND outcome = 'queued' ORDER BY occurrence_at").all(id);
+    const before = snapshot();
+    expect(before).toHaveLength(2);
+
+    for (const overlap of ['skip', 'queue', 'skip', 'queue', 'skip'] as const) {
+      s.schedules.update(id, { overlap, goal: `edited for ${overlap}` });
+    }
+    expect(snapshot()).toEqual(before);
+    expect(queued(s, id).map(o => o.queuePosition)).toEqual([1, 2]);
+  });
+});
+
+/**
+ * P1-2. MAX_CATCH_UP_ROWS is an audit bound. One downtime interval yields at
+ * most ONE catch-up occurrence — the newest real one in the window — and the
+ * reconciliation moves `nextFireAt` past the whole interval, so repeating it
+ * (same tick, same boot, a cold connection) produces nothing further.
+ */
+describe('K5 overlap: queue — catch-up is chosen from now, not from the audit cap', () => {
+  it('A — >200 missed per-minute occurrences queue exactly ONE, the newest eligible', async () => {
+    await boot(); const s = scheduler();
+    const id = s.schedules.create(perMinute).scheduleId;
+    at('2030-01-01T00:01:00Z'); await s.tick();
+    const first = occurrences(s, id)[0]!;
+    expect(first).toMatchObject({ occurrenceAt: '2030-01-01T00:01:00.000Z', outcome: 'created' });
+    hold(first.taskId!);
+
+    at('2030-01-01T23:59:00Z'); await s.tick();            // ~1438 real misses
+    expect(queued(s, id).map(o => o.occurrenceAt)).toEqual(['2030-01-01T23:59:00.000Z']);
+    expect(taskCount()).toBe(1);
+    // The audit tail is bounded and is NOT executable work.
+    expect(countOutcome(id, 'skipped-catch-up')).toBe(200);
+    // nextFireAt is strictly past the whole downtime interval.
+    const next = s.schedules.get(id)!.nextFireAt!;
+    expect(next).toBe('2030-01-02T00:00:00.000Z');
+    expect(Date.parse(next)).toBeGreaterThan(Date.parse('2030-01-01T23:59:00Z'));
+  });
+
+  it('B — ticking repeatedly at the SAME now adds no task and no second catch-up occurrence', async () => {
+    await boot(); const s = scheduler();
+    const id = s.schedules.create(perMinute).scheduleId;
+    at('2030-01-01T00:01:00Z'); await s.tick();
+    hold(occurrences(s, id)[0]!.taskId!);
+    at('2030-01-01T23:59:00Z'); await s.tick();
+    const after = { queued: queued(s, id).map(o => o.occurrenceAt), audit: countOutcome(id, 'skipped-catch-up'), tasks: taskCount() };
+
+    for (let i = 0; i < 5; i++) await s.tick();
+    expect(queued(s, id).map(o => o.occurrenceAt)).toEqual(after.queued);
+    expect(countOutcome(id, 'skipped-catch-up')).toBe(after.audit);
+    expect(taskCount()).toBe(after.tasks);
+  });
+
+  it('C — restart reconciliation at the same now, on a COLD connection, creates nothing further', async () => {
+    await boot(); const s = scheduler();
+    const id = s.schedules.create(perMinute).scheduleId;
+    at('2030-01-01T00:01:00Z'); await s.tick();
+    hold(occurrences(s, id)[0]!.taskId!);
+    at('2030-01-01T23:59:00Z'); await s.tick();
+    const before = { queued: queued(s, id).map(o => o.occurrenceAt), audit: countOutcome(id, 'skipped-catch-up'), tasks: taskCount() };
+
+    await scheduler().reconcileOnBoot();                   // same connection
+    const cold = await coldRestart();                      // genuinely fresh connection
+    try { await cold.s.reconcileOnBoot(); } finally { await cold.close(); }
+
+    expect(queued(s, id).map(o => o.occurrenceAt)).toEqual(before.queued);
+    expect(countOutcome(id, 'skipped-catch-up')).toBe(before.audit);
+    expect(taskCount()).toBe(before.tasks);
+    expect(s.schedules.get(id)?.nextFireAt).toBe('2030-01-02T00:00:00.000Z');
+  });
+
+  it('D — overlap=skip over >200 misses makes ONE decision, not chunk-by-chunk work', async () => {
+    await boot(); const s = scheduler();
+    const id = s.schedules.create({ ...perMinute, overlap: 'skip' }).scheduleId;
+    at('2030-01-01T00:01:00Z'); await s.tick();
+    hold(occurrences(s, id)[0]!.taskId!);
+
+    at('2030-01-01T23:59:00Z'); await s.tick();
+    expect(countOutcome(id, 'queued')).toBe(0);
+    expect(countOutcome(id, 'skipped-overlap')).toBe(1);
+    expect(occurrences(s, id)[0]).toMatchObject({ occurrenceAt: '2030-01-01T23:59:00.000Z', outcome: 'skipped-overlap' });
+    expect(taskCount()).toBe(1);
+    expect(s.schedules.get(id)?.nextFireAt).toBe('2030-01-02T00:00:00.000Z');
+
+    for (let i = 0; i < 3; i++) await s.tick();
+    expect(countOutcome(id, 'skipped-overlap')).toBe(1);
+    expect(taskCount()).toBe(1);
+  });
+
+  it('E — a disabled scheduler re-enabled after >200 misses records ONE skipped-disabled and advances past now', async () => {
+    await boot(); config.scheduler = { ...config.scheduler!, enabled: false };
+    const s = scheduler();
+    const id = s.schedules.create(perMinute).scheduleId;
+    at('2030-01-01T00:01:00Z'); await s.tick();
+    expect(occurrences(s, id)).toHaveLength(0);
+
+    config.scheduler = { ...config.scheduler!, enabled: true };
+    at('2030-01-01T23:59:00Z'); await s.tick();
+    expect(countOutcome(id, 'skipped-disabled')).toBe(1);
+    expect(occurrences(s, id)[0]).toMatchObject({ occurrenceAt: '2030-01-01T23:59:00.000Z', outcome: 'skipped-disabled' });
+    expect(taskCount()).toBe(0);
+    expect(s.schedules.get(id)?.nextFireAt).toBe('2030-01-02T00:00:00.000Z');
+
+    for (let i = 0; i < 3; i++) await s.tick();
+    expect(countOutcome(id, 'skipped-disabled')).toBe(1);
+    expect(taskCount()).toBe(0);
+  });
+
+  it('F — an existing backlog keeps the FIFO head; >200 misses append exactly one occurrence behind it', async () => {
+    await boot(); const s = scheduler();
+    const id = s.schedules.create(perMinute).scheduleId;
+    at('2030-01-01T00:01:00Z'); await s.tick();
+    hold(occurrences(s, id)[0]!.taskId!);
+    at('2030-01-01T00:02:00Z'); await s.tick();            // the FIFO head
+    expect(queued(s, id).map(o => o.occurrenceAt)).toEqual(['2030-01-01T00:02:00.000Z']);
+
+    // Fire without draining, so the queue is observed exactly as catch-up left
+    // it. The backlog is read from `queuedOccurrences`: 200 audit rows now sit
+    // between the head and the recency page.
+    at('2030-01-01T23:59:00Z'); s.schedules.fireDue();
+    expect(s.schedules.queuedOccurrences(id).map(o => o.occurrenceAt)).toEqual(['2030-01-01T00:02:00.000Z', '2030-01-01T23:59:00.000Z']);
+    expect(s.schedules.queuedOccurrences(id)[0]).toMatchObject({ occurrenceAt: '2030-01-01T00:02:00.000Z', queuePosition: 1 });
+
+    // And the head is what actually runs first once the predecessor is gone.
+    db.prepare("UPDATE tasks SET state = 'COMPLETED' WHERE id = ?").run(occurrences(s, id, 500).find(o => o.outcome === 'created')!.taskId!);
+    s.schedules.drain();
+    expect(occurrences(s, id, 500).find(o => o.occurrenceAt === '2030-01-01T00:02:00.000Z')).toMatchObject({ outcome: 'created' });
+    expect(s.schedules.queuedOccurrences(id).map(o => o.occurrenceAt)).toEqual(['2030-01-01T23:59:00.000Z']);
+  });
+
+  it('G — across a >200-occurrence downtime spanning spring-forward, the candidate is still a REAL local time', async () => {
+    await boot(); const s = scheduler();
+    at('2029-08-01T00:00:00Z');
+    // 02:30 America/New_York, down for ~221 days: far more misses than the audit cap.
+    const id = s.schedules.create({ ...daily, catchUpWindowMinutes: 366 * 24 * 60 }).scheduleId;
+    at('2030-03-10T12:00:00Z'); await s.tick();
+
+    const all = occurrences(s, id, 500);
+    // 2030-03-10 02:30 EST never existed; the newest REAL occurrence is 03-09.
+    expect(all.some(o => o.occurrenceAt.startsWith('2030-03-10'))).toBe(false);
+    expect(all.find(o => o.outcome === 'created')).toMatchObject({ occurrenceAt: '2030-03-09T07:30:00.000Z' });
+    expect(countOutcome(id, 'created')).toBe(1);
+    expect(countOutcome(id, 'skipped-catch-up')).toBe(200);
+    expect(s.schedules.get(id)?.nextFireAt).toBe('2030-03-11T06:30:00.000Z');
+  });
+
+  it('H — a fall-back ambiguous local time is ONE catch-up occurrence, not two', async () => {
+    await boot(); const s = scheduler();
+    at('2030-04-01T00:00:00Z');
+    // 01:30 America/New_York; 2030-11-03 repeats 01:00-02:00 local.
+    const id = s.schedules.create({ ...daily, cron: '30 1 * * *', catchUpWindowMinutes: 366 * 24 * 60 }).scheduleId;
+    at('2030-11-03T12:00:00Z'); await s.tick();
+
+    const onTheDay = occurrences(s, id, 500).filter(o => o.occurrenceAt.startsWith('2030-11-03'));
+    expect(onTheDay).toHaveLength(1);
+    expect(onTheDay[0]).toMatchObject({ occurrenceAt: '2030-11-03T05:30:00.000Z', outcome: 'created' });
+    expect(s.schedules.get(id)?.nextFireAt).toBe('2030-11-04T06:30:00.000Z');
   });
 });

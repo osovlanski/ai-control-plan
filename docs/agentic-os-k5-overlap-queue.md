@@ -235,7 +235,7 @@ immune to all of them:
 | `goal`, `constraints`, `repoPath`, `profile`, `overrides` | none — it holds its own snapshot (§3) |
 | `cron`, `timezone` | none — `occurrence_at` is its primary key and cannot move, so its FIFO position cannot move either |
 | `catchUpWindowMinutes` | none — the window bounds enumeration of *missed* instants, not the queue |
-| `overlap` → `skip` | queued occurrences stay durable and still drain; `skip` governs what happens to the *next* occurrence |
+| `overlap` → `skip` | none — the backlog stays durable, keeps its order and still drains oldest-first; `overlap` governs only what happens to the *next* occurrence, and never lets it overtake the backlog (§10) |
 
 `nextFireAt` is still recomputed from now on every edit, for future occurrences.
 
@@ -288,11 +288,70 @@ because an older non-terminal one would have caused the newer occurrence to be
 skipped rather than created — and having one answer to "is this schedule busy"
 is what stops the two modes from ever disagreeing.
 
-**Catch-up is unchanged.** `advance()` still enumerates at most one legitimate
-missed occurrence per sweep, and still records older misses `skipped-catch-up`.
-In queue mode that one legitimate occurrence is *enqueued behind* an existing
-backlog instead of being skipped. Queue mode never replays a missed cron series:
-the catch-up bound, not the queue, decides how many occurrences exist at all.
+### An existing backlog outranks every later occurrence, in both modes
+
+Firing asks two durable questions, never `last_task_id`:
+
+```
+busy    = this schedule has a non-terminal occurrence task
+backlog = this schedule has a queued occurrence
+```
+
+`overlap` decides what happens to the **new** occurrence, and nothing else:
+
+| `overlap` | `busy` or `backlog` | the newly-due occurrence |
+|---|---|---|
+| `queue` | no | created immediately |
+| `queue` | yes | `queued`, at the back of the line |
+| `skip` | no | created immediately |
+| `skip` | yes | `skipped-overlap`, no task |
+
+A queued occurrence is work the operator has already been told is accepted, so
+it outranks every instant that comes after it — including under `skip`, where
+the older queued occurrence still drains first and the newer one is recorded as
+skipped. An `overlap` edit is future policy: it changes how the next occurrence
+is treated and rewrites no queued row, no `occurrence_at` and no snapshot. This
+holds wherever `drain()` runs relative to firing; it is a property of the firing
+decision, not of tick ordering.
+
+### Catch-up: the newest eligible miss, chosen independently of the audit cap
+
+One reconciliation at `now` reconciles **one** downtime interval:
+
+```
+windowStart       = now - catchUpWindowMinutes
+latestEligibleMiss = the newest real local occurrence in [max(nextFireAt, windowStart), now]
+```
+
+That occurrence is the only candidate that may fire, be enqueued under
+`overlap: queue`, or become the single `skipped-disabled` of a disabled period.
+It is found by walking **backwards from `now`**, so it is the same occurrence
+whether the outage missed three instants or three thousand. Older eligible
+misses never become tasks and never enter the queue; they are audit history.
+
+**`MAX_CATCH_UP_ROWS` (200) is an audit cap only.** It bounds how many older
+misses are recorded as `skipped-catch-up`, so a per-minute schedule cannot write
+a row per instant after a long outage. It cannot change which occurrence runs.
+Consequently **per-occurrence skipped history is deliberately bounded**: after
+an outage longer than the cap, the oldest misses have no individual row. No
+queued work is invented to represent them.
+
+Walking *forwards* and taking the last row enumerated is what made the cap
+decide execution: a per-minute schedule down for a day resynced onto its 200th
+miss, stayed overdue, and turned one downtime interval into a fresh durable
+occurrence on every tick.
+
+**After reconciliation `nextFireAt` is strictly greater than `now`**, unless the
+cron has no future occurrence at all. `nextFireAt` is recomputed from
+`latestEligibleMiss`, and there is by construction no real occurrence between it
+and `now`, so the whole downtime interval is behind the schedule. Repeating the
+same reconciliation at the same `now` — another tick, a restart, a cold process
+against the same database — therefore creates no task, no queued occurrence and
+no further audit row.
+
+In queue mode the one legitimate catch-up occurrence is *appended behind* an
+existing backlog, preserving FIFO. Queue mode never replays a missed cron
+series.
 
 **DST is unchanged.** Occurrence calculation is untouched: a nonexistent
 spring-forward local instant produces no occurrence and therefore nothing to
@@ -355,8 +414,9 @@ position, "Promoted from the queue" with the promotion time and task, plain
 "created" with its task, and the unchanged `skipped-overlap`. Every one of those
 values arrives decided from the reads above; the browser sorts nothing.
 
-The readout polls on the same bounded cadence as the rest of the Inspector
-panel (4s) so a promotion, a terminal task, a new queued occurrence or the
+The readout runs its own bounded schedule refresh while mounted, at the same 4 s
+cadence the rest of the Inspector panel uses — a matching interval, not a shared
+loop — so a promotion, a terminal task, a new queued occurrence or the
 fallback sweep — none of which the browser initiates — eventually becomes
 visible without remounting the panel; an overlap-mode change still refreshes
 immediately, on top of that poll.
