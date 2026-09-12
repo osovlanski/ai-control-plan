@@ -314,50 +314,98 @@ is treated and rewrites no queued row, no `occurrence_at` and no snapshot. This
 holds wherever `drain()` runs relative to firing; it is a property of the firing
 decision, not of tick ordering.
 
-### Catch-up: the newest eligible miss, chosen independently of the audit cap
+### Catch-up: one canonical occurrence relation
 
 One reconciliation at `now` reconciles **one** downtime interval:
 
 ```
-windowStart       = now - catchUpWindowMinutes
-latestEligibleMiss = the newest real local occurrence in [max(nextFireAt, windowStart), now]
+windowStart        = now - catchUpWindowMinutes
+lowerBound         = max(storedNextFireAt, windowStart)          -- inclusive
+latestEligibleMiss = the newest canonical occurrence in [lowerBound, now]
 ```
 
 That occurrence is the only candidate that may fire, be enqueued under
-`overlap: queue`, or become the single `skipped-disabled` of a disabled period.
-It is found by walking **backwards from `now`**, so it is the same occurrence
-whether the outage missed three instants or three thousand. Older eligible
-misses never become tasks and never enter the queue; they are audit history.
+`overlap: queue`, become the single `skipped-overlap` of a busy schedule, or
+become the single `skipped-disabled` of a disabled period. Older eligible misses
+never become tasks and never enter the queue; they are audit history.
 
-**`MAX_CATCH_UP_ROWS` (200) is an audit cap only.** It bounds how many older
-misses are recorded as `skipped-catch-up`, so a per-minute schedule cannot write
-a row per instant after a long outage. It cannot change which occurrence runs.
-Consequently **per-occurrence skipped history is deliberately bounded**: after
-an outage longer than the cap, the oldest misses have no individual row. No
-queued work is invented to represent them.
+**"Canonical occurrence" has exactly one definition**, `canonicalOccurrences` in
+`apps/api/src/modules/schedules.ts`: the UTC instants at which an IANA schedule
+actually fires, in recurrence order, strictly after a given instant. Catch-up
+selection, the audit tail and `nextFireAt` all read occurrence identity from
+that one relation, so a gap or a fold cannot mean one thing to selection and
+another to advancement. An ambiguous local wall time resolves to the same single
+UTC identity whether the walk starts before the fold, inside either side of it,
+after it, or on a cold restart, and `occurrence_at` is that UTC instant — the
+primary key deduplicates the two representations of one local reading.
 
-Walking *forwards* and taking the last row enumerated is what made the cap
-decide execution: a per-minute schedule down for a day resynced onto its 200th
-miss, stayed overdue, and turned one downtime interval into a fresh durable
-occurrence on every tick.
+Enumeration is **forward from the lower bound**, in bounded traversal state: a
+cursor, the current `latestEligibleMiss`, and at most `MAX_CATCH_UP_ROWS` audit
+entries. No occurrence array grows with the interval.
+
+Forward is load-bearing, and it replaces an earlier backward walk from `now`.
+Backward enumeration is not the same relation. The cron library walks the *local
+wall clock* back from the reference's reading, which fails in two ways that a
+one-hour mental model of DST hides:
+
+- Inside a **fold**, `now`'s reading is the second pass, so the previous local
+  occurrence is *yesterday's* — today's already-elapsed canonical occurrence is
+  never seen. `America/New_York`, `30 1 * * *`, reconciling at
+  `2030-11-03T06:15:00Z`, selected 2030-11-02 and left `nextFireAt` behind
+  `now`; the canonical answer is `2030-11-03T05:30:00Z`.
+- Across a **skipped civil date**, it returns a long run of instants that are
+  UTC-*after* the reference. `Pacific/Apia`, `* 4-7 * * *`, reconciling at
+  `2011-12-30T12:00:00Z`, returned 240 such candidates before reaching the
+  legitimate `2011-12-29T17:59:00Z`, so any finite request short of that lost
+  the work silently.
+
+**`MAX_CATCH_UP_ROWS` (200) is an audit cap only**, and after this change it is
+structurally incapable of being anything else: selection lives in
+`selectCatchUp`, which takes the audit limit as a parameter and stops when the
+*interval* is exhausted, never when a row budget is. The winner is identical at
+a limit of 1, 10, 200 or 1000, and that is asserted directly. The cap bounds how
+many older misses are recorded as `skipped-catch-up`, so a per-minute schedule
+cannot write a row per instant after a long outage. Consequently
+**per-occurrence skipped history is deliberately bounded**: after an outage
+longer than the cap, the oldest misses have no individual row. No queued work is
+invented to represent them.
+
+`canonicalOccurrences` supplies two guarantees the cron library does not. Asked
+for the next run from a reference inside a repeated wall-clock hour, the library
+can answer with an instant at or *before* that reference — and for a dense
+pattern, with the fold's first side one instant at a time — so the traversal
+chains forward until it clears the cursor, however wide the fold is. And a
+nonexistent local time is answered with the shifted instant, which is dropped
+while the cursor still advances, so a gap cannot stall the walk.
+
+Traversal has a fail-closed ceiling — the interval at one-minute granularity
+plus discontinuity slack — and exhausting it **throws**. It can never mean "no
+occurrence exists". The same applies to a recurrence calculator that makes no
+forward progress.
 
 **After reconciliation `nextFireAt` is strictly greater than `now`**, unless the
-cron has no future occurrence at all. `nextFireAt` is recomputed from
-`latestEligibleMiss`, and there is by construction no real occurrence between it
-and `now`, so the whole downtime interval is behind the schedule. Repeating the
-same reconciliation at the same `now` — another tick, a restart, a cold process
+cron has no future occurrence at all. This is *enforced as a postcondition*, not
+assumed: `resync` recomputes from `latestEligibleMiss` and throws rather than
+storing an overdue schedule. The fold reproduction is why — the cron library,
+asked for the next run from a reference inside a repeated hour, can answer with
+an instant at or *before* it, and a stored non-future `nextFireAt` would
+rediscover the same downtime interval on the next tick. Repeating the same
+reconciliation at the same `now` — another tick, a restart, a cold process
 against the same database — therefore creates no task, no queued occurrence and
-no further audit row.
+no further audit row. No in-process cache is involved.
 
 In queue mode the one legitimate catch-up occurrence is *appended behind* an
 existing backlog, preserving FIFO. Queue mode never replays a missed cron
 series.
 
-**DST is unchanged.** Occurrence calculation is untouched: a nonexistent
-spring-forward local instant produces no occurrence and therefore nothing to
-queue, an ambiguous fall-back local instant produces exactly one occurrence and
-therefore at most one queue entry, and `occurrence_at` is the UTC instant, so
-FIFO never compares local wall-clock strings.
+**No DST arithmetic is assumed anywhere.** Nothing in the traversal contains a
+60-minute or 3,600,000-millisecond constant; local-time existence is decided by
+comparing rendered wall-clock fields, so it holds for a thirty-minute gap or
+fold (`Australia/Lord_Howe`), an hour (`America/New_York`) or a whole civil date
+(`Pacific/Apia`). A nonexistent local instant produces no occurrence and
+therefore nothing to queue; an ambiguous local instant produces exactly one
+occurrence and therefore at most one queue entry; FIFO never compares local
+wall-clock strings.
 
 ## 11. K4b
 

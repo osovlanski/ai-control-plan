@@ -6,14 +6,143 @@ import type { TaskStore } from './tasks.js';
 
 /**
  * How many OLDER missed occurrences one reconciliation records as
- * `skipped-catch-up`. This is an AUDIT bound and nothing else: the occurrence
- * that may still run is chosen from `now` backwards (see `missed`), so it is
- * never one of these rows and changing this number cannot change what executes
- * — only how much history a long outage writes. Audit history is therefore
- * deliberately bounded: after a very long outage the oldest misses have no
- * individual row.
+ * `skipped-catch-up`. This bounds PERSISTED AUDIT HISTORY and nothing else.
+ *
+ * Which occurrence may still run is decided by `selectCatchUp`, whose traversal
+ * is bounded by the catch-up interval rather than by this number, so changing
+ * it cannot change what executes, what queues, which occurrence a skip or a
+ * disabled reconciliation records, or where `nextFireAt` lands — only how much
+ * history a long outage writes. Audit history is therefore deliberately
+ * bounded: after a very long outage the oldest misses have no individual row.
  */
 const MAX_CATCH_UP_ROWS = 200;
+
+/**
+ * Fail-closed traversal slack, in occurrence candidates, for crossing a
+ * timezone discontinuity. Generous enough for a whole skipped civil date at the
+ * densest granularity a 5-field cron expresses (Pacific/Apia, 2011-12-30).
+ * Exhausting it is a defect, not an answer — see `canonicalOccurrences`.
+ */
+const DISCONTINUITY_SLACK = 1536;
+
+/**
+ * THE canonical occurrence truth: the UTC instants at which this IANA schedule
+ * actually fires, in recurrence order, strictly after `after`.
+ *
+ * One definition, every consumer. The catch-up winner, the audit tail and
+ * `nextFireAt` all read occurrence identity from here and from nowhere else, so
+ * a gap or a fold cannot mean one thing to selection and another to
+ * advancement, and an ambiguous local wall time resolves to the same single UTC
+ * identity whether the walk starts before the fold, inside either side of it,
+ * after it, or on a cold restart.
+ *
+ * Two guarantees the cron library does not give on its own:
+ *
+ *  - STRICT UTC PROGRESS. Asked for the next run from a reference inside a
+ *    repeated wall-clock hour, it can answer with an instant at or BEFORE that
+ *    reference (America/New_York `30 1 * * *`, reference 2030-11-03T06:15:00Z,
+ *    answer 2030-11-03T05:30:00Z) — and for a dense pattern, with the fold's
+ *    first side one instant at a time. Chaining forward clears it, however wide
+ *    the fold is; a chained call that fails to advance is a defect and throws
+ *    rather than spinning or stalling.
+ *  - REAL LOCAL TIMES ONLY. A nonexistent local time is answered with the
+ *    shifted instant, which is not an occurrence; the local-time check drops it
+ *    while the cursor still advances, so a gap cannot stall the traversal.
+ *
+ * Enumeration is FORWARD, and that is load-bearing. Backwards enumeration is
+ * not the same relation: the library walks the local wall clock back from the
+ * reference's READING, so inside a fold it reaches yesterday before today's
+ * already-elapsed occurrence, and across a skipped civil date it returns a long
+ * run of instants that are UTC-AFTER the reference.
+ *
+ * `maxSteps` is a fail-closed ceiling on pathological traversal, never a
+ * semantic bound: exhausting it throws, and can never mean "no occurrence
+ * exists". Callers that need only the first occurrence break out of the loop
+ * and never reach it.
+ */
+export function* canonicalOccurrences(pattern: string, timezone: string, after: Date, maxSteps: number): Generator<Date> {
+  const job = new Cron(pattern, { timezone });
+  // Built once per traversal: both are expensive to construct and a long
+  // catch-up interval asks the same question thousands of times.
+  const wallClock = new Intl.DateTimeFormat('en-US', {
+    timeZone: timezone, hour12: false, year: 'numeric', month: '2-digit',
+    day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit',
+  });
+  const asUtc = new Cron(pattern, { timezone: 'UTC' });
+  /**
+   * True when `instant`'s local wall clock actually satisfies the pattern. The
+   * cron library answers a nonexistent local time with the SHIFTED instant
+   * instead of skipping it, and this is what catches that: the pattern is
+   * re-evaluated against the rendered wall-clock fields with UTC semantics.
+   * Comparing rendered fields is what makes it hold for a discontinuity of any
+   * size — 30 minutes, an hour, or a whole civil date.
+   */
+  const localTimeExists = (instant: Date): boolean => {
+    const parts = Object.fromEntries(wallClock.formatToParts(instant)
+      .filter(p => p.type !== 'literal').map(p => [p.type, Number(p.value)]));
+    // Intl renders midnight as hour 24 in some locales/zones.
+    const wall = Date.UTC(parts.year!, parts.month! - 1, parts.day!, parts.hour! % 24, parts.minute!, parts.second!);
+    const match = asUtc.nextRun(new Date(wall - 1));
+    return !!match && match.getTime() === wall;
+  };
+  let cursor = after.getTime();
+  for (let step = 0; step < maxSteps; step++) {
+    let candidate = job.nextRun(new Date(cursor));
+    // Asked from a reference inside a repeated wall-clock hour, the library can
+    // answer with an instant at or BEFORE that reference — and for a dense
+    // pattern with every instant of the fold's first side in turn. Chain
+    // forward until it clears the cursor. Chained calls DO make strict
+    // progress, so this terminates on the width of the discontinuity, and it is
+    // paid at most once per traversal: after the first step the cursor is
+    // itself an occurrence, which the library answers monotonically.
+    for (let nudge = 0; candidate && candidate.getTime() <= cursor; nudge++) {
+      const chained = nudge < DISCONTINUITY_SLACK ? job.nextRun(candidate) : null;
+      if (chained && chained.getTime() <= candidate.getTime()) {
+        throw new Error(`Cron '${pattern}' in ${timezone} made no forward progress past ${candidate.toISOString()}`);
+      }
+      if (!chained) {
+        throw new Error(`Cron '${pattern}' in ${timezone} made no forward progress past ${new Date(cursor).toISOString()}`);
+      }
+      candidate = chained;
+    }
+    if (!candidate) return;
+    cursor = candidate.getTime();
+    if (localTimeExists(candidate)) yield candidate;
+  }
+  throw new Error(`Cron '${pattern}' in ${timezone} exceeded ${maxSteps} candidates after ${after.toISOString()}`);
+}
+
+/**
+ * The catch-up decision for ONE reconciliation, read off canonical occurrence
+ * order: `latest` is the newest real occurrence in `[fromMs, nowMs]`, and
+ * `older` is the bounded audit tail behind it, oldest first.
+ *
+ * These are two separate questions and `auditLimit` answers only the second.
+ * Selection walks the whole interval and stops when the INTERVAL is exhausted,
+ * never when a row budget is, so the winner is the same for an audit limit of
+ * 1, 200 or 1000. Memory stays bounded regardless of interval length: one
+ * `latest`, at most `auditLimit` tail entries, and a cursor.
+ *
+ * Traversal is bounded by the interval itself at one-minute granularity — the
+ * densest a 5-field cron expresses — plus discontinuity slack. That bound fails
+ * closed: it throws, and never reports "no occurrence exists".
+ */
+export function selectCatchUp(pattern: string, timezone: string, fromMs: number, nowMs: number, auditLimit: number): { latest: Date | null; older: Date[] } {
+  const older: Date[] = [];
+  let latest: Date | null = null;
+  const ceiling = Math.ceil(Math.max(0, nowMs - fromMs) / 60_000) + DISCONTINUITY_SLACK;
+  // `fromMs - 1`, so an occurrence landing exactly ON the lower bound is in
+  // scope and one landing before it can never be.
+  for (const occurrence of canonicalOccurrences(pattern, timezone, new Date(fromMs - 1), ceiling)) {
+    if (occurrence.getTime() > nowMs) break;
+    if (latest) {
+      older.push(latest);
+      if (older.length > auditLimit) older.shift();
+    }
+    latest = occurrence;
+  }
+  return { latest, older };
+}
 
 type Row = {
   schedule_id: string; kind: 'user' | 'system'; intent_json: string; cron: string; timezone: string;
@@ -79,34 +208,10 @@ export class ScheduleService {
     } catch (error) { throw new Error(`Invalid cron or timezone: ${error instanceof Error ? error.message : String(error)}`); }
   }
 
-  /**
-   * True when `instant`'s local wall clock in `timezone` actually satisfies the
-   * pattern. On a spring-forward day the cron library shifts a nonexistent local
-   * time forward instead of skipping it, and this is what catches that: the
-   * pattern is re-evaluated against the wall-clock fields with UTC semantics.
-   */
-  private localTimeExists(pattern: string, timezone: string, instant: Date): boolean {
-    const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', {
-      timeZone: timezone, hour12: false, year: 'numeric', month: '2-digit',
-      day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit',
-    }).formatToParts(instant).filter(p => p.type !== 'literal').map(p => [p.type, Number(p.value)]));
-    // Intl renders midnight as hour 24 in some locales/zones.
-    const wall = Date.UTC(parts.year!, parts.month! - 1, parts.day!, parts.hour! % 24, parts.minute!, parts.second!);
-    const match = new Cron(pattern, { timezone: 'UTC' }).nextRun(new Date(wall - 1));
-    return !!match && match.getTime() === wall;
-  }
-
-  /** Next firing instant strictly after `after`, skipping nonexistent local times. */
+  /** The first canonical occurrence strictly after `after`, or null if none. */
   private nextFireAt(pattern: string, timezone: string, after: Date): string | null {
-    const job = new Cron(pattern, { timezone });
-    let candidate = job.nextRun(after);
-    // A DST gap skips at most a couple of occurrences; the bound only guards
-    // against a pathological pattern that never lands on a real local time.
-    for (let i = 0; candidate && i < 32; i++) {
-      if (this.localTimeExists(pattern, timezone, candidate)) return candidate.toISOString();
-      candidate = job.nextRun(candidate);
-    }
-    return candidate ? candidate.toISOString() : null;
+    for (const occurrence of canonicalOccurrences(pattern, timezone, after, DISCONTINUITY_SLACK)) return occurrence.toISOString();
+    return null;
   }
 
   private hydrate(r: Row): Schedule {
@@ -336,41 +441,18 @@ export class ScheduleService {
   }
 
   /**
-   * The catch-up decision for ONE reconciliation: `latest` is the newest real
-   * occurrence in the catch-up window, and `older` is the audit tail behind it,
-   * oldest first.
+   * This schedule's catch-up decision, over the reconciliation interval
+   * `[max(storedNextFireAt, now - catchUpWindow), now]`.
    *
-   * These are two separate questions and the cap answers only the second one.
-   * Which occurrence may still run is semantic, so it is derived from `now`
-   * BACKWARDS and is found whether the outage missed three occurrences or three
-   * thousand. Walking forward and taking the last row enumerated made the audit
-   * cap pick the winner: a per-minute schedule down for a day resynced onto its
-   * 200th miss, stayed overdue, and turned one downtime interval into a fresh
-   * durable occurrence on every tick. Going backwards, one downtime interval
-   * yields exactly one candidate and `resync` then moves `nextFireAt` past the
-   * entire interval, so repeating the same reconciliation produces nothing.
+   * The lower bound is inclusive and the upper bound is `now`: an occurrence
+   * before the bound can never execute, and one landing exactly on it can.
+   * Everything else — which occurrence wins, how a gap or a fold resolves — is
+   * `selectCatchUp`'s, so it is the same answer whatever `MAX_CATCH_UP_ROWS` is.
    */
   private missed(row: Row, nowMs: number): { latest: Date | null; older: Date[] } {
     const windowStart = nowMs - row.catch_up_window_minutes * 60_000;
     const from = Math.max(Date.parse(row.next_fire_at!), windowStart);
-    const job = new Cron(row.cron, { timezone: row.timezone });
-    // ONE backward enumeration, newest first. It has to be one call: on a
-    // spring-forward day the cron library answers a nonexistent local time with
-    // the shifted instant, and feeding that instant back as the next reference
-    // returns it again forever. Croner strips milliseconds and enumerates
-    // strictly before the reference, so the reference is nudged past `now` to
-    // keep an occurrence landing exactly on `now` in scope; anything after
-    // `now` is filtered below. The 32 extra candidates are DST slack, so a gap
-    // cannot consume the audit budget.
-    const found: Date[] = [];
-    for (const candidate of job.previousRuns(MAX_CATCH_UP_ROWS + 32, new Date(nowMs + 1000))) {
-      if (candidate.getTime() < from) break;
-      // The same real-local-time truth the forward walk used: a nonexistent
-      // spring-forward instant is not an occurrence in either direction.
-      if (candidate.getTime() <= nowMs && this.localTimeExists(row.cron, row.timezone, candidate)) found.push(candidate);
-      if (found.length > MAX_CATCH_UP_ROWS) break;
-    }
-    return { latest: found[0] ?? null, older: found.slice(1).reverse() };
+    return selectCatchUp(row.cron, row.timezone, from, nowMs, MAX_CATCH_UP_ROWS);
   }
 
   /**
@@ -388,7 +470,7 @@ export class ScheduleService {
   private advance(row: Row, mode: 'catch-up' | 'disabled'): void {
     const nowMs = this.d.now().getTime();
     const { latest, older } = this.missed(row, nowMs);
-    if (!latest) { this.resync(row, new Date(nowMs)); return; }
+    if (!latest) { this.resync(row, new Date(nowMs), nowMs); return; }
     this.d.db.transaction(() => {
       // Re-read inside the transaction: a concurrent edit or fire wins.
       const current = this.d.db.prepare('SELECT * FROM schedules WHERE schedule_id = ?').get(row.schedule_id) as Row | undefined;
@@ -401,7 +483,7 @@ export class ScheduleService {
       }
       // Strictly past the whole downtime interval: `latest` is the newest real
       // occurrence at or before now, so the next one after it is after now too.
-      this.resync(current, latest);
+      this.resync(current, latest, nowMs);
     })();
   }
 
@@ -431,9 +513,23 @@ export class ScheduleService {
       .run(occurrenceAt, taskId, this.iso(), row.schedule_id);
   }
 
-  private resync(row: Row, after: Date): void {
+  /**
+   * Moves `nextFireAt` past `after` and ENFORCES that it lands in the future.
+   *
+   * A postcondition, not an assumption. A reconciliation that stored a
+   * `nextFireAt` at or before now would rediscover the same downtime interval
+   * on the very next tick and turn one miss into an occurrence per tick; the
+   * fold reproduction proves the recurrence library alone does not rule that
+   * out. Failing loudly here keeps an overdue schedule from being stored
+   * silently — the caller's error path surfaces it.
+   */
+  private resync(row: Row, after: Date, nowMs: number): void {
+    const next = this.nextFireAt(row.cron, row.timezone, after);
+    if (next !== null && Date.parse(next) <= nowMs) {
+      throw new Error(`Reconciling ${row.schedule_id} produced a nextFireAt of ${next}, which is not after ${new Date(nowMs).toISOString()}`);
+    }
     this.d.db.prepare('UPDATE schedules SET next_fire_at = ?, updated_at = ? WHERE schedule_id = ?')
-      .run(this.nextFireAt(row.cron, row.timezone, after), this.iso(), row.schedule_id);
+      .run(next, this.iso(), row.schedule_id);
   }
 
   /**
