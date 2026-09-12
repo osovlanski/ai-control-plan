@@ -45,6 +45,9 @@ export class Scheduler {
       // An occurrence is parked on a due time wait, so the existing K1 wake
       // protocol dispatches it. K5 adds no execution path of its own.
       park: (taskId, occurrenceAt, reason) => this.attach(taskId, { kind: 'time', notBefore: occurrenceAt, reason }),
+      // A disabled scheduler promotes no queued occurrence, exactly as it fires
+      // no schedule and evaluates no condition. The backlog stays durable.
+      schedulerEnabled: () => this.enabled,
     });
   }
   get enabled(): boolean { return this.d.config.scheduler?.enabled !== false; }
@@ -676,6 +679,11 @@ export class Scheduler {
     const waiters = (this.d.db.prepare("SELECT task_id, generation, depends_on FROM wait_conditions WHERE kind = 'dependency' AND state = 'active'")
       .all() as { task_id: string; generation: number; depends_on: string }[])
       .filter(r => (JSON.parse(r.depends_on) as string[]).includes(taskId));
+    // K5 `overlap: queue`: a schedule's occurrence task settling is what lets the
+    // next queued occurrence become a task. Same microtask discipline as the
+    // claim release above — the transition may still be inside a transaction.
+    const schedule = this.schedules.scheduleOf(taskId);
+    if (schedule) queueMicrotask(() => { try { this.schedules.promote(schedule); } catch (error) { this.d.onError?.(error); } });
     if (!waiters.length) return;
     queueMicrotask(() => {
       for (const w of waiters) void this.wake(w.task_id, w.generation, 'event').catch(error => this.d.onError?.(error));
@@ -1001,6 +1009,12 @@ export class Scheduler {
     // Schedules fire before the wake sweep, so an occurrence created now is
     // dispatched by this same tick rather than waiting for the next one.
     this.schedules.fireDue(wasDisabled ? 'disabled' : 'catch-up');
+    // K5 queue: the bounded fallback for a terminal notification lost across a
+    // crash. It arms no deadline of its own — K4b's absolute sweep already
+    // bounds this cadence, and a queue deadline would be the sliding re-arm
+    // that sweep exists to replace. A missed event costs one tick, never
+    // permanent starvation.
+    this.schedules.drain();
     // Bounded re-evaluation: a missed release event costs one tick, never a hang.
     this.releaseIdleClaims();
     for (const d of this.d.db.prepare("SELECT * FROM dispatches WHERE phase = 'reserved'").all() as Dispatch[]) {

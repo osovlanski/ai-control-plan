@@ -1,4 +1,6 @@
-import type { ModelRecommendation } from "@agent-plane/core";
+import { useEffect, useState } from "react";
+import type { ModelRecommendation, Schedule, ScheduleOccurrence, ScheduleOverlap } from "@agent-plane/core";
+import { api } from "../api.js";
 import type { SchedulerStatus, TaskContext } from "../api.js";
 import { actualStatusLine, contextPercent, probeFreshness, type ActualLifecycle } from "../orbital.js";
 
@@ -490,5 +492,119 @@ export function ModelRecommendationReadout({
         </ul>
       </details>
     </>
+  );
+}
+
+/**
+ * K5 recurring schedules, with `overlap: queue` truth. Everything shown here is
+ * read from the plane — the backlog count, the active occurrence task and the
+ * queue POSITION all arrive already decided. The browser orders nothing: a
+ * second opinion about who runs next is exactly what must not exist.
+ */
+/**
+ * Uses the same 4 s cadence as Inspector, but this readout runs its OWN bounded
+ * schedule refresh while mounted — it is an independent loop at a matching
+ * interval, not a shared one.
+ */
+const QUEUE_POLL_MS = 4000;
+
+export function ScheduleQueueReadout() {
+  const [schedules, setSchedules] = useState<Schedule[] | null>(null);
+  const [occurrences, setOccurrences] = useState<Record<string, ScheduleOccurrence[]>>({});
+  const [queuedOccurrences, setQueuedOccurrences] = useState<Record<string, ScheduleOccurrence[]>>({});
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [nonce, setNonce] = useState(0);
+
+  useEffect(() => {
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const load = async () => {
+      try {
+        const rows = await api.schedules();
+        const detail = await Promise.all(rows.map((s) => api.schedule(s.scheduleId)));
+        if (disposed) return;
+        setSchedules(rows);
+        setOccurrences(Object.fromEntries(detail.map((d) => [d.scheduleId, d.occurrences])));
+        setQueuedOccurrences(Object.fromEntries(detail.map((d) => [d.scheduleId, d.queuedOccurrences])));
+        setError(null);
+      } catch (e) {
+        if (!disposed) setError(e instanceof Error ? e.message : String(e));
+      } finally {
+        // Server truth (promotion, a terminal task, a new queued occurrence, the
+        // fallback sweep) can change while this panel stays mounted and idle;
+        // this bounded poll is how it eventually catches up without a remount.
+        if (!disposed) timer = setTimeout(() => void load(), QUEUE_POLL_MS);
+      }
+    };
+    void load();
+    return () => { disposed = true; clearTimeout(timer); };
+  }, [nonce]);
+
+  async function setOverlap(id: string, overlap: ScheduleOverlap) {
+    setBusy(true);
+    try { await api.setOverlap(id, overlap); setNonce((n) => n + 1); }
+    catch (e) { setError(e instanceof Error ? e.message : String(e)); }
+    finally { setBusy(false); }
+  }
+
+  if (error) return <p role="alert" className="error">Schedules are unavailable in this read: {error}</p>;
+  if (!schedules) return <p role="status">Reading schedules…</p>;
+  if (!schedules.length) return <p>No recurring schedules. Create one from Cockpit's Schedule tab (K6).</p>;
+
+  return (
+    <ul className="candidate-list">
+      {schedules.map((s) => (
+        <li key={s.scheduleId}>
+          <strong>{s.intent.goal}</strong>
+          <span className={s.queuedCount ? "tone-limit" : "tone-neutral"}>
+            {s.queuedCount ? `${s.queuedCount} queued` : "no backlog"}
+          </span>
+          <small>
+            <code>{s.cron}</code> · {s.timezone}
+            {s.nextFireAt ? ` · next ${new Date(s.nextFireAt).toLocaleString()}` : ""}
+            {s.activeTaskId ? ` · running ${s.activeTaskId}` : " · idle"}
+          </small>
+          <label>
+            On overlap{" "}
+            <select
+              aria-label={`Overlap mode for ${s.intent.goal}`}
+              value={s.overlap}
+              disabled={busy}
+              onChange={(e) => void setOverlap(s.scheduleId, e.target.value as ScheduleOverlap)}
+            >
+              <option value="skip">Skip</option>
+              <option value="queue">Queue</option>
+            </select>
+          </label>
+          <ol className="event-list">
+            {/* The queue head first, always — `occurrences` pages RECENT history
+                newest-first, so a backlog past that page would otherwise hide
+                exactly the occurrence that runs next. */}
+            {[...(queuedOccurrences[s.scheduleId] ?? []),
+              ...(occurrences[s.scheduleId] ?? []).filter((o) => o.outcome !== "queued")]
+              .slice(0, 6).map((o) => (
+              <li key={o.occurrenceAt}>
+                <time>{new Date(o.occurrenceAt).toLocaleString()}</time>
+                <div>
+                  <strong>{o.outcome === "queued" ? `Queued · position ${o.queuePosition}` : o.outcome}</strong>
+                  <span>
+                    {o.outcome === "queued"
+                      ? "Queued — waiting for the previous occurrence"
+                      : o.outcome === "created" && o.queuedAt
+                        ? `Promoted from the queue${o.promotedAt ? ` at ${new Date(o.promotedAt).toLocaleString()}` : ""} · task ${o.taskId}`
+                        : o.outcome === "created"
+                          ? `Task ${o.taskId}`
+                          : o.outcome === "skipped-overlap"
+                            ? "Skipped — the previous occurrence was still running"
+                            : ""}
+                  </span>
+                </div>
+              </li>
+            ))}
+          </ol>
+        </li>
+      ))}
+    </ul>
   );
 }

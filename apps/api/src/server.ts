@@ -383,7 +383,10 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   app.get<{ Params: { id: string } }>('/api/schedules/:id', schedulerRead, (req, reply) => {
     const schedule = scheduler.schedules.get(req.params.id);
     if (!schedule) return reply.status(404).send({ error: 'not found' });
-    return { ...schedule, occurrences: scheduler.schedules.occurrences(req.params.id) };
+    // `occurrences` pages recent history; `queuedOccurrences` is the FIFO
+    // backlog's own head-first view, so a large backlog never hides it.
+    return { ...schedule, occurrences: scheduler.schedules.occurrences(req.params.id),
+      queuedOccurrences: scheduler.schedules.queuedOccurrences(req.params.id) };
   });
   app.post<{ Body: ScheduleInput }>('/api/schedules', write, (req, reply) => {
     try { return reply.status(201).send(scheduler.schedules.create(req.body)); }
