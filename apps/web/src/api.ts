@@ -1,4 +1,4 @@
-import type { ModelRecommendation } from "@agent-plane/core";
+import type { ModelRecommendation, Schedule, ScheduleOccurrence, ScheduleOverlap } from "@agent-plane/core";
 export interface Workspace {
   workspace: string;
   assistants: string[];
@@ -279,6 +279,12 @@ export const api = {
   syncAssistant: (id: string) => req<unknown>(`/api/assistants/${id}/sync`, { method: "POST" }),
   runNow: (id: string, generation: number) => req(`/api/tasks/${id}/run-now`, { method: "POST", body: JSON.stringify({ generation }) }),
   schedulerStatus: () => req<SchedulerStatus>("/api/scheduler/status"),
+  // K5. Queue order, backlog count and the active occurrence task all come from
+  // the plane — the browser renders the order it is given and computes none.
+  schedules: () => req<Schedule[]>("/api/schedules"),
+  schedule: (id: string) => req<Schedule & { occurrences: ScheduleOccurrence[] }>(`/api/schedules/${id}`),
+  setOverlap: (id: string, overlap: ScheduleOverlap) =>
+    req<Schedule>(`/api/schedules/${id}`, { method: "PATCH", body: JSON.stringify({ overlap }) }),
   attachWait: (id: string, wait: { kind: "time" | "quota"; notBefore: string; reason?: string }) =>
     req<TaskWait>(`/api/tasks/${id}/wait`, { method: "POST", body: JSON.stringify(wait) }),
   tasks: () => req<TaskSummary[]>("/api/tasks"),

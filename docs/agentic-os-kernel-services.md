@@ -1,11 +1,12 @@
 # Agentic OS — Kernel Services (M12–M15)
 
 **Implementation update:** K1 durable dispatch, K2 quota retry, K3 optional quota probes,
-K4 dependency waits, K4b resource slots and K5 recurring schedules are implemented and
-regression-verified; see the acceptance records for [K1](agentic-os-k1-implementation.md),
-[K3](agentic-os-k3-implementation.md) and [K4b](agentic-os-k4b-resource-slots.md).
-`overlap: queue` stays deferred, and K6+ and the other proposed Agentic OS services are not
-implemented by those slices.
+K4 dependency waits, K4b resource slots and K5 recurring schedules — including
+`overlap: queue` — are implemented and regression-verified; see the acceptance records for
+[K1](agentic-os-k1-implementation.md), [K3](agentic-os-k3-implementation.md),
+[K4b](agentic-os-k4b-resource-slots.md) and
+[K5 overlap: queue](agentic-os-k5-overlap-queue.md).
+K6+ and the other proposed Agentic OS services are not implemented by those slices.
 
 **Status:** Proposed — revision 2 (planning only; no production implementation in this pass).
 Revision 2 reconciles the adversarial review of revision 1 (2026-09-05): it makes the design
@@ -749,16 +750,21 @@ interface Schedule {
   cron: string;                    // 5-field
   timezone: string;                // IANA
   enabled: boolean;
-  overlap: "skip";                 // "queue" deferred
+  overlap: "skip" | "queue";
   catchUpWindowMinutes: number;    // default 1440
   lastFiredAt?: string; nextFireAt?: string;  // persisted; recomputed on boot, edit and fire
   createdAt: string; updatedAt: string;
+  queuedCount: number;             // derived at read, never stored
+  activeTaskId?: TaskId;           // derived: the non-terminal occurrence task, if any
 }
 /** One row per scheduled occurrence; UNIQUE(schedule_id, occurrence_at). */
 interface ScheduleOccurrence {
-  scheduleId: string; occurrenceAt: string;   // the cron instant in UTC — the dedup key
-  firedAt: string; outcome: "created" | "skipped-overlap" | "skipped-catch-up" | "skipped-disabled";
+  scheduleId: string; occurrenceAt: string;   // the cron instant in UTC — the dedup key, and the FIFO key
+  firedAt: string; outcome: "created" | "queued" | "skipped-overlap" | "skipped-catch-up" | "skipped-disabled";
   taskId?: TaskId;
+  queuedAt?: string;               // survives promotion: `created` WITH a queuedAt means "promoted"
+  promotedAt?: string;
+  queuePosition?: number;          // 1-based FIFO rank on queued rows; ordered by the plane
 }
 ```
 
@@ -774,8 +780,16 @@ interface ScheduleOccurrence {
   changing `enabled` to false leaves in-flight tasks alone.
 - **Catch-up:** on boot, at most **one** missed occurrence per schedule is fired, and only if
   it is within `catchUpWindowMinutes`; older misses are recorded `skipped-catch-up`.
-- **Overlap:** `skip` only — while the previous occurrence's task is non-terminal, the
-  occurrence is recorded `skipped-overlap`. Queue mode is deferred.
+- **Overlap:** at most one non-terminal task per schedule in both modes. `skip` records the
+  overlapping occurrence `skipped-overlap` and creates nothing. `queue` persists it as durable
+  queued work on its own occurrence row — carrying an immutable snapshot of the `TaskIntent`
+  as of that instant — and promotes the oldest queued occurrence, strict FIFO by
+  `occurrenceAt`, once the schedule has no non-terminal task. Promotion is one transaction
+  whose `... AND outcome = 'queued'` compare-and-swap makes concurrent promoters safe, and it
+  parks the task on the same K1 time wait an immediate occurrence gets: no second launch path,
+  no second timer, no resource claim and no routing or K13 recommendation until the promoted
+  task reaches the ordinary execution path. Wake is the existing task-terminal event, with the
+  bounded tick sweep as the fallback. Full model: [K5 overlap: queue](agentic-os-k5-overlap-queue.md).
 - **Disabled scheduler** (`scheduler.enabled: false`): the timer is not armed, schedules do not
   fire (`skipped-disabled` recorded on the next enable, at most one), conditions are not
   evaluated; `WAITING_RESOURCE` tasks remain, the UI shows a "scheduler disabled" banner, and
@@ -1379,7 +1393,8 @@ evidence the pause is an ordinary human decision again.
 
 **K5 — recurring schedules.** One task per occurrence; a duplicate tick for the same
 `occurrenceAt` violates the unique constraint and creates nothing; `overlap: skip` records
-`skipped-overlap`; after restart at most one missed occurrence within the catch-up window
+`skipped-overlap`, `overlap: queue` persists the occurrence and promotes it oldest-first once
+the schedule is idle, with the intent it was queued with; after restart at most one missed occurrence within the catch-up window
 fires; DST spring-forward skips the nonexistent local time and fall-back fires once; editing
 cron recomputes `nextFireAt`; disabled scheduler records `skipped-disabled` once on re-enable.
 
@@ -1547,7 +1562,7 @@ or runtime work to finish before unrelated increments.
 |---|---|---|---|---|
 | K4 | `dependency` kind with cycle/self rejection and missing-dependency semantics; scheduler event hook on task terminal | ai-control-plan | "run reviewer after implementation finishes" | K1; before increment 11 |
 | K4b | `resource` kind + named config pools + `resource_claims` co-committed with the wake reservation + FIFO release wake over ready requirements by `resource_queued_at` + derived pool truth | ai-control-plan | two tasks, one slot: one runs, the other waits and wakes on release | K4; one launch funnel (`startTask`) |
-| K5 | Recurring `Schedule` + `schedule_occurrences` + cron dependency + atomic firing + catch-up + skip-only overlap + `GET/POST /api/schedules`; `schedules.read` | ai-control-plan | nightly template creates exactly one task per occurrence | K1 soaked (time waits in use) |
+| K5 | Recurring `Schedule` + `schedule_occurrences` + cron dependency + atomic firing + catch-up + `overlap: skip \| queue` (durable queued occurrences, FIFO promotion, intent snapshot) + `GET/POST /api/schedules`; `schedules.read` | ai-control-plan | nightly template creates exactly one task per occurrence | K1 soaked (time waits in use) |
 | K6 | Cockpit Schedule tab third source (read) + create via `commands.write`; `WAITING_RESOURCE` in managed views | cockpit | plane schedules and waiting tasks visible beside Cockpit jobs | K5, Cockpit auth follow-up |
 
 **Deferred (decided, unscheduled)**
@@ -1619,8 +1634,9 @@ or runtime work to finish before unrelated increments.
   separated from wake attempts; the "never starts into an exhausted window" promise replaced
   with revalidation and a bounded retry; probes optional and account-scoped, `reportsLimits`
   untouched (CR-22, CR-29).
-- K5: atomic firing with unique occurrences; timezone/DST, edits, catch-up, skip-only overlap,
-  disabled scheduler defined; queue mode deferred. K4: cycle rejection at first ship; missing
+- K5: atomic firing with unique occurrences; timezone/DST, edits, catch-up, skip overlap,
+  disabled scheduler defined; queue mode deferred at revision 2 and shipped since, on the
+  occurrence row itself rather than a parallel queue. K4: cycle rejection at first ship; missing
   dependency semantics; resource slots split off and deferred (K4b) (CR-23).
 - M14: observation model separating occupancy, accounting, effective window, advertised max,
   source and freshness; unknown allowed; Codex estimator withdrawn; Claude programmatic

@@ -10,7 +10,7 @@ import {
   type SchedulerStatus,
 } from "../api.js";
 import { actualLifecycle, describeState, modelIdentityView, nextStep, observedModel, resourceNextStep, waitKindLabel } from "../orbital.js";
-import { QuotaReadout, ContextReadout, ModelRecommendationReadout, DecisionSummary } from "./readouts.js";
+import { QuotaReadout, ContextReadout, ModelRecommendationReadout, DecisionSummary, ScheduleQueueReadout } from "./readouts.js";
 import { executionRead, missionState, type Mission } from "./execution.js";
 
 export type Snapshot = {
@@ -699,7 +699,22 @@ export function Inspector({
               <strong>Recurring schedule</strong>
               <span className="tone-complete">Implemented · K5</span>
             </li>
+            <li>
+              <strong>Overlap: skip or queue</strong>
+              <span className="tone-complete">Implemented · K5</span>
+            </li>
           </ul>
+          <div className="section-label">
+            Recurring schedules <span>K5 · overlap and queue backlog</span>
+          </div>
+          <p className="fine-print">
+            A schedule never has two non-terminal tasks. <strong>Skip</strong>{" "}
+            records the overlapping occurrence and creates nothing;{" "}
+            <strong>Queue</strong> persists it and promotes the oldest queued
+            occurrence once the schedule is idle, with the intent it was queued
+            with. Order, backlog and position are the plane's.
+          </p>
+          <ScheduleQueueReadout />
           <details>
             <summary>Schedule controls</summary>
             <p>
