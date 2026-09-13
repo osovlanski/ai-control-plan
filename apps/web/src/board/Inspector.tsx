@@ -189,14 +189,14 @@ export function Inspector({
 
   return (
     <section className="inspector" aria-label="Selected task inspector">
+      <div className="inspector-summary">
       <div className="inspector-top">
         <span className="eyebrow">Selected mission</span>
         <span className={`badge tone-${state.tone}`}>{state.label}</span>
       </div>
       <h2>{task.goal}</h2>
-      <code className="task-id">{task.id}</code>
       <p className="state-reason">{state.reason}</p>
-      {routing?.explanation.modelRecommendation ? (
+      {!snapshot ? <p className="status-line">{error ? "Mission evidence unavailable." : "Reading routing and execution evidence…"}</p> : routing?.explanation.modelRecommendation ? (
         <DecisionSummary
           recommendation={routing.explanation.modelRecommendation}
           actual={{
@@ -207,9 +207,16 @@ export function Inspector({
         />
       ) : routingSummary}
 
+      {error && snapshot && <p role="status" className="error">Mission read unavailable. Last successful snapshot shown.</p>}
+      {!!snapshot?.unavailable.length && <p className="fine-print">Some evidence is unavailable. See mission evidence below.</p>}
       <button className="open-task" onClick={onOpen}>
         Open full controls & diagnostics <span>↗</span>
       </button>
+      <a className="evidence-link" href="#mission-evidence">Inspect execution, routing & waits <span aria-hidden="true">↓</span></a>
+      </div>
+      <div className="inspector-detail" id="mission-evidence" tabIndex={-1}>
+      <div className="evidence-heading"><h2>Mission evidence</h2><code className="task-id">{task.id}</code></div>
+      {routing?.explanation.modelRecommendation && routingSummary}
       <div className="inspector-tabs" aria-label="Inspector sections">
         {["execution", "decision", "context", "schedule", "quota"].map((t) => (
           <button key={t} aria-pressed={tab === t} onClick={() => setTab(t)}>
@@ -718,6 +725,7 @@ export function Inspector({
           unavailable={snapshot.unavailable.includes("Scheduler status")}
         />
       )}
+      </div>
     </section>
   );
 }

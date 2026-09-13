@@ -44,17 +44,16 @@ export interface Satellite {
 /** Outer band the assistant constellation and model candidates ride. Constant,
  *  not sphere-relative, so a bigger core never pushes labels off the page. */
 const SAT_R = 430;
-const clamp = (n: number, lo: number, hi: number) => Math.min(Math.max(n, lo), hi);
 
 /** Polar placement shared by SVG relationship lines (scene units) and the
  *  absolutely-positioned HTML nodes (percent of the scene box). The line
  *  endpoint is derived from the SAME clamped position, so a line always lands
  *  exactly on its node. */
-function polar(angleDeg: number, radius: number) {
-  const a = (angleDeg * Math.PI) / 180;
-  const left = clamp((0.5 + (radius * Math.cos(a)) / SCENE) * 100, 5, 93);
-  const top = clamp((0.5 + (radius * Math.sin(a)) / SCENE) * 100, 6, 94);
-  return { left, top, sx: (left / 100) * SCENE, sy: (top / 100) * SCENE };
+function constellationSlot(index: number, count: number) {
+  const rows = Math.ceil(count / 2);
+  const left = index % 2 ? 96 : 4;
+  const top = rows === 1 ? 9 : 9 + (76 * Math.floor(index / 2)) / (rows - 1);
+  return { left, top, sx: left * SCENE / 100, sy: top * SCENE / 100 };
 }
 
 /**
@@ -84,6 +83,7 @@ export function OrbitalField({
   totalTasks,
   models,
   actual,
+  readAvailable,
 }: {
   tasks: Mission[];
   selectedId: string | null;
@@ -95,33 +95,29 @@ export function OrbitalField({
   models: ModelNode[];
   /** What actually executes / is routed for the selected mission. */
   actual: ActualExecution;
+  readAvailable: boolean;
 }) {
   const sceneRef = useRef<HTMLDivElement>(null);
   const size = useSize(sceneRef);
   const scale = size / SCENE;
-  const bodies = visibleBodies(tasks, selectedId, scale || 1);
-
-  // Model candidates ride the outer band, swept across the upper ~210° so the
-  // ACTUAL and SHADOW relationships both stay above the fold at 1440×900.
-  // Alternating radius gives them apparent orbital depth.
-  // Candidates sweep the LEFT + TOP (‑200°…‑40°), never the right side where the
-  // register and constellation live. Alternating radius (~54px) separates
-  // neighbours in apparent depth; the winner lands mid‑left so the amber SHADOW
-  // path is always the same reach. Everything stays above the 1440×900 fold.
-  const n = Math.max(models.length, 1);
-  const modelPlaced = models.map((m, i) => ({
-    m,
-    pos: polar(-200 + (160 * (i + 0.5)) / n, SAT_R + (i % 2 ? 0 : 54)),
-  }));
+  // Paired outer slots keep fixed-size identity labels apart at the rendered
+  // width. Relationship endpoints and reserved label boxes share these slots.
+  const needsActualChip = actual.assistantId && !models.some(m => m.actual && actual.modelSelector === m.selector);
+  const count = models.length + satellites.length + (needsActualChip ? 1 : 0);
+  const modelPlaced = models.map((m, i) => ({ m, pos: constellationSlot(i, count) }));
+  const satellitePlaced = satellites.map((satellite, i) => ({ ...satellite, pos: constellationSlot(models.length + i, count) }));
   const shadowPos = modelPlaced.find(({ m }) => m.shadow)?.pos;
-  // ACTUAL is an explicit relationship, never "nothing is executing". When a
-  // concrete selector is running we anchor to that model node; otherwise to a
-  // dedicated assistant-level chip (model unspecified — never invented), placed
-  // lower‑left, clear of the candidate sweep.
   const actualNodePos = actual.modelSelector
     ? modelPlaced.find(({ m }) => m.actual && m.selector === actual.modelSelector)?.pos
     : undefined;
-  const actualChipPos = actual.assistantId && !actualNodePos ? polar(-206, SAT_R - 62) : undefined;
+  const actualChipPos = needsActualChip ? constellationSlot(count - 1, count) : undefined;
+  const labelWidth = Math.min(224, size * .46) / (scale || 1);
+  const obstacles = [...modelPlaced, ...satellitePlaced, ...(actualChipPos ? [{ pos: actualChipPos }] : [])].map(({ pos }) => ({
+    x0: pos.left > 52 ? pos.sx - labelWidth - 12 : pos.sx - 12,
+    x1: pos.left > 52 ? pos.sx + 12 : pos.sx + labelWidth + 12,
+    y0: pos.sy - 38 / (scale || 1), y1: pos.sy + 38 / (scale || 1),
+  }));
+  const bodies = visibleBodies(tasks, selectedId, scale || 1, size > 460 ? obstacles : []);
   const actualPos = actualNodePos ?? actualChipPos;
   const live = pulse.running + pulse.attention + pulse.waiting + pulse.ready + pulse.unknown;
   const ringLen = 2 * Math.PI * (SPHERE_R + 14);
@@ -139,7 +135,7 @@ export function OrbitalField({
     <>
     <div className="map-heading">
       <strong>Execution field</strong>
-      <a href="#mission-register">{bodies.length} of {totalTasks} shown · register ↓</a>
+      <a href="#mission-register">{readAvailable ? `${bodies.length} of ${totalTasks} shown` : "Task read unavailable"} · register ↓</a>
     </div>
     <div
       ref={sceneRef}
@@ -202,6 +198,17 @@ export function OrbitalField({
           <path id="sph-flow-a" d="M 240 470 C 214 287 455 156 617 268 C 733 348 692 517 572 635 C 461 744 314 719 313 620 C 278 733 457 794 601 650 C 757 495 773 329 637 240 C 452 119 179 293 240 470 Z" />
           <path id="sph-flow-b" d="M 291 690 C 410 799 737 598 739 403 C 742 302 643 293 548 333 C 672 258 778 304 762 422 C 735 646 426 838 291 690 Z" />
           <path id="sph-flow-c" d="M 285 369 C 435 205 674 405 627 592 C 603 690 490 730 418 690 C 530 728 632 612 607 504 C 577 372 387 254 285 369 Z" />
+          <radialGradient id="sph-specular" cx="30%" cy="20%" r="65%">
+            <stop offset="0" stopColor="#dce8ff" stopOpacity=".8" />
+            <stop offset=".22" stopColor="#9b9dff" stopOpacity=".25" />
+            <stop offset=".68" stopColor="#645cff" stopOpacity="0" />
+          </radialGradient>
+          <linearGradient id="sph-depth" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0" stopColor="#b9d7ff" stopOpacity=".8" />
+            <stop offset=".38" stopColor="#7566ff" stopOpacity=".4" />
+            <stop offset=".72" stopColor="#4037a0" stopOpacity=".08" />
+            <stop offset="1" stopColor="#e6bf86" stopOpacity=".45" />
+          </linearGradient>
           <clipPath id="sph-clip">
             <circle cx={SCENE / 2} cy={SCENE / 2} r={SPHERE_R} />
           </clipPath>
@@ -255,6 +262,13 @@ export function OrbitalField({
             <path d="M 333 347 C 484 290 633 465 581 586 S 432 723 382 686" />
             <path d="M 259 614 C 316 777 662 622 722 434" />
           </g>
+          {/* Static refraction contours describe volume, never events or stages. */}
+          <g fill="none" stroke="url(#sph-depth)" strokeWidth="1.2" opacity=".65">
+            {Array.from({ length: 18 }, (_, i) => (
+              <path key={i} d={`M ${264 + i * 3} ${450 + i * 8} C ${190 + i * 8} ${245 + i * 4}, ${492 + i * 5} ${180 + i * 7}, ${647 - i * 2} ${315 + i * 9} S ${674 - i * 3} ${686 - i * 2}, ${413 + i * 4} ${730 - i * 4}`} />
+            ))}
+          </g>
+          <ellipse cx="390" cy="310" rx="190" ry="125" transform="rotate(-38 390 310)" fill="url(#sph-specular)" opacity=".5" />
           {/* Opposite light is a surface reflection as well as a soft spill. */}
           <ellipse cx="731" cy="621" rx="130" ry="202" transform="rotate(30 731 621)" fill="url(#sph-amber)" />
           <path d="M 443 766 C 642 799 798 549 736 388 C 854 539 700 821 514 806 Z" fill="url(#sph-gold)" />
@@ -305,7 +319,7 @@ export function OrbitalField({
         {/* constellation track */}
         <circle className="constellation-track" cx={SCENE / 2} cy={SCENE / 2} r={SAT_R + 20} />
 
-        {/* ACTUAL vs SHADOW relationships — solid teal for what runs, dashed
+        {/* ACTUAL vs SHADOW relationships — solid blue for what runs, dashed
             amber for what K13 would choose. The two are always drawn together. */}
         {actualPos && (
           <path className="rel-line rel-actual" d={relPath(actualPos, 44)} />
@@ -316,8 +330,8 @@ export function OrbitalField({
       </svg>
 
       <div className="sphere-core" aria-live="polite">
-        <span className="core-eyebrow">{pulse.running ? "Executing" : live ? "Holding" : "Idle"}</span>
-        <strong>{String(live).padStart(2, "0")}</strong>
+        <span className="core-eyebrow">{!readAvailable ? "Awaiting data" : pulse.running ? "Executing" : live ? "Holding" : "Idle"}</span>
+        <strong>{readAvailable ? String(live).padStart(2, "0") : "—"}</strong>
         <span className="core-sub">live missions</span>
       </div>
 
@@ -350,13 +364,9 @@ export function OrbitalField({
           );
         })}
 
-      {satellites.map(({ assistant, executing, cooling, shadow }, i) => {
+      {satellitePlaced.map(({ assistant, executing, cooling, shadow, pos }) => {
         const availability = !assistant.enabled ? "disabled" : !assistant.manifest ? "availability unknown" : assistant.manifest.core.auth.state !== "ok" ? `auth ${assistant.manifest.core.auth.state}` : null;
-        // Assistant constellation rides the top→right arc, opposite the model
-        // candidates (which own the left + top) so the two never pile up.
-        const a = ((-104 + (150 * (i + 0.5)) / satellites.length) * Math.PI) / 180;
-        const x = clamp(50 + ((SAT_R - 34) * Math.cos(a) * 100) / SCENE, 5, 93);
-        const y = clamp(50 + ((SAT_R - 34) * Math.sin(a) * 100) / SCENE, 6, 94);
+        const { left: x, top: y } = pos;
         return (
           <div
             key={assistant.id}
@@ -364,7 +374,7 @@ export function OrbitalField({
             style={{ left: `${x}%`, top: `${y}%` }}
             title={`${assistant.id} · ${assistant.provider}${availability ? ` · ${availability}` : ""}${cooling ? " · cooling down" : ""}${executing ? " · executing selected mission" : ""}${shadow && !executing ? " · K13 shadow: would choose (not executing)" : ""}`}
           >
-            <i />
+            <i aria-hidden="true">{assistant.provider.slice(0, 2).toUpperCase()}</i>
             <span>
               <strong>{assistant.id}</strong>
               <small>{[executing ? "executing" : "", shadow && !executing ? "shadow: would choose" : "", cooling ? "cooling down" : "", availability].filter(Boolean).join(" · ") || assistant.provider}</small>

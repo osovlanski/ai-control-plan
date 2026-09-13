@@ -1,7 +1,12 @@
-# Orbital operator console — visual language (UI v2)
+# Orbital operator console — visual language (UI v2 / V3)
+
+V3 updates the shell, composer and composition described here. See the
+[V3 audit, navigation decisions and visual evidence](agentic-os-ui-v3.md).
+The compact mission summary sits beside the execution field; complete mission
+evidence follows below it. Execution/selection is now blue, SHADOW remains amber.
 
 The Orbital board is the awareness layer of the Agentic OS operator UI; the
-inspector beside it is the precision layer. Everything the board draws is
+inspector is the precision layer. Everything the board draws is
 derived from persisted K1–K3 kernel truth (`/api/tasks`, `/api/tasks/:id`,
 `/api/scheduler/status`, `/api/assistants`, `/api/cooldowns`). The board never
 invents state, and it never forecasts time.

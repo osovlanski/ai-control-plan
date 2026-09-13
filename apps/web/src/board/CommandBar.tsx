@@ -3,10 +3,10 @@ import { useState } from "react";
 /** Prefill goals — they route to intake exactly like a typed goal, no new
  *  behaviour. The router still previews its choice before anything runs. */
 const SUGGESTIONS = [
-  "Build a new agent",
+  "Review a code change",
   "Analyze my codebase",
   "Create a research report",
-  "Run a multi-agent task",
+  "Plan an implementation",
 ];
 
 /** The one obvious way to issue work, and the page's primary command surface.
@@ -33,21 +33,20 @@ export function CommandBar({ onSubmit }: { onSubmit: (goal: string) => void }) {
           value={goal}
           onChange={(e) => setGoal(e.target.value)}
         />
-        <kbd>↵ route</kbd>
+        <p id="command-help" className="command-help">Preview routing in Intake. You choose when to run.</p>
         <button className="btn btn-primary cb-run" type="submit" disabled={!goal.trim()}>
           Route mission
         </button>
       </form>
       <div className="command-suggestions" aria-label="Suggested missions">
+        <span>Suggested missions</span>
         {SUGGESTIONS.map((s) => (
           <button key={s} type="button" className="cb-chip" onClick={() => onSubmit(s)}>
             {s}
           </button>
         ))}
       </div>
-      <p id="command-help" className="command-help">
-        Preview the assistant and routing reason in Intake. You choose when to run.
-      </p>
+
     </div>
   );
 }

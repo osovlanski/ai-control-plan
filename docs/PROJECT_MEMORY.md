@@ -137,3 +137,19 @@ Docs: `docs/ui/orbital-operator.md`.
   `provider-reported`; no `compact_boundary` in a short run. No transcript
   committed.
 - Evidence: `docs/agentic-os-k9-context-observation.md`.
+
+
+## Orbital UI V3 convergence (2026-09-13)
+
+- UI-only evolution from PR #38 in `feat/agentic-os-ui-convergence-v3`: Agentic OS
+  product rail, prominent preview-before-run composer, real kernel overview,
+  scoped activity/attention and a compact mission summary beside the semantic
+  field. Complete inspector evidence follows below; no backend controls removed.
+- Blue/violet visual system with solid ACTUAL and dashed amber SHADOW. SVG depth
+  and constellation-aware mission placement preserve canonical state rings.
+  Unknown/loading/stale reads remain explicit; no provider availability or
+  product destinations are invented. Memory/Tools/Settings navigation stays out.
+- Existing visual harness is restored as `pnpm --filter @agent-plane/web visual`.
+  Audit, captures, validation and P2 limits: `docs/ui/agentic-os-ui-v3.md`.
+- Protected K5 worktree, scheduler implementation, K13 activation policy and
+  production auth/bootstrap code are unchanged by this slice.

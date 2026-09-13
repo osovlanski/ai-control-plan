@@ -151,8 +151,8 @@ export async function boot(
       pages.add(page);
       await page.clock.setFixedTime(clock.current);
       await page.goto(l.url);
-      await expect(page.getByText("Agent Control Plane")).toBeVisible();
-      await expect(page.getByRole("heading", { name: /Missions in orbit/ })).toBeVisible();
+      await expect(page.getByText("Operator workspace", { exact: true })).toBeVisible();
+      await expect(page.getByRole("heading", { name: /Command the next wave/ })).toBeVisible();
       return page;
     },
     privileged: () =>

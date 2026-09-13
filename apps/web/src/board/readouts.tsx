@@ -289,7 +289,7 @@ export function DecisionSummary({ recommendation, actual }: {
 
       <p className="decision-why"><span>Why</span>{recommendation.reason}.</p>
       <ul className="relationship-key" aria-label="Model relationship key">
-        <li className="key-actual"><i />Solid teal · ACTUAL</li>
+        <li className="key-actual"><i />Solid blue · ACTUAL</li>
         <li className="key-shadow"><i />Dashed amber · SHADOW</li>
         <li className="key-excluded"><i />Muted / dotted · EXCLUDED</li>
       </ul>

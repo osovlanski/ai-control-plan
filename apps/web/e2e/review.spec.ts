@@ -125,15 +125,19 @@ test("runtime geometry and selection remain readable across eight active mission
     await page.setViewportSize({ width, height: 1000 });
     await expect(page.locator(".orbital-body.moving").first()).toBeVisible();
     await page.emulateMedia({ reducedMotion: "reduce" });
-    await page.waitForTimeout(150);
-    const overlaps = await page.locator(".body-label").evaluateAll(labels => {
+    const readOverlaps = () => page.locator(".body-label").evaluateAll(labels => {
       const boxes = labels.map(label => { const r = label.getBoundingClientRect(); return { x: r.x, y: r.y, right: r.right, bottom: r.bottom }; });
       return boxes.flatMap((a, i) => boxes.slice(i + 1).filter(b => a.x < b.right && b.x < a.right && a.y < b.bottom && b.y < a.bottom).map(b => ({ a, b })));
     });
+    // ResizeObserver recomputes pixel paths and density after the breakpoint.
+    // Wait for the rendered invariant, not a fixed 150ms under variable load.
+    await expect.poll(readOverlaps).toEqual([]);
+    const overlaps = await readOverlaps();
     evidence.push({ width, overlaps });
+    await page.screenshot({ path: info.outputPath(`eight-running-${width}.png`) });
+    writeFileSync(info.outputPath("geometry.json"), JSON.stringify(evidence, null, 2));
     expect(overlaps).toEqual([]);
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
-    await page.screenshot({ path: info.outputPath(`eight-running-${width}.png`) });
   }
   writeFileSync(info.outputPath("geometry.json"), JSON.stringify(evidence, null, 2));
 });
@@ -182,6 +186,7 @@ test("partial and failed reads are explicit; loading and disabled providers rema
   const page = await h.openApp(context);
   await page.setViewportSize({ width: 1440, height: 1000 });
   await expect(page.getByRole("heading", { name: "Reading your workspace…" })).toBeVisible();
+  await expect(page.locator(".system-overview .stat b")).toHaveText(["—", "—", "—"]);
   await page.screenshot({ path: info.outputPath("loading.png") });
   release();
   await expect(page.locator(".task-row")).toHaveCount(1);
@@ -194,5 +199,6 @@ test("partial and failed reads are explicit; loading and disabled providers rema
   await page.screenshot({ path: info.outputPath("partial-reads.png") });
   await context.route("**/api/tasks", route => route.fulfill({ status: 503, contentType: "application/json", body: '{"error":"Review task outage"}' }));
   await expect(page.getByRole("alert").filter({ hasText: "Task refresh failed" })).toContainText("last successful snapshot", { timeout: 10000 });
+  await expect(page.getByRole("region", { name: "System overview" })).toContainText("Last successful task snapshot");
   await page.screenshot({ path: info.outputPath("stale-tasks.png") });
 });
