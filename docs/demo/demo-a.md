@@ -114,23 +114,15 @@ per 15 minutes and are recorded separately from the wake budget.
 
 ## 5. Running the plane on the Oracle machine
 
-```bash
-pnpm --filter @agent-plane/api start     # API on 127.0.0.1:4176
-pnpm --filter @agent-plane/web dev       # Vite dev server on 127.0.0.1:5173+
-```
+Follow the [headless OCI bootstrap runbook](../headless-open.md): start
+`pnpm dev` in tmux, run `pnpm --filter @agent-plane/api open --headless` in
+another pane, and forward API 4176, web 5176 and the printed bootstrap port
+from your laptop. The launcher waits five minutes for the browser and mints
+its existing ten-second, single-use exchange token only on the page request.
+For a permanent SSH forward, use `--headless --port 8787`.
 
-Both listen on loopback only. Do not change the bind address, the auth mode or
-the firewall to make the demo easier to reach.
-
-To open the UI from a laptop, forward the ports over SSH from the laptop:
-
-```bash
-ssh -N -L 4176:127.0.0.1:4176 -L 5173:127.0.0.1:5173 <user>@<oracle-host>
-```
-
-then browse `http://127.0.0.1:5173`. The SPA obtains its session through the
-normal single-use bootstrap flow (`pnpm --filter @agent-plane/api open`); the
-tunnel carries it unchanged.
+All three listeners stay on loopback. Do not change the bind address, auth
+mode or firewall to make the demo easier to reach.
 
 ## 6. Optional real-provider smoke
 

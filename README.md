@@ -93,6 +93,9 @@ pnpm test
 pnpm build
 ```
 
+For a remote headless server, use `pnpm --filter @agent-plane/api open --headless`
+and the [OCI / SSH bootstrap runbook](docs/headless-open.md).
+
 ## Core loop being proven first
 
 ```text
