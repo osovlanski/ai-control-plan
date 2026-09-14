@@ -10,7 +10,9 @@
 
 - **K12 PARTIAL:** operator surfaces are implemented in the Control Plane and
   Cockpit #37. Only the joint K9/K12 live-provider warning-pressure evidence gate
-  (§5.2.4) remains unverified; do not rebuild the context service or gauges.
+  (§5.2.4) remains unverified: Claude is rate-limited; the real Codex unavailable
+  projection passed. See the [live record](agentic-os-k12-live-acceptance.md).
+  Do not rebuild the context service or gauges.
 - **K14 COMPLETE:** K7/K8 supply canonical model/price/benchmark evidence;
   Cockpit #38 implements the offline catalog snapshot and shared Usage/Retro
   pricing. The existing Agents card presents evidence; it grants no eligibility

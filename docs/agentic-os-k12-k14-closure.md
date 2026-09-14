@@ -71,9 +71,11 @@ products. The bounded web changes label the latest execution session, format
 the API's supplied pressure without recomputing it, reject stale/unavailable
 pressure inputs, and correct the adjacent K11 implementation status. The
 remaining item is evidence for kernel-services §5.2.4, not another service or
-gauge: a recorded real Claude session beyond `warnRatio`, an observed boundary
-if the provider auto-compacts, and a real Codex unavailable read. No live
-provider stress run was performed here; no transcript is committed.
+gauge: a recorded real Claude session beyond `warnRatio` and an observed boundary
+if the provider auto-compacts. The bounded follow-up hit a real Claude rate
+limit; the real Codex unavailable-session API/renderer check passed. See the
+[sanitized live acceptance record](agentic-os-k12-live-acceptance.md). No
+transcript is committed.
 
 **K14: COMPLETE.** The Cockpit acceptance was already delivered by #38. In the
 existing Control Plane Agents card, each price now shows its own source and
@@ -121,6 +123,38 @@ inspected read-only; all changes belong to the isolated Control Plane branch.
   provenance and evidence not granting routing or bounded-cost authority.
 - An initial browser-fixture type error (`task.id` vs `task.taskId`) was fixed.
   Interrupted validation attempts are not counted as passes; the completed
-  reruns above are the final results. No live-provider acceptance is claimed.
+  reruns above passed. The later bounded live check proves only the Codex
+  unavailable-session projection; it does not close Claude pressure acceptance.
 - Cockpit historical K12/K14 CI checks were successful. Cockpit tests were
   inspected but not rerun or changed in this Control Plane worktree.
+
+## PR #40 CI follow-up
+
+[CI #108](https://github.com/osovlanski/ai-control-plan/actions/runs/34861529828)
+at `9ee1faba2c776d253ef5bcec49d7cf76fc1fd396` failed once removing
+`repo/.git/objects` in the failover handoff test. Attempt **2 passed on the
+unchanged head**, including the normal suite, Harness-on suite, recovery-chaos
+gate and build. No source/test cleanup correction was made.
+
+The exact failing scenario passed **21/21** local runs: one initial invocation,
+then ten with legacy execution and ten with Harness single mode. Local Node
+was 22.18.0; CI used 22.23.2, the same supported major. Patch-version parity
+was not claimed; the successful unchanged rerun used CI's own environment.
+
+Inspection found a plausible pre-existing race: legacy `consume` removes its
+active entry before detached `settleRun` finishes; `settleRun` transitions the
+task terminal before awaiting the completion checkpoint. `waitForSettled` and
+shutdown therefore need not imply that checkpoint Git writes have ended. The
+nested real-repository teardown deletes its fixture before outer teardown. Git
+helper calls themselves await `execFile`; no unawaited child spawn was found
+inside those helpers. PR #40 did not change these paths.
+
+**Root cause: unknown; suspected pre-existing cleanup flake.** The source
+ordering is a hypothesis, not proof that this caused CI's single ENOTEMPTY.
+There was no deterministic reproduction, so no speculative retry, sleep,
+production-lifecycle change or test assertion weakening was introduced.
+
+Code safety and milestone acceptance are separate: the unchanged CI rerun
+passed, K12 implementation and K14 are complete, and the Claude live-pressure
+proof remains the Green-Light-A K12 gate. Final-head validation is recorded in
+the PR checks and follow-up summary.
