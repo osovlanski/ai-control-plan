@@ -10,14 +10,15 @@ import { buildServer } from "../../api/src/server.js";
 test("real headless CLI delivers the browser's HttpOnly session after the old token window", async ({ page, context }) => {
   const home = mkdtempSync(join(tmpdir(), "acp-headless-e2e-"));
   const config = loadConfig({ AGENT_PLANE_HOME: home });
+  config.api.port = 4276;
   const db = openDb(config.dbPath);
   const built = buildServer({ config, db });
   let child: ChildProcess | undefined;
   let exited: Promise<number | null> | undefined;
   try {
     built.registry.init();
-    await built.app.listen({ host: "127.0.0.1", port: 4176 });
-    child = spawn("pnpm", ["--filter", "@agent-plane/api", "open", "--headless"], {
+    await built.app.listen({ host: "127.0.0.1", port: 4276 });
+    child = spawn("pnpm", ["--filter", "@agent-plane/api", "open", "--headless", "--origin", "http://127.0.0.1:4276"], {
       cwd: resolve("../.."),
       env: { ...process.env, AGENT_PLANE_HOME: home, AGENT_PLANE_WORKSPACE: "personal", DISPLAY: "", WAYLAND_DISPLAY: "", FORCE_COLOR: undefined },
       stdio: ["ignore", "pipe", "pipe"],
@@ -36,8 +37,8 @@ test("real headless CLI delivers the browser's HttpOnly session after the old to
     const exchange = page.waitForRequest((req) => req.url().endsWith("/api/auth/bootstrap"));
     await page.goto(origin);
     expect((await exchange).headers().origin).toBe(origin);
-    await expect(page).toHaveURL("http://127.0.0.1:4176/");
-    await expect(page.getByText("Agent Control Plane")).toBeVisible();
+    await expect(page).toHaveURL("http://127.0.0.1:4276/");
+    await expect(page.getByText("Operator workspace", { exact: true })).toBeVisible();
     await expect.poll(() => page.evaluate(() => fetch("/api/workspace").then((r) => r.status))).toBe(200);
     const cookie = (await context.cookies()).find((c) => c.name === "__Host-acp_session");
     expect(cookie).toMatchObject({ httpOnly: true, secure: true, sameSite: "Strict", path: "/" });

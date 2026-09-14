@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, type Assistant } from "./api.js";
 import { actualLifecycle, fieldPulse, modelNodes, type ActualExecution } from "./orbital.js";
+import { MissionActivity, SystemOverview } from "./board/Overview.js";
 import { CommandBar } from "./board/CommandBar.js";
 import { Inspector, type Snapshot } from "./board/Inspector.js";
 import { OrbitalField, type Satellite } from "./board/OrbitalField.js";
@@ -139,36 +140,15 @@ export function OrbitalBoard({
         <div>
           <span className="eyebrow">Orbital · operator console</span>
           <h1>
-            Missions in orbit<em>.</em>
+            Command the next wave<em>.</em>
           </h1>
-          <p>Every body is a mission the kernel owns. Motion is execution; stillness is a wait.</p>
+          <p>Set a goal. Review the route. Stay in command.</p>
         </div>
         <button className="btn" onClick={() => onNew()}>
           Detailed intake
         </button>
       </div>
       <CommandBar onSubmit={(goal) => onNew(goal)} />
-      <div className="workspace-status">
-        <span className="stat tone-active">
-          <i /> <b>{pulse.running}</b> running
-        </span>
-        <button className="stat stat-action tone-human" onClick={() => setFilter(filter === "attention" ? "all" : "attention")} aria-pressed={filter === "attention"}>
-          <i /> <b>{pulse.attention}</b> need you
-        </button>
-        <span className="stat tone-resource">
-          <i /> <b>{pulse.waiting}</b> waiting for the scheduler
-        </span>
-        <span className="stat tone-neutral">
-          <i /> <b>{pulse.ready}</b> ready to start
-        </span>
-        {pulse.unknown > 0 && <span className="stat tone-neutral"><i /> <b>{pulse.unknown}</b> runtime unknown</span>}
-        <span className="stat tone-neutral">
-          <i /> <b>{pulse.settled}</b> settled
-        </span>
-        <span className="read-status">
-          {loading ? "Connecting" : error ? "Read unavailable" : "Live from the kernel · refreshes every 4s"}
-        </span>
-      </div>
       {error && (
         <p role="alert" className="error">
           Task refresh failed: {error}. {tasks.length ? "Showing the last successful snapshot." : "No task data available."}
@@ -176,6 +156,8 @@ export function OrbitalBoard({
       )}
       {!!unavailable.length && <p role="status" className="error">Unavailable reads: {unavailable.join(", ")}. Provider and approval visibility may be incomplete.</p>}
       <div className="orbital-layout">
+        <SystemOverview pulse={pulse} loading={loading} error={error} hasSnapshot={tasks.length > 0}
+          attentionSelected={filter === "attention"} onAttention={() => setFilter(filter === "attention" ? "all" : "attention")} />
         {current ? (
           <Inspector key={current.id} task={current} onOpen={() => onOpen(current.id)} onSnapshot={onSnapshot} />
         ) : (
@@ -191,6 +173,8 @@ export function OrbitalBoard({
             </p>
           </section>
         )}
+        <MissionActivity tasks={tasks} selectedId={current?.id ?? null} snapshot={forCurrent ? snapshot : null}
+          loading={loading} error={error} onSelect={(id) => { setFilter("all"); setQuery(""); setSelected(id); }} />
         <section className="orbital-map" aria-label="Task orbital map">
           <OrbitalField
             tasks={bodies}
@@ -201,6 +185,7 @@ export function OrbitalBoard({
             satellites={satellites}
             models={models}
             actual={actual}
+            readAvailable={!loading && (!error || tasks.length > 0)}
           />
           <div className="map-caption">
             <span>Ring = state group · angle = index, not a forecast.</span>
@@ -208,7 +193,7 @@ export function OrbitalBoard({
           </div>
           <div className="map-legend">
             <span className="tone-active">
-              <i /> Solid line: ACTUAL execution
+              <i /> Solid blue: ACTUAL run / route
             </span>
             <span className="model-shadow-key">
               <i /> Dashed amber: K13 SHADOW “would choose” (not running)

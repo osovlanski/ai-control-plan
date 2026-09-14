@@ -20,6 +20,7 @@ import {
   shortFilterReason,
   resourceNextStep,
   waitKindLabel,
+  visibleBodies,
   type ActualExecution,
 } from "./orbital.js";
 import type { TaskEvent } from "./api.js";
@@ -369,5 +370,34 @@ describe("model identity (K7)", () => {
     const legacy = modelIdentityView(undefined, "claude-opus-4-1-20991231");
     expect(legacy.served).toBe("claude-opus-4-1-20991231");
     expect(legacy.servedKnown).toBe(true);
+  });
+});
+
+
+describe("constellation clearance", () => {
+  it("moves the selected body along its state ring to clear a provider label", () => {
+    const tasks = [{ id: "selected", state: "RUNNING" }, { id: "waiting", state: "WAITING_RESOURCE" }];
+    const original = visibleBodies(tasks, "selected", .6)[0]!;
+    const at = pointAt(original.ring, original.phase);
+    const obstacle = { x0: at.x - 50, x1: at.x + 50, y0: at.y - 50, y1: at.y + 50 };
+    const placed = visibleBodies(tasks, "selected", .6, [obstacle]);
+    expect(placed[0]!.task.id).toBe("selected");
+    expect(placed[0]!.ring).toBe(original.ring);
+    expect(placed[0]!.phase).not.toBe(original.phase);
+    for (const body of placed) {
+      const pos = pointAt(body.ring, body.phase);
+      expect(pos.x < obstacle.x0 || pos.x > obstacle.x1 || pos.y < obstacle.y0 || pos.y > obstacle.y1).toBe(true);
+    }
+    expect(tasks).toEqual([{ id: "selected", state: "RUNNING" }, { id: "waiting", state: "WAITING_RESOURCE" }]);
+  });
+
+  it("bounds a crowded field without changing the complete mission input", () => {
+    const tasks = Array.from({ length: 8 }, (_, i) => ({ id: String(i), state: "RUNNING" }));
+    const placed = visibleBodies(tasks, "7", .5, [{ x0: 0, x1: 300, y0: 0, y1: 1000 }]);
+    expect(placed[0]!.task.id).toBe("7");
+    for (let i = 0; i < placed.length; i++) {
+      for (const other of placed.slice(i + 1)) expect(bodiesCollide(placed[i]!, other, .5)).toBe(false);
+    }
+    expect(tasks).toHaveLength(8);
   });
 });

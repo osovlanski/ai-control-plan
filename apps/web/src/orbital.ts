@@ -308,11 +308,23 @@ export function layoutBodies<T extends { id: string; state: string }>(tasks: T[]
 
 /** Bound density using the rendered label footprint, keeping selection first.
  * Missions that do not fit remain accessible in the register. */
-export function visibleBodies<T extends { id: string; state: string }>(tasks: T[], selectedId: string | null, scale: number): Body<T>[] {
+export type FieldObstacle = { x0: number; x1: number; y0: number; y1: number };
+export function visibleBodies<T extends { id: string; state: string }>(tasks: T[], selectedId: string | null, scale: number, obstacles: FieldObstacle[] = []): Body<T>[] {
   const placed: Body<T>[] = [];
   const candidates = layoutBodies(tasks, scale).sort((a, b) => Number(b.task.id === selectedId) - Number(a.task.id === selectedId));
   for (const body of candidates) {
-    if (placed.every(other => !bodiesCollide(body, other, scale))) placed.push(body);
+    // Reserve constellation label footprints too. Angle remains an index, never
+    // time; nudging a slot does not change its canonical state ring.
+    for (let attempt = 0; attempt < 40; attempt++) {
+      const bounds = box(body, scale);
+      const blocked = obstacles.some(o => bounds.x0 < o.x1 && o.x0 < bounds.x1 && bounds.y0 < o.y1 && o.y0 < bounds.y1);
+      if (!blocked && placed.every(other => !bodiesCollide(body, other, scale))) {
+        body.flip = flipFor(pointAt(body.ring, body.phase).x, LABEL_W / scale);
+        placed.push(body);
+        break;
+      }
+      body.phase = (body.phase + 0.025) % 1;
+    }
   }
   return placed;
 }

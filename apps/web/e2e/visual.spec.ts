@@ -113,6 +113,14 @@ test("reference screenshots: active workspace, quota wait, laptop, mobile", asyn
   await expect(page.locator(".satellite.executing")).toHaveCount(1);
   await shot("1-desktop-active", page);
   await shot("1-desktop-active-full", page, true);
+  const mainBox = await page.locator(".os-main").boundingBox();
+  const fieldBox = await page.locator(".orbital-map").boundingBox();
+  expect(fieldBox!.width / mainBox!.width).toBeGreaterThan(.44);
+  expect(fieldBox!.width / mainBox!.width).toBeLessThan(.52);
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await shot("1b-wide-active", page);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.setViewportSize({ width: 1440, height: 1000 });
 
   // 2. Desktop, WAITING_RESOURCE quota case with blocker evidence.
   await select(quota);
@@ -138,6 +146,9 @@ test("reference screenshots: active workspace, quota wait, laptop, mobile", asyn
   await shot("4-laptop", page);
   await shot("4-laptop-full", page, true);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.setViewportSize({ width: 900, height: 1000 });
+  await shot("4b-tablet-full", page, true);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.setViewportSize({ width: 390, height: 844 });
   await shot("5-mobile", page);
   await shot("5-mobile-full", page, true);
@@ -150,11 +161,22 @@ test("reference screenshots: active workspace, quota wait, laptop, mobile", asyn
   await expect.poll(() => page.evaluate(() => document.getAnimations().filter(a => a.playState === "running" && a.effect?.getTiming().iterations === Infinity).length)).toBe(0);
   await select(running);
   await shot("6-desktop-reduced-motion", page);
+  // Check rendered labels, not just the geometry helper: constellation labels
+  // must clear task labels and each other in the static accessible frame.
+  const overlaps = await page.locator(".body-label, .satellite > span, .model-node > span").evaluateAll(labels => {
+    const boxes = labels.filter(el => getComputedStyle(el).opacity !== "0" && getComputedStyle(el).display !== "none")
+      .map(el => ({ text: el.textContent, box: el.getBoundingClientRect() }));
+    return boxes.flatMap((a, i) => boxes.slice(i + 1).filter(b => a.box.left < b.box.right && b.box.left < a.box.right && a.box.top < b.box.bottom && b.box.top < a.box.bottom).map(b => [a.text, b.text]));
+  });
+  expect(overlaps).toEqual([]);
 
   // 7. Intake screen reached from the command bar.
   await page.getByRole("textbox", { name: "What should Agentic OS do?" }).fill("Audit the retry policy for idempotency");
   await page.getByRole("button", { name: "Route mission" }).click();
   await expect(page.getByRole("heading", { name: "New mission" })).toBeVisible();
+  await expect(page.getByText(/Rule fired:/)).toBeVisible();
+  const preview = built.tasks.list().find(t => t.goal === "Audit the retry policy for idempotency")!;
+  expect((await (await api.get(`/api/tasks/${preview.id}`)).json()).runs).toHaveLength(0);
   await shot("7-intake", page);
 
   // 8. Full controls & diagnostics and 9. the agent catalog keep the same shell.
