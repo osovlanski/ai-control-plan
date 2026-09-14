@@ -130,7 +130,7 @@ export function App() {
  * the authority for which assistant can serve it.
  */
 function ModelCatalogCard() {
-  const [models, setModels] = useState<CatalogModel[]>([]);
+  const [models, setModels] = useState<CatalogModel[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -149,7 +149,7 @@ function ModelCatalogCard() {
 
   return (
     <Card>
-      <div style={{ display: "flex", alignItems: "center", gap: "0.7rem" }}>
+      <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "0.7rem" }}>
         <strong>Model catalog</strong>
         <span style={{ fontSize: "0.8rem", color: tokens.muted }}>identity + price + external benchmark evidence (K7/K8)</span>
         <span style={{ marginLeft: "auto" }}>
@@ -158,24 +158,32 @@ function ModelCatalogCard() {
           </Button>
         </span>
       </div>
+      <p className="fine-print">Catalog and benchmark evidence do not grant routing eligibility. Availability comes from configured assistant discovery.</p>
       {error && <p style={{ margin: "0.6rem 0 0", fontSize: "0.85rem", color: tokens.muted }}>Catalog unavailable: {error}. Routing is unaffected.</p>}
-      {!error && models.length === 0 && (
+      {!error && models === null && <p role="status">Reading model catalog…</p>}
+      {!error && models?.length === 0 && (
         <p style={{ margin: "0.6rem 0 0", fontSize: "0.85rem", color: tokens.muted }}>
           No catalog evidence yet — refresh to collect it from provider discovery and this workspace’s own runs.
         </p>
       )}
-      {models.map((m) => (
-        <div key={m.modelKey} style={{ marginTop: "0.6rem", fontSize: "0.83rem" }}>
+      {models?.map((m) => (
+        <div key={m.modelKey} style={{ marginTop: "0.6rem", fontSize: "0.83rem", overflowWrap: "anywhere" }}>
           <strong>{m.modelId}</strong>{" "}
           <span style={{ color: tokens.muted }}>
-            {m.provider} · {m.provenance.tier} via {m.provenance.source} · {m.freshness}
+            {m.provider} · {m.status} · {m.provenance.tier} via {m.provenance.source} · {m.freshness} · observed {m.provenance.observedAt}
             {/* Each fact names its own source: a filled gap is not the entry's evidence. */}
-            {m.contextWindowTokens ? ` · ctx ${m.contextWindowTokens.value} (${m.contextWindowTokens.provenance.source})` : ""}
+            {m.contextWindowTokens ? ` · advertised context ${m.contextWindowTokens.value} (${m.contextWindowTokens.provenance.source}; observed ${m.contextWindowTokens.provenance.observedAt})` : " · advertised context unknown"}
             {m.availableVia.length ? ` · via ${m.availableVia.join(", ")}` : " · no assistant advertises it"}
           </span>
+          <div style={{ color: tokens.muted }}>
+            {m.capabilities
+              ? `Capabilities: ${Object.entries(m.capabilities.value).map(([key, value]) => `${key}: ${value}`).join(", ")} · ${m.capabilities.provenance.source} · observed ${m.capabilities.provenance.observedAt}`
+              : "Capability evidence unavailable"}
+          </div>
+          {m.pricing.length === 0 && <div style={{ color: tokens.muted }}>Price evidence unavailable</div>}
           {m.pricing.map((p) => (
             <div key={p.pricingVersion} style={{ color: tokens.muted }}>
-              price {p.inputPerMtok}/{p.outputPerMtok} {p.currency} per Mtok · version {p.pricingVersion} · {p.provenance.tier} · {p.freshness}
+              price {p.inputPerMtok}/{p.outputPerMtok} {p.currency} per Mtok · version {p.pricingVersion} · {p.provenance.source} · {p.provenance.tier} · observed {p.provenance.observedAt} · {p.freshness}
               {p.appliesTo ? ` · applies to ${p.appliesTo.servingProvider}${p.appliesTo.accountKind ? `/${p.appliesTo.accountKind}` : ""}` : " · applicability not established"}
               {" · evidence only, not an enforcement tariff"}
             </div>

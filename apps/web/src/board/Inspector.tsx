@@ -418,7 +418,7 @@ export function Inspector({
             </li>
             <li>
               <strong>Context yield & clean-session continuation</strong>
-              <span className="planned">Planned · K11</span>
+              <span className="tone-complete">Implemented · K11</span>
             </li>
           </ul>
           <details>
@@ -429,9 +429,9 @@ export function Inspector({
             </p>
             <p>
               Provider auto-compaction is recorded as an observation, never as an
-              Agentic OS action. Plane-driven compaction (K10) and
-              checkpoint-backed clean-session continuation (K11) are not yet
-              implemented.
+              Agentic OS action. Checkpoint-backed clean-session continuation
+              (K11) is implemented with task-level bounds and evidence gates.
+              Plane-driven compaction (K10) remains separate and unavailable.
             </p>
           </details>
         </div>

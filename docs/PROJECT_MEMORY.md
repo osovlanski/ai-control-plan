@@ -153,3 +153,18 @@ Docs: `docs/ui/orbital-operator.md`.
   Audit, captures, validation and P2 limits: `docs/ui/agentic-os-ui-v3.md`.
 - Protected K5 worktree, scheduler implementation, K13 activation policy and
   production auth/bootstrap code are unchanged by this slice.
+
+
+## K12/K14 reconciliation (2026-09-14)
+
+- K12 presentation already shipped through K9 in apps/web and Cockpit #37
+  (`ec1569a`). K14 already shipped through K7/K8 and Cockpit #38 (`833d420`),
+  including the durable offline snapshot and shared Usage/Retro resolver.
+- Current closure adds only bounded web presentation: latest-session identity,
+  supplied-pressure rendering, truthful K11 status, catalog loading/unknown
+  states and each price's own source/date. No service, schema or policy change.
+- **K12 PARTIAL overall:** kernel-services §5.2.4's real-provider warning-pressure
+  scenario is not proved by the recorded short K9 smoke or scripted tests.
+  **K14 COMPLETE.** Do not reopen completed implementation as new packages.
+- Matrices, evidence and validation: `docs/agentic-os-k12-k14-closure.md`.
+  Older slice notes above are historical, not current pending-work lists.
