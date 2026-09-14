@@ -32,6 +32,34 @@ const base = (o: Partial<NonNullable<TaskContext["observation"]>> = {}): TaskCon
 });
 
 describe("ContextReadout", () => {
+  it("labels the latest session instead of implying a task-wide occupancy total", () => {
+    const html = renderToStaticMarkup(<ContextReadout context={base()} />);
+    expect(html).toContain("Latest execution session:");
+    expect(html).toContain("es_1");
+    expect(html).toContain("not a task-wide total");
+  });
+
+  it("formats canonical pressure and never recomputes a missing pressure", () => {
+    const html = renderToStaticMarkup(<ContextReadout context={base({ pressure: 0.31 })} />);
+    expect(html).toContain("31%");
+    expect(html).not.toContain("46%");
+    const missing = renderToStaticMarkup(<ContextReadout context={base({ pressure: undefined })} />);
+    expect(missing).not.toContain("<meter");
+    expect(missing).toContain("Pressure unavailable in this observation");
+  });
+
+  it.each([
+    { occupancySource: "unavailable" as const },
+    { effectiveWindowSource: "unavailable" as const },
+    { freshness: "stale" as const },
+    { pressure: Number.NaN },
+    { pressure: -1 },
+    { effectiveWindowTokens: 0 },
+  ])("does not render pressure with unavailable or invalid evidence: %j", (observation) => {
+    const html = renderToStaticMarkup(<ContextReadout context={base(observation)} />);
+    expect(html).not.toContain("<meter");
+  });
+
   it("KNOWN: shows occupancy / window, a percentage, the method chip and Live", () => {
     const html = renderToStaticMarkup(<ContextReadout context={base({ advertisedMaxTokens: 1_000_000 })} />);
     expect(html).toContain("82k / 180k tokens");

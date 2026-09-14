@@ -1,5 +1,12 @@
 # K9 context observation — implementation and acceptance record
 
+**Later implementation status (2026-09-14):** the pending/deferred wording
+below describes this slice at delivery. Cockpit K12 (#37) and K14 (#38), K11
+continuation, and K13 SHADOW have since merged. K12's joint live-provider
+pressure evidence gate remains unverified; K14 is complete. See the
+[K12/K14 closure record](agentic-os-k12-k14-closure.md). K13 activation is
+unchanged; this annotation does not close any compaction or runtime deferral.
+
 Implemented on `feat/agentic-os-k9-context-observation`, from
 `docs/agentic-os-kernel-services.md` §4.3.1, §5.2 (K9 + K12), CR-34 and
 invariants I-C1/I-C3. K1–K8 are unchanged.

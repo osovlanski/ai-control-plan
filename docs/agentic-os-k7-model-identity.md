@@ -1,5 +1,12 @@
 # K7 model identity and catalog — implementation and acceptance record
 
+**Later implementation status (2026-09-14):** the pending/deferred wording
+below describes this slice at delivery. Cockpit K12 (#37) and K14 (#38), K11
+continuation, and K13 SHADOW have since merged. K12's joint live-provider
+pressure evidence gate remains unverified; K14 is complete. See the
+[K12/K14 closure record](agentic-os-k12-k14-closure.md). K13 activation is
+unchanged; this annotation does not close any compaction or runtime deferral.
+
 Implemented on `feat/agentic-os-k7-model-identity-catalog`, based on
 `docs/agentic-os-kernel-services.md` (§4.4, §5.3 K7, CR-33, invariants I-M1/I-M3/I-M5).
 K1–K6 are unchanged. **K8 (Artificial Analysis / benchmarks) and K13 (model scoring and
