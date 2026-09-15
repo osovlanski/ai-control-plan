@@ -109,8 +109,8 @@ export function* canonicalOccurrences(pattern: string, timezone: string, after: 
    * asks about heavily overlapping instant ranges, so this is what keeps the
    * whole walk at roughly one rendering per occurrence however dense the
    * pattern is. Sampling only proposes offsets to try — every one of them is
-   * then confirmed exactly — and no IANA offset regime is anywhere near as
-   * short as the grid.
+   * then confirmed exactly — and the grid is half the shortest offset regime
+   * IANA has ever defined, so no regime can fall between two samples.
    */
   const sampled = new Map<number, number>();
   const offsetNear = (bucket: number): number => {
@@ -141,10 +141,19 @@ export function* canonicalOccurrences(pattern: string, timezone: string, after: 
     }
     return earliest;
   };
-  // A civil candidate up to one offset BEFORE `after` can still map to an
-  // instant after it, so that is where the civil walk starts. What is in scope
-  // is decided by the filter below, never by where the walk began.
-  let wallCursor = after.getTime() - MAX_ZONE_OFFSET_MS - 1;
+  // A civil candidate BEFORE `after`'s own reading can still map to an instant
+  // after it, so the walk starts one offset back — the smallest offset the zone
+  // actually uses around `after`, not a worst-case one, which is what keeps the
+  // walk free of wasted candidates in a zone at or near UTC. A reading earlier
+  // than that cannot map into scope under any offset: beyond the sampled span
+  // it would take an offset below -32 hours. What IS in scope is decided by the
+  // filter below, never by where the walk began.
+  let backOff = Infinity;
+  const around = Math.ceil(MAX_ZONE_OFFSET_MS / OFFSET_SAMPLE_MS);
+  for (let bucket = Math.floor(after.getTime() / OFFSET_SAMPLE_MS) - around; bucket <= Math.ceil(after.getTime() / OFFSET_SAMPLE_MS) + around; bucket++) {
+    backOff = Math.min(backOff, offsetNear(bucket));
+  }
+  let wallCursor = after.getTime() + backOff - 1;
   let emitted = after.getTime();
   for (let step = 0; step < maxSteps; step++) {
     const candidate = civil.nextRun(new Date(wallCursor));
