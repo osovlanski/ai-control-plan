@@ -7,6 +7,11 @@ Evaluated PR #40 at `9ee1faba2c776d253ef5bcec49d7cf76fc1fd396`, against
 scenario remains open. The real Codex unavailable-session projection passed.
 This record does not clear the Green-Light-A K12 acceptance gate.
 
+> **CLOSED 2026-09-15.** The remaining Claude warning-band scenario was
+> demonstrated live during the Green-Light-A acceptance campaign. See
+> "Closure — 2026-09-15" at the end of this document. This section is kept as
+> the record of what was still open on 2026-09-14.
+
 ## Exact acceptance and checklist
 
 Kernel-services §5.2, item 4:
@@ -188,3 +193,64 @@ session is live; do not relabel terminal evidence as live or lower `warnRatio`.
 **Single remaining proof:** a real Claude session above `warnRatio = 0.70`
 with its provider-reported observation projected truthfully to the operator,
 and an observed `compact_boundary` if the provider auto-compacts.
+
+---
+
+## Closure — 2026-09-15
+
+The single remaining proof named above was demonstrated against merged
+`origin/main` `33b8112ee4b6549468d42c3981f4835a2df6d68a` (K5 overlap queue, #37;
+K12/K14 closure, #40) in a fresh `AGENT_PLANE_HOME` with a disposable Git
+fixture and a disposable database. `warnRatio` was not changed, no database row
+was inserted, no `ContextObservation` was manufactured, and occupancy was never
+derived from token accounting. Pressure was reached by prompt size alone.
+
+### Bounds declared before the run
+
+One real Claude session per attempt, 180 s wall budget, a single prompt of at
+most 2 MiB, scheduler and quota probes off, failover off, K13 SHADOW, no
+provider compaction command issued, no automatic retry.
+
+### Result
+
+| Attempt | Requested selector | Resolved identity | Occupancy (provider-reported) | Effective window (provider-reported) | Pressure | Above `warnRatio` 0.70 |
+|---|---|---|---|---|---|---|
+| Warning band | `haiku` | `claude-haiku-4-5-20251001` | 159,045 | 200,000 | **0.7952** | yes |
+| Near-critical | `haiku` | `claude-haiku-4-5-20251001` | 193,813 | 200,000 | **0.9691** | yes |
+
+Both observations carry `occupancySource: provider-reported` and
+`effectiveWindowSource: provider-reported`, and both were recorded by the
+production `SessionRunner` sampling path from the adapter's own
+`getContextUsage` control request.
+
+### Operator projection, captured while the session was live
+
+`GET /api/tasks/:id/context` was polled during the run and the response was
+rendered through the production `ContextReadout` with `react-dom/server`:
+
+| Projection | Warning band | Near-critical |
+|---|---|---|
+| `status` | `known` | `known` |
+| Rendered pressure | `<strong>80%</strong>` | `<strong>97%</strong>` |
+| Rendered occupancy | `159k / 200k tokens` | `194k / 200k tokens` |
+| Rendered freshness | Live | Live |
+| Rendered method | Provider-reported | Provider-reported |
+
+The same read taken after the session settled correctly reported the
+observation stale and withheld the percentage, reproducing the terminal-read
+behaviour already described above.
+
+### Auto-compaction
+
+No `compact_boundary` was observed in either attempt, and the contract does not
+require one to occur. The forwarding path itself is unchanged and remains
+covered by the deterministic suites.
+
+### Note on effective windows
+
+The window the provider manages against is the acceptance denominator, and it
+is model-dependent: a 1M-context Sonnet session in the same harness reported an
+effective window of 967,000 tokens, against which the same prompt sizes sit far
+below `warnRatio`. Reaching the warning band on that window costs roughly four
+times the tokens for the same proof, so the bounded probe used a 200,000-token
+window instead. The threshold itself was never lowered.
