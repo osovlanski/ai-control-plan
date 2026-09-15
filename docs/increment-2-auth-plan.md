@@ -162,6 +162,13 @@ app.addHook("onRequest", async (req, reply) => {
 
 ### 7. The launcher (`apps/api/src/bin/open-web.ts`, `pnpm --filter @agent-plane/api open`)
 
+**Headless flow update:** the shipped launcher now waits up to five minutes
+(configurable, capped at 15 minutes), mints the existing short-lived token on the
+first page request, and supports `--headless` and `--port`. See the current
+[operator contract](headless-open.md). The steps below record the original
+increment-2 design, including its former mint-at-launch / 30-second listener.
+The API exchange and session contract are unchanged.
+
 Native Node process — the privileged issuer. The token never touches disk:
 
 1. `loadConfig()`; read + **validate** `api-credential.json` (owner / mode / regular-file). Absent → exit "start the server first".

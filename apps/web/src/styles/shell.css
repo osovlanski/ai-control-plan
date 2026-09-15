@@ -64,7 +64,7 @@ a {
   background:
     radial-gradient(
       900px 620px at 62% 42%,
-      rgba(127, 227, 220, 0.075),
+      rgba(155, 185, 255, 0.075),
       transparent 70%
     ),
     radial-gradient(
@@ -113,9 +113,9 @@ a {
   margin-bottom: 18px;
   position: relative;
   background:
-    radial-gradient(circle at 35% 30%, #d9fbf8, var(--accent) 35%, #0f3a3a 75%);
+    radial-gradient(circle at 35% 30%, #d9e7ff, var(--accent) 35%, #182955 75%);
   box-shadow:
-    0 0 0 1px rgba(127, 227, 220, 0.35),
+    0 0 0 1px rgba(155, 185, 255, 0.35),
     0 0 26px var(--accent-glow);
 }
 .os-mark::after {
@@ -123,7 +123,7 @@ a {
   position: absolute;
   inset: -7px;
   border-radius: 50%;
-  border: 1px solid rgba(127, 227, 220, 0.3);
+  border: 1px solid rgba(155, 185, 255, 0.3);
   transform: rotate(-30deg) scaleY(0.42);
 }
 .os-rail nav {
@@ -166,8 +166,8 @@ a {
 }
 .os-nav[aria-current="page"] {
   color: var(--accent);
-  background: rgba(127, 227, 220, 0.07);
-  border-color: rgba(127, 227, 220, 0.22);
+  background: rgba(155, 185, 255, 0.07);
+  border-color: rgba(155, 185, 255, 0.22);
 }
 .os-rail-foot {
   margin-top: auto;
@@ -266,11 +266,11 @@ a {
   background: var(--accent);
   border-color: var(--accent);
   color: var(--accent-ink);
-  box-shadow: 0 0 22px rgba(127, 227, 220, 0.18);
+  box-shadow: 0 0 22px rgba(155, 185, 255, 0.18);
 }
 .btn-primary:hover:not(:disabled) {
-  background: #9cece6;
-  border-color: #9cece6;
+  background: #bdceff;
+  border-color: #bdceff;
 }
 .btn-danger {
   color: var(--tone-failed);
@@ -315,7 +315,7 @@ a {
 .input:focus {
   border-color: var(--accent);
   outline: none;
-  box-shadow: 0 0 0 3px rgba(127, 227, 220, 0.14);
+  box-shadow: 0 0 0 3px rgba(155, 185, 255, 0.14);
 }
 .badge {
   display: inline-flex;

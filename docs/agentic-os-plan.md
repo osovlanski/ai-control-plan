@@ -1,5 +1,15 @@
 # Agentic OS — Design & Change Plan
 
+**K12/K14 status — 2026-09-14:** K12 **PARTIAL** overall: both operator
+presentations are implemented (K9 web gauge and Cockpit #37); the joint K9/K12
+live-provider warning-pressure acceptance in kernel-services §5.2.4 remains
+unverified. K14 **COMPLETE**: K7/K8 evidence and Cockpit #38 deliver the catalog,
+price provenance, offline snapshot and shared Usage/Retro pricing. See
+[K12/K14 closure matrices and evidence](agentic-os-k12-k14-closure.md).
+These are implementation-status annotations; the historical design below is
+not a claim that every planned service shipped. K13 activation and the other
+standing deferrals are unchanged.
+
 **Implementation update:** K1 durable dispatch, K2 quota retry and K3 optional quota probes are
 implemented and regression-verified; see the acceptance records for
 [K1](agentic-os-k1-implementation.md) and [K3](agentic-os-k3-implementation.md).

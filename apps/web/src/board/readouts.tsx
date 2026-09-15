@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import type { ModelRecommendation, Schedule, ScheduleOccurrence, ScheduleOverlap } from "@agent-plane/core";
 import { api } from "../api.js";
 import type { SchedulerStatus, TaskContext } from "../api.js";
-import { actualStatusLine, contextPercent, probeFreshness, type ActualLifecycle } from "../orbital.js";
+import { actualStatusLine, probeFreshness, type ActualLifecycle } from "../orbital.js";
 
 /** K3 idle quota probe evidence, read from `/api/scheduler/status`. */
 export function QuotaReadout({
@@ -145,6 +145,7 @@ export function ContextReadout({ context }: { context: TaskContext | null }) {
   const continuation = context.continuation ? (
     <ContinuationReadout continuation={context.continuation} />
   ) : null;
+  const session = <p className="fine-print">Latest execution session: <span className="mono">{context.sessionId ?? "unavailable"}</span>. This observation is not a task-wide total.</p>;
 
   const auto = context.autoCompaction?.observed ? (
     <p className="fine-print">
@@ -161,6 +162,7 @@ export function ContextReadout({ context }: { context: TaskContext | null }) {
     const legacy = context.reason === "legacy execution path";
     return (
       <>
+        {session}
         <dl className="identity-grid">
           <div>
             <dt>Context</dt>
@@ -184,12 +186,14 @@ export function ContextReadout({ context }: { context: TaskContext | null }) {
   }
 
   const o = context.observation;
-  const percentage = contextPercent({
-    occupancyTokens: o.occupancyTokens,
-    effectiveWindowTokens: o.effectiveWindowTokens,
-    occupancySource: o.occupancySource,
-    freshness: o.freshness === "stale" ? "stale" : "live",
-  });
+  // Format the canonical observation; never manufacture pressure from a catalog
+  // maximum, accounting tokens, or a sample whose source is unavailable.
+  const percentage = o.freshness === "live" && o.occupancySource !== "unavailable" &&
+    o.effectiveWindowSource !== "unavailable" &&
+    typeof o.occupancyTokens === "number" && Number.isFinite(o.occupancyTokens) && o.occupancyTokens >= 0 &&
+    typeof o.effectiveWindowTokens === "number" && Number.isFinite(o.effectiveWindowTokens) && o.effectiveWindowTokens > 0 &&
+    typeof o.pressure === "number" && Number.isFinite(o.pressure) && o.pressure >= 0
+    ? Math.round(o.pressure * 100) : undefined;
   const sourceChip =
     o.occupancySource === "provider-reported"
       ? "Provider-reported"
@@ -199,6 +203,7 @@ export function ContextReadout({ context }: { context: TaskContext | null }) {
 
   return (
     <>
+      {session}
       <dl className="identity-grid">
         <div>
           <dt>Occupancy</dt>
@@ -241,7 +246,9 @@ export function ContextReadout({ context }: { context: TaskContext | null }) {
         <p className="fine-print">
           {o.freshness === "stale"
             ? "Observation is stale — pressure is not shown."
-            : "Effective window unknown — occupancy tokens only, no percentage."}
+            : o.effectiveWindowTokens === undefined || o.effectiveWindowSource === "unavailable"
+              ? "Effective window unknown — occupancy tokens only, no percentage."
+              : "Pressure unavailable in this observation — no percentage."}
         </p>
       )}
       {o.advertisedMaxTokens !== undefined && (
@@ -291,7 +298,7 @@ export function DecisionSummary({ recommendation, actual }: {
 
       <p className="decision-why"><span>Why</span>{recommendation.reason}.</p>
       <ul className="relationship-key" aria-label="Model relationship key">
-        <li className="key-actual"><i />Solid teal · ACTUAL</li>
+        <li className="key-actual"><i />Solid blue · ACTUAL</li>
         <li className="key-shadow"><i />Dashed amber · SHADOW</li>
         <li className="key-excluded"><i />Muted / dotted · EXCLUDED</li>
       </ul>

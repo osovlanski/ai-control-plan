@@ -231,6 +231,7 @@ export interface CatalogModel {
   aliases: Array<Attributed<string>>;
   contextWindowTokens?: Attributed<number>;
   maxOutputTokens?: Attributed<number>;
+  capabilities?: Attributed<Record<string, boolean | number | string>>;
   availableVia: string[];
   status: string;
   freshness: string;

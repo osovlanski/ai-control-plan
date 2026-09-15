@@ -137,3 +137,34 @@ Docs: `docs/ui/orbital-operator.md`.
   `provider-reported`; no `compact_boundary` in a short run. No transcript
   committed.
 - Evidence: `docs/agentic-os-k9-context-observation.md`.
+
+
+## Orbital UI V3 convergence (2026-09-13)
+
+- UI-only evolution from PR #38 in `feat/agentic-os-ui-convergence-v3`: Agentic OS
+  product rail, prominent preview-before-run composer, real kernel overview,
+  scoped activity/attention and a compact mission summary beside the semantic
+  field. Complete inspector evidence follows below; no backend controls removed.
+- Blue/violet visual system with solid ACTUAL and dashed amber SHADOW. SVG depth
+  and constellation-aware mission placement preserve canonical state rings.
+  Unknown/loading/stale reads remain explicit; no provider availability or
+  product destinations are invented. Memory/Tools/Settings navigation stays out.
+- Existing visual harness is restored as `pnpm --filter @agent-plane/web visual`.
+  Audit, captures, validation and P2 limits: `docs/ui/agentic-os-ui-v3.md`.
+- Protected K5 worktree, scheduler implementation, K13 activation policy and
+  production auth/bootstrap code are unchanged by this slice.
+
+
+## K12/K14 reconciliation (2026-09-14)
+
+- K12 presentation already shipped through K9 in apps/web and Cockpit #37
+  (`ec1569a`). K14 already shipped through K7/K8 and Cockpit #38 (`833d420`),
+  including the durable offline snapshot and shared Usage/Retro resolver.
+- Current closure adds only bounded web presentation: latest-session identity,
+  supplied-pressure rendering, truthful K11 status, catalog loading/unknown
+  states and each price's own source/date. No service, schema or policy change.
+- **K12 PARTIAL overall:** kernel-services §5.2.4's real-provider warning-pressure
+  scenario is not proved by the recorded short K9 smoke or scripted tests.
+  **K14 COMPLETE.** Do not reopen completed implementation as new packages.
+- Matrices, evidence and validation: `docs/agentic-os-k12-k14-closure.md`.
+  Older slice notes above are historical, not current pending-work lists.
