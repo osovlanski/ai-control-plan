@@ -18,12 +18,24 @@ import type { TaskStore } from './tasks.js';
 const MAX_CATCH_UP_ROWS = 200;
 
 /**
- * Fail-closed traversal slack, in occurrence candidates, for crossing a
- * timezone discontinuity. Generous enough for a whole skipped civil date at the
- * densest granularity a 5-field cron expresses (Pacific/Apia, 2011-12-30).
+ * Fail-closed traversal slack, in civil candidates, for crossing a timezone
+ * discontinuity: enough for a whole skipped civil date at the densest
+ * granularity a 5-field cron expresses (Pacific/Apia, 2011-12-30), whose
+ * candidates are enumerated and rejected rather than skipped over.
  * Exhausting it is a defect, not an answer — see `canonicalOccurrences`.
  */
 const DISCONTINUITY_SLACK = 1536;
+
+/**
+ * Bound on any UTC offset IANA defines (±14:00 today, historical local mean
+ * times within ±16:00). It brackets where a civil time can possibly map to and
+ * how far back the civil walk has to start. It is not DST arithmetic: no
+ * transition size, direction or date is assumed anywhere.
+ */
+const MAX_ZONE_OFFSET_MS = 16 * 60 * 60_000;
+
+/** Grid the zone's offsets are sampled on. Finer than any IANA offset regime. */
+const OFFSET_SAMPLE_MS = 30 * 60_000;
 
 /**
  * THE canonical occurrence truth: the UTC instants at which this IANA schedule
@@ -32,28 +44,43 @@ const DISCONTINUITY_SLACK = 1536;
  * One definition, every consumer. The catch-up winner, the audit tail and
  * `nextFireAt` all read occurrence identity from here and from nowhere else, so
  * a gap or a fold cannot mean one thing to selection and another to
- * advancement, and an ambiguous local wall time resolves to the same single UTC
- * identity whether the walk starts before the fold, inside either side of it,
- * after it, or on a cold restart.
+ * advancement.
  *
- * Two guarantees the cron library does not give on its own:
+ * A cron expression names CIVIL times — wall-clock readings — and the zone
+ * decides which UTC instants those readings correspond to. So that is the order
+ * the traversal works in, and the order is load-bearing:
  *
- *  - STRICT UTC PROGRESS. Asked for the next run from a reference inside a
- *    repeated wall-clock hour, it can answer with an instant at or BEFORE that
- *    reference (America/New_York `30 1 * * *`, reference 2030-11-03T06:15:00Z,
- *    answer 2030-11-03T05:30:00Z) — and for a dense pattern, with the fold's
- *    first side one instant at a time. Chaining forward clears it, however wide
- *    the fold is; a chained call that fails to advance is a defect and throws
- *    rather than spinning or stalling.
- *  - REAL LOCAL TIMES ONLY. A nonexistent local time is answered with the
- *    shifted instant, which is not an occurrence; the local-time check drops it
- *    while the cursor still advances, so a gap cannot stall the traversal.
+ *  1. enumerate the civil candidates, by evaluating the pattern in UTC, where
+ *     no discontinuity exists and the sequence is therefore complete and
+ *     strictly increasing whatever the target zone does;
+ *  2. resolve each civil candidate through the zone's own offsets into every
+ *     UTC instant whose wall clock reads it — none across a gap, two inside a
+ *     fold, one otherwise;
+ *  3. take the EARLIEST such instant as the occurrence's one identity;
+ *  4. only then filter against `after`.
  *
- * Enumeration is FORWARD, and that is load-bearing. Backwards enumeration is
- * not the same relation: the library walks the local wall clock back from the
- * reference's READING, so inside a fold it reaches yesterday before today's
- * already-elapsed occurrence, and across a skipped civil date it returns a long
- * run of instants that are UTC-AFTER the reference.
+ * Two properties follow from doing it in that order, and neither holds if a
+ * UTC timestamp from the cron library is treated as occurrence truth:
+ *
+ *  - START-POINT INDEPENDENCE. A civil candidate is resolved before it is
+ *    filtered, so beginning the walk before a fold, between its two mappings,
+ *    or after the first of them yields the same identity for it. (Asked
+ *    directly, the library answers a fold's first mapping in one zone and its
+ *    second in another, and can answer with an instant at or before its own
+ *    reference; none of that is reachable from here any more.)
+ *  - GAP SAFETY. A civil time a gap skipped has no mapping, so it is not an
+ *    occurrence. Rejecting it advances the CIVIL cursor only — the next civil
+ *    candidate, whose mapping may well be UTC-EARLIER than the shifted instant
+ *    the library would have answered with, is still reachable. (Asked directly,
+ *    the library answers a nonexistent civil time with a shifted instant, and
+ *    dropping that instant after the UTC cursor has moved to it loses the next
+ *    legitimate occurrence.)
+ *
+ * A fold therefore yields exactly ONE identity — the repeated wall-clock
+ * reading belongs to its first representation, so the schedule fires promptly
+ * and never twice — and identities are strictly increasing: across a fall-back
+ * the civil step and the shrinking offset both push the identity forward, and
+ * across a spring-forward the civil step always exceeds the offset it gains.
  *
  * `maxSteps` is a fail-closed ceiling on pathological traversal, never a
  * semantic bound: exhausting it throws, and can never mean "no occurrence
@@ -61,53 +88,80 @@ const DISCONTINUITY_SLACK = 1536;
  * and never reach it.
  */
 export function* canonicalOccurrences(pattern: string, timezone: string, after: Date, maxSteps: number): Generator<Date> {
-  const job = new Cron(pattern, { timezone });
-  // Built once per traversal: both are expensive to construct and a long
-  // catch-up interval asks the same question thousands of times.
+  // The pattern read as wall-clock fields: UTC evaluation of a civil pattern is
+  // the civil sequence, and it is the same sequence from any starting point.
+  const civil = new Cron(pattern, { timezone: 'UTC' });
+  // Built once per traversal: expensive to construct, and a long catch-up
+  // interval asks the same question thousands of times.
   const wallClock = new Intl.DateTimeFormat('en-US', {
     timeZone: timezone, hour12: false, year: 'numeric', month: '2-digit',
     day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit',
   });
-  const asUtc = new Cron(pattern, { timezone: 'UTC' });
-  /**
-   * True when `instant`'s local wall clock actually satisfies the pattern. The
-   * cron library answers a nonexistent local time with the SHIFTED instant
-   * instead of skipping it, and this is what catches that: the pattern is
-   * re-evaluated against the rendered wall-clock fields with UTC semantics.
-   * Comparing rendered fields is what makes it hold for a discontinuity of any
-   * size — 30 minutes, an hour, or a whole civil date.
-   */
-  const localTimeExists = (instant: Date): boolean => {
-    const parts = Object.fromEntries(wallClock.formatToParts(instant)
+  /** The zone's offset at a real instant, as (civil reading − instant) in ms. */
+  const offsetAt = (instant: number): number => {
+    const parts = Object.fromEntries(wallClock.formatToParts(new Date(instant))
       .filter(p => p.type !== 'literal').map(p => [p.type, Number(p.value)]));
     // Intl renders midnight as hour 24 in some locales/zones.
-    const wall = Date.UTC(parts.year!, parts.month! - 1, parts.day!, parts.hour! % 24, parts.minute!, parts.second!);
-    const match = asUtc.nextRun(new Date(wall - 1));
-    return !!match && match.getTime() === wall;
+    return Date.UTC(parts.year!, parts.month! - 1, parts.day!, parts.hour! % 24, parts.minute!, parts.second!) - instant;
   };
-  let cursor = after.getTime();
-  for (let step = 0; step < maxSteps; step++) {
-    let candidate = job.nextRun(new Date(cursor));
-    // Asked from a reference inside a repeated wall-clock hour, the library can
-    // answer with an instant at or BEFORE that reference — and for a dense
-    // pattern with every instant of the fold's first side in turn. Chain
-    // forward until it clears the cursor. Chained calls DO make strict
-    // progress, so this terminates on the width of the discontinuity, and it is
-    // paid at most once per traversal: after the first step the cursor is
-    // itself an occurrence, which the library answers monotonically.
-    for (let nudge = 0; candidate && candidate.getTime() <= cursor; nudge++) {
-      const chained = nudge < DISCONTINUITY_SLACK ? job.nextRun(candidate) : null;
-      if (chained && chained.getTime() <= candidate.getTime()) {
-        throw new Error(`Cron '${pattern}' in ${timezone} made no forward progress past ${candidate.toISOString()}`);
-      }
-      if (!chained) {
-        throw new Error(`Cron '${pattern}' in ${timezone} made no forward progress past ${new Date(cursor).toISOString()}`);
-      }
-      candidate = chained;
+  /**
+   * The zone's offsets, sampled on a half-hour grid and memoised. A traversal
+   * asks about heavily overlapping instant ranges, so this is what keeps the
+   * whole walk at roughly one rendering per occurrence however dense the
+   * pattern is. Sampling only proposes offsets to try — every one of them is
+   * then confirmed exactly — and no IANA offset regime is anywhere near as
+   * short as the grid.
+   */
+  const sampled = new Map<number, number>();
+  const offsetNear = (bucket: number): number => {
+    let offset = sampled.get(bucket);
+    if (offset === undefined) { offset = offsetAt(bucket * OFFSET_SAMPLE_MS); sampled.set(bucket, offset); }
+    return offset;
+  };
+  /**
+   * The earliest UTC instant whose wall clock in `timezone` reads `wallMs`, or
+   * undefined when a gap skipped that civil time.
+   *
+   * A mapping is an instant `wallMs - offset` whose own offset is that same
+   * `offset` — a fixed point, which is what makes this exact for a
+   * discontinuity of any size or direction. Every mapping lies within one
+   * offset of the civil reading, so every offset the zone uses over that span
+   * is tried, and the fixed-point test rejects the rest.
+   */
+  const earliestMapping = (wallMs: number): number | undefined => {
+    let earliest: number | undefined;
+    const tried = new Set<number>();
+    const last = Math.ceil((wallMs + MAX_ZONE_OFFSET_MS) / OFFSET_SAMPLE_MS);
+    for (let bucket = Math.floor((wallMs - MAX_ZONE_OFFSET_MS) / OFFSET_SAMPLE_MS); bucket <= last; bucket++) {
+      const offset = offsetNear(bucket);
+      if (tried.has(offset)) continue;
+      tried.add(offset);
+      const instant = wallMs - offset;
+      if (offsetAt(instant) === offset && (earliest === undefined || instant < earliest)) earliest = instant;
     }
+    return earliest;
+  };
+  // A civil candidate up to one offset BEFORE `after` can still map to an
+  // instant after it, so that is where the civil walk starts. What is in scope
+  // is decided by the filter below, never by where the walk began.
+  let wallCursor = after.getTime() - MAX_ZONE_OFFSET_MS - 1;
+  let emitted = after.getTime();
+  for (let step = 0; step < maxSteps; step++) {
+    const candidate = civil.nextRun(new Date(wallCursor));
     if (!candidate) return;
-    cursor = candidate.getTime();
-    if (localTimeExists(candidate)) yield candidate;
+    if (candidate.getTime() <= wallCursor) {
+      throw new Error(`Cron '${pattern}' made no forward progress past civil ${new Date(wallCursor).toISOString()}`);
+    }
+    wallCursor = candidate.getTime();
+    // Cheap arithmetic before any zone work: a reading this far back cannot map
+    // to an instant in scope under ANY offset, which is what makes the walk's
+    // offset back-off free for the common case of a zone at or near UTC.
+    if (wallCursor + MAX_ZONE_OFFSET_MS <= emitted) continue;
+    const occurrence = earliestMapping(wallCursor);
+    if (occurrence === undefined) continue;              // a gap skipped this civil time
+    if (occurrence <= emitted) continue;                 // before `after`, or already emitted
+    emitted = occurrence;
+    yield new Date(occurrence);
   }
   throw new Error(`Cron '${pattern}' in ${timezone} exceeded ${maxSteps} candidates after ${after.toISOString()}`);
 }
@@ -124,13 +178,14 @@ export function* canonicalOccurrences(pattern: string, timezone: string, after: 
  * `latest`, at most `auditLimit` tail entries, and a cursor.
  *
  * Traversal is bounded by the interval itself at one-minute granularity — the
- * densest a 5-field cron expresses — plus discontinuity slack. That bound fails
- * closed: it throws, and never reports "no occurrence exists".
+ * densest a 5-field cron expresses — plus the civil walk's offset back-off and
+ * discontinuity slack. That bound fails closed: it throws, and never reports
+ * "no occurrence exists".
  */
 export function selectCatchUp(pattern: string, timezone: string, fromMs: number, nowMs: number, auditLimit: number): { latest: Date | null; older: Date[] } {
   const older: Date[] = [];
   let latest: Date | null = null;
-  const ceiling = Math.ceil(Math.max(0, nowMs - fromMs) / 60_000) + DISCONTINUITY_SLACK;
+  const ceiling = Math.ceil((Math.max(0, nowMs - fromMs) + MAX_ZONE_OFFSET_MS) / 60_000) + DISCONTINUITY_SLACK;
   // `fromMs - 1`, so an occurrence landing exactly ON the lower bound is in
   // scope and one landing before it can never be.
   for (const occurrence of canonicalOccurrences(pattern, timezone, new Date(fromMs - 1), ceiling)) {
@@ -210,7 +265,8 @@ export class ScheduleService {
 
   /** The first canonical occurrence strictly after `after`, or null if none. */
   private nextFireAt(pattern: string, timezone: string, after: Date): string | null {
-    for (const occurrence of canonicalOccurrences(pattern, timezone, after, DISCONTINUITY_SLACK)) return occurrence.toISOString();
+    const ceiling = MAX_ZONE_OFFSET_MS / 60_000 + DISCONTINUITY_SLACK;
+    for (const occurrence of canonicalOccurrences(pattern, timezone, after, ceiling)) return occurrence.toISOString();
     return null;
   }
 

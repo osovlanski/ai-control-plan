@@ -370,18 +370,58 @@ cannot write a row per instant after a long outage. Consequently
 longer than the cap, the oldest misses have no individual row. No queued work is
 invented to represent them.
 
-`canonicalOccurrences` supplies two guarantees the cron library does not. Asked
-for the next run from a reference inside a repeated wall-clock hour, the library
-can answer with an instant at or *before* that reference — and for a dense
-pattern, with the fold's first side one instant at a time — so the traversal
-chains forward until it clears the cursor, however wide the fold is. And a
-nonexistent local time is answered with the shifted instant, which is dropped
-while the cursor still advances, so a gap cannot stall the walk.
+**The traversal enumerates civil candidates and resolves them, in that order.**
+A cron expression names wall-clock readings; the zone decides which UTC instants
+those readings correspond to. So `canonicalOccurrences`:
 
-Traversal has a fail-closed ceiling — the interval at one-minute granularity
-plus discontinuity slack — and exhausting it **throws**. It can never mean "no
-occurrence exists". The same applies to a recurrence calculator that makes no
-forward progress.
+1. enumerates the civil candidates by evaluating the pattern in UTC, where no
+   discontinuity exists and the sequence is therefore complete and strictly
+   increasing whatever the target zone does;
+2. resolves each candidate through the zone's own offsets into every UTC instant
+   whose wall clock reads it — none across a gap, two inside a fold, one
+   otherwise. A mapping is an instant `reading - offset` whose own offset is
+   that same offset, a fixed point that is exact for a discontinuity of any size
+   or direction;
+3. takes the **earliest** such instant as that occurrence's one identity — a
+   repeated reading belongs to its first representation, so a schedule fires
+   promptly and never twice;
+4. and only then filters against the lower bound.
+
+Two properties follow from that order, and **neither holds if a UTC timestamp
+from the cron library is treated as occurrence truth**, which is what an earlier
+revision did:
+
+- *Start-point independence.* A candidate is resolved before it is filtered, so
+  beginning the walk before a fold, between its two mappings, or after the first
+  of them yields the same identity for it. Asked directly, the library answers a
+  fold's first mapping in one zone and its second in another
+  (`America/New_York` `30 1 * * *` → `05:30Z`, `Australia/Lord_Howe`
+  `45 1 * * *` → `15:15Z`), and can answer with an instant at or before its own
+  reference. None of that is reachable any more.
+- *Gap safety.* A reading a gap skipped has no mapping, so it is not an
+  occurrence, and rejecting it advances the **civil** cursor only. The next
+  civil candidate — whose mapping may well be UTC-*earlier* than the shifted
+  instant the library would have answered with — is still reachable.
+  `Australia/Lord_Howe` `15,30 2 * * *` across the 2030-10-05T15:30:00Z
+  transition is the case: local 02:15 never happens on 2030-10-06, local 02:30
+  does, and advancing a UTC cursor onto the shifted answer for 02:15 lost that
+  day's real work.
+
+Identities are therefore strictly increasing: across a fall-back the civil step
+and the shrinking offset both push the identity forward, and across a
+spring-forward the civil step always exceeds the offset it gains.
+
+Traversal has a fail-closed ceiling — the interval at one-minute granularity,
+plus the walk's offset back-off, plus discontinuity slack — and exhausting it
+**throws**. It can never mean "no occurrence exists". The same applies to a
+recurrence calculator that makes no forward progress.
+
+Completeness is checked against an **independent oracle** in the test suite:
+it scans UTC minutes, renders each one's wall clock in the zone, matches the
+pattern against the rendered fields and keeps the first instant of each distinct
+reading. It shares no code with the traversal — no cron library, no
+`canonicalOccurrences`, no `selectCatchUp` — so it can answer the question
+property assertions cannot: *was a legitimate occurrence omitted?*
 
 **After reconciliation `nextFireAt` is strictly greater than `now`**, unless the
 cron has no future occurrence at all. This is *enforced as a postcondition*, not
@@ -398,11 +438,13 @@ In queue mode the one legitimate catch-up occurrence is *appended behind* an
 existing backlog, preserving FIFO. Queue mode never replays a missed cron
 series.
 
-**No DST arithmetic is assumed anywhere.** Nothing in the traversal contains a
-60-minute or 3,600,000-millisecond constant; local-time existence is decided by
-comparing rendered wall-clock fields, so it holds for a thirty-minute gap or
-fold (`Australia/Lord_Howe`), an hour (`America/New_York`) or a whole civil date
-(`Pacific/Apia`). A nonexistent local instant produces no occurrence and
+**No DST arithmetic is assumed anywhere.** No transition size, direction or date
+appears in the traversal: mappings come from the zone's own offsets, so the same
+code holds for a thirty-minute gap or fold (`Australia/Lord_Howe`), an hour
+(`America/New_York`) or a whole civil date (`Pacific/Apia`). The only zone
+constants are a bound on how large any IANA offset can be and the grid those
+offsets are sampled on — both far outside DST's range, and every sampled offset
+is confirmed exactly before it is used. A nonexistent local instant produces no occurrence and
 therefore nothing to queue; an ambiguous local instant produces exactly one
 occurrence and therefore at most one queue entry; FIFO never compares local
 wall-clock strings.

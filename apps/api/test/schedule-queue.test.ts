@@ -16,7 +16,7 @@ import Database from 'better-sqlite3';
 import { migrate, openDb, type Db } from '../src/db/index.js';
 import { buildServer, type BuiltServer } from '../src/server.js';
 import { Scheduler } from '../src/modules/scheduler.js';
-import { selectCatchUp } from '../src/modules/schedules.js';
+import { canonicalOccurrences, selectCatchUp } from '../src/modules/schedules.js';
 import { credentialPath, readCredential } from '../src/auth/credential-file.js';
 
 let home: string; let db: Db; let config: ResolvedConfig; let built: BuiltServer;
@@ -1172,11 +1172,12 @@ describe('K5 canonical time reconciliation — reconciling from inside a fold (A
 
 /**
  * Australia/Lord_Howe moves by THIRTY minutes, so a fold or a gap of one hour
- * is not a safe assumption anywhere in the traversal. Pinned transitions:
+ * is not a safe assumption anywhere in the traversal. Pinned transitions,
+ * verified against the zone itself:
  *   fold 2030-04-06T15:00:00Z — 02:00 +11 becomes 01:30 +10:30, so local
  *        01:30-01:59 occurs twice, at 14:30-15:00Z and again at 15:00-15:30Z.
- *   gap  2030-10-05T16:00:00Z — 02:00 +10:30 becomes 03:00 +11, so local
- *        02:00-02:29 never occurs on 2030-10-06.
+ *   gap  2030-10-05T15:30:00Z — 02:00 +10:30 becomes 02:30 +11, so local
+ *        02:00-02:29 never occurs on 2030-10-06, and local 02:30 does.
  */
 describe('K5 canonical time reconciliation — a thirty-minute fold and gap (Australia/Lord_Howe)', () => {
   const lhi: ScheduleInput = { goal: 'lord howe sweep', cron: '45 1 * * *', timezone: 'Australia/Lord_Howe', overlap: 'queue', catchUpWindowMinutes: 3 * 24 * 60 };
@@ -1188,11 +1189,12 @@ describe('K5 canonical time reconciliation — a thirty-minute fold and gap (Aus
     at('2030-04-06T15:20:00Z'); await s.tick();         // local 01:50 +10:30 — the SECOND pass
 
     const onTheDay = occurrences(s, id, 500).filter(o => o.occurrenceAt >= '2030-04-06T14:00:00.000Z' && o.occurrenceAt < '2030-04-06T16:00:00.000Z');
-    expect(onTheDay).toMatchObject([{ occurrenceAt: '2030-04-06T15:15:00.000Z', outcome: 'created' }]);
-    // The first-side representation of the same local 01:45 is never an occurrence.
-    expect(occurrences(s, id, 500).some(o => o.occurrenceAt === '2030-04-06T14:45:00.000Z')).toBe(false);
+    expect(onTheDay).toMatchObject([{ occurrenceAt: '2030-04-06T14:45:00.000Z', outcome: 'created' }]);
+    // The repeated reading belongs to its FIRST representation, here and in
+    // every other zone: the second one is never a separate occurrence.
+    expect(occurrences(s, id, 500).some(o => o.occurrenceAt === '2030-04-06T15:15:00.000Z')).toBe(false);
     const next = s.schedules.get(id)!.nextFireAt!;
-    expect(next).toBe('2030-04-07T15:15:00.000Z');
+    expect(next).toBe('2030-04-07T15:15:00.000Z');      // local 2030-04-08 01:45 +10:30
     expect(Date.parse(next)).toBeGreaterThan(Date.parse('2030-04-06T15:20:00Z'));
 
     at('2030-04-06T15:45:00Z'); await s.tick();
@@ -1201,7 +1203,7 @@ describe('K5 canonical time reconciliation — a thirty-minute fold and gap (Aus
 
   it('drops a local time inside the thirty-minute gap and selects the last real one instead', async () => {
     await boot(); const s = scheduler();
-    // 02:15 local: real on 2030-10-05, nonexistent on 2030-10-06 (02:00 -> 03:00).
+    // 02:15 local: real on 2030-10-05, nonexistent on 2030-10-06 (02:00 -> 02:30).
     const id = pinned(s, { ...lhi, cron: '15 2 * * *' }, '2030-10-04T00:00:00Z', '2030-10-04T15:45:00.000Z');
 
     at('2030-10-06T12:00:00Z'); await s.tick();
@@ -1243,5 +1245,353 @@ describe('K5 canonical time reconciliation — catch-up window boundaries', () =
     const { latest, older } = selectCatchUp(nyFold.cron, nyFold.timezone, nowMs - 60 * 60_000, nowMs, 200);
     expect(latest?.toISOString()).toBe(NY_CANONICAL);
     expect(older).toEqual([]);
+  });
+});
+
+/* ==========================================================================
+ * Canonical occurrence COMPLETENESS.
+ *
+ * The suite above asks whether the occurrences that came back are ordered, in
+ * the interval, independent of the audit cap and in the future. The question it
+ * never asked is the one an omission hides in: was a legitimate occurrence left
+ * out? Both reproductions below come from an independent review of 1a8f8b5,
+ * where the traversal chained the cron library's own UTC answers and therefore
+ * (1) resolved a fold differently depending on where the walk started and
+ * (2) moved its UTC cursor onto the shifted instant a nonexistent civil time is
+ * answered with, losing the next legitimate occurrence behind it.
+ *
+ * The oracle here shares no code with what it checks: no `canonicalOccurrences`,
+ * no `selectCatchUp`, no cron library. It scans UTC minutes, renders each one's
+ * wall clock in the zone, matches the pattern against the RENDERED fields, and
+ * keeps the first UTC instant of each distinct reading. Slow and obviously
+ * correct, which is the whole point.
+ * ========================================================================== */
+
+/** Far enough back that a reading's earlier mapping is always seen first. */
+const ORACLE_BACKSCAN_MS = 18 * 60 * 60_000;
+
+function oracleOccurrences(pattern: string, timezone: string, fromMs: number, toMs: number): string[] {
+  const [minute, hour, dom, month, dow] = pattern.split(' ');
+  expect([dom, month, dow]).toEqual(['*', '*', '*']);          // the shape the fixtures use
+  const matches = (field: string, value: number) => field === '*' || field.split(',').some(part => {
+    const bounds = part.split('-').map(Number);
+    return bounds.length === 1 ? bounds[0] === value : value >= bounds[0]! && value <= bounds[1]!;
+  });
+  const fmt = new Intl.DateTimeFormat('en-US', {
+    timeZone: timezone, hour12: false, year: 'numeric', month: '2-digit',
+    day: '2-digit', hour: '2-digit', minute: '2-digit',
+  });
+  const seen = new Set<string>();
+  const hits: string[] = [];
+  for (let t = fromMs - ORACLE_BACKSCAN_MS; t <= toMs; t += 60_000) {
+    const p = Object.fromEntries(fmt.formatToParts(new Date(t))
+      .filter(x => x.type !== 'literal').map(x => [x.type, Number(x.value)]));
+    const h = p.hour! % 24;                                     // Intl renders midnight as 24
+    const reading = `${p.year}-${p.month}-${p.day} ${h}:${p.minute}`;
+    if (seen.has(reading)) continue;                            // a fold's second mapping
+    seen.add(reading);
+    if (t >= fromMs && matches(minute!, p.minute!) && matches(hour!, h)) hits.push(new Date(t).toISOString());
+  }
+  return hits;
+}
+
+/** Canonical occurrences inside an inclusive interval, walked from `anchorMs`. */
+function canonicalWindow(pattern: string, timezone: string, fromMs: number, toMs: number, anchorMs = fromMs - 1): string[] {
+  const found: string[] = [];
+  for (const occurrence of canonicalOccurrences(pattern, timezone, new Date(anchorMs), 20_000)) {
+    if (occurrence.getTime() > toMs) break;
+    if (occurrence.getTime() >= fromMs) found.push(occurrence.toISOString());
+  }
+  return found;
+}
+
+const LHI = 'Australia/Lord_Howe';
+/** Daily 01:45 local: ambiguous on 2030-04-07, when 01:30-01:59 happens twice. */
+const FOLD_CRON = '45 1 * * *';
+/** Local 02:15 and 02:30: on 2030-10-06 only the second exists. */
+const GAP_CRON = '15,30 2 * * *';
+
+describe('K5 canonical occurrence completeness — an independent oracle (Australia/Lord_Howe)', () => {
+  it('matches the oracle exactly across the fold', () => {
+    const from = Date.parse('2030-04-05T00:00:00Z');
+    const to = Date.parse('2030-04-09T00:00:00Z');
+    const expected = oracleOccurrences(FOLD_CRON, LHI, from, to);
+    expect(expected).toEqual([
+      '2030-04-05T14:45:00.000Z',     // local 04-06 01:45 +11
+      '2030-04-06T14:45:00.000Z',     // local 04-07 01:45 +11 — the fold's FIRST mapping
+      '2030-04-07T15:15:00.000Z',     // local 04-08 01:45 +10:30
+      '2030-04-08T15:15:00.000Z',
+    ]);
+    expect(canonicalWindow(FOLD_CRON, LHI, from, to)).toEqual(expected);
+  });
+
+  it('matches the oracle exactly across the gap, emitting the transition day\'s real work', () => {
+    const from = Date.parse('2030-10-04T15:45:00Z');
+    const to = Date.parse('2030-10-05T16:00:00Z');
+    const expected = oracleOccurrences(GAP_CRON, LHI, from, to);
+    expect(expected).toEqual([
+      '2030-10-04T15:45:00.000Z',     // local 10-05 02:15 +10:30
+      '2030-10-04T16:00:00.000Z',     // local 10-05 02:30 +10:30
+      '2030-10-05T15:30:00.000Z',     // local 10-06 02:30 +11 — 02:15 never happens
+    ]);
+    expect(canonicalWindow(GAP_CRON, LHI, from, to)).toEqual(expected);
+    // 1a8f8b5 stepped its UTC cursor onto the shifted instant that local 02:15
+    // is answered with and lost the legitimate 02:30 sitting behind it.
+    expect(canonicalWindow(GAP_CRON, LHI, from, to)).not.toContain('2030-10-05T15:45:00.000Z');
+  });
+
+  it('returns the same occurrences for an interval from EVERY anchor around the fold', () => {
+    const from = Date.parse('2030-04-06T16:00:00Z');
+    const to = Date.parse('2030-04-09T00:00:00Z');
+    const expected = oracleOccurrences(FOLD_CRON, LHI, from, to);
+    for (const anchor of ['2030-04-01T00:00:00Z', '2030-04-06T14:44:59.999Z', '2030-04-06T14:45:00.000Z',
+      '2030-04-06T14:50:00.000Z', '2030-04-06T15:15:00.000Z', '2030-04-06T15:20:00.000Z', '2030-04-06T15:59:59.999Z']) {
+      expect(canonicalWindow(FOLD_CRON, LHI, from, to, Date.parse(anchor))).toEqual(expected);
+    }
+  });
+
+  it('returns the same occurrences for an interval from EVERY anchor around the gap', () => {
+    const from = Date.parse('2030-10-05T16:00:00Z');
+    const to = Date.parse('2030-10-08T00:00:00Z');
+    const expected = oracleOccurrences(GAP_CRON, LHI, from, to);
+    for (const anchor of ['2030-10-01T00:00:00Z', '2030-10-04T16:00:00.000Z', '2030-10-05T15:14:59.999Z',
+      '2030-10-05T15:30:00.000Z', '2030-10-05T15:45:00.000Z', '2030-10-05T15:59:59.999Z']) {
+      expect(canonicalWindow(GAP_CRON, LHI, from, to, Date.parse(anchor))).toEqual(expected);
+    }
+  });
+
+  it('agrees with the oracle for the hour-long fold and the skipped civil date too', () => {
+    const fold = [Date.parse('2030-11-02T00:00:00Z'), Date.parse('2030-11-05T00:00:00Z')] as const;
+    expect(canonicalWindow('30 1 * * *', 'America/New_York', ...fold))
+      .toEqual(oracleOccurrences('30 1 * * *', 'America/New_York', ...fold));
+    const perMinute = [Date.parse('2030-11-03T04:30:00Z'), Date.parse('2030-11-03T07:30:00Z')] as const;
+    expect(canonicalWindow('* * * * *', 'America/New_York', ...perMinute))
+      .toEqual(oracleOccurrences('* * * * *', 'America/New_York', ...perMinute));
+    const apia = [Date.parse('2011-12-29T17:59:00Z'), Date.parse('2011-12-31T00:00:00Z')] as const;
+    expect(canonicalWindow('* 4-7 * * *', 'Pacific/Apia', ...apia))
+      .toEqual(oracleOccurrences('* 4-7 * * *', 'Pacific/Apia', ...apia));
+  });
+});
+
+/**
+ * Reproduction 1 — the fold. A thirty-minute fall-back, a daily 01:45, and a
+ * reconciliation whose lower bound falls BETWEEN the two mappings of the
+ * ambiguous reading.
+ *
+ * The repeated reading belongs to its first representation (14:45Z), the same
+ * rule the hour-long America/New_York fold above is pinned to, so the occurrence
+ * sits five minutes before a thirty-minute window and is out of scope — while a
+ * window that does reach it catches it, from any anchor. What 1a8f8b5 did
+ * instead was answer 15:15Z when walked from before the fold and nothing at all
+ * when walked from inside it: the same civil occurrence, two identities.
+ */
+describe('K5 canonical occurrence completeness — reproduction 1, the fold', () => {
+  const lhiFold: ScheduleInput = { goal: 'lord howe fold', cron: FOLD_CRON, timezone: LHI, overlap: 'queue', catchUpWindowMinutes: 30 };
+  const FOLD_NOW = '2030-04-06T15:20:00Z';
+  const FOLD_OCCURRENCE = '2030-04-06T14:45:00.000Z';
+  const FOLD_NEXT = '2030-04-07T15:15:00.000Z';
+
+  it('selects the same occurrence from every anchor, and only when the window reaches it', () => {
+    const nowMs = Date.parse(FOLD_NOW);
+    // The review's exact bound: now - 30 min, which lands between the mappings.
+    const between = selectCatchUp(FOLD_CRON, LHI, Date.parse('2030-04-06T14:50:00Z'), nowMs, 200);
+    expect(between.latest).toBeNull();
+    expect(between.older).toEqual([]);
+    for (const from of ['2030-04-06T14:45:00.000Z', '2030-04-06T14:44:59.999Z', '2030-04-06T00:00:00.000Z']) {
+      const { latest } = selectCatchUp(FOLD_CRON, LHI, Date.parse(from), nowMs, 200);
+      expect(latest?.toISOString()).toBe(FOLD_OCCURRENCE);
+    }
+  });
+
+  it('catches up immediately, records ONE identity and lands nextFireAt in the future', async () => {
+    await boot(); const s = scheduler();
+    const id = pinned(s, { ...lhiFold, catchUpWindowMinutes: 3 * 24 * 60 }, '2030-04-05T00:00:00Z', '2030-04-05T14:45:00.000Z');
+
+    at(FOLD_NOW); await s.tick();
+
+    expect(occurrences(s, id, 500).find(o => o.outcome === 'created')).toMatchObject({ occurrenceAt: FOLD_OCCURRENCE });
+    expect(countOutcome(id, 'created')).toBe(1);
+    expect(occurrences(s, id, 500).some(o => o.occurrenceAt === '2030-04-06T15:15:00.000Z')).toBe(false);
+    const next = s.schedules.get(id)!.nextFireAt!;
+    expect(next).toBe(FOLD_NEXT);
+    expect(Date.parse(next)).toBeGreaterThan(Date.parse(FOLD_NOW));
+  });
+
+  it('a window that ends before the occurrence revives nothing and still resyncs forward', async () => {
+    await boot(); const s = scheduler();
+    const id = pinned(s, lhiFold, '2030-04-05T00:00:00Z', '2030-04-05T14:45:00.000Z');
+
+    at(FOLD_NOW); await s.tick();
+
+    expect(occurrences(s, id, 500)).toEqual([]);
+    expect(taskCount()).toBe(0);
+    expect(s.schedules.get(id)!.nextFireAt).toBe(FOLD_NEXT);
+  });
+
+  it('queues that one occurrence behind an active predecessor, and skips exactly one under overlap=skip', async () => {
+    await boot(); const s = scheduler();
+    const wide = { ...lhiFold, catchUpWindowMinutes: 3 * 24 * 60 };
+    const id = pinned(s, wide, '2030-04-04T00:00:00Z', '2030-04-04T14:45:00.000Z');
+    at('2030-04-04T14:45:00Z'); await s.tick();
+    hold(occurrences(s, id)[0]!.taskId!);
+
+    at(FOLD_NOW); await s.tick();
+
+    expect(s.schedules.queuedOccurrences(id).map(o => o.occurrenceAt)).toEqual([FOLD_OCCURRENCE]);
+    expect(liveOccurrenceTasks(id)).toBe(1);
+    expect(s.schedules.get(id)!.nextFireAt).toBe(FOLD_NEXT);
+
+    await boot(); const t = scheduler();
+    const skipId = pinned(t, { ...wide, overlap: 'skip' }, '2030-04-04T00:00:00Z', '2030-04-04T14:45:00.000Z');
+    at('2030-04-04T14:45:00Z'); await t.tick();
+    hold(occurrences(t, skipId)[0]!.taskId!);
+
+    at(FOLD_NOW); await t.tick();
+
+    expect(countOutcome(skipId, 'skipped-overlap')).toBe(1);
+    expect(occurrences(t, skipId, 500).find(o => o.outcome === 'skipped-overlap')).toMatchObject({ occurrenceAt: FOLD_OCCURRENCE });
+    expect(t.schedules.get(skipId)!.nextFireAt).toBe(FOLD_NEXT);
+  });
+
+  it('a disabled reconciliation records the same identity, and re-enabling never runs it', async () => {
+    await boot(); config.scheduler = { ...config.scheduler!, enabled: false };
+    const s = scheduler();
+    const id = pinned(s, { ...lhiFold, catchUpWindowMinutes: 3 * 24 * 60 }, '2030-04-05T00:00:00Z', '2030-04-05T14:45:00.000Z');
+    at('2030-04-05T14:45:00Z'); await s.tick();
+    expect(occurrences(s, id)).toHaveLength(0);
+
+    config.scheduler = { ...config.scheduler!, enabled: true };
+    at(FOLD_NOW); await s.tick();
+
+    expect(countOutcome(id, 'skipped-disabled')).toBe(1);
+    expect(occurrences(s, id, 500).find(o => o.outcome === 'skipped-disabled')).toMatchObject({ occurrenceAt: FOLD_OCCURRENCE });
+    expect(s.schedules.get(id)!.nextFireAt).toBe(FOLD_NEXT);
+
+    at('2030-04-06T15:15:00Z'); await s.tick();
+    at('2030-04-06T18:00:00Z'); await s.tick();
+    expect(taskCount()).toBe(0);
+  });
+
+  it('gives a new schedule, an edited schedule and a cold restart the same answer', async () => {
+    await boot(); const s = scheduler();
+    // The review's future-scheduling case A: the first occurrence after a
+    // moment that sits between the two mappings.
+    at('2030-04-06T14:50:00Z');
+    expect(s.schedules.create(lhiFold).nextFireAt).toBe(FOLD_NEXT);
+    // ... and from before the fold, the first mapping is what is scheduled.
+    at('2030-04-06T14:00:00Z');
+    const edited = s.schedules.create({ ...lhiFold, goal: 'edited' });
+    expect(edited.nextFireAt).toBe(FOLD_OCCURRENCE);
+    expect(s.schedules.update(edited.scheduleId, { cron: FOLD_CRON }).nextFireAt).toBe(FOLD_OCCURRENCE);
+
+    const id = pinned(s, { ...lhiFold, catchUpWindowMinutes: 3 * 24 * 60 }, '2030-04-05T00:00:00Z', '2030-04-05T14:45:00.000Z');
+    at(FOLD_NOW); await s.tick();
+    const before = { all: occurrences(s, id, 500), tasks: taskCount(), next: s.schedules.get(id)!.nextFireAt };
+
+    for (let i = 0; i < 3; i++) await s.tick();               // same now, repeated
+    const cold = await coldRestart();
+    try { await cold.s.reconcileOnBoot(); } finally { await cold.close(); }
+
+    expect(occurrences(s, id, 500)).toEqual(before.all);
+    expect(taskCount()).toBe(before.tasks);
+    expect(s.schedules.get(id)!.nextFireAt).toBe(before.next);
+  });
+});
+
+/**
+ * Reproduction 2 — the mixed gap. Local 02:15 does not exist on 2030-10-06 and
+ * local 02:30 does, so the transition day has real work that sits UTC-EARLIER
+ * than the shifted instant 02:15 is answered with. 1a8f8b5 moved its cursor onto
+ * that shifted instant before rejecting it and skipped the day entirely.
+ */
+describe('K5 canonical occurrence completeness — reproduction 2, the mixed gap', () => {
+  const lhiGap: ScheduleInput = { goal: 'lord howe gap', cron: GAP_CRON, timezone: LHI, overlap: 'queue', catchUpWindowMinutes: 4320 };
+  const GAP_NOW = '2030-10-05T16:00:00Z';
+  const GAP_WINNER = '2030-10-05T15:30:00.000Z';
+  const GAP_NEXT = '2030-10-06T15:15:00.000Z';                 // local 10-07 02:15 +11
+
+  it('selects the transition day\'s occurrence, with the earlier two as audit history', () => {
+    const { latest, older } = selectCatchUp(GAP_CRON, LHI, Date.parse('2030-10-04T15:45:00Z'), Date.parse(GAP_NOW), 200);
+    expect(latest?.toISOString()).toBe(GAP_WINNER);
+    expect(older.map(d => d.toISOString())).toEqual(['2030-10-04T15:45:00.000Z', '2030-10-04T16:00:00.000Z']);
+    for (const auditLimit of [1, 10, 200, 1000]) {
+      expect(selectCatchUp(GAP_CRON, LHI, Date.parse('2030-10-04T15:45:00Z'), Date.parse(GAP_NOW), auditLimit).latest?.toISOString())
+        .toBe(GAP_WINNER);
+    }
+  });
+
+  it('catches up onto it, keeps the earlier two as history and moves nextFireAt past now', async () => {
+    await boot(); const s = scheduler();
+    const id = pinned(s, lhiGap, '2030-10-04T00:00:00Z', '2030-10-04T15:45:00.000Z');
+
+    at(GAP_NOW); await s.tick();
+
+    expect(occurrences(s, id, 500).find(o => o.outcome === 'created')).toMatchObject({ occurrenceAt: GAP_WINNER });
+    expect(countOutcome(id, 'created')).toBe(1);
+    expect(countOutcome(id, 'skipped-catch-up')).toBe(2);
+    expect(occurrences(s, id, 500).some(o => o.occurrenceAt === '2030-10-05T15:45:00.000Z')).toBe(false);
+    const next = s.schedules.get(id)!.nextFireAt!;
+    expect(next).toBe(GAP_NEXT);
+    expect(Date.parse(next)).toBeGreaterThan(Date.parse(GAP_NOW));
+  });
+
+  it('queues it behind an active predecessor, and skips exactly it under overlap=skip', async () => {
+    await boot(); const s = scheduler();
+    const id = pinned(s, lhiGap, '2030-10-04T00:00:00Z', '2030-10-04T15:45:00.000Z');
+    at('2030-10-04T15:45:00Z'); await s.tick();
+    hold(occurrences(s, id)[0]!.taskId!);
+
+    at(GAP_NOW); await s.tick();
+
+    expect(s.schedules.queuedOccurrences(id).map(o => o.occurrenceAt)).toEqual([GAP_WINNER]);
+    expect(taskCount()).toBe(1);
+    expect(s.schedules.get(id)!.nextFireAt).toBe(GAP_NEXT);
+
+    await boot(); const t = scheduler();
+    const skipId = pinned(t, { ...lhiGap, overlap: 'skip' }, '2030-10-04T00:00:00Z', '2030-10-04T15:45:00.000Z');
+    at('2030-10-04T15:45:00Z'); await t.tick();
+    hold(occurrences(t, skipId)[0]!.taskId!);
+
+    at(GAP_NOW); await t.tick();
+
+    expect(countOutcome(skipId, 'skipped-overlap')).toBe(1);
+    expect(occurrences(t, skipId, 500).find(o => o.outcome === 'skipped-overlap')).toMatchObject({ occurrenceAt: GAP_WINNER });
+  });
+
+  it('a disabled reconciliation records it, and re-enabling never runs it', async () => {
+    await boot(); config.scheduler = { ...config.scheduler!, enabled: false };
+    const s = scheduler();
+    const id = pinned(s, lhiGap, '2030-10-04T00:00:00Z', '2030-10-04T15:45:00.000Z');
+    at('2030-10-04T15:45:00Z'); await s.tick();
+
+    config.scheduler = { ...config.scheduler!, enabled: true };
+    at(GAP_NOW); await s.tick();
+
+    expect(countOutcome(id, 'skipped-disabled')).toBe(1);
+    expect(occurrences(s, id, 500).find(o => o.outcome === 'skipped-disabled')).toMatchObject({ occurrenceAt: GAP_WINNER });
+    expect(s.schedules.get(id)!.nextFireAt).toBe(GAP_NEXT);
+
+    at('2030-10-06T00:00:00Z'); await s.tick();
+    expect(taskCount()).toBe(0);
+  });
+
+  it('schedules the transition day\'s work as a plain future fire, and survives a cold restart', async () => {
+    await boot(); const s = scheduler();
+    // The review's future-scheduling case B: the first occurrence after the
+    // last one before the transition.
+    at('2030-10-04T16:00:00Z');
+    expect(s.schedules.create(lhiGap).nextFireAt).toBe(GAP_WINNER);
+
+    const id = pinned(s, lhiGap, '2030-10-04T00:00:00Z', '2030-10-04T15:45:00.000Z');
+    at(GAP_NOW); await s.tick();
+    const before = { all: occurrences(s, id, 500), tasks: taskCount(), next: s.schedules.get(id)!.nextFireAt };
+
+    for (let i = 0; i < 3; i++) await s.tick();
+    const cold = await coldRestart();
+    try { await cold.s.reconcileOnBoot(); } finally { await cold.close(); }
+
+    expect(occurrences(s, id, 500)).toEqual(before.all);
+    expect(taskCount()).toBe(before.tasks);
+    expect(s.schedules.get(id)!.nextFireAt).toBe(before.next);
   });
 });
