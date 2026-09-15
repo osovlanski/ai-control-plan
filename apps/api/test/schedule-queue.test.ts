@@ -1360,6 +1360,18 @@ describe('K5 canonical occurrence completeness — an independent oracle (Austra
     }
   });
 
+  it('throws when the traversal ceiling is exhausted, rather than reporting no occurrence', () => {
+    const after = new Date(Date.parse('2030-04-01T00:00:00Z'));
+    expect(() => [...canonicalOccurrences(FOLD_CRON, LHI, after, 1)]).toThrow(/exceeded 1 candidates/);
+    // A caller that needs only the first occurrence breaks out and never
+    // reaches the ceiling. Two candidates here: the civil walk starts one
+    // offset back, so the reading before the bound is considered and rejected.
+    for (const first of canonicalOccurrences(FOLD_CRON, LHI, after, 2)) {
+      expect(first.toISOString()).toBe('2030-04-01T14:45:00.000Z');
+      break;
+    }
+  });
+
   it('agrees with the oracle for the hour-long fold and the skipped civil date too', () => {
     const fold = [Date.parse('2030-11-02T00:00:00Z'), Date.parse('2030-11-05T00:00:00Z')] as const;
     expect(canonicalWindow('30 1 * * *', 'America/New_York', ...fold))
