@@ -154,8 +154,14 @@ export interface Schedule {
   /** IANA zone name. */
   timezone: string;
   enabled: boolean;
-  /** 'queue' is deferred; a schedule never stacks occurrences. */
-  overlap: 'skip';
+  /**
+   * 'skip': an occurrence due while the previous one is non-terminal is
+   * recorded `skipped-overlap` and creates nothing.
+   * 'queue': it is persisted as durable queued work and promoted, oldest
+   * first, once the schedule has no non-terminal task. Either way a schedule
+   * never has two non-terminal tasks at once.
+   */
+  overlap: ScheduleOverlap;
   catchUpWindowMinutes: number;
   lastFiredAt?: string;
   nextFireAt?: string;
@@ -163,16 +169,35 @@ export interface Schedule {
   lastTaskId?: string;
   createdAt: string;
   updatedAt: string;
+  /**
+   * Queued occurrences not yet promoted. Derived at read from
+   * `schedule_occurrences`, never stored: a stale backlog number would be
+   * worse than none (the K9 lesson).
+   */
+  queuedCount: number;
+  /** The schedule's current non-terminal occurrence task, if any. Derived. */
+  activeTaskId?: string;
 }
-export type ScheduleOutcome = 'created' | 'skipped-overlap' | 'skipped-catch-up' | 'skipped-disabled';
+export type ScheduleOverlap = 'skip' | 'queue';
+export type ScheduleOutcome = 'created' | 'queued' | 'skipped-overlap' | 'skipped-catch-up' | 'skipped-disabled';
 /** One row per scheduled occurrence; unique on (scheduleId, occurrenceAt). */
 export interface ScheduleOccurrence {
   scheduleId: string;
-  /** The cron instant in UTC - the dedup key. */
+  /** The cron instant in UTC - the dedup key, and the queue's FIFO key. */
   occurrenceAt: string;
   firedAt: string;
   outcome: ScheduleOutcome;
   taskId?: string;
+  /**
+   * When this occurrence was enqueued behind a non-terminal task. Survives
+   * promotion: `created` WITH a `queuedAt` means "promoted from the queue",
+   * which is not the same fact as "created at the cron instant".
+   */
+  queuedAt?: string;
+  /** When the queued occurrence became a task. */
+  promotedAt?: string;
+  /** 1-based FIFO rank, on queued occurrences only. Ordered by the plane. */
+  queuePosition?: number;
 }
 export interface ScheduleInput {
   goal: string;
@@ -182,8 +207,11 @@ export interface ScheduleInput {
   repoPath?: string;
   profile?: RoutingProfile;
   overrides?: TaskIntent['overrides'];
+  /** Declared hard requirements — a minimum context window excludes candidates (K13). */
+  requirements?: TaskIntent['requirements'];
   kind?: 'user' | 'system';
   enabled?: boolean;
+  overlap?: ScheduleOverlap;
   catchUpWindowMinutes?: number;
 }
 export interface SchedulerEvent {
