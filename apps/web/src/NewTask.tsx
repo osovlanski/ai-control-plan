@@ -1,9 +1,9 @@
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { api, type RoutingExplanation } from "./api.js";
-import { Button, Card, Field, inputStyle, QuotaBar, tokens } from "./ui.jsx";
+import { Button, Field, inputStyle, QuotaBar, tokens } from "./ui.jsx";
 
-export function NewTask({ onStarted, initialGoal }: { onStarted: (taskId: string) => void; initialGoal?: string }) {
-  const [goal, setGoal] = useState(initialGoal ?? "");
+export function NewTask({ onStarted, onPreviewed }: { onStarted: (taskId: string) => void; onPreviewed: () => void }) {
+  const [goal, setGoal] = useState("");
   const [constraints, setConstraints] = useState("");
   const [repoPath, setRepoPath] = useState("");
   const [profile, setProfile] = useState("auto");
@@ -33,22 +33,13 @@ export function NewTask({ onStarted, initialGoal }: { onStarted: (taskId: string
           });
       setTaskId(created.taskId);
       setExplanation(await api.route(created.taskId));
+      onPreviewed();
     } catch (e) {
       setError((e as Error).message);
     } finally {
       setBusy(false);
     }
   };
-
-  // Arriving from the command bar: the operator already asked to route it.
-  // The ref guards StrictMode's double effect so only one task is created.
-  const autoRouted = useRef(false);
-  useEffect(() => {
-    if (initialGoal?.trim() && !autoRouted.current) {
-      autoRouted.current = true;
-      void previewRoute();
-    }
-  }, []);
 
   const eligible = explanation?.candidates.filter((c) => c.passedFilters) ?? [];
 
@@ -59,6 +50,7 @@ export function NewTask({ onStarted, initialGoal }: { onStarted: (taskId: string
     try {
       await api.startParallel(taskId, eligible.map((c) => c.assistantId), mode);
       onStarted(taskId);
+      setGoal(""); setTaskId(null); setExplanation(null);
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -73,6 +65,7 @@ export function NewTask({ onStarted, initialGoal }: { onStarted: (taskId: string
     try {
       await api.start(taskId, assistantId);
       onStarted(taskId);
+      setGoal(""); setTaskId(null); setExplanation(null);
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -81,71 +74,50 @@ export function NewTask({ onStarted, initialGoal }: { onStarted: (taskId: string
   };
 
   return (
-    <div className="new-task-layout">
-      <Card>
-        <span className="eyebrow">Intake</span>
-        <h2 style={{ margin: "6px 0 16px", fontSize: "1.25rem", fontWeight: 500 }}>New mission</h2>
-        <Field label="Goal">
-          <textarea
-            disabled={busy}
-            value={goal}
-            onChange={(e) => { setGoal(e.target.value); invalidatePreview(); }}
-            rows={4}
-            placeholder="Fix the authentication refresh-token race and raise coverage"
-            style={{ ...inputStyle, resize: "vertical" }}
-          />
-        </Field>
-        <Field label="Constraints (one per line — recorded as user decisions, inviolable on handoff)">
-          <textarea
-            disabled={busy}
-            value={constraints}
-            onChange={(e) => { setConstraints(e.target.value); invalidatePreview(); }}
-            rows={2}
-            placeholder="no breaking changes"
-            style={{ ...inputStyle, resize: "vertical" }}
-          />
-        </Field>
-        <Field label="Repository path (must be in the workspace allowlist)">
-          <input disabled={busy} value={repoPath} onChange={(e) => { setRepoPath(e.target.value); invalidatePreview(); }} style={inputStyle} />
-        </Field>
-        <Field label="Routing profile">
-          <select disabled={busy} value={profile} onChange={(e) => { setProfile(e.target.value); invalidatePreview(); }} style={inputStyle}>
-            <option value="auto">Auto</option>
-            <option value="preserve-quota">Preserve Quota</option>
-            <option value="fastest">Fastest (measured)</option>
-            <option value="best-quality">Best Quality (measured)</option>
-            <option value="lowest-tokens">Lowest Tokens (measured)</option>
-          </select>
-        </Field>
-        <Button onClick={previewRoute} disabled={busy || goal.trim().length === 0}>
-          {taskId ? "Re-route" : "Preview routing"}
-        </Button>
-        <p className="fine-print" role="status" style={{ marginTop: 12 }}>
-          {busy ? "Preparing mission…" : "Preview creates an unstarted mission. Editing requires a new preview; earlier previews remain unstarted in the register. Choose Run to begin execution."}
-        </p>
-        {explanation && explanation.candidates.filter((c) => c.passedFilters).length > 1 && (
-          <p style={{ fontSize: "0.8rem", color: tokens.muted, marginTop: "0.8rem" }}>
-            Running in parallel multiplies quota and token spend, so it is never automatic — use the buttons
-            in the recommendation panel to compare or race deliberately.
-          </p>
-        )}
-        {error && <p style={{ color: tokens.danger, fontSize: "0.85rem" }}>{error}</p>}
-      </Card>
-
-      <Card>
-        <span className="eyebrow">Decision</span>
-        <h2 style={{ margin: "6px 0 16px", fontSize: "1.25rem", fontWeight: 500 }}>Routing recommendation</h2>
-        {!explanation && (
-          <p style={{ color: tokens.muted, fontSize: "0.9rem" }}>
-            Submit a goal to see which assistant the router picks — and exactly why.
-          </p>
-        )}
-        {explanation && (
-          <>
-            <p style={{ fontSize: "0.85rem", color: tokens.muted, margin: "0 0 0.75rem" }}>
-              Rule fired: <code style={{ fontFamily: tokens.mono }}>{explanation.ruleFired}</code>
-              {explanation.tieBreaker ? ` · ${explanation.tieBreaker}` : ""}
-            </p>
+    <div className="shell-intake">
+      <form className="shell-composer" aria-label="Command" onSubmit={e => { e.preventDefault(); if (!busy && goal.trim()) void previewRoute(); }}>
+        <label className="shell-goal-label" htmlFor="mission-goal">What should Agentic OS do?</label>
+        <textarea id="mission-goal" aria-describedby="command-help" disabled={busy} value={goal}
+          onChange={e => { setGoal(e.target.value); invalidatePreview(); }} rows={1}
+          placeholder="What do you want Agentic OS to do?"
+          onKeyDown={e => { if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); if (!busy && goal.trim()) void previewRoute(); } }} />
+        <div className="shell-composer-actions">
+          <span className="shell-auto">Automatic routing</span>
+          <button className="btn btn-primary" type="submit" disabled={busy || !goal.trim()}>
+            {busy ? "Preparing…" : taskId ? "Re-route" : "Preview routing"}
+          </button>
+        </div>
+        <details className="shell-context">
+          <summary>Context & constraints</summary>
+          <div className="shell-context-fields">
+            <Field label="Repository path (must be in the workspace allowlist)">
+              <input disabled={busy} value={repoPath} onChange={e => { setRepoPath(e.target.value); invalidatePreview(); }} style={inputStyle} placeholder="/path/to/your/repository" />
+            </Field>
+            <Field label="Constraints (one per line)">
+              <textarea disabled={busy} value={constraints} onChange={e => { setConstraints(e.target.value); invalidatePreview(); }} rows={2} style={inputStyle} placeholder="Keep the public API compatible" />
+            </Field>
+            <Field label="Routing profile">
+              <select disabled={busy} value={profile} onChange={e => { setProfile(e.target.value); invalidatePreview(); }} style={inputStyle}>
+                <option value="auto">Auto</option><option value="preserve-quota">Preserve Quota</option>
+                <option value="fastest">Fastest (measured)</option><option value="best-quality">Best Quality (measured)</option>
+                <option value="lowest-tokens">Lowest Tokens (measured)</option>
+              </select>
+            </Field>
+            <p className="fine-print">Repository context is available. File upload, memory recall and per-mission tool selection are planned.</p>
+          </div>
+        </details>
+        <p id="command-help" className="fine-print">Preview saves an unstarted mission. Edits need a new preview. Ctrl/⌘ + Enter to preview.</p>
+        {error && <p role="alert" className="error">{error}</p>}
+      </form>
+      {explanation && <section className="shell-proposal" aria-label="Routing recommendation">
+        <div className="shell-proposal-summary" role="status">
+          <div><span className="eyebrow">Proposed route</span><h2>{explanation.chosen ?? "No eligible assistant"}</h2>
+            <p>Rule fired: <code>{explanation.ruleFired}</code>{explanation.tieBreaker ? ` · ${explanation.tieBreaker}` : ""}</p>
+            <p className="fine-print">The model will be reported when execution provides evidence.</p>
+          </div>
+          {explanation.chosen && <Button onClick={() => void start()} disabled={busy}>Run recommended</Button>}
+        </div>
+        <details className="shell-route-details"><summary>Routing evidence & advanced overrides</summary>
             {explanation.candidates.map((c) => (
               <div
                 key={c.assistantId}
@@ -184,30 +156,14 @@ export function NewTask({ onStarted, initialGoal }: { onStarted: (taskId: string
                 )}
               </div>
             ))}
-            {explanation.chosen ? (
-              <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
-                <Button onClick={() => void start()} disabled={busy}>
-                  Run recommended
-                </Button>
-                {eligible.length > 1 && (
-                  <>
-                    <Button variant="secondary" disabled={busy} onClick={() => void startParallel("compare")}>
-                      Compare {eligible.length}
-                    </Button>
-                    <Button variant="secondary" disabled={busy} onClick={() => void startParallel("race")}>
-                      Race {eligible.length}
-                    </Button>
-                  </>
-                )}
-              </div>
-            ) : (
-              <p style={{ color: tokens.danger, fontSize: "0.85rem" }}>
-                No eligible assistant — every candidate failed a hard filter.
-              </p>
-            )}
-          </>
-        )}
-      </Card>
+            {eligible.length > 1 && <div className="shell-parallel">
+              <p className="fine-print">Parallel execution multiplies quota and token spend. Choose it deliberately.</p>
+              <Button variant="secondary" disabled={busy} onClick={() => void startParallel("compare")}>Compare {eligible.length}</Button>
+              <Button variant="secondary" disabled={busy} onClick={() => void startParallel("race")}>Race {eligible.length}</Button>
+            </div>}
+            {!explanation.chosen && <p className="error">No eligible assistant — every candidate failed a hard filter.</p>}
+        </details>
+      </section>}
     </div>
   );
 }

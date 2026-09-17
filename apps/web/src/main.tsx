@@ -15,3 +15,6 @@ createRoot(document.getElementById("root")!).render(
     <App />
   </StrictMode>,
 );
+
+import "./styles/applications.css";
+import "./styles/mission-shell.css";

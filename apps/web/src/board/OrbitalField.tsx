@@ -139,7 +139,7 @@ export function OrbitalField({
     </div>
     <div
       ref={sceneRef}
-      className={`sphere-scene ${pulse.running ? "is-executing" : ""}`}
+      className={`sphere-scene ${readAvailable && pulse.running ? "is-executing" : ""}`}
       style={{ "--orbit-scale": scale } as CSSProperties}
     >
       <svg className="sphere-svg" viewBox={`0 0 ${SCENE} ${SCENE}`} aria-hidden="true">
@@ -339,7 +339,7 @@ export function OrbitalField({
         bodies.map(({ task, ring, phase, flip }) => {
           const state = missionState(task);
           const s = describeState(state);
-          const moving = state === "RUNNING" || state === "ROUTING" || state === "HANDING_OFF";
+          const moving = readAvailable && (state === "RUNNING" || state === "ROUTING" || state === "HANDING_OFF");
           return (
             <button
               key={task.id}

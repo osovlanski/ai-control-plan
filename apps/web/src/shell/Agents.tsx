@@ -136,7 +136,7 @@ export function Catalog() {
           <Card key={a.id} style={cooldown ? { borderColor: `${tokens.warn}66` } : undefined}>
             <div style={{ display: "flex", alignItems: "center", gap: "0.7rem" }}>
               <strong style={{ fontSize: "0.95rem" }}>{a.id}</strong>
-              <span style={{ fontSize: "0.8rem", color: tokens.muted }}>{a.provider}</span>
+              <span style={{ fontSize: "0.8rem", color: tokens.muted }}>{a.provider} · {a.enabled ? "Enabled" : "Disabled"}</span>
               {core && (
                 <span
                   style={{

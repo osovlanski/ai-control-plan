@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api, type Assistant } from "./api.js";
 import { actualLifecycle, fieldPulse, modelNodes, type ActualExecution } from "./orbital.js";
 import { MissionActivity, SystemOverview } from "./board/Overview.js";
-import { CommandBar } from "./board/CommandBar.js";
+import { MissionShell } from "./shell/MissionShell.js";
 import { Inspector, type Snapshot } from "./board/Inspector.js";
 import { OrbitalField, type Satellite } from "./board/OrbitalField.js";
 import { TaskRegister, type Filter } from "./board/TaskRegister.js";
@@ -13,7 +13,7 @@ const MAX_BODIES = 8;
 type Cooldown = { assistantId: string; reason: string; until: string };
 
 /** Board data: tasks + the provider constellation, refreshed every 4s. */
-function useBoard() {
+function useBoard(revision: number, active: boolean) {
   const [tasks, setTasks] = useState<Mission[]>([]);
   const [unavailable, setUnavailable] = useState<string[]>([]);
   const [assistants, setAssistants] = useState<Assistant[]>([]);
@@ -21,6 +21,13 @@ function useBoard() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   useEffect(() => {
+    if (!active) {
+      setLoading(true);
+      setTasks([]);
+      setAssistants([]);
+      setCooldowns([]);
+      return;
+    }
     let disposed = false;
     let timer: ReturnType<typeof setTimeout>;
     const load = async () => {
@@ -63,18 +70,20 @@ function useBoard() {
       disposed = true;
       clearTimeout(timer);
     };
-  }, []);
+  }, [revision, active]);
   return { tasks, assistants, cooldowns, error, loading, unavailable };
 }
 
 export function OrbitalBoard({
   onOpen,
-  onNew,
+  active = true,
 }: {
   onOpen: (id: string) => void;
-  onNew: (goal?: string) => void;
+  active?: boolean;
 }) {
-  const { tasks, assistants, cooldowns, error, loading, unavailable } = useBoard();
+  const [revision, setRevision] = useState(0);
+  const { tasks, assistants, cooldowns, error, loading, unavailable } = useBoard(revision, active);
+  const [pendingSelection, setPendingSelection] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [filter, setFilter] = useState<Filter>("all");
   const [query, setQuery] = useState("");
@@ -94,7 +103,8 @@ export function OrbitalBoard({
     const rank = (t: Mission) => ["WAITING_INPUT", "LIMIT_PAUSED", "AWAITING_APPROVAL"].includes(missionState(t)) ? 0 : terminal.has(t.state) ? 2 : 1;
     return rank(a) - rank(b);
   });
-  const current = visible.find((t) => t.id === selected) ?? visible[0];
+  const current = pendingSelection && !tasks.some(t => t.id === pendingSelection)
+    ? undefined : visible.find((t) => t.id === selected) ?? visible[0];
   const bodies = visible.slice(0, MAX_BODIES);
   if (current && !bodies.some((t) => t.id === current.id)) bodies[bodies.length - 1] = current;
   const pulse = fieldPulse(tasks);
@@ -113,7 +123,7 @@ export function OrbitalBoard({
   const actual: ActualExecution = {
     assistantId: executing[0] ?? routedAssistant,
     modelSelector: recommendation?.execution.requestedModelSelector ?? null,
-    running: executing.length > 0,
+    running: !loading && !error && executing.length > 0,
     // Truthful lifecycle from the selected mission's canonical/effective state —
     // never derived from the field's visual state.
     lifecycle: current ? actualLifecycle(missionState(current)) : "routed",
@@ -129,7 +139,7 @@ export function OrbitalBoard({
     ? []
     : assistants.map((a) => ({
         assistant: a,
-        executing: executing.includes(a.id),
+        executing: !loading && !error && executing.includes(a.id),
         cooling: cooldowns.some((c) => c.assistantId === a.id && Date.parse(c.until) > now),
         shadow: a.id === shadowChoice,
       }));
@@ -138,17 +148,17 @@ export function OrbitalBoard({
     <div className="orbital-workspace">
       <div className="board-head">
         <div>
-          <span className="eyebrow">Orbital · operator console</span>
+          <span className="eyebrow">Overview</span>
           <h1>
             Command the next wave<em>.</em>
           </h1>
-          <p>Set a goal. Review the route. Stay in command.</p>
+          <p>One place to direct your AI work.</p>
         </div>
-        <button className="btn" onClick={() => onNew()}>
-          Detailed intake
-        </button>
       </div>
-      <CommandBar onSubmit={(goal) => onNew(goal)} />
+      <MissionShell active={active} selected={current ?? null} snapshot={forCurrent ? snapshot : null}
+        onOpen={() => current && onOpen(current.id)}
+        onChanged={() => setRevision(r => r + 1)}
+        onStarted={id => { setPendingSelection(id); setFilter("all"); setQuery(""); setSelected(id); setRevision(r => r + 1); }} />
       {error && (
         <p role="alert" className="error">
           Task refresh failed: {error}. {tasks.length ? "Showing the last successful snapshot." : "No task data available."}
@@ -159,15 +169,15 @@ export function OrbitalBoard({
         <SystemOverview pulse={pulse} loading={loading} error={error} hasSnapshot={tasks.length > 0}
           attentionSelected={filter === "attention"} onAttention={() => setFilter(filter === "attention" ? "all" : "attention")} />
         {current ? (
-          <Inspector key={current.id} task={current} onOpen={() => onOpen(current.id)} onSnapshot={onSnapshot} />
+          active && <Inspector key={current.id} task={current} onOpen={() => onOpen(current.id)} onSnapshot={onSnapshot} />
         ) : (
           <section className="inspector empty" aria-label="Selected task inspector">
             <span className="eyebrow">{loading ? "Connecting" : "Execution ready"}</span>
             <h2>
-              {loading ? "Reading your workspace…" : tasks.length ? "No matching missions" : "Your first mission starts here."}
+              {loading ? "Reading your workspace…" : error ? "Mission state unavailable" : tasks.length ? "No matching missions" : "Your first mission starts here."}
             </h2>
             <p>
-              {tasks.length
+              {error ? "The task read failed. Mission state will appear when the connection recovers." : tasks.length
                 ? "Adjust the filter or search."
                 : "Describe a goal above. The router previews which assistant it would choose, and why, before anything runs."}
             </p>
@@ -185,7 +195,7 @@ export function OrbitalBoard({
             satellites={satellites}
             models={models}
             actual={actual}
-            readAvailable={!loading && (!error || tasks.length > 0)}
+            readAvailable={!loading && !error}
           />
           <div className="map-caption">
             <span>Ring = state group · angle = index, not a forecast.</span>
