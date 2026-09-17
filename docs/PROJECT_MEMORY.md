@@ -168,3 +168,12 @@ Docs: `docs/ui/orbital-operator.md`.
   **K14 COMPLETE.** Do not reopen completed implementation as new packages.
 - Matrices, evidence and validation: `docs/agentic-os-k12-k14-closure.md`.
   Older slice notes above are historical, not current pending-work lists.
+
+## Conversational shell (2026-09-17)
+
+Git metadata supersedes old worktree descriptions above. Shell work starts at
+remote main `6a0eb55`, preserving K5, K12/K14 and Codex runtime fixes. Canonical
+product architecture and verified capability matrix: `docs/ui/agentic-os-ui-v3.md`.
+The control-plane React app owns the seven-destination shell; Cockpit retains
+durable memory, installed tooling and machine-global writes. Task input currently
+accepts approvals only; do not claim arbitrary conversational continuation.

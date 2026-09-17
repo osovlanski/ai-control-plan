@@ -1,5 +1,7 @@
 # Roadmap
 
+**Conversational shell (2026-09-17):** [current architecture, audit, ownership and acceptance](ui/agentic-os-ui-v3.md). Supersedes the historical three-tab navigation; existing kernel behavior is preserved.
+
 ## Now
 
 - Keep capability probes deterministic and time-bounded across new providers. *(completed for current adapters)*

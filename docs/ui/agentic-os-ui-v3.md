@@ -1,3 +1,195 @@
+# Agentic OS shell: product architecture and implementation
+
+**2026-09-17 · supersedes V3 navigation/composition decisions below.**
+Reference inspected: `/home/ubuntu/workspace/reference-images/agentic-os-target.png`.
+This is the canonical UI plan, not a second kernel or Cockpit roadmap.
+
+## Product thesis and ownership
+
+One conversational shell turns intent into an explainable, observable mission.
+Ordinary work defaults to automatic routing. The operator gives goals and
+constraints, reviews a proposal, and handles exceptions without selecting a
+provider first. Linux is an ownership metaphor, not a terminal skin:
+
+| Layer | Responsibility / owner |
+| --- | --- |
+| Resources | Repository/files, credentials, compute, quotas and context capacity remain with their existing authorities; Cockpit owns durable memory/config sources |
+| Kernel | Control plane owns task lifecycle, routing, scheduling, resource claims, quota recovery, checkpoints, permissions and model identity |
+| Execution harness | Existing SessionRunner/adapters own process execution, normalized events, approvals, verification and recovery |
+| System libraries | Cockpit owns installed skills/plugins/hooks/MCP, lineage and machine-global writes; core owns capability contracts |
+| Shell | Control-plane React application owns conversational intent and mission interaction, consuming existing authenticated APIs |
+| Processes | Tasks, sessions, waits and schedules retain their existing IDs/state machines; no new frontend lifecycle |
+| Applications | Overview, Agents, Memory, Routing, Traces, Tools, Settings provide stable destinations |
+| System monitor | Orbital projects task/session truth; Cockpit continues to monitor external observed sessions and local/cloud jobs |
+
+Control-plane hosting is chosen because intake, auth, routing, SSE, approvals,
+mission inspection and the orbit already live here. Moving these into Cockpit
+now would require a second mutation/auth boundary. Cockpit remains the package
+and memory authority. Integration must use versioned, authenticated contracts;
+there is no cross-origin fetch, hard-coded Cockpit port, embedded privileged UI,
+or copy of its memory/scheduler implementations in this slice.
+
+## Current-state audit (verified bases)
+
+Fetched remote bases: control plane `6a0eb55` and Cockpit `7af84bd`.
+Original primary checkouts: control plane `2952fb3` on
+`feat/agentic-os-k5-overlap-queue` (clean); Cockpit `833d420` on `main`
+with 11 untracked dated proposal folders. Both are left untouched.
+Worktree metadata, branch, HEAD and status were compared for every registered
+worktree. The old Agentic OS documentation worktree has modified/untracked plans;
+none were copied. The UI V3, K12/K14, headless bootstrap and Codex runtime branches
+are historical feature worktrees, not alternative product roots. Fresh dedicated
+worktrees start at current remote main, retaining the merged K5/K6 fixes.
+
+`AGENTS.md` and `PROJECT_MEMORY.md` retain stale documentation-worktree wording.
+Git metadata is authoritative for topology. Existing Graphify JSON was queried
+locally (CLI absent); its older revisions omit recent services. Source and tests
+are authoritative for capabilities. Read plans: master Agentic OS plan, vNext,
+kernel-services, harness implementation progress, Orbital/V3, Cockpit Spec E and
+K6/K14 implementation records. Historical implementation counts are not reused
+as current validation results.
+
+Entry points: `apps/web/src/main.tsx`, `App.tsx`, `NewTask.tsx`,
+`OrbitalBoard.tsx`, `TaskDetail.tsx`; React 19/Vite, IBM Plex and CSS tokens.
+API: Fastify `apps/api/src/server.ts`, SQLite stores, core contracts, adapters.
+Tests: Vitest workspace suites plus real in-process API/FakeAdapter Playwright.
+Cockpit: Express `server.ts`, vanilla `public/app.js`/`index.html`, local source
+scanners, `controlPlane.ts`, `controlPlaneScheduleSource.ts`, Node tests and
+public wiring checks. Cockpit has no configured Playwright runner.
+
+## Current-to-target capability and migration matrix
+
+| Capability | Action / destination | Authority and implementation evidence |
+| --- | --- | --- |
+| Three-tab rail | Redesign to seven routes; Overview default | `App.tsx`; hash routes preserve reload/back/forward without server rewrite |
+| Intake and command bar | Merge into one Overview command surface | Existing task create/route/start APIs; previews remain durable unstarted tasks |
+| Orbital/task register | Keep in Overview | `orbital.ts`, `OrbitalField`, `executionRead`; bounded field plus full accessible register |
+| Task controls and evidence | Keep, progressively disclose | `Inspector` and `TaskDetail`; all existing K-slice actions retain a destination |
+| Assistant discovery/auth/catalog | Move behind Agents | `/api/assistants`, changes, cooldowns, models; discovery remains availability authority |
+| Routing explanations | Move entry point to Routing; retain mission inspector | Persisted routing decisions; observed data, configuration and external priors remain distinct |
+| Traces/usage/verification | Merge navigation, retain existing detail renderer | Control-plane normalized events/session audits; Cockpit Usage/Retro for observed external sessions |
+| Working memory/checkpoints | Keep in mission context/controls | Existing envelope/checkpoint/context observation, not durable semantic memory |
+| Durable memory/search/graph/garden | Defer shell integration; Memory names available Cockpit surfaces | Cockpit memory/knowledge/context APIs; M8 registry absent |
+| Skills/plugins/hooks/tools/MCP | Defer shell integration; Tools describes real types and owner | Cockpit installed/lineage/discovery; no authenticated M8 inventory snapshot yet |
+| Mission scheduling and recovery | Keep mission inspector; Settings explains schedule ownership | Plane K1–K5; Cockpit K6 federated schedule source, local/OS/cloud jobs |
+| Global configuration, retention, security | Keep Cockpit/config authorities; Settings lists availability | Existing workspace/auth/policies, Cockpit guarded configuration |
+| Free-text continuation, semantic state questions, file upload | Defer with explicit UI limit | `/api/tasks/:id/input` only accepts approval; no generic chat or attachment contract |
+| Automatic composition / subtask topology | Defer | Composer and Task/Subtask fan-out are proposed, not represented by decorative orbit nodes |
+| Redundant top-level Intake/Orbital names | Remove navigation only after inline destination exists | No backend, task detail or K-slice implementation removed |
+
+Missions do not need a separate application: selection, orbit, register and detail
+cover the observed workflows. Schedule remains a mission/system concern;
+Cockpit already provides the cross-source schedule application.
+
+## Navigation and shell interaction
+
+Routes: `#/overview`, `#/agents`, `#/memory`, `#/routing`, `#/traces`,
+`#/tools`, `#/settings`. Mission diagnostics use `#/missions/:taskId` under
+Overview. Unknown routes explain the problem and offer Overview. Native fragment
+anchors continue to reach mission evidence/register. Browser history and reload
+retain the application boundary. Drafts stay in memory across application
+navigation, never in localStorage (goals may contain private context).
+
+Overview hierarchy: calm heading and scheduler read; wide luminous command
+surface; system summary and selected mission to the left, mission orbit about
+half the useful width to the right; attention/activity; disclosed evidence and
+mission register. No green “all healthy” inference from API reachability.
+
+New-mission mode: goal → optional repository/constraints/profile → Preview
+routing → concise chosen assistant/rule → Run recommended. Alternative assistants,
+filters and compare/race stay behind an advanced disclosure. Edits invalidate the
+preview; no start can use an edited intent until previewed again. Preview creates
+a durable task but starts no provider. Start returns to the same Overview and
+selects the task. API revalidates execution eligibility at start.
+
+Selected-mission mode: show the persisted goal and recent normalized messages,
+explicit read errors, durable pending approvals with Approve/Deny, and access to
+full controls. This is a bounded mission interaction surface, not a simulated
+LLM response. General natural-language follow-up is explicitly unavailable.
+Changing selection never sends a message or an approval to the old mission.
+
+## Chat-to-execution lifecycle and smallest missing contracts
+
+1. In-memory draft captures goal, allowlisted repository path, constraints and
+   routing profile. Auto is the default; assistant selection is an override.
+2. Existing `POST /api/tasks` persists intent. `POST /:id/route` records an
+   explainable recommendation; no fabricated topology/asset plan.
+3. Explicit Run uses existing `POST /:id/start` (or deliberate parallel command).
+4. Existing task/session/events APIs drive the orbit, summary and mission stream.
+5. Existing `POST /:id/input {kind: approval, requestId, approved}` handles
+   permission decisions; persisted session approvals survive reload.
+6. Existing inspection, checkpoint/handoff/wait/cancel controls remain reachable.
+
+**Next contract, not implemented:** a session-addressed input command containing
+`clientMessageId`, `sessionId`, `expectedVersion`, `kind: message`, and text;
+authenticated `commands.write`, bounded/redacted persistence, durable accepted/
+delivered/rejected/unknown result, idempotency and capability/state checks.
+Target a specific live owner, reject ambiguous/parallel/stale targets, and never
+reinterpret a follow-up as a new task or an approval. Adapters advertising
+`supportsMidRunInput` alone are not proof the API can deliver it. Return available
+actions from the kernel so the shell can expose continuation/compaction/scheduling
+without guessing. Completed-session continuation needs an explicit checkpoint-
+anchored new execution command, not reuse of an ended handle.
+
+Other gaps: authenticated Cockpit M8 inventory/memory reads, content-digest and
+visibility filtering, M9 deterministic bundle rendering, per-run provisioning,
+attachment manifests, composition revisions, subtask/dependency projection and
+normalized external usage ingestion. Existing task dependency waits are real;
+subtask topology is not. Free-text scheduling and semantic memory recall remain
+unavailable until those contracts are implemented.
+
+## Mission-orbit semantics
+
+Preserve `orbital.ts` geometry and mission-state derivation. One task body per
+persisted task; rings mean active/held/settled; angle is layout, never progress
+or forecast. Selection is a button with `aria-pressed`. Effective Harness approval
+is stationary amber even when the task remains RUNNING. Unknown session reads
+cannot animate execution. Wait horizons indicate scheduler ownership, not a
+promise of quota recovery. Provider satellites are configured discoveries;
+participation requires an active session. Requested and observed model identity
+remain separate. Dashed amber model candidates are advisory SHADOW evidence,
+never running agents. Core counts derive from the same task snapshot as summary.
+Dependencies/handoffs are explained from recorded evidence; graph links/subtask
+bodies wait for a bounded projected topology contract. No invented links or
+percentage progress. Existing phase/event information is the progress evidence.
+
+## Responsive, accessibility and acceptance rules
+
+- Desktop/laptop: command remains above the fold; orbit uses approximately half
+  the primary two-column region. Tablet/mobile stack command, summary, orbit and
+  inspector. Seven destinations remain named and keyboard reachable; mobile uses
+  a wrapping top rail, not seven cramped fixed bottom icons.
+- Use semantic links, labels, native disclosures, explicit buttons, visible focus,
+  skip link and route-focus restoration. Polling must not steal focus or announce
+  entire transcripts repeatedly. Announce command results/errors only.
+- Maintain bundled typography, high contrast text, blue selection, restrained
+  violet ambient light and amber attention. No decorative provider logos.
+- Reduced motion disables continuous movement; shape/text still convey every
+  state. No overflow at 1440, 1280, 900, 390 or 320px.
+- Verify real task creation → route → explicit start → orbit selection and
+  approval after reload. No separate Intake navigation or model selection required.
+- Verify editing invalidates preview, drafts survive application switches,
+  route/back/reload, keyboard, empty/loading/unavailable/failed/waiting/approval/
+  quota/completed states. Reuse real API/FakeAdapter fixtures; label captures as
+  deterministic test workspaces, not live provider evidence.
+- Preserve all K-slice backend tests and existing detailed controls. Validate both
+  repositories and compare browser captures to the reference and these semantics.
+
+## Decisions and explicit deferrals
+
+Rejected: copying Cockpit into React; iframe integration into a privileged UI;
+a new shell backend; fake chat replies; animation implying unsupported processes;
+a universal health verdict; full implementation of seven applications in one PR.
+Memory, Tools and Settings are truthful destination structures. Routing and
+Traces link to existing mission evidence until their richer workspaces arrive.
+No K13 activation, model-policy change, remote runtime, cost-cap enforcement,
+provider-command compaction, generated artwork or production credential use.
+
+Validation and final artifact inventory are recorded at the end of this section
+once the implementation checks complete. Historical V3 evidence follows.
+
+---
+
 # Agentic OS UI V3 convergence
 
 Scope: UI evolution from origin/main `8ed98c6` (PR #38), isolated in

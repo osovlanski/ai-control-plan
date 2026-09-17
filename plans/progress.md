@@ -1,5 +1,7 @@
 # Project Progress
 
+**Conversational shell (2026-09-17):** [current architecture, audit, ownership and acceptance](../docs/ui/agentic-os-ui-v3.md). Supersedes the historical three-tab navigation; existing kernel behavior is preserved.
+
 ## Current phase
 
 **Phase 5 — complete. All planned phases are delivered.** Parallel comparison and race modes run in isolated worktrees, and the routing profiles are now fed by measurements from the user's own runs.
