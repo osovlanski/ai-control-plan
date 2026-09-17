@@ -1,0 +1,26 @@
+/* Stable application boundaries; the existing Orbital design tokens are shared. */
+[hidden] { display: none !important; }
+.os-nav { text-decoration: none; min-height: 48px; }
+.os-nav:last-child { margin-top: 18px; }
+.os-rail { overflow-y: auto; }
+.os-rail-foot { padding-top: 16px; }
+.application-heading { margin-bottom: 30px; }
+.application-heading h1, .application-workspace > h1 { font-size: clamp(28px, 3vw, 40px); font-weight: 500; letter-spacing: -.025em; }
+.application-heading p { color: var(--text-2); margin-top: 10px; font-size: 16px; }
+.application-workspace { max-width: 850px; padding: 26px 0; }
+.application-status, .application-planned { padding: 28px 0; border-top: 1px solid var(--line-strong); }
+.application-workspace h2 { font-size: 18px; font-weight: 500; margin-bottom: 12px; }
+.application-workspace p { color: var(--text-2); line-height: 1.8; max-width: 70ch; }
+.application-workspace .btn { margin-top: 22px; text-decoration: none; }
+.catalog-disclosure { margin-top: 16px; }
+.catalog-disclosure > summary { color: var(--accent); cursor: pointer; padding: 8px 0; }
+@media (max-width: 760px) {
+  .os-rail { position: static; padding: 12px 14px; border-bottom: 1px solid var(--line); backdrop-filter: none; }
+  .os-rail nav { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
+  .os-nav { min-width: 0; min-height: 48px; padding: 8px 3px; font-size: 12px; }
+  .os-nav svg { width: 19px; height: 19px; }
+  .os-nav:last-child { margin-top: 0; }
+  .os-main { padding-bottom: 28px; }
+  .os-topbar { padding-top: 14px; }
+  .application-workspace { padding: 12px 0; }
+}
