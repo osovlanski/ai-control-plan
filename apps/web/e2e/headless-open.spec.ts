@@ -29,7 +29,7 @@ test("real headless CLI delivers the browser's HttpOnly session after the old to
     let errors = "";
     child.stdout!.on("data", (chunk) => { output += String(chunk); });
     child.stderr!.on("data", (chunk) => { errors += String(chunk); });
-    await expect.poll(() => output).toContain("Browser bootstrap ready.");
+    await expect.poll(() => output, { timeout: 30_000 }).toContain("Browser bootstrap ready.");
     const origin = output.match(/Open (http:\/\/127\.0\.0\.1:\d+)/)![1]!;
     expect(output).toContain("300 seconds");
     // Real elapsed time proves CLI wait and token TTL are independent.
@@ -38,7 +38,7 @@ test("real headless CLI delivers the browser's HttpOnly session after the old to
     await page.goto(origin);
     expect((await exchange).headers().origin).toBe(origin);
     await expect(page).toHaveURL("http://127.0.0.1:4276/");
-    await expect(page.getByText("Operator workspace", { exact: true })).toBeVisible();
+    await expect(page.getByRole("navigation", { name: "System" })).toBeVisible();
     await expect.poll(() => page.evaluate(() => fetch("/api/workspace").then((r) => r.status))).toBe(200);
     const cookie = (await context.cookies()).find((c) => c.name === "__Host-acp_session");
     expect(cookie).toMatchObject({ httpOnly: true, secure: true, sameSite: "Strict", path: "/" });

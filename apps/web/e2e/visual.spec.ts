@@ -170,23 +170,24 @@ test("reference screenshots: active workspace, quota wait, laptop, mobile", asyn
   });
   expect(overlaps).toEqual([]);
 
-  // 7. Intake screen reached from the command bar.
+  // 7. Inline intake stays beside the mission orbit.
   await page.getByRole("textbox", { name: "What should Agentic OS do?" }).fill("Audit the retry policy for idempotency");
-  await page.getByRole("button", { name: "Route mission" }).click();
-  await expect(page.getByRole("heading", { name: "New mission" })).toBeVisible();
+  await page.getByRole("button", { name: "Preview routing" }).click();
+  await expect(page.getByRole("region", { name: "Routing recommendation" })).toBeVisible();
   await expect(page.getByText(/Rule fired:/)).toBeVisible();
   const preview = built.tasks.list().find(t => t.goal === "Audit the retry policy for idempotency")!;
   expect((await (await api.get(`/api/tasks/${preview.id}`)).json()).runs).toHaveLength(0);
-  await shot("7-intake", page);
+  await shot("7-inline-preview", page);
 
   // 8. Full controls & diagnostics and 9. the agent catalog keep the same shell.
-  await page.getByRole("button", { name: "Orbital" }).click();
+  await page.getByRole("link", { name: "Overview" }).click();
+  await page.getByRole("button", { name: "Selected mission", exact: true }).click();
   await select(quota);
   await page.getByRole("button", { name: /Open full controls/ }).click();
   await expect(page.getByRole("heading", { name: quota })).toBeVisible();
   await shot("8-task-detail", page);
-  await page.getByRole("button", { name: "Agents" }).click();
-  await expect(page.getByText("What changed today")).toBeVisible();
+  await page.getByRole("link", { name: "Agents" }).click();
+  await expect(page.getByRole("heading", { name: "Agents", exact: true })).toBeVisible();
   await shot("9-agents", page);
 
   expect(consoleErrors).toEqual([]);
