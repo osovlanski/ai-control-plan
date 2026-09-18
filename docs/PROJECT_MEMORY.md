@@ -177,3 +177,16 @@ product architecture and verified capability matrix: `docs/ui/agentic-os-ui-v3.m
 The control-plane React app owns the seven-destination shell; Cockpit retains
 durable memory, installed tooling and machine-global writes. Task input currently
 accepts approvals only; do not claim arbitrary conversational continuation.
+
+Shell implementation: URL-backed seven-application navigation, inline goal and
+route preview, selected-mission messages and durable approval controls, in-memory
+draft retention, and explicit backend gaps. No generic follow-up delivery is
+claimed. Existing K12 live closure on 2026-09-15 remains valid; older PARTIAL
+headers describe historical checkpoints.
+
+Final shell acceptance (2026-09-18): full control-plane unit/integration suite
+1,078 passed; final web 49 passed; 34 browser checks passed across final bounded
+runs; Cockpit 1,401 passed. Screenshot index and exact validation scope are in
+`docs/ui/agentic-os-ui-v3.md`. Failed task reads freeze orbit motion; re-entering
+Overview clears paused snapshots before refresh. Input delivery remains the next
+backend slice; seven destinations do not imply seven fully implemented apps.

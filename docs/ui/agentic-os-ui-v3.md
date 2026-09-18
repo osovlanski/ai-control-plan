@@ -44,7 +44,9 @@ worktrees start at current remote main, retaining the merged K5/K6 fixes.
 `AGENTS.md` and `PROJECT_MEMORY.md` retain stale documentation-worktree wording.
 Git metadata is authoritative for topology. Existing Graphify JSON was queried
 locally (CLI absent); its older revisions omit recent services. Source and tests
-are authoritative for capabilities. Read plans: master Agentic OS plan, vNext,
+are authoritative for capabilities. K12 live warning-band acceptance was closed
+on 2026-09-15 (`docs/agentic-os-k12-live-acceptance.md`); historical PARTIAL
+headers in older plans are not current blockers. Read plans: master Agentic OS plan, vNext,
 kernel-services, harness implementation progress, Orbital/V3, Cockpit Spec E and
 K6/K14 implementation records. Historical implementation counts are not reused
 as current validation results.
@@ -185,8 +187,74 @@ Traces link to existing mission evidence until their richer workspaces arrive.
 No K13 activation, model-policy change, remote runtime, cost-cap enforcement,
 provider-command compaction, generated artwork or production credential use.
 
-Validation and final artifact inventory are recorded at the end of this section
-once the implementation checks complete. Historical V3 evidence follows.
+## Validation record · 2026-09-17/18
+
+Validation uses the built production web bundle against isolated real Fastify/
+SQLite APIs and deterministic FakeAdapters. Screenshots are test workspaces,
+not production activity or proof of live provider execution. No provider
+credentials, transcripts, database fixtures, traces or bearer tokens are committed.
+
+- Full `pnpm test`: core 116, adapters 21, API 892, web 49; **1,078 passed**.
+- `pnpm typecheck`, `pnpm lint`, `pnpm build`: passed on the first integration;
+  final checks after browser-driven corrections are recorded below.
+- Cockpit `npm test`: **1,401 passed, 0 failed**, 223.225 seconds.
+  `npm run build` passed, including TypeScript and browser graph compilation.
+  Cockpit has no configured lint/format or browser runner; unchanged UI wiring,
+  READ_ONLY, version/capability and schedule-source tests ran in its full suite.
+- Initial updated browser pass: 21/24 passed. One new assertion incorrectly
+  expected an ID in an orbit button labelled with its goal; corrected to assert
+  the goal. CLI startup exceeded the old five-second fixture budget under load;
+  its readiness poll now allows 30 seconds. The eight-session geometry test
+  passed its visual assertions but sequential adapter teardown exhausted its
+  test budget; independent session drains now run concurrently. No kernel timeout
+  or execution behavior changed.
+- Initial visual project: 1/1 passed, including real waits, approval, geometry,
+  reduced motion and desktop/laptop/tablet/mobile captures. Manual inspection
+  against the reference led to a shorter command composer, preserving the orbit
+  at laptop widths. Both browser and visual suites are rerun on the final bundle.
+
+A later Demo B geometry assertion identified partial clipping of the
+ACTUAL/SHADOW relationship key at 1280×800. The short-screen composer was tightened
+without reducing font size. Its old `.command-bar` fixture selector now targets
+`.mission-shell`. Browser-only teardown closes abandoned HTTP connections after
+clients/providers stop; runtime shutdown policy is unchanged. Interrupted runner
+invocations are excluded from acceptance totals.
+
+Final review also freezes orbit execution motion on failed task reads and clears
+paused polling snapshots when leaving Overview, so re-entry reads current state.
+Keyboard focus moves to the selected mission after its start is acknowledged and
+the mission is available. Targeted browser coverage verifies both boundaries.
+
+Final acceptance on the final source and production bundle:
+
+- **34 browser checks passed** across bounded runs: shell 7, auth/headless/operator/
+  review regression 19, Demo A 1, Demo A.5 1, Demo B 5, visual 1. The final visual
+  and Demo B run exited 0 on 2026-09-18: **6 passed (1.5m)**. Earlier occupied-port
+  failures and interrupted processes are excluded; all affected tests were rerun.
+- Final web typecheck and ESLint over web source/E2E exited 0 after the freshness
+  and focus fixes. Final web unit suite: **49 passed in 6 files**; production build
+  passed. Full repository typecheck/lint/build and the 1,078-test suite above passed
+  before those last frontend-only fixes. No API, core, adapter or Cockpit runtime
+  implementation changed. Neither repository defines a separate formatter check;
+  `git diff --check` is clean.
+- Browser coverage includes empty/loading/unavailable/failed/waiting/approval/
+  quota/completed state, preview without execution, explicit start and orbit
+  selection, persisted approval after reload, private draft retention, native
+  keyboard routes/focus, missing routes, failed snapshots and fresh re-entry.
+- Geometry and screenshots cover 1920, 1440, 1280, 1100, 900, 390 and 320px widths,
+  including 1280×800 model evidence and reduced motion. Manual comparison retains
+  the reference's wide command surface, dark blue/violet/amber hierarchy and
+  roughly half-width orbit; mobile stacks content with wrapping navigation.
+- [Committed screenshot index](assets/conversational-shell/README.md) contains
+  desktop, laptop, tablet, mobile, reduced-motion, routing, conversation and
+  approval evidence. No screenshots are presented as production telemetry.
+
+The next vertical slice is the session-addressed durable input contract above,
+then shell delivery/status and adapter capability checks. Memory/tool federation,
+attachment upload, composition/subtasks, rich global Routing/Traces and a complete
+Settings application remain explicit deferrals, not acceptance claims.
+
+Historical V3 evidence follows; its screenshots and counts describe that revision.
 
 ---
 
