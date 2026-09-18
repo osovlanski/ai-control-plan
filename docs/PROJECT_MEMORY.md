@@ -190,3 +190,14 @@ runs; Cockpit 1,401 passed. Screenshot index and exact validation scope are in
 `docs/ui/agentic-os-ui-v3.md`. Failed task reads freeze orbit motion; re-entering
 Overview clears paused snapshots before refresh. Input delivery remains the next
 backend slice; seven destinations do not imply seven fully implemented apps.
+
+
+## Shell preservation review (2026-09-18)
+
+Revalidated the existing conversational-shell branch before standalone work.
+Failed selected-task reads now clear provider participation; initial loading/failed
+task reads no longer present an empty register. Agents explains that its input
+flag does not prove text delivery. Canonical findings, exact suite outcomes and
+22 fresh deterministic captures are indexed in `docs/ui/agentic-os-ui-v3.md`
+and `docs/ui/assets/shell-review/README.md`. Cockpit ownership remains at
+`a45a750`; its runtime and existing dirty worktrees were not modified.

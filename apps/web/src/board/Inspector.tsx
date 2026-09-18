@@ -36,7 +36,7 @@ export function Inspector({
   task: Mission;
   onOpen: () => void;
   /** Lets the field light the assistant that is executing this mission. */
-  onSnapshot?: (s: Snapshot) => void;
+  onSnapshot?: (s: Snapshot | null) => void;
 }) {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -97,8 +97,9 @@ export function Inspector({
     };
   }, [task.id, nonce]);
   useEffect(() => {
-    if (snapshot) onSnapshot?.(snapshot);
-  }, [snapshot, onSnapshot]);
+    // A failed refresh is not evidence that the previous owner still executes.
+    onSnapshot?.(error ? null : snapshot);
+  }, [snapshot, error, onSnapshot]);
   const run =
     snapshot?.detail.runs.find((r) => r.id === runId) ??
     snapshot?.detail.runs.at(-1);

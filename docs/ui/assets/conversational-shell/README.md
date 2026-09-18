@@ -1,5 +1,8 @@
 # Conversational shell acceptance captures
 
+Historical first-slice captures. See the [fresh preservation review](../shell-review/README.md)
+for the complete destination/state set and the current acceptance record.
+
 Captured from the production web bundle against isolated real Fastify/SQLite
 APIs and deterministic FakeAdapters. These are test workspaces, not live provider
 activity. Provider names, tasks and approvals are test inputs; state is supplied

@@ -88,7 +88,7 @@ export function OrbitalBoard({
   const [filter, setFilter] = useState<Filter>("all");
   const [query, setQuery] = useState("");
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
-  const onSnapshot = useCallback((s: Snapshot) => {
+  const onSnapshot = useCallback((s: Snapshot | null) => {
     setSnapshot(s);
   }, []);
 
@@ -223,7 +223,9 @@ export function OrbitalBoard({
           </div>
         </section>
       </div>
-      <TaskRegister
+      {loading || (error && !tasks.length) ? <section id="mission-register" className="task-register" aria-label="Mission register">
+        <p role="status">{loading ? "Reading mission register…" : "Mission register unavailable. Waiting for a successful task read."}</p>
+      </section> : <TaskRegister
         tasks={visible}
         selectedId={current?.id ?? null}
         onSelect={setSelected}
@@ -231,7 +233,7 @@ export function OrbitalBoard({
         onFilter={setFilter}
         query={query}
         onQuery={setQuery}
-      />
+      />}
     </div>
   );
 }

@@ -110,6 +110,26 @@ test("responsive empty shell and failed reads stay truthful with reduced motion"
   await page.reload();
   await expect(page.getByRole("alert")).toContainText("Task refresh failed");
   await expect(page.locator(".workspace-status")).not.toContainText("0 running");
+  await expect(page.getByRole("region", { name: "Mission register", exact: true })).toContainText("Mission register unavailable");
+  await page.screenshot({ path: info.outputPath("review-task-failure.png"), fullPage: true });
+});
+
+test("loading and unavailable discovery are explicit", async ({ context }, info) => {
+  const page = await h.openApp(context);
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  await context.route("**/api/tasks", async route => { await gate; await route.continue(); });
+  await page.reload({ waitUntil: "domcontentloaded" });
+  try {
+    await expect(page.getByRole("heading", { name: "Reading your workspace…" })).toBeVisible();
+    await expect(page.getByRole("region", { name: "Mission register", exact: true })).toContainText("Reading mission register…");
+    await page.screenshot({ path: info.outputPath("review-loading.png"), fullPage: true });
+  } finally { release(); }
+  await expect(page.getByRole("heading", { name: "Your first mission starts here." })).toBeVisible();
+  await context.route("**/api/assistants", route => route.fulfill({ status: 503, json: { error: "Discovery unavailable" } }));
+  await page.reload();
+  await expect(page.getByText(/Unavailable reads: Provider discovery/)).toBeVisible();
+  await page.screenshot({ path: info.outputPath("review-discovery-unavailable.png"), fullPage: true });
 });
 
 

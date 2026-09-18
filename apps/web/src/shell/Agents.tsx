@@ -173,8 +173,9 @@ export function Catalog() {
                   <strong style={{ color: core.reportsLimits ? tokens.ok : tokens.warn }}>
                     {String(core.reportsLimits)}
                   </strong>{" "}
-                  · mid-run input: {String(core.supportsMidRunInput)}
+                  · adapter input flag: {String(core.supportsMidRunInput)}
                 </div>
+                <p className="fine-print">The input flag can cover approval replies. Free-text session delivery is not available through the task API.</p>
                 {core.limits?.map((l) => (
                   <div key={l.window} style={{ marginTop: "0.4rem" }}>
                     <QuotaBar usedPercent={l.usedPercent} resetsAt={l.resetsAt} />

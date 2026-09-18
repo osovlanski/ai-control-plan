@@ -187,6 +187,109 @@ Traces link to existing mission evidence until their richer workspaces arrive.
 No K13 activation, model-policy change, remote runtime, cost-cap enforcement,
 provider-command compaction, generated artwork or production credential use.
 
+## Preservation review · 2026-09-18
+
+This review starts at `feat/agentic-os-conversational-shell@103b803`, with
+`origin/main@6a0eb55` fetched and verified. The five shell commits change only web
+presentation/tests and documentation. Cockpit ownership remains
+`docs/agentic-os-shell-ownership@a45a750` over `origin/main@7af84bd`.
+Local `main@f7f9655` is six commits behind remote main: its broader diff
+includes already-merged UI/K5/K12/headless/Codex changes (89 files); the actual
+shell-only diff against remote main is 41 files. Both feature worktrees were clean at entry. The main control-plane checkout is
+on `feat/agentic-os-k5-overlap-queue@2952fb3`, not main; Cockpit's main checkout
+is `833d420`, behind its remote and contains 12 untracked proposal directories.
+All registered worktrees were inspected. The old Agentic OS documentation
+worktree contains modified architecture/roadmap/design files and untracked
+Harness/vNext/observability plans; the Harness documentation worktree has an
+untracked continuation prompt. They remain untouched. Historical UI V3,
+K12/K14, headless-open and Codex-runtime worktrees are clean; none was merged.
+Remotes are `git@github.com:osovlanski/ai-control-plan.git` and
+`git@github.com:osovlanski/cockpit.git`.
+
+Reviewed against this canonical record, the target PNG, `orbital-operator.md`,
+core adapter/event contracts, the approval-only input handler in `server.ts`,
+Harness approval persistence, and Cockpit Spec E's accepted shell ownership.
+Local Graphify JSON was queried directly because the Python CLI is absent;
+source inspection resolves graph staleness. The [interface guidelines](https://raw.githubusercontent.com/vercel-labs/web-interface-guidelines/main/command.md)
+informed keyboard, focus, state and responsive checks.
+
+### Findings and corrections
+
+- `apps/web/src/board/Inspector.tsx:100`: failed detail refresh kept publishing
+  the previous successful snapshot, allowing a provider satellite to remain
+  marked executing. Now publishes null on failure and restores participation
+  only after a fresh read. The inspector retains its visibly stale evidence.
+  A deterministic browser check interrupts and recovers the detail endpoint.
+- `apps/web/src/shell/Agents.tsx`: “mid-run input: true” was ambiguous. Claude
+  and FakeAdapter accept approvals but reject text in `send()`. The UI now calls
+  this an adapter input flag and explicitly states the API text-delivery gap.
+  No capability, backend, or routing policy was changed.
+- `apps/web/src/OrbitalBoard.tsx`: loading/failed initial task reads showed an
+  empty mission register and a zero count. They now show explicit loading or
+  unavailable text until a successful task read; true empty state is unchanged.
+- Screenshot coverage previously omitted five destination structures and
+  explicit failure/loading examples. The visual and shell harnesses now capture
+  them, active conversation, persisted approval and detail-read recovery.
+- Navigation, native keyboard controls, private draft retention and backend
+  approval semantics remain intact. No invented messages, provider health,
+  attachment service, memory inventory or task progress was added.
+
+### Visual comparison
+
+The implementation retains the target's seven-item rail, wide command surface,
+blue/violet field, amber attention and roughly half-width desktop orbit. It is
+quieter and less cinematic: a semantic SVG sphere replaces photographic light
+ribbons; configured adapter labels replace decorative provider logos. The
+actual product displays a scheduler verdict rather than “all agents online”,
+and real task partitions instead of the illustration's fixed counts.
+Routing preview and detailed evidence make the page taller than the reference.
+Selected conversation is deliberately short in Operator mode. Memory, Tools and
+Settings show explicit availability/planning text; Routing and Traces lead to
+existing mission evidence. Those are capability differences, not rendering
+failures. Mobile stacks the interface and wraps navigation; it is a longer page
+than a chat terminal. A focused Shell mode is the next bounded presentation.
+
+Fresh screenshot index: [preservation captures](assets/shell-review/README.md).
+All captures use isolated temporary SQLite workspaces and scripted adapters;
+none documents live provider execution. Test fixtures include empty, loading,
+failed/unavailable reads, running, human approval, quota wait and terminal states.
+
+### Review validation
+
+- `pnpm typecheck`, `pnpm lint`, `pnpm build`: passed on the final review source.
+- `pnpm test`: **1,078 passed** (core 116, adapters 21, API integration 892,
+  web 49), all 75 test files passed, exit 0 confirmed by an isolated subprocess receipt.
+- `pnpm test:recovery-chaos`: **56 passed**, 3 files, exit 0.
+- `pnpm test:harness-on`: **892 passed**, 54 files, exit 0 (147.19s);
+  `AGENT_PLANE_HARNESS_SINGLE_MODE=1`. Both normal and Harness runs have explicit
+  subprocess exit receipts; interrupted earlier invocations are excluded.
+- Browser acceptance: **35 distinct checks passed** across bounded runs.
+  Final changed suites: shell 8 + visual 1 = **9 passed (3.4m), exit 0**;
+  unchanged auth/headless/operator/review 19, Demo A 1, Demo A.5 1 and Demo B 5
+  passed in the earlier full invocation. That invocation's visual assertion
+  wrongly expected output from a deliberately delayed adapter; it was corrected
+  to assert the truthful no-output state and the whole visual test rerun.
+  Earlier interrupted parent commands are not counted as successful invocations.
+- Cockpit ownership worktree: `npm test` **1,401 passed**, no failures;
+  `npm run build` passed, both exit 0. No Cockpit source was changed.
+- Clean detached checkout of the review source: `pnpm install --frozen-lockfile
+  --offline` and `pnpm build` passed, exit 0. Acceptance text may be updated after
+  this check; compiled source is identical. No shared node_modules symlink.
+- Keyboard route traversal/focus, preview/start, durable Approve/Deny after
+  reload, browser history, failed-read recovery, motion/label geometry and
+  1920/1440/1280/1100/900/390/320px responsive checks passed in browser suites.
+- Secret scan: staged and unstaged additions clean. The prior acceptance
+  commit's generic 40-character pattern hit was slash-separated state names,
+  not credential material. `git diff --check` passed.
+- Raw local logs: `/tmp/agentic-os-review-20260918/`; committed evidence is this
+  record and the 22-capture index. No live transcript is committed.
+
+Live-provider runs are deliberately skipped: this is a presentation/contract review, existing
+sessions and provider credentials must remain untouched, and deterministic
+adapters exercise the command/approval/recovery paths without quota consumption.
+Neither repository defines a standalone formatting script; whitespace is checked
+with `git diff --check`. No merge, PR, production config change or deployment.
+
 ## Validation record · 2026-09-17/18
 
 Validation uses the built production web bundle against isolated real Fastify/
