@@ -67,7 +67,9 @@ no streaming typewriter, animated text or new motion requirement.
 
 Preservation evidence: [canonical record](agentic-os-ui-v3.md) and
 [22 screenshots](assets/shell-review/README.md). Standalone implementation evidence
-will be recorded separately so the preserved Operator baseline remains auditable.
+is recorded separately — [14 captures](assets/standalone-shell/README.md) and the
+2026-09-19 acceptance section of the canonical record — so the preserved Operator
+baseline remains auditable.
 
 1. **Durable conversational input**: implement the [contract plan](../contracts/session-input.md)
    behind a disabled-by-default capability, with one deterministic adapter and

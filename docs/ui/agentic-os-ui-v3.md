@@ -290,6 +290,65 @@ adapters exercise the command/approval/recovery paths without quota consumption.
 Neither repository defines a standalone formatting script; whitespace is checked
 with `git diff --check`. No merge, PR, production config change or deployment.
 
+## Standalone Shell acceptance · 2026-09-19
+
+Route `#/shell` and `#/shell/<taskId>` added over the same kernel records. No new
+message, mission or session store. Evidence index:
+[14 captures](assets/standalone-shell/README.md). Design:
+[standalone Shell](standalone-shell.md). Input boundary:
+[session-input contract](../contracts/session-input.md).
+
+### Findings and corrections
+
+- The orbit panel's `.map-heading` is absolutely positioned for the Overview
+  column. Inside the Shell disclosure it had no positioned ancestor, escaped the
+  panel and stretched the page to **1825px against a 1440px viewport**. Corrected
+  by keeping the heading in flow there, reusing the existing narrow-viewport
+  treatment in `command-center.css`. Verified: `orbit.png` is now 1440px wide.
+- Full-page acceptance captures pinned the viewport-docked composer part-way down
+  the page, overlaying the mission heading and transcript in exactly the states
+  those captures document. The capture helper now pins the dock in flow for the
+  screenshot only; on screen it still docks to the viewport bottom.
+- Two Overview specs used an unscoped `Context & constraints` locator that became
+  ambiguous once a second composer existed in the DOM. Scoped to `Mission shell`.
+  Product behaviour was correct; only the locators were under-specified.
+- `standalone-shell.spec.ts` asserted a badge label of `Routing`; the canonical
+  label for `ROUTING` is `Choosing environment`. The behaviour under test —
+  canonical task state beating an unpersisted stream claim — was already correct.
+- The same spec released a gated route and failed on `Route is already handled`
+  when the request had already been cancelled. The release now tolerates that.
+
+Operator mode keeps both composers mounted so a draft survives a mode round trip;
+the inactive one is `hidden`, so it is outside the accessibility tree.
+
+### Review validation
+
+- `pnpm typecheck`, `pnpm lint`, `pnpm build`: passed, exit 0.
+- `pnpm test`: **1,079 passed** (core 116, adapters 21, API integration 892,
+  web 50), 75 test files, exit 0.
+- `pnpm test:harness-on`: **892 passed**, 54 files, exit 0.
+- `pnpm test:recovery-chaos`: **56 passed**, 3 files, exit 0.
+- Browser acceptance `--project=chromium`: **31 passed** (2.7m), exit 0, including
+  4 new Shell specs covering route identity and draft retention, inline approval
+  by keyboard, loading/empty/unavailable history, failed selected read and
+  recovery, and SSE reconnect reconciliation.
+- Deterministic visual suite `--project=visual`: **1 passed**, exit 0.
+- Responsive and preference captures at 1440/1280/900/390/320px and
+  `prefers-reduced-motion: reduce`; no horizontal overflow at any width.
+- Keyboard: route change moves focus to main, history is a labelled nav list with
+  `aria-current`, approval Approve/Deny reachable and operable by Enter.
+- Clean detached checkout of `cd0b810` with no shared `node_modules`:
+  `pnpm install --frozen-lockfile --offline`, `pnpm build`, `pnpm typecheck` all
+  exit 0.
+- `git diff --check` passed. Token-pattern scan over the commit's non-binary
+  additions found nothing. No credentials or provider transcripts committed.
+
+Live-provider runs are deliberately skipped again: this slice is presentation and
+contract work, deterministic adapters cover command, approval, recovery and
+reconnect paths, and existing provider sessions and quota must stay untouched.
+Neither repository defines a formatting script; whitespace is checked with
+`git diff --check`. No merge, PR, config change or deployment.
+
 ## Validation record · 2026-09-17/18
 
 Validation uses the built production web bundle against isolated real Fastify/
