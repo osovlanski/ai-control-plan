@@ -1,33 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
-import {
-  api,
-  type Assistant,
-  type TaskContext,
-  type TaskDetail,
-  type TaskEvent,
-  type RoutingExplanation,
-  type SessionSummary,
-  type SchedulerStatus,
-} from "../api.js";
+import { api } from "../api.js";
 import { actualLifecycle, describeState, modelIdentityView, nextStep, observedModel, resourceNextStep, waitKindLabel } from "../orbital.js";
 import { QuotaReadout, ContextReadout, ModelRecommendationReadout, DecisionSummary, ScheduleQueueReadout } from "./readouts.js";
 import { executionRead, missionState, type Mission } from "./execution.js";
 
-export type Snapshot = {
-  detail: TaskDetail;
-  events: TaskEvent[];
-  routing: Array<{
-    chosen: string | null;
-    at: string;
-    explanation: RoutingExplanation;
-  }>;
-  assistants: Assistant[];
-  sessions: SessionSummary[];
-  scheduler: SchedulerStatus | null;
-  context: TaskContext | null;
-  unavailable: string[];
-};
-
+export type { Snapshot } from "./useMissionSnapshot.js";
+import { useMissionSnapshot, type Snapshot } from "./useMissionSnapshot.js";
 export function Inspector({
   task,
   onOpen,
@@ -38,64 +16,13 @@ export function Inspector({
   /** Lets the field light the assistant that is executing this mission. */
   onSnapshot?: (s: Snapshot | null) => void;
 }) {
-  const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
-  const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState("execution");
   const [runId, setRunId] = useState("");
   const [nonce, setNonce] = useState(0);
+  const { snapshot, error } = useMissionSnapshot(task.id, nonce);
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const reload = useCallback(() => setNonce((n) => n + 1), []);
-  useEffect(() => {
-    let disposed = false;
-    let timer: ReturnType<typeof setTimeout>;
-    const load = async () => {
-      try {
-        const [detail, events, routing, assistants, sessions, scheduler, context] =
-          await Promise.allSettled([
-            api.task(task.id),
-            api.events(task.id),
-            api.routing(task.id),
-            api.assistants(),
-            api.sessions(task.id),
-            api.schedulerStatus(),
-            api.taskContext(task.id),
-          ]);
-        if (detail.status === "rejected") throw detail.reason;
-        if (!disposed) {
-          setSnapshot({
-            detail: detail.value,
-            events: events.status === "fulfilled" ? events.value : [],
-            routing: routing.status === "fulfilled" ? routing.value : [],
-            assistants:
-              assistants.status === "fulfilled" ? assistants.value : [],
-            sessions: sessions.status === "fulfilled" ? sessions.value : [],
-            scheduler:
-              scheduler.status === "fulfilled" ? scheduler.value : null,
-            context: context.status === "fulfilled" ? context.value : null,
-            unavailable: [
-              events.status === "rejected" ? "Events" : "",
-              routing.status === "rejected" ? "Routing" : "",
-              assistants.status === "rejected" ? "Provider discovery" : "",
-              sessions.status === "rejected" ? "Sessions" : "",
-              scheduler.status === "rejected" ? "Scheduler status" : "",
-              context.status === "rejected" ? "Context observation" : "",
-            ].filter(Boolean),
-          });
-          setError(null);
-        }
-      } catch (e) {
-        if (!disposed) setError((e as Error).message);
-      } finally {
-        if (!disposed) timer = setTimeout(() => void load(), 4000);
-      }
-    };
-    void load();
-    return () => {
-      disposed = true;
-      clearTimeout(timer);
-    };
-  }, [task.id, nonce]);
   useEffect(() => {
     // A failed refresh is not evidence that the previous owner still executes.
     onSnapshot?.(error ? null : snapshot);

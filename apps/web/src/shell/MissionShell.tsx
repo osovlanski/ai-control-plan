@@ -38,8 +38,8 @@ export function MissionShell({ active, selected, snapshot, onStarted, onChanged,
   </section>;
 }
 
-function MissionConversation({ task, snapshot, onChanged, onOpen }: {
-  task: Mission; snapshot: Snapshot | null; onChanged: () => void; onOpen: () => void;
+export function MissionConversation({ task, snapshot, onChanged, onOpen, expanded = false }: {
+  task: Mission; snapshot: Snapshot | null; onChanged: () => void; onOpen: () => void; expanded?: boolean;
 }) {
   const [sessions, setSessions] = useState<SessionDetail[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -70,7 +70,8 @@ function MissionConversation({ task, snapshot, onChanged, onOpen }: {
     return () => { disposed = true; clearTimeout(timer); };
   }, [task.id, revision]);
   const state = describeState(missionState(task));
-  const events = snapshot?.events.filter(e => ["message", "approval.requested", "completed", "error"].includes(e.type)).slice(-3) ?? [];
+  const Heading = expanded ? "h1" : "h2";
+  const events = snapshot?.events.filter(e => expanded || ["message", "approval.requested", "completed", "error"].includes(e.type)).slice(expanded ? -100 : -3) ?? [];
   const pending = sessions.flatMap(s => s.approvals.filter(a => a.state === "pending").map(a => ({ ...a, sessionId: s.sessionId })));
   const respond = async (requestId: string, approved: boolean) => {
     setBusy(true); setNotice("");
@@ -83,13 +84,15 @@ function MissionConversation({ task, snapshot, onChanged, onOpen }: {
     finally { setBusy(false); }
   };
   return <div className="mission-conversation">
-    <div className="shell-conversation-head"><h2>{task.goal}</h2><span className={`badge tone-${state.tone}`}>{state.label}</span></div>
+    <div className="shell-conversation-head"><Heading>{task.goal}</Heading><span className={`badge tone-${state.tone}`}>{state.label}</span></div>
     <p className="fine-print">{task.id} · {state.reason}</p>
-    <div className="shell-messages" aria-label="Recent mission messages">
+    {expanded && <div className="shell-user-goal"><strong>You · goal recorded in the kernel</strong><p>{task.goal}</p><small>Provider delivery is not confirmed by this record.</small></div>}
+    <div className="shell-messages" aria-label={expanded ? "Mission transcript" : "Recent mission messages"}>
       {!snapshot ? <p>Reading mission messages…</p> : snapshot.unavailable.includes("Events") ? <p>Mission messages unavailable.</p>
-        : events.length ? events.map(e => <p key={`${e.run_id}:${e.seq}`}><span>{e.type === "message" ? "Agent" : e.type}</span>{e.summary}</p>)
+        : events.length ? events.map(e => <p key={`${e.run_id}:${e.seq}`}><span>{e.type === "message" ? "Agent" : e.type.replaceAll(".", " · ").replaceAll("_", " ")}</span>{e.summary}{expanded && <small>{e.assistant_id} · session {e.run_id} · <time dateTime={e.ts}>{new Date(e.ts).toLocaleTimeString()}</time></small>}</p>)
         : <p>No agent messages recorded yet.</p>}
     </div>
+    {expanded && (snapshot?.events.length ?? 0) > 100 && <p className="fine-print">Showing the latest 100 events. Open mission controls for the full trace.</p>}
     {loading && <p role="status">Reading approval state…</p>}
     {error && <p role="alert" className="error">Approval state unavailable: {error}</p>}
     {pending.map(a => {

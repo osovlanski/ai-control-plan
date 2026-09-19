@@ -1,8 +1,10 @@
-import { useState } from "react";
+import { useId, useState } from "react";
 import { api, type RoutingExplanation } from "./api.js";
 import { Button, Field, inputStyle, QuotaBar, tokens } from "./ui.jsx";
 
 export function NewTask({ onStarted, onPreviewed }: { onStarted: (taskId: string) => void; onPreviewed: () => void }) {
+  const inputId = useId();
+  const helpId = useId();
   const [goal, setGoal] = useState("");
   const [constraints, setConstraints] = useState("");
   const [repoPath, setRepoPath] = useState("");
@@ -76,8 +78,8 @@ export function NewTask({ onStarted, onPreviewed }: { onStarted: (taskId: string
   return (
     <div className="shell-intake">
       <form className="shell-composer" aria-label="Command" onSubmit={e => { e.preventDefault(); if (!busy && goal.trim()) void previewRoute(); }}>
-        <label className="shell-goal-label" htmlFor="mission-goal">What should Agentic OS do?</label>
-        <textarea id="mission-goal" aria-describedby="command-help" disabled={busy} value={goal}
+        <label className="shell-goal-label" htmlFor={inputId}>What should Agentic OS do?</label>
+        <textarea id={inputId} aria-describedby={helpId} disabled={busy} value={goal}
           onChange={e => { setGoal(e.target.value); invalidatePreview(); }} rows={1}
           placeholder="What do you want Agentic OS to do?"
           onKeyDown={e => { if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); if (!busy && goal.trim()) void previewRoute(); } }} />
@@ -106,7 +108,7 @@ export function NewTask({ onStarted, onPreviewed }: { onStarted: (taskId: string
             <p className="fine-print">Repository context is available. File upload, memory recall and per-mission tool selection are planned.</p>
           </div>
         </details>
-        <p id="command-help" className="fine-print">Preview saves an unstarted mission. Edits need a new preview. Ctrl/⌘ + Enter to preview.</p>
+        <p id={helpId} className="fine-print">Preview saves an unstarted mission. Edits need a new preview. Ctrl/⌘ + Enter to preview.</p>
         {error && <p role="alert" className="error">{error}</p>}
       </form>
       {explanation && <section className="shell-proposal" aria-label="Routing recommendation">

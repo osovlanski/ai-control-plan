@@ -30,7 +30,7 @@ test("Intake never starts a stale goal or constraints after editing a preview", 
   await page.getByRole("textbox", { name: "What should Agentic OS do?" }).press("Control+Enter");
   await expect(page.getByRole("button", { name: "Run recommended", exact: true })).toBeVisible();
   await page.getByRole("textbox", { name: "What should Agentic OS do?", exact: true }).fill("Revised goal");
-  await page.getByText("Context & constraints", { exact: true }).click();
+  await page.getByLabel("Mission shell").getByText("Context & constraints", { exact: true }).click();
   await page.getByRole("textbox", { name: /^Constraints/ }).fill("Do not modify production");
   await expect(page.getByRole("button", { name: "Run recommended", exact: true })).toHaveCount(0);
   await page.getByRole("button", { name: "Preview routing", exact: true }).click();

@@ -10,18 +10,19 @@ export const APPLICATIONS = [
   { screen: "settings", label: "Settings", icon: "M4 6h16M4 12h16M4 18h16M8 3v6M16 9v6M10 15v6" },
 ] as const;
 export type Application = typeof APPLICATIONS[number]["screen"];
-export type Route = { screen: Application | "unavailable"; key: string } | { screen: "mission"; taskId: string; key: string };
+export type Route = { screen: "shell"; taskId?: string; key: string } | { screen: Application | "unavailable"; key: string } | { screen: "mission"; taskId: string; key: string };
 
 export function readRoute(hash = window.location.hash): Route {
   if (!hash.startsWith("#/")) return { screen: "overview", key: "overview" };
   const path = hash.slice(2).replace(/\/$/, "");
   if (APPLICATIONS.some(a => a.screen === path)) return { screen: path as Application, key: path };
-  const match = /^missions\/([^/]+)$/.exec(path);
+  if (path === "shell") return { screen: "shell", key: path };
+  const match = /^(missions|shell)\/([^/]+)$/.exec(path);
   if (match) {
     try {
-      const taskId = decodeURIComponent(match[1]!);
+      const taskId = decodeURIComponent(match[2]!);
       // Task IDs are opaque identifiers, never URL paths.
-      if (/^[\w-]+$/.test(taskId)) return { screen: "mission", taskId, key: path };
+      if (/^[\w-]+$/.test(taskId)) return { screen: match[1] === "shell" ? "shell" : "mission", taskId, key: path };
     } catch { /* malformed route */ }
   }
   return { screen: "unavailable", key: path };

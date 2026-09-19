@@ -3,6 +3,7 @@ import { api, type SchedulerStatus, type Workspace } from "./api.js";
 import { TaskDetail } from "./TaskDetail.jsx";
 import { OrbitalBoard } from "./OrbitalBoard.js";
 import { onAuthExpired } from "./auth.js";
+import { StandaloneShell } from "./shell/StandaloneShell.js";
 import { Catalog } from "./shell/Agents.js";
 import { ApplicationWorkspace } from "./shell/ApplicationWorkspace.js";
 import { APPLICATIONS, readRoute, useShellRoute } from "./shell/routes.js";
@@ -45,7 +46,7 @@ export function App() {
   const main = useRef<HTMLElement>(null);
   const previousRoute = useRef(readRoute().key);
   const application = route.screen === "mission" ? "overview" : route.screen;
-  const label = APPLICATIONS.find(a => a.screen === application)?.label ?? "Page unavailable";
+  const label = route.screen === "shell" ? "Shell" : APPLICATIONS.find(a => a.screen === application)?.label ?? "Page unavailable";
 
   useEffect(() => onAuthExpired(() => setExpired(true)), []);
   useEffect(() => {
@@ -66,10 +67,10 @@ export function App() {
   if (expired) return <div className="os-expired">
     <h1>Session expired — re-open with <code>pnpm --filter @agent-plane/api open</code></h1>
   </div>;
-  return <div className="os-shell">
+  return <div className={`os-shell ${route.screen === "shell" ? "is-shell-mode" : ""}`}>
     <a className="skip-link" href="#main-content" onClick={e => { e.preventDefault(); main.current?.focus(); }}>Skip to workspace</a>
     <div className="os-environment" aria-hidden="true" />
-    <aside className="os-rail">
+    <aside className="os-rail" hidden={route.screen === "shell"}>
       <div className="os-identity"><div className="os-mark" aria-hidden="true" />
         <div><strong>Agentic <em>OS</em></strong><span>A workspace for AI work</span></div>
       </div>
@@ -85,6 +86,7 @@ export function App() {
     <div className="os-main">
       <header className="os-topbar">
         <div className="os-brand"><strong>{label}</strong><span>Agentic OS</span></div>
+        <a className="btn" href={route.screen === "shell" ? "#/overview" : "#/shell"}>{route.screen === "shell" ? "Operator mode" : "Shell mode"}</a>
         {workspace && <span className="os-workspace">{workspace.workspace}</span>}
         <SystemHealth />
       </header>
@@ -94,11 +96,13 @@ export function App() {
         <div hidden={route.screen !== "overview"}>
           <OrbitalBoard active={route.screen === "overview"} onOpen={taskId => { window.location.hash = `/missions/${encodeURIComponent(taskId)}`; }} />
         </div>
+        <div hidden={route.screen !== "shell"}><StandaloneShell active={route.screen === "shell"}
+          taskId={route.screen === "shell" ? route.taskId : undefined} /></div>
         {route.screen === "mission" && <TaskDetail key={route.taskId} taskId={route.taskId}
           onBack={() => { window.location.hash = "/overview"; }} />}
         {route.screen === "agents" && <><div className="application-heading"><h1>Agents</h1>
           <p>Configured environments and their observed capabilities. Missions route automatically.</p></div><Catalog /></>}
-        {route.screen !== "overview" && route.screen !== "mission" && route.screen !== "agents" &&
+        {route.screen !== "overview" && route.screen !== "mission" && route.screen !== "shell" && route.screen !== "agents" &&
           <ApplicationWorkspace screen={route.screen} workspace={workspace} />}
       </main>
     </div>

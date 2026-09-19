@@ -48,7 +48,7 @@ test("seven routes, keyboard focus, private draft retention, history and reload"
 test("inline preview never executes, starts real mission in orbit, and reload preserves diagnostics", async ({ context }, info) => {
   const page = await h.openApp(context);
   await page.getByRole("textbox", { name: "What should Agentic OS do?" }).fill("Inspect retry behavior");
-  await page.getByText("Context & constraints", { exact: true }).click();
+  await page.getByLabel("Mission shell").getByText("Context & constraints", { exact: true }).click();
   await page.getByRole("textbox", { name: "Constraints (one per line)", exact: true }).fill("Keep API compatibility");
   await page.getByRole("button", { name: "Preview routing", exact: true }).click();
   await expect(page.getByRole("button", { name: "Run recommended", exact: true })).toBeVisible();
@@ -56,7 +56,7 @@ test("inline preview never executes, starts real mission in orbit, and reload pr
   const api = await h.privileged();
   expect((await (await api.get(`/api/tasks/${mission.id}`)).json()).runs).toHaveLength(0);
   await expect(page.getByRole("region", { name: "Task orbital map" })).toBeVisible();
-  await page.getByText("Context & constraints", { exact: true }).click();
+  await page.getByLabel("Mission shell").getByText("Context & constraints", { exact: true }).click();
   const inspector = page.getByRole("region", { name: "Selected task inspector" });
   await expect(inspector.getByRole("heading", { name: "Inspect retry behavior", exact: true })).toBeVisible();
   await expect(inspector).not.toContainText("Reading routing and execution evidence…");

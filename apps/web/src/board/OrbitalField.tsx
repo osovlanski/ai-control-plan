@@ -84,6 +84,8 @@ export function OrbitalField({
   models,
   actual,
   readAvailable,
+  registerHref = "#mission-register",
+  registerLabel,
 }: {
   tasks: Mission[];
   selectedId: string | null;
@@ -96,6 +98,8 @@ export function OrbitalField({
   /** What actually executes / is routed for the selected mission. */
   actual: ActualExecution;
   readAvailable: boolean;
+  registerHref?: string;
+  registerLabel?: string;
 }) {
   const sceneRef = useRef<HTMLDivElement>(null);
   const size = useSize(sceneRef);
@@ -135,7 +139,7 @@ export function OrbitalField({
     <>
     <div className="map-heading">
       <strong>Execution field</strong>
-      <a href="#mission-register">{readAvailable ? `${bodies.length} of ${totalTasks} shown` : "Task read unavailable"} · register ↓</a>
+      <a href={registerHref}>{registerLabel ?? `${readAvailable ? `${bodies.length} of ${totalTasks} shown` : "Task read unavailable"} · register ↓`}</a>
     </div>
     <div
       ref={sceneRef}

@@ -18,3 +18,5 @@ createRoot(document.getElementById("root")!).render(
 
 import "./styles/applications.css";
 import "./styles/mission-shell.css";
+
+import "./styles/standalone-shell.css";
