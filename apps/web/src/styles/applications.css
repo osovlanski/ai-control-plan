@@ -24,3 +24,13 @@
   .os-topbar { padding-top: 14px; }
   .application-workspace { padding: 12px 0; }
 }
+/* Delivery recovery — flag-gated; absent from the DOM while session input is off. */
+.delivery-recovery { padding: 28px 0; border-top: 1px solid var(--line-strong); }
+/* `.application-workspace p` is more specific than the tone class alone, and an
+   unresolved delivery must not read as ordinary body copy here. */
+.delivery-recovery p[class*="tone-"] { color: var(--tone); }
+.delivery-recovery-count { margin-top: 12px; font-size: 14px; }
+.delivery-recovery-row { padding: 18px 0; border-top: 1px solid var(--line); }
+.delivery-recovery-text { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text); }
+.delivery-recovery-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 14px; }
+.delivery-recovery-actions .btn { margin-top: 0; }

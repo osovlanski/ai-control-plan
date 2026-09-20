@@ -339,6 +339,8 @@ export const api = {
     }),
   sessionInputs: (sessionId: string) =>
     req<{ inputs: SessionInput[]; nextCursor: string | null }>(`/api/sessions/${encodeURIComponent(sessionId)}/inputs`),
+  /** Every message this workspace cannot account for, across sessions. */
+  unresolvedInputs: () => req<{ inputs: SessionInput[] }>("/api/inputs/unresolved"),
   assistants: () => req<Assistant[]>("/api/assistants"),
   changes: () => req<CapabilityChange[]>("/api/assistants/changes"),
   syncAssistant: (id: string) => req<unknown>(`/api/assistants/${id}/sync`, { method: "POST" }),
