@@ -25,9 +25,9 @@ never a second workspace or API origin.
 | Surface | First step | Later boundary |
 | --- | --- | --- |
 | History | Existing tasks, including unstarted route previews; state labels and task IDs | Pagination/search API when scale warrants it |
-| Transcript | Persisted goal, readable normalized events, session ownership and timestamps; bounded recent window with full evidence link | Durable user messages and delivery receipts |
+| Transcript | Persisted goal, readable normalized events, session ownership and timestamps; bounded recent window with full evidence link; flag-gated follow-ups read back from the input ledger with their delivery state | Attachments and a delivery receipt per provider turn |
 | Updates | Existing authenticated SSE invalidates canonical reads; periodic reconciliation and reconnect refresh | Resumable event cursor and heartbeat protocol |
-| Composer | Shared goal form, automatic routing, preview then start; persistent draft within mounted mode | Session-addressed follow-ups after delivery contract |
+| Composer | Shared goal form, automatic routing, preview then start; persistent draft within mounted mode; flag-gated session-addressed send reusing one client message id | Attachments; a finished conversation experience |
 | Context | Allowlisted repository path, constraints, routing profile in disclosure | Attachments, memory recall and tool selection explicitly future |
 | Approvals | Same durable pending approvals and task approval command as Operator | Provider acknowledgement exposed separately from recorded decision |
 | Commands | Link to existing mission controls, which gate stop/continue/retry/reroute/schedule/context actions by real state | No new unsupported command handlers |
@@ -37,11 +37,26 @@ never a second workspace or API origin.
 | Memory/traces | Links to existing mission evidence and Memory destination | No second memory or transcript store |
 
 The goal is labelled **recorded in the kernel**, not provider-confirmed delivery.
-There is no Send button for arbitrary follow-ups. The composer area explains the
-missing capability and offers a new mission and existing controls. New mission is
-not a claim to clear an existing provider session. A successful start request is
-not a message-delivery acknowledgement. A lost create response is currently
-ambiguous; inspect history before retrying. Do not manufacture a delivery badge.
+New mission is not a claim to clear an existing provider session. A successful
+start request is not a message-delivery acknowledgement. A lost create response
+is currently ambiguous; inspect history before retrying. Do not manufacture a
+delivery badge.
+
+While `sessionInput.enabled` is false — the default — there is no Send button
+for arbitrary follow-ups: the composer area explains the missing capability and
+offers a new mission and existing controls, and no transcript entry, no ledger
+read and no delivery wording exist at all.
+
+With it on, each follow-up is rendered from the plane's own ledger rather than
+from what the browser remembers sending, so a reload, a second tab and a
+scheduler-owned redelivery agree. The wording never runs ahead of the plane:
+`queued` is "recorded · waiting to send", an unknown outcome is never "sent",
+and provider receipt is claimed only where one was recorded.
+`manual_recovery_required` is named as itself — **delivery unresolved · needs
+manual recovery** — with the tone reserved for "a person is needed", because
+the plane has decided it will not resend and that is a fact to act on, not a
+softer kind of pending. Retry and cancel are offered only where the plane
+accepts them, so no button returns a 409.
 
 Shared code: task discovery hook, mission snapshot hook, `MissionConversation`
 (compact in Operator, expanded in Shell), `NewTask`, `OrbitalField`, execution and
@@ -74,10 +89,13 @@ baseline remains auditable.
 1. **Durable conversational input**: the disabled-by-default backend slice of the
    [contract plan](../contracts/session-input.md) — one deterministic adapter plus
    restart and ambiguous-delivery tests — is implemented and recorded in
-   [its implementation record](../agentic-os-session-input.md). Remaining: one live
-   adapter with actual provider acknowledgement semantics.
-2. **Transcript delivery UI**: consume those canonical records in both modes;
-   retry the same logical input, never generate another message on ambiguous send.
+   [its implementation record](../agentic-os-session-input.md), and the first live
+   adapter (Claude Code) is implemented on top of it.
+2. **Transcript delivery UI**: done for both modes — per-message delivery state
+   in the Shell transcript and a cross-session Delivery recovery section in
+   Traces, over `/api/inputs/unresolved`. Evidence:
+   [3 captures](assets/session-input-delivery/). Remaining: nothing new is
+   surfaced for a provider turn's own delivery, and attachments stay future.
 3. **Sirius proof**: accept ownership/API seam first, then manifest, isolation,
    deterministic execution, trace/cancel/approval/restart conformance. No live
    capability claim before all safety gates pass.

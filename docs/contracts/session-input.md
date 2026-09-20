@@ -399,10 +399,45 @@ disagrees with the live process about which provider session it is answers
 assistant answers `adapter_input_unsupported` — never a silent fallback to the
 deterministic adapter.
 
+### Delivery state, where a person can see it
+
+Delivery state that only the plane can see is not delivery state anyone can act
+on. Two surfaces read it, both flag-gated, neither holding any state of its own.
+
+**Shell.** Each follow-up appears in the mission transcript, read back from the
+session's input ledger rather than from what the browser remembers sending — so
+a reload, a second tab and a scheduler-owned redelivery agree. Every message the
+session holds is shown, not only the most recent.
+
+**Operator.** `GET /api/inputs/unresolved` lists every message in the workspace
+whose delivery cannot be accounted for, and Traces renders it. That set is
+`delivery_unknown = 1`, which is the whole of it by construction: the schema
+already restricts the flag to `accepted`, and `accepted` + unknown is the only
+shape meaning "an attempt was taken and the outcome is not known". Rows carrying
+`manual_recovery_required` are deliberately not a separate query — the
+distinction is on the row, and an operator needs the set whole rather than only
+its worst half. The read exposes no fact the per-session listing did not; it
+only makes those rows findable without already knowing which session to open.
+
+Two rules govern both surfaces:
+
+1. **`manual_recovery_required` is named, never softened.** It is not a slower
+   kind of pending. The plane has decided it will not resend, because neither
+   reconciliation route exists and a blind retry is how a message arrives twice.
+   The surfaces say that, and say what retrying will and will not do.
+2. **A command is offered only where the plane accepts it.** Retry and cancel
+   mirror `canRetryInput` / `canCancelInput`, so no button returns a 409. A
+   message with a live attempt offers neither: its outcome is not yet known.
+
+Note that an unresolved row's `reason` is the *verdict* only in the manual
+recovery case; otherwise it carries the attempt's own bounded diagnostic. That
+is why the check is an equality test and never "has a reason".
+
 ### Still deferred
 
 * Codex and Cursor adapters.
 * Retention/deletion policy for inputs and receipts, and the goal-creation
   idempotency key.
 * `compacting` handling, still blocked on K10.
-* Operator/Shell delivery cards beyond the minimal flag-gated Shell composer.
+* Delivery evidence for a provider's own turns, and attachments. The surfaces
+  above cover session-addressed input only.
