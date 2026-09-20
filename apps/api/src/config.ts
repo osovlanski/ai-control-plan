@@ -137,6 +137,13 @@ export interface WorkspaceConfig {
      */
     mcpTools?: Record<string, Record<string, McpToolAccess>>;
   };
+  /**
+   * Durable session-addressed conversational input (docs/contracts/session-input.md).
+   * Default FALSE. While it is off the routes are not registered at all, so the
+   * capability is indistinguishable from absent and the Shell composer stays
+   * truthfully disabled.
+   */
+  sessionInput?: { enabled?: boolean };
   /** Execution-Harness cutover switches (execution-harness.md §5/§10). */
   execution?: {
     /**
@@ -174,10 +181,12 @@ export interface ResolvedDecisionsConfig {
   mcpTools: McpToolPolicy;
 }
 
-export interface ResolvedConfig extends Omit<WorkspaceConfig, "execution" | "models" | "decisions"> {
+export interface ResolvedConfig extends Omit<WorkspaceConfig, "execution" | "models" | "decisions" | "sessionInput"> {
   execution: ResolvedExecutionConfig;
   models: ResolvedModelsConfig;
   decisions: ResolvedDecisionsConfig;
+  /** Always present, always fail-closed by default. */
+  sessionInput: { enabled: boolean };
   /** Directory holding config.yaml and the workspace DB. */
   dir: string;
   dbPath: string;
@@ -235,6 +244,8 @@ const PERSONAL_DEFAULTS: Omit<WorkspaceConfig, "workspace"> = {
   // K13 ships in shadow. Turning this on is an explicit operator act that still
   // has to satisfy every activation gate.
   models: { selection: { enabled: false } },
+  // The session-input contract ships disabled: no route, no ledger write.
+  sessionInput: { enabled: false },
   // M16 seam only (K17): no vendor provider exists yet, so `rules` is the only
   // real choice. Reproduces today's regex/threshold behaviour exactly.
   decisions: { provider: "rules", sites: { "tool-gate": { mode: "shadow" } } },
@@ -299,6 +310,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ResolvedConfig
   const execution = resolveExecution(file.execution, env, configPath, warnings);
   const models = resolveModels(file.models, configPath);
   const decisions = resolveDecisions(file.decisions, configPath);
+  const sessionInput = resolveSessionInput(file.sessionInput, configPath);
 
   const config: WorkspaceConfig = {
     workspace: file.workspace ?? workspace,
@@ -324,7 +336,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ResolvedConfig
   }
   ensureCredential(dir);
 
-  return { ...config, execution, models, decisions, dir, dbPath: join(dir, "agent-plane.db"), warnings };
+  return { ...config, execution, models, decisions, sessionInput, dir, dbPath: join(dir, "agent-plane.db"), warnings };
 }
 
 /**
@@ -482,6 +494,24 @@ function validateDecisions(decisions: ResolvedDecisionsConfig, path: string): vo
   ) {
     throw new Error(`Invalid config at ${path}:\n  - decisions.typesafeApiKeyRef must be a non-empty string`);
   }
+}
+
+/**
+ * Resolve `sessionInput`. Fail-closed: only an explicit `true` enables it, and
+ * there is deliberately NO environment override — the capability writes durable
+ * provider-facing records, so enabling it is a recorded workspace decision.
+ */
+function resolveSessionInput(
+  file: WorkspaceConfig["sessionInput"],
+  configPath: string,
+): { enabled: boolean } {
+  if (file !== undefined && (typeof file !== "object" || Array.isArray(file))) {
+    throw new Error(`${configPath}: sessionInput must be a mapping`);
+  }
+  if (file?.enabled !== undefined && typeof file.enabled !== "boolean") {
+    throw new Error(`${configPath}: sessionInput.enabled must be a boolean, got ${JSON.stringify(file.enabled)}`);
+  }
+  return { enabled: file?.enabled === true };
 }
 
 function validateModels(models: ResolvedModelsConfig, path: string): void {
