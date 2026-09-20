@@ -592,7 +592,7 @@ function renderDefaultConfig(workspace: string): string {
       [
         "# sessionInput.enabled: durable session-addressed conversational input (docs/contracts/session-input.md).",
         "# Default false. While it is false the input routes are not registered and no input ledger row is written.",
-        "# Only the deterministic fake adapter can deliver today; every real provider declares the capability unsupported.",
+        "# Claude Code, Codex (per-session opt-in) and the deterministic fake adapter can deliver; every other provider declares the capability unsupported.",
         "sessionInput:",
       ].join("\n"),
     )
