@@ -213,6 +213,30 @@ export class SessionInputService {
     return rows.map(toRow);
   }
 
+  /**
+   * Every message in this workspace whose delivery this plane cannot account
+   * for, newest first, across all sessions.
+   *
+   * `delivery_unknown = 1` IS that set by construction: the schema already
+   * restricts the flag to `accepted`, and `accepted` + unknown is the only
+   * shape that means "an attempt was taken and the outcome is not known".
+   * The rows carrying `manual_recovery_required` — the ones no automatic
+   * reconciliation can settle — are deliberately not a separate query: the
+   * distinction is already on the row, and an operator needs to see the
+   * unresolved set whole rather than only its worst half.
+   */
+  unresolved(limit = 50): SessionInputRow[] {
+    const bounded = Math.min(Math.max(limit, 1), 200);
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM session_inputs
+          WHERE workspace = ? AND delivery_unknown = 1
+          ORDER BY updated_at DESC, id LIMIT ?`,
+      )
+      .all(this.opts.workspace, bounded) as RawInput[];
+    return rows.map(toRow);
+  }
+
   attempts(messageId: string): SessionInputAttemptRow[] {
     return (
       this.db
