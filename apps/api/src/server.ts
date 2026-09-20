@@ -1,4 +1,4 @@
-import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
+import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import fastifyStatic from "@fastify/static";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -36,6 +36,7 @@ import { QuotaProjection } from "./modules/quota.js";
 import { readTaskContext } from "./modules/context.js";
 import { TaskStore } from "./modules/tasks.js";
 import {
+  SessionInputCommandRejectedError,
   SessionInputConflictError,
   SessionInputInvalidError,
   SessionInputService,
@@ -984,6 +985,45 @@ export function buildServer(deps: ServerDeps): BuiltServer {
       if (!row) return reply.status(404).send({ error: "not found" });
       return inputView(row, inputs);
     });
+
+    // ---- Explicit commands over a message id ----
+    //
+    // Addressed by MESSAGE id, not session id, and authorized exactly like the
+    // send path: a record outside this workspace is invisible, so it answers
+    // 404 rather than revealing that it exists. A command the record's own
+    // state forbids answers 409 with a machine-readable reason — never a
+    // silent no-op, because "nothing happened" and "we refused" are different
+    // facts to an operator deciding what to do next.
+    const command = (
+      run: (id: string, actor: string, expectedVersion?: number) => Promise<SessionInputRow | undefined>,
+    ) =>
+      async (
+        req: FastifyRequest<{ Params: { id: string }; Body?: { expectedVersion?: number } }>,
+        reply: FastifyReply,
+      ) => {
+        const actor = `${req.cred?.kind ?? "unknown"}:${req.cred?.kid ?? "unknown"}`;
+        try {
+          const row = await run(req.params.id, actor, req.body?.expectedVersion);
+          if (!row) return reply.status(404).send({ error: "not found" });
+          return reply.status(200).send(inputView(row, inputs));
+        } catch (err) {
+          if (err instanceof SessionInputCommandRejectedError) {
+            return reply.status(409).send({ error: message(err), reason: err.reason });
+          }
+          throw err;
+        }
+      };
+
+    app.post<{ Params: { id: string }; Body?: { expectedVersion?: number } }>(
+      "/api/inputs/:id/retry", write,
+      command((id, actor, expectedVersion) => inputs.retry(id, actor, expectedVersion)),
+    );
+
+    app.post<{ Params: { id: string }; Body?: { expectedVersion?: number } }>(
+      "/api/inputs/:id/cancel", write,
+      command(async (id, actor, expectedVersion) => inputs.cancel(id, actor, expectedVersion)),
+    );
+
   }
 
   deps.registerExtraRoutes?.(app);
@@ -1095,6 +1135,8 @@ function inputView(row: SessionInputRow, service: SessionInputService): Record<s
     updatedAt: row.updatedAt,
     expiresAt: row.expiresAt,
     providerReceipt: row.providerReceipt,
+    generation: row.generation,
+    retryOf: row.retryOf,
     attempts: service.attempts(row.id),
     events: service.events(row.id),
   };
