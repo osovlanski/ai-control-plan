@@ -27,9 +27,10 @@ test.afterEach(async () => {
 test("Intake never starts a stale goal or constraints after editing a preview", async ({ context }) => {
   const page = await h.openApp(context);
   await page.getByRole("textbox", { name: "What should Agentic OS do?" }).fill("Original goal");
-  await page.getByRole("textbox", { name: "What should Agentic OS do?" }).press("Enter");
+  await page.getByRole("textbox", { name: "What should Agentic OS do?" }).press("Control+Enter");
   await expect(page.getByRole("button", { name: "Run recommended", exact: true })).toBeVisible();
-  await page.getByRole("textbox", { name: "Goal", exact: true }).fill("Revised goal");
+  await page.getByRole("textbox", { name: "What should Agentic OS do?", exact: true }).fill("Revised goal");
+  await page.getByLabel("Mission shell").getByText("Context & constraints", { exact: true }).click();
   await page.getByRole("textbox", { name: /^Constraints/ }).fill("Do not modify production");
   await expect(page.getByRole("button", { name: "Run recommended", exact: true })).toHaveCount(0);
   await page.getByRole("button", { name: "Preview routing", exact: true }).click();
@@ -69,6 +70,8 @@ for (const decision of ["Approve", "Deny"] as const) test(`real Harness approval
   await expect(pending.getByRole("button", { name: "Deny", exact: true })).toBeEnabled();
   // Reload discards all transient SSE/UI state; recover the pending request from storage.
   await page.reload();
+  await expect(page.getByRole("heading", { name: id })).toBeVisible();
+  await page.getByRole("link", { name: "Overview", exact: true }).click();
   await expect(page.locator(".workspace-status .tone-human")).toContainText("1 need you");
   await page.getByRole("button", { name: /Select task: Review deployment/ }).click();
   await expect(inspector.locator(".badge")).toHaveText("Approval required");

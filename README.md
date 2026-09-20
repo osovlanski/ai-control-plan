@@ -1,5 +1,7 @@
 # AI Agent Control Plane
 
+**Conversational shell (2026-09-17):** [current architecture, audit, ownership and acceptance](docs/ui/agentic-os-ui-v3.md). Supersedes the historical three-tab navigation; existing kernel behavior is preserved.
+
 An agnostic control plane that catalogs your available AI assistant environments (Claude Code, OpenAI Codex, Cursor, AWS Bedrock agents), explains and selects the best one for each task, observes execution through a normalized event timeline, and hands work off between assistants — automatically when the active one hits its usage limits.
 
 It routes between **complete assistant environments** (runtime + models + skills + MCP + tools + account limits), not bare LLM APIs.

@@ -27,6 +27,7 @@ export function MissionActivity({ tasks, selectedId, snapshot, loading, error, o
   loading: boolean; error: string | null; onSelect: (id: string) => void;
 }) {
   const attention = tasks.filter(t => ["WAITING_INPUT", "AWAITING_APPROVAL", "LIMIT_PAUSED"].includes(missionState(t)));
+  const uncertain = tasks.some(t => missionState(t) === "RUNTIME_UNKNOWN");
   const events = snapshot?.events.slice().sort((a, b) => b.ts.localeCompare(a.ts) || b.seq - a.seq).slice(0, 3) ?? [];
   return <div className="overview-feeds">
     <section className="overview-feed" aria-label="Selected mission activity">
@@ -39,7 +40,7 @@ export function MissionActivity({ tasks, selectedId, snapshot, loading, error, o
     <section className="overview-feed" aria-label="Missions needing attention">
       <h2>Needs attention</h2><p className="feed-scope">Approval, input or limit</p>
       {loading ? <p className="feed-empty">Reading task state…</p> : error ? <p className="feed-empty">Task read unavailable. Check the register snapshot below.</p>
-        : attention.length === 0 ? <p className="feed-empty">No missions in an attention state.</p>
+        : attention.length === 0 ? <p className="feed-empty">{uncertain ? "No confirmed attention states. Some runtime and approval reads are unavailable." : "No missions in an attention state."}</p>
         : <ul>{attention.slice(0, 3).map(t => <li key={t.id}><button onClick={() => onSelect(t.id)} aria-pressed={selectedId === t.id}><strong>{t.goal}</strong><span className={`tone-${describeState(missionState(t)).tone}`}>{describeState(missionState(t)).label}</span></button></li>)}</ul>}
       {attention.length > 3 && <a href="#mission-register">All {attention.length} in the register ↓</a>}
     </section>

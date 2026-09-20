@@ -84,6 +84,8 @@ export function OrbitalField({
   models,
   actual,
   readAvailable,
+  registerHref = "#mission-register",
+  registerLabel,
 }: {
   tasks: Mission[];
   selectedId: string | null;
@@ -96,6 +98,8 @@ export function OrbitalField({
   /** What actually executes / is routed for the selected mission. */
   actual: ActualExecution;
   readAvailable: boolean;
+  registerHref?: string;
+  registerLabel?: string;
 }) {
   const sceneRef = useRef<HTMLDivElement>(null);
   const size = useSize(sceneRef);
@@ -135,11 +139,11 @@ export function OrbitalField({
     <>
     <div className="map-heading">
       <strong>Execution field</strong>
-      <a href="#mission-register">{readAvailable ? `${bodies.length} of ${totalTasks} shown` : "Task read unavailable"} · register ↓</a>
+      <a href={registerHref}>{registerLabel ?? `${readAvailable ? `${bodies.length} of ${totalTasks} shown` : "Task read unavailable"} · register ↓`}</a>
     </div>
     <div
       ref={sceneRef}
-      className={`sphere-scene ${pulse.running ? "is-executing" : ""}`}
+      className={`sphere-scene ${readAvailable && pulse.running ? "is-executing" : ""}`}
       style={{ "--orbit-scale": scale } as CSSProperties}
     >
       <svg className="sphere-svg" viewBox={`0 0 ${SCENE} ${SCENE}`} aria-hidden="true">
@@ -339,7 +343,7 @@ export function OrbitalField({
         bodies.map(({ task, ring, phase, flip }) => {
           const state = missionState(task);
           const s = describeState(state);
-          const moving = state === "RUNNING" || state === "ROUTING" || state === "HANDING_OFF";
+          const moving = readAvailable && (state === "RUNNING" || state === "ROUTING" || state === "HANDING_OFF");
           return (
             <button
               key={task.id}

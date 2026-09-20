@@ -34,7 +34,8 @@ const model: CatalogModel = {
 test("catalog exposes each price's provenance and benchmark dates without granting availability", async ({ context }, info) => {
   await context.route("**/api/models", route => route.fulfill({ json: { models: [model] } }));
   const page = await h.openApp(context);
-  await page.getByRole("button", { name: "Agents", exact: true }).click();
+  await page.getByRole("link", { name: "Agents", exact: true }).click();
+  await page.getByText("Model catalog & evidence", { exact: true }).click();
   const card = page.locator(".card").filter({ hasText: "Model catalog" });
   for (const text of ["manual-price-snapshot", "2026-08-01T00:00:00Z", "price-v2", "expired",
     "applies to test/api", "not an enforcement tariff", "no assistant advertises it", "unknown",
@@ -54,7 +55,8 @@ test("catalog retains a model with unknown context, capabilities and price", asy
     ...model, contextWindowTokens: undefined, capabilities: undefined, pricing: [], benchmarkPriors: [],
   }] } }));
   const page = await h.openApp(context);
-  await page.getByRole("button", { name: "Agents", exact: true }).click();
+  await page.getByRole("link", { name: "Agents", exact: true }).click();
+  await page.getByText("Model catalog & evidence", { exact: true }).click();
   const card = page.locator(".card").filter({ hasText: "Model catalog" });
   for (const text of ["recorded-model", "advertised context unknown", "Capability evidence unavailable", "Price evidence unavailable"])
     await expect(card).toContainText(text);
@@ -69,7 +71,8 @@ test("catalog distinguishes pending, empty and failed reads", async ({ context }
     await route.fulfill(failed ? { status: 503, json: { error: "fixture unavailable" } } : { json: { models: [] } });
   });
   const page = await h.openApp(context);
-  await page.getByRole("button", { name: "Agents", exact: true }).click();
+  await page.getByRole("link", { name: "Agents", exact: true }).click();
+  await page.getByText("Model catalog & evidence", { exact: true }).click();
   const card = page.locator(".card").filter({ hasText: "Model catalog" });
   await expect(card).toContainText("Reading model catalog");
   await expect(card).not.toContainText("No catalog evidence yet");
@@ -77,7 +80,8 @@ test("catalog distinguishes pending, empty and failed reads", async ({ context }
   await expect(card).toContainText("No catalog evidence yet");
   failed = true;
   await page.reload();
-  await page.getByRole("button", { name: "Agents", exact: true }).click();
+  await page.getByRole("link", { name: "Agents", exact: true }).click();
+  await page.getByText("Model catalog & evidence", { exact: true }).click();
   await expect(card).toContainText("Catalog unavailable");
   await expect(card).toContainText("Routing is unaffected");
   await expect(card).not.toContainText("No catalog evidence yet");

@@ -135,12 +135,15 @@ export async function boot(
     async close() {
       await Promise.all([...pages].map(page => page.close()));
       // Settle scripted sessions while their durable store is still open.
-      for (const task of built.tasks.list()) {
-        if (built.orchestrator.isActive(task.id)) {
-          await built.orchestrator.cancelTask(task.id);
-          await expect.poll(() => built.orchestrator.isActive(task.id), { timeout: 10000 }).toBe(false);
-        }
-      }
+      // Independent sessions can drain concurrently; eight slow adapters should
+      // not consume eight consecutive cancellation windows during teardown.
+      await Promise.all(built.tasks.list().filter(task => built.orchestrator.isActive(task.id)).map(async task => {
+        await built.orchestrator.cancelTask(task.id);
+        await expect.poll(() => built.orchestrator.isActive(task.id), { timeout: 10000 }).toBe(false);
+      }));
+      // Browser route interception can leave speculative/aborted HTTP sockets
+      // open after page.close(). Clients and providers are already stopped.
+      built.app.server.closeAllConnections();
       await built.app.close();
       if (db.open) db.close();
       rmSync(home, { recursive: true, force: true });
@@ -151,7 +154,7 @@ export async function boot(
       pages.add(page);
       await page.clock.setFixedTime(clock.current);
       await page.goto(l.url);
-      await expect(page.getByText("Operator workspace", { exact: true })).toBeVisible();
+      await expect(page.getByRole("navigation", { name: "System" })).toBeVisible();
       await expect(page.getByRole("heading", { name: /Command the next wave/ })).toBeVisible();
       return page;
     },

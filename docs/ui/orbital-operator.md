@@ -1,5 +1,7 @@
 # Orbital operator console — visual language (UI v2 / V3)
 
+**Conversational shell (2026-09-17):** [current architecture, audit, ownership and acceptance](agentic-os-ui-v3.md). Supersedes the historical three-tab navigation; existing kernel behavior is preserved.
+
 V3 updates the shell, composer and composition described here. See the
 [V3 audit, navigation decisions and visual evidence](agentic-os-ui-v3.md).
 The compact mission summary sits beside the execution field; complete mission

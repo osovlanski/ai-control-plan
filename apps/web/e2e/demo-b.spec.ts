@@ -281,7 +281,7 @@ async function decisionOverview(page: Page) {
 async function recordViewport(page: Page, testInfo: TestInfo, name: string) {
   const bounds = await page.evaluate(() => {
     const result: Record<string, { x: number; y: number; width: number; height: number; bottom: number }> = {};
-    for (const selector of [".truth-actual", ".truth-shadow", ".decision-why", ".relationship-key", ".command-bar", ".orbital-map", ".os-main"]) {
+    for (const selector of [".truth-actual", ".truth-shadow", ".decision-why", ".relationship-key", ".mission-shell", ".orbital-map", ".os-main"]) {
       const b = document.querySelector(selector)!.getBoundingClientRect();
       result[selector] = { x: b.x, y: b.y, width: b.width, height: b.height, bottom: b.bottom };
     }

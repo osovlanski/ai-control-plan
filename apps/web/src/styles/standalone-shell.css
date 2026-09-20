@@ -1,0 +1,63 @@
+.os-shell.is-shell-mode { grid-template-columns: minmax(0, 1fr); }
+.is-shell-mode .os-rail { display: none; }
+.is-shell-mode .os-main { margin-left: 0; }
+.os-rail-foot .btn { display: block; margin-bottom: 18px; }
+.standalone-shell { display: grid; grid-template-columns: 250px minmax(0, 1fr); max-width: 1500px; margin: 0 auto; min-height: calc(100dvh - 120px); }
+.shell-history { padding: 24px 18px; border-right: 1px solid var(--line); min-width: 0; }
+.shell-history-heading { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; justify-content: space-between; margin-bottom: 20px; }
+.shell-history-heading h2 { font-size: 16px; font-weight: 500; }
+.shell-history nav { display: grid; gap: 6px; max-height: 70dvh; overflow: auto; padding: 4px; }
+.shell-history nav a { display: grid; gap: 6px; text-decoration: none; padding: 12px; border-left: 2px solid transparent; border-radius: 4px; color: var(--text-2); overflow-wrap: anywhere; }
+.shell-history nav a[aria-current] { background: #718cc51c; border-color: var(--accent); color: var(--text); }
+.shell-history nav strong { font-weight: 500; font-size: 14px; }
+.shell-history nav span { font-size: 11px; color: var(--text-2); }
+.shell-workspace { min-width: 0; max-width: 1000px; width: 100%; padding: 24px 40px; margin: 0 auto; }
+.shell-new-mission { display: flex; flex-direction: column; min-height: calc(100dvh - 180px); }
+.shell-new-mission[hidden] { display: none; }
+.shell-welcome { flex: 1; display: flex; flex-direction: column; justify-content: center; padding: 48px 8px; }
+.shell-welcome h1 { font-size: clamp(28px, 3vw, 42px); font-weight: 500; letter-spacing: -.035em; margin: 12px 0; }
+.shell-welcome p { color: var(--text-2); font-size: 16px; }
+.shell-dock { position: sticky; bottom: 12px; z-index: 2; max-height: 65dvh; overflow-y: auto; border: 1px solid var(--line-strong); border-radius: 16px; background: #0b1225; margin-top: 24px; }
+.shell-new-mission .shell-composer > textarea { min-height: 100px; }
+.shell-mission-bar { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 16px; padding-bottom: 18px; border-bottom: 1px solid var(--line); }
+.shell-mission-bar nav { display: flex; flex-wrap: wrap; gap: 18px; font-size: 12px; }
+.shell-execution-summary { display: grid; gap: 12px; margin-top: 18px; color: var(--text-2); font-size: 12px; }
+.shell-execution-summary span { display: block; overflow-wrap: anywhere; }
+.shell-workspace .mission-conversation { padding: 28px 0; }
+.shell-workspace .shell-messages { max-height: none; overflow: visible; gap: 24px; }
+.shell-workspace .shell-messages p { font-size: 15px; line-height: 1.65; }
+.shell-workspace .shell-messages small { display: block; color: var(--text-3); font-size: 11px; margin-top: 8px; }
+.shell-user-goal { padding: 20px 0; margin: 24px 0; border-block: 1px solid var(--line); }
+.shell-user-goal strong { color: var(--accent); font-size: 12px; font-weight: 500; }
+.shell-user-goal p { margin: 10px 0; white-space: pre-wrap; font-size: 16px; }
+.shell-user-goal small { color: var(--text-2); }
+.shell-observations, .shell-orbit { padding: 14px 0; border-top: 1px solid var(--line); }
+.shell-observations > summary, .shell-orbit > summary { cursor: pointer; color: var(--accent); }
+.shell-observations[open] > summary { margin-bottom: 20px; }
+/* The field heading is absolute inside the Overview column; in this panel it stays in flow. */
+.shell-orbit .map-heading { position: static; margin-top: 24px; }
+.shell-orbit .sphere-scene { margin-top: 0; }
+.shell-followup { padding: 18px; }
+.shell-followup label { display: block; font-size: 13px; color: var(--text-2); }
+.shell-followup textarea { display: block; width: 100%; resize: none; background: transparent; border: 0; margin: 8px 0; }
+.shell-followup textarea::placeholder { color: var(--text-2); opacity: 1; }
+.shell-followup .btn { display: inline-block; margin-top: 12px; }
+.shell-workspace :is(a, button, summary, textarea) { scroll-margin-block: 24px; }
+.shell-mission-unavailable { display: grid; gap: 20px; padding-block: 40px; }
+@media (max-width: 1050px) {
+  .standalone-shell { grid-template-columns: 210px minmax(0, 1fr); }
+  .shell-workspace { padding: 24px; }
+}
+@media (max-width: 760px) {
+  .standalone-shell { grid-template-columns: minmax(0, 1fr); }
+  .shell-history { border-right: 0; border-bottom: 1px solid var(--line); padding: 14px 16px; }
+  .shell-history-heading { margin-bottom: 8px; }
+  .shell-history nav { max-height: 160px; }
+  .shell-workspace { padding: 20px 16px; }
+  .shell-welcome { padding: 28px 0; }
+  .shell-new-mission { min-height: calc(100dvh - 320px); }
+  .is-shell-mode .os-topbar { flex-wrap: wrap; gap: 12px; }
+}
+
+.shell-workspace .shell-conversation-head h1 { font-size: 25px; font-weight: 500; line-height: 1.4; }
+.is-shell-mode .os-main { padding-bottom: 24px; }

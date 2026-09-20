@@ -1,5 +1,7 @@
 # Agentic OS — Design & Change Plan
 
+**Conversational shell (2026-09-17):** [current architecture, audit, ownership and acceptance](ui/agentic-os-ui-v3.md). Supersedes the historical three-tab navigation; existing kernel behavior is preserved.
+
 **K12/K14 status — 2026-09-14:** K12 **PARTIAL** overall: both operator
 presentations are implemented (K9 web gauge and Cockpit #37); the joint K9/K12
 live-provider warning-pressure acceptance in kernel-services §5.2.4 remains

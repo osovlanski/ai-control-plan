@@ -38,6 +38,9 @@ export function openTaskEventStream(taskId: string, onMessage: (message: Message
 }
 
 export function TaskDetail({ taskId, onBack }: { taskId: string; onBack: () => void }) {
+  const [eventError, setEventError] = useState<string | null>(null);
+  const [readError, setReadError] = useState<string | null>(null);
+  const [unavailable, setUnavailable] = useState<string[]>([]);
   const [detail, setDetail] = useState<Detail | null>(null);
   const [events, setEvents] = useState<TaskEvent[]>([]);
   const [state, setState] = useState<string>("");
@@ -60,15 +63,18 @@ export function TaskDetail({ taskId, onBack }: { taskId: string; onBack: () => v
   const timelineRef = useRef<HTMLDivElement>(null);
 
   const refresh = () => {
-    void api.task(taskId).then((d) => {
-      setDetail(d);
-      setState(d.state);
+    void Promise.allSettled([api.task(taskId), api.routing(taskId), api.handoffs(taskId),
+      api.checkpoints(taskId), api.comparison(taskId), api.sessions(taskId)]).then(([task, routes, transfers, points, compared, runs]) => {
+      if (task.status === "fulfilled") { setDetail(task.value); setState(task.value.state); setReadError(null); }
+      else setReadError(task.reason instanceof Error ? task.reason.message : String(task.reason));
+      setRouting(routes.status === "fulfilled" ? routes.value : []);
+      setHandoffs(transfers.status === "fulfilled" ? transfers.value : []);
+      setCheckpoints(points.status === "fulfilled" ? points.value : []);
+      setComparison(compared.status === "fulfilled" ? compared.value : null);
+      setSessions(runs.status === "fulfilled" ? runs.value : []);
+      setUnavailable([routes.status === "rejected" ? "Routing" : "", transfers.status === "rejected" ? "Handoffs" : "",
+        points.status === "rejected" ? "Checkpoints" : "", runs.status === "rejected" ? "Sessions" : ""].filter(Boolean));
     });
-    void api.routing(taskId).then(setRouting);
-    void api.handoffs(taskId).then(setHandoffs);
-    void api.checkpoints(taskId).then(setCheckpoints);
-    void api.comparison(taskId).then(setComparison).catch(() => setComparison(null));
-    void api.sessions(taskId).then(setSessions).catch(() => setSessions([]));
     if (selectedSessionId.current) void api.session(selectedSessionId.current).then(setSession).catch(() => setSession(null));
   };
 
@@ -84,7 +90,7 @@ export function TaskDetail({ taskId, onBack }: { taskId: string; onBack: () => v
     setSession(null);
     setSessions([]);
     selectedSessionId.current = null;
-    void api.events(taskId).then(setEvents);
+    void api.events(taskId).then(rows => { setEvents(rows); setEventError(null); }).catch(() => setEventError("Mission event read unavailable"));
     refresh();
 
     // Live tail: SSE carries normalized events and authoritative state changes.
@@ -127,7 +133,9 @@ export function TaskDetail({ taskId, onBack }: { taskId: string; onBack: () => v
     setApproval(null);
   };
 
-  if (!detail) return <p style={{ color: tokens.muted }}>Loading…</p>;
+  if (!detail) return <div><Button variant="secondary" onClick={onBack}>Back to Overview</Button>
+    <p role={readError ? "alert" : "status"} className={readError ? "error" : "muted"}>
+      {readError ? `Mission unavailable: ${readError}` : "Reading mission…"}</p></div>;
 
   const usage = detail.runs.at(-1)?.usage as
     | { inputTokens?: number; outputTokens?: number; costUsd?: number }
@@ -136,9 +144,12 @@ export function TaskDetail({ taskId, onBack }: { taskId: string; onBack: () => v
 
   return (
     <div className="task-detail">
+      {readError && <p role="alert" className="error">Mission refresh unavailable: {readError}</p>}
+      {eventError && <p role="status" className="error">{eventError}</p>}
+      {!!unavailable.length && <p role="status" className="error">Unavailable evidence: {unavailable.join(", ")}</p>}
       <div className="task-detail-toolbar" style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: "0.8rem", marginBottom: "1rem" }}>
         <Button variant="secondary" onClick={onBack}>
-          ← Board
+          ← Overview
         </Button>
         <h2 style={{ margin: 0, fontSize: "1.05rem", whiteSpace: "nowrap", fontFamily: tokens.mono }}>{detail.id}</h2>
         <StateBadge state={state} />

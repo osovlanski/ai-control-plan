@@ -113,6 +113,19 @@ test("reference screenshots: active workspace, quota wait, laptop, mobile", asyn
   await expect(page.locator(".satellite.executing")).toHaveCount(1);
   await shot("1-desktop-active", page);
   await shot("1-desktop-active-full", page, true);
+  await page.getByRole("button", { name: "Selected mission", exact: true }).click();
+  // This adapter is deliberately held before its first message.
+  await expect(page.locator(".shell-conversation-head")).toContainText("Refactor the billing reconciliation service");
+  await expect(page.locator(".shell-messages")).toContainText("No agent messages recorded yet.");
+  await shot("review-active-mission", page, true);
+  // A failed selected-task read must not keep asserting provider participation.
+  await context.route(`**/api/tasks/${running}`, route => route.fulfill({ status: 503, json: { error: "Detail unavailable" } }));
+  await expect(inspector.getByRole("alert")).toBeVisible({ timeout: 10000 });
+  await expect(page.locator(".satellite.executing")).toHaveCount(0);
+  await shot("review-detail-unavailable", page, true);
+  await context.unroute(`**/api/tasks/${running}`);
+  await expect(page.locator(".satellite.executing")).toHaveCount(1, { timeout: 10000 });
+  await page.getByRole("button", { name: "New mission", exact: true }).click();
   const mainBox = await page.locator(".os-main").boundingBox();
   const fieldBox = await page.locator(".orbital-map").boundingBox();
   expect(fieldBox!.width / mainBox!.width).toBeGreaterThan(.44);
@@ -139,6 +152,10 @@ test("reference screenshots: active workspace, quota wait, laptop, mobile", asyn
   await expect(page.locator(".orbital-body.state-AWAITING_APPROVAL")).not.toHaveClass(/moving/);
   await expect(page.locator(".satellite.executing")).toHaveCount(0);
   await shot("3b-desktop-approval", page);
+  await page.getByRole("button", { name: "Selected mission", exact: true }).click();
+  await expect(page.getByRole("group", { name: "Mission approval" })).toBeVisible();
+  await shot("review-approval-required", page, true);
+  await page.getByRole("button", { name: "New mission", exact: true }).click();
 
   // 4. Laptop and 5. mobile — asserted free of horizontal overflow.
   await select(quota);
@@ -170,26 +187,35 @@ test("reference screenshots: active workspace, quota wait, laptop, mobile", asyn
   });
   expect(overlaps).toEqual([]);
 
-  // 7. Intake screen reached from the command bar.
+  // 7. Inline intake stays beside the mission orbit.
   await page.getByRole("textbox", { name: "What should Agentic OS do?" }).fill("Audit the retry policy for idempotency");
-  await page.getByRole("button", { name: "Route mission" }).click();
-  await expect(page.getByRole("heading", { name: "New mission" })).toBeVisible();
+  await page.getByRole("button", { name: "Preview routing" }).click();
+  await expect(page.getByRole("region", { name: "Routing recommendation" })).toBeVisible();
   await expect(page.getByText(/Rule fired:/)).toBeVisible();
   const preview = built.tasks.list().find(t => t.goal === "Audit the retry policy for idempotency")!;
   expect((await (await api.get(`/api/tasks/${preview.id}`)).json()).runs).toHaveLength(0);
-  await shot("7-intake", page);
+  await shot("7-inline-preview", page);
 
   // 8. Full controls & diagnostics and 9. the agent catalog keep the same shell.
-  await page.getByRole("button", { name: "Orbital" }).click();
+  await page.getByRole("link", { name: "Overview" }).click();
+  await page.getByRole("button", { name: "Selected mission", exact: true }).click();
   await select(quota);
   await page.getByRole("button", { name: /Open full controls/ }).click();
   await expect(page.getByRole("heading", { name: quota })).toBeVisible();
   await shot("8-task-detail", page);
-  await page.getByRole("button", { name: "Agents" }).click();
-  await expect(page.getByText("What changed today")).toBeVisible();
+  await page.getByRole("link", { name: "Agents" }).click();
+  await expect(page.getByRole("heading", { name: "Agents", exact: true })).toBeVisible();
   await shot("9-agents", page);
+  for (const name of ["Memory", "Routing", "Traces", "Tools", "Settings"]) {
+    await page.getByRole("link", { name, exact: true }).click();
+    await expect(page.getByRole("heading", { name, exact: true })).toBeVisible();
+    await shot(`review-${name.toLowerCase()}`, page);
+    await page.setViewportSize({ width: 390, height: 844 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.setViewportSize({ width: 1440, height: 1000 });
+  }
 
-  expect(consoleErrors).toEqual([]);
+  expect(consoleErrors.filter(e => !e.includes("503"))).toEqual([]);
 
   await api.dispose();
 });
