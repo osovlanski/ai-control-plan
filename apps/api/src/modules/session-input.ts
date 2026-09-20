@@ -23,7 +23,9 @@ import {
   RUN_STATE_TO_SESSION_STATE,
   SessionInputRejectedError,
   assertInputTransition,
+  canCancelInput,
   canClaimDelivered,
+  canRetryInput,
   canonicalJson,
   digestString,
   inputEventFor,
@@ -57,6 +59,10 @@ export interface SessionInputRow {
   updatedAt: string;
   expiresAt: string | null;
   providerReceipt: SessionInputReceipt | null;
+  /** Which incarnation of `clientMessageId` this row is; 1 is the first submit. */
+  generation: number;
+  /** The settled row this one retries, when it is not the first incarnation. */
+  retryOf: string | null;
 }
 
 export interface SessionInputAttemptRow {
@@ -109,6 +115,18 @@ export class SessionInputUnknownSessionError extends Error {
   constructor(readonly sessionId: string) {
     super(`no addressable session ${sessionId}`);
     this.name = "SessionInputUnknownSessionError";
+  }
+}
+
+/**
+ * An explicit retry/cancel command that the record's own state forbids, or that
+ * named a version the record no longer has. Always carries a machine-readable
+ * reason — a command is never silently dropped.
+ */
+export class SessionInputCommandRejectedError extends Error {
+  constructor(readonly reason: string) {
+    super(`session input command refused: ${reason}`);
+    this.name = "SessionInputCommandRejectedError";
   }
 }
 
@@ -358,6 +376,160 @@ export class SessionInputService {
   }
 
   /**
+   * Explicit retry over a message id.
+   *
+   * Two shapes, and the difference is the whole safety argument:
+   *
+   *   `accepted` + unknown delivery — the provider MAY already hold the text.
+   *   The retry is a reconciliation (receipt lookup, or a declared-idempotent
+   *   replay of the SAME message id), never a second send. `dispatch` already
+   *   owns that rule, so this path delegates to it unchanged.
+   *
+   *   `rejected` — the refusal was definitive, so nothing was delivered and a
+   *   fresh attempt cannot duplicate anything. The settled row stays settled
+   *   (terminal is terminal); a successor row inherits the client key, the
+   *   payload fingerprint and the text, and carries the next generation.
+   *
+   * A message with a live, unresolved attempt is refused with
+   * `delivery_in_flight`: that is exactly the ambiguous-delivery case the
+   * restart tests prove, and retrying through it would break the guarantee.
+   */
+  async retry(
+    messageId: string,
+    actor: string,
+    expectedVersion?: number,
+  ): Promise<SessionInputRow | undefined> {
+    const row = this.get(messageId);
+    if (!row) return undefined;
+    // Re-authorized on every command, exactly like the original send path.
+    const session = this.session(row.sessionId);
+    if (!session) return undefined;
+    if (expectedVersion !== undefined && expectedVersion !== row.version) {
+      throw new SessionInputCommandRejectedError("version_conflict");
+    }
+    const check = canRetryInput(row.state, row.deliveryUnknown);
+    if (!check.allowed) throw new SessionInputCommandRejectedError(check.reason);
+    // The command itself is traced, distinctly from anything the retry causes.
+    this.trace("input.retry_requested", row.id, session, actor, this.now(), `from_${row.state}`, null);
+    if (row.state === "accepted") return this.dispatch(row.id);
+    return this.dispatch(this.successor(row, session, actor).id);
+  }
+
+  /**
+   * Explicit cancel over a message id. Only a message that was never dispatched
+   * can be cancelled. Anything already `accepted` is refused with
+   * `already_dispatched` rather than silently ignored: the provider may hold
+   * the text, and the plane cannot recall it.
+   */
+  cancel(messageId: string, actor: string, expectedVersion?: number): SessionInputRow | undefined {
+    const row = this.get(messageId);
+    if (!row) return undefined;
+    const session = this.session(row.sessionId);
+    if (!session) return undefined;
+    if (expectedVersion !== undefined && expectedVersion !== row.version) {
+      throw new SessionInputCommandRejectedError("version_conflict");
+    }
+    const check = canCancelInput(row.state);
+    if (!check.allowed) throw new SessionInputCommandRejectedError(check.reason);
+    try {
+      this.db.transaction(() => {
+        this.trace("input.cancelled", row.id, session, actor, this.now(), "cancelled_by_actor", null);
+        // `queued -> rejected` is an edge the contract already has; a cancel is
+        // a definitive refusal to deliver, recorded with its own reason.
+        this.transition(row, "rejected", "cancelled_by_actor", session, null);
+      })();
+    } catch (err) {
+      if (!(err instanceof Error) || !/concurrent state change/.test(err.message)) throw err;
+      // A dispatch won the row between the check and the write. Report what is
+      // now true rather than the race.
+      const now = this.get(messageId);
+      const recheck = now ? canCancelInput(now.state) : ({ allowed: false, reason: "already_settled" } as const);
+      throw new SessionInputCommandRejectedError(recheck.allowed ? "concurrent_change" : recheck.reason);
+    }
+    return this.get(row.id);
+  }
+
+  /**
+   * Scheduler-owned redelivery for one task.
+   *
+   * Driven by the kernel's existing task-state announcement (the `{kind:
+   * "state"}` frame on `TaskEventBus`, published by the orchestrator, the
+   * scheduler and the harness recorder) — this module owns no timer and does
+   * no polling, exactly as the contract requires for quota recovery.
+   *
+   * Only messages queued BECAUSE of a session condition that can clear are
+   * reconsidered. `context_barrier` is deliberately absent: compaction is
+   * policy-only until the kernel has a compaction record (K10).
+   *
+   * A redelivery is an ordinary dispatch, so it is subject to the same
+   * idempotency, lease-epoch fencing and ambiguous-delivery rules as a
+   * client-initiated send. Losing a race to a concurrent client command is the
+   * fence working; it is not a pump failure.
+   */
+  async redeliverForTask(taskId: string): Promise<number> {
+    const rows = this.db
+      .prepare(
+        `SELECT id FROM session_inputs
+          WHERE task_id = ? AND workspace = ? AND state = 'queued'
+            AND reason IN ('quota_paused','approval_pending')
+          ORDER BY created_at, id`,
+      )
+      .all(taskId, this.opts.workspace) as Array<{ id: string }>;
+    let moved = 0;
+    for (const { id } of rows) {
+      try {
+        const after = await this.dispatch(id);
+        if (after && after.state !== "queued") moved += 1;
+      } catch (err) {
+        if (!(err instanceof Error) || !/concurrent state change/.test(err.message)) throw err;
+      }
+    }
+    return moved;
+  }
+
+  /**
+   * The next incarnation of a settled message: same client key, same payload
+   * fingerprint, same text, next generation. Copied in SQL so the inherited
+   * identity cannot drift.
+   *
+   * The unique key `(workspace, session, client key, generation)` is also the
+   * fence — two concurrent retries of the same row compute the same next
+   * generation, so exactly one creates it and the other adopts the winner.
+   */
+  private successor(row: SessionInputRow, session: SessionRecord, actor: string): SessionInputRow {
+    const id = `msg_${randomUUID()}`;
+    const at = this.now();
+    const generation = row.generation + 1;
+    try {
+      this.db.transaction(() => {
+        this.db
+          .prepare(
+            `INSERT INTO session_inputs
+               (id, workspace, session_id, task_id, client_message_id, payload_fingerprint, kind, text,
+                actor, state, reason, delivery_unknown, version, created_at, updated_at, expires_at,
+                generation, retry_of)
+             SELECT ?, workspace, session_id, task_id, client_message_id, payload_fingerprint, kind, text,
+                    ?, 'queued', NULL, 0, 1, ?, ?, expires_at, generation + 1, id
+               FROM session_inputs WHERE id = ?`,
+          )
+          .run(id, actor, at, at, row.id);
+        this.trace("input.queued", id, session, actor, at, "retry_of_rejected", null);
+      })();
+    } catch (err) {
+      if (!(err instanceof Error) || !/UNIQUE/i.test(err.message)) throw err;
+      const winner = this.db
+        .prepare(
+          `SELECT * FROM session_inputs
+            WHERE workspace = ? AND session_id = ? AND client_message_id = ? AND generation = ?`,
+        )
+        .get(this.opts.workspace, row.sessionId, row.clientMessageId, generation) as RawInput | undefined;
+      if (!winner) throw err;
+      return toRow(winner);
+    }
+    return this.get(id)!;
+  }
+
+  /**
    * Boot-time fencing. Every `in_flight` attempt from a previous incarnation is
    * an unknown outcome: the process died between `deliver()` and the durable
    * record of its result, so the provider may or may not hold the message.
@@ -387,7 +559,9 @@ export class SessionInputService {
   private byClientKey(sessionId: string, clientMessageId: string): RawInput | undefined {
     return this.db
       .prepare(
-        "SELECT * FROM session_inputs WHERE workspace = ? AND session_id = ? AND client_message_id = ?",
+        `SELECT * FROM session_inputs
+          WHERE workspace = ? AND session_id = ? AND client_message_id = ?
+          ORDER BY generation DESC LIMIT 1`,
       )
       .get(this.opts.workspace, sessionId, clientMessageId) as RawInput | undefined;
   }
@@ -656,6 +830,7 @@ interface RawInput {
   payload_fingerprint: string; kind: string; text: string; actor: string; state: string;
   reason: string | null; delivery_unknown: number; version: number; created_at: string;
   updated_at: string; expires_at: string | null; provider_receipt: string | null;
+  generation: number; retry_of: string | null;
 }
 
 interface RawAttempt {
@@ -685,6 +860,7 @@ function toRow(r: RawInput): SessionInputRow {
     state: r.state as SessionInputState, reason: r.reason, deliveryUnknown: r.delivery_unknown === 1,
     version: r.version, createdAt: r.created_at, updatedAt: r.updated_at, expiresAt: r.expires_at,
     providerReceipt: parseReceipt(r.provider_receipt),
+    generation: r.generation, retryOf: r.retry_of,
   };
 }
 

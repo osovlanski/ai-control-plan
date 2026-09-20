@@ -37,6 +37,19 @@ export function canRetry(input: SessionInput): boolean {
   return input.state === "accepted" || input.state === "queued";
 }
 
+/**
+ * The two explicit commands, mirroring the plane's own rules so the UI does not
+ * offer a button the plane will refuse. A message with a live attempt offers
+ * neither: its outcome is not yet known, and both commands would be a lie.
+ */
+export function canCommandRetry(input: SessionInput): boolean {
+  return input.state === "rejected" || (input.state === "accepted" && input.deliveryUnknown);
+}
+
+export function canCommandCancel(input: SessionInput): boolean {
+  return input.state === "queued";
+}
+
 const newClientMessageId = (): string =>
   globalThis.crypto?.randomUUID?.() ?? `cmid-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
@@ -60,6 +73,20 @@ export function FollowUpComposer({ enabled, sessionId }: { enabled: boolean; ses
       <a className="btn" href="#/shell">Start a new mission</a>
     </footer>;
   }
+
+  /** Runs one explicit command and shows whatever the plane now says is true. */
+  const command = async (run: () => Promise<SessionInput>) => {
+    if (sending) return;
+    setSending(true);
+    setError(null);
+    try {
+      setRecord(await run());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSending(false);
+    }
+  };
 
   const submit = async () => {
     if (!text.trim() || sending) return;
@@ -89,6 +116,10 @@ export function FollowUpComposer({ enabled, sessionId }: { enabled: boolean; ses
       <button className="btn" type="button" onClick={() => void submit()} disabled={sending || !text.trim()}>
         {record && canRetry(record) ? "Retry this message" : "Send"}
       </button>
+      {record && canCommandRetry(record) && <button className="btn" type="button" disabled={sending}
+        onClick={() => void command(() => api.retrySessionInput(record.id, record.version))}>Retry this delivery</button>}
+      {record && canCommandCancel(record) && <button className="btn" type="button" disabled={sending}
+        onClick={() => void command(() => api.cancelSessionInput(record.id, record.version))}>Cancel</button>}
       <span className="fine-print">Addressing session {sessionId}. Attachments are a future capability.</span>
     </div>
     {error && <p className="error" role="alert">Send failed: {error}. Nothing about delivery is known; retry to resolve it.</p>}

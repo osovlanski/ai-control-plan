@@ -18,6 +18,7 @@ type Subscriber = (payload: TaskStreamPayload) => void;
 /** In-process fan-out of live task activity to SSE subscribers. */
 export class TaskEventBus {
   private subscribers = new Map<string, Set<Subscriber>>();
+  private watchers = new Set<(taskId: string, payload: TaskStreamPayload) => void>();
 
   subscribe(taskId: string, fn: Subscriber): () => void {
     let set = this.subscribers.get(taskId);
@@ -32,7 +33,27 @@ export class TaskEventBus {
     };
   }
 
+  /**
+   * Every frame for every task, for in-process kernel consumers rather than an
+   * SSE client. Used by session-input redelivery, which needs the task-state
+   * announcements the plane already makes but cannot know which task ids to
+   * subscribe to in advance.
+   */
+  subscribeAll(fn: (taskId: string, payload: TaskStreamPayload) => void): () => void {
+    this.watchers.add(fn);
+    return () => {
+      this.watchers.delete(fn);
+    };
+  }
+
   publish(taskId: string, payload: TaskStreamPayload): void {
+    for (const fn of this.watchers) {
+      try {
+        fn(taskId, payload);
+      } catch {
+        // A broken watcher must not break the run loop either.
+      }
+    }
     const set = this.subscribers.get(taskId);
     if (!set) return;
     for (const fn of set) {

@@ -5,7 +5,7 @@
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { SessionInput } from "../api.js";
-import { FollowUpComposer, canRetry, deliveryLabel } from "./FollowUpComposer.js";
+import { FollowUpComposer, canCommandCancel, canCommandRetry, canRetry, deliveryLabel } from "./FollowUpComposer.js";
 
 const input = (over: Partial<SessionInput> = {}): SessionInput => ({
   id: "msg_1", sessionId: "run_1", taskId: "AG-1", clientMessageId: "c1", text: "hi",
@@ -51,6 +51,19 @@ describe("follow-up composer", () => {
       providerReceipt: { reference: "fake-receipt-1", ackLevel: "provider-accepted", at: "2026-09-20T09:00:01.000Z" },
     });
     expect(deliveryLabel(delivered)).toBe("Provider confirmed receipt (provider-accepted)");
+  });
+
+  it("offers the explicit commands only where the plane accepts them", () => {
+    // Mirrors the plane's own rules, so the UI never offers a button that will
+    // come back 409. A live attempt offers neither: its outcome is unknown.
+    expect(canCommandRetry(input({ state: "rejected" }))).toBe(true);
+    expect(canCommandRetry(input({ state: "accepted", deliveryUnknown: true }))).toBe(true);
+    expect(canCommandRetry(input({ state: "accepted" }))).toBe(false);
+    expect(canCommandRetry(input({ state: "queued" }))).toBe(false);
+    expect(canCommandCancel(input({ state: "queued" }))).toBe(true);
+    for (const state of ["accepted", "delivered", "rejected", "expired"] as const) {
+      expect(canCommandCancel(input({ state }))).toBe(false);
+    }
   });
 
   it("offers a retry only while the message is unsettled", () => {

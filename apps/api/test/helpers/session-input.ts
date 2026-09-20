@@ -126,3 +126,29 @@ export async function send(
   });
   return { statusCode: res.statusCode, body: res.statusCode === 404 ? {} : res.json() };
 }
+
+/** Drives one explicit command over a MESSAGE id, exactly as a client would. */
+export async function command(
+  ws: Workspace,
+  messageId: string,
+  action: "retry" | "cancel",
+  body: Record<string, unknown> = {},
+): Promise<{ statusCode: number; body: Record<string, unknown> }> {
+  const res = await ws.built.app.inject({
+    method: "POST",
+    url: `/api/inputs/${messageId}/${action}`,
+    headers: ws.headers,
+    payload: body,
+  });
+  return { statusCode: res.statusCode, body: res.statusCode === 404 ? {} : res.json() };
+}
+
+/**
+ * The kernel's own task-state announcement — the frame the orchestrator, the
+ * scheduler and the harness event recorder all publish — followed by a drain of
+ * the redelivery pump it feeds.
+ */
+export async function announceState(ws: Workspace, taskId: string, state: string): Promise<void> {
+  ws.built.bus.publish(taskId, { kind: "state", state: { state } });
+  await ws.built.sessionInputRedelivery?.();
+}
