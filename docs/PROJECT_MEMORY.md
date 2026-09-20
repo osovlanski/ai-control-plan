@@ -1,5 +1,13 @@
 # Project Memory
 
+Durable facts live above the first `##`. Below that is a log of outcomes, newest last.
+
+Append a section only when a contract changed, a gate opened or closed, a defect was found that the code alone does not explain, or a decision was made that the next session would otherwise re-litigate. Give each new section a date and tag it `SHIPPED`, `PROPOSED` or `BLOCKED`; sections written before this rule carry neither and need not be back-filled. Do not record what the code, the tests or git history already say. Delete a section once it becomes wrong — stale memory costs more than none.
+
+Never write credentials, provider transcripts, hostnames, tunnel ports or internal URLs here.
+
+Plans and review logs are not kept in this file; it records outcomes.
+
 AI Agent Control Plane routes work across complete assistant environments (Claude Code, Codex, Cursor, Bedrock and an opt-in OpenRouter model), normalizes execution events, checkpoints work, handles approvals/failover, and compares parallel runs.
 
 - Architecture: pnpm monorepo. `apps/api` is a Fastify/SQLite orchestration service; `apps/web` is a React 19/Vite UI; `packages/core` owns contracts/state/redaction; `packages/adapters` owns provider runtimes.
@@ -13,7 +21,6 @@ AI Agent Control Plane routes work across complete assistant environments (Claud
 - Weaknesses: large orchestration module, no authenticated remote mode, no frontend tests, limited production packaging/observability.
 - Portfolio: the source of truth for control/execution-plane contracts. `ai-control-plan-agentic-os` was a documentation worktree; its design docs are now tracked here under `docs/`. It is not a separate product. Cockpit is a plausible UX/observability consumer, not currently integrated.
 - Open questions: intended trust boundary for the API; whether remote execution is actually required; ownership/versioning of contracts shared with Cockpit.
-This is not an independent product: it is the `docs/agentic-os-contract-lifecycle` documentation worktree of `ai-control-plan`. The branch proposes later Agentic OS lifecycle phases; proposals must not be reported as shipped features. Build/run/test and architecture match the parent repository; do not evolve duplicate application code here.
 
 ## K1 durable dispatch implementation
 
@@ -55,7 +62,6 @@ unit-tested. Inspector gained a decided / because / next strip derived by
 `@fontsource` (OFL). Reference captures: `pnpm --filter @agent-plane/web visual`.
 Docs: `docs/ui/orbital-operator.md`.
 
-
 ## K7 model identity and catalog (2026-09-08)
 
 - Requested vs served model identity are now two separate persisted facts:
@@ -88,7 +94,6 @@ Docs: `docs/ui/orbital-operator.md`.
   is still rejected, with the five §4.4.5 gates named in the code and a negative
   test that grants proven usage reporting and still expects rejection.
 - Evidence: `docs/agentic-os-k7-model-identity.md`.
-
 
 ## K9 context observation (2026-09-08)
 
