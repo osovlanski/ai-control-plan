@@ -160,8 +160,8 @@ Implemented and covered by tests:
   on**; they remain absent otherwise. 202 means kernel persistence only; a
   message refused on arrival answers 422 carrying its persisted record.
 * `session_inputs`, `session_input_attempts`, `session_input_events` with the
-  unique `(workspace, session_id, client_message_id)` key, the payload
-  fingerprint, per-attempt lease epoch and capability version, and the six
+  unique `(workspace, session_id, client_message_id, generation)` key, the payload
+  fingerprint, per-attempt lease epoch and capability version, and the
   normalized `input.*` events written in the state-change transaction.
 * The five-state machine, with `accepted -> expired` deliberately absent.
 * The session-condition policy for all eight conditions in §"Session-state
@@ -181,11 +181,87 @@ Implemented and covered by tests:
 Still deferred, and still only proposed text above:
 
 * Any live provider adapter and its actual acknowledgement evidence.
-* A dedicated retry/cancel command over a message id and expected version;
-  today a resubmit of the original client key is the whole retry protocol.
-* Scheduler-owned redelivery of a queued message when a quota pause or approval
-  clears; a queued message is dispatched on the next submit or explicit
-  dispatch, not by a background pump.
 * Retention/deletion policy for inputs and receipts, and the goal-creation
   idempotency key noted above.
 * Operator/Shell delivery cards beyond the minimal flag-gated Shell composer.
+
+## Commands and redelivery — 2026-09-20
+
+The second slice closes the two operational gaps above. Both are behind the same
+`sessionInput.enabled` flag, which still defaults to **false**, and both still
+use `FakeSessionInputAdapter` only. Migration `026_session_input_commands.sql`
+applies unconditionally, like 025.
+
+### Retry and cancel over a message id
+
+`POST /api/inputs/:id/retry` and `POST /api/inputs/:id/cancel`, addressed by
+MESSAGE id rather than session id, both accepting an optional
+`expectedVersion`. Authorization is re-evaluated per command exactly as on the
+send path: a record outside the caller's workspace answers 404 rather than
+revealing that it exists. A command the record's own state forbids answers 409
+with a machine-readable `reason` — never a silent no-op, because "nothing
+happened" and "we refused, here is why" are different facts to an operator.
+
+Retry is legal from exactly two places, and the difference is the safety
+argument:
+
+| From | What retry means | Why it is safe |
+| --- | --- | --- |
+| `accepted` + unknown delivery | Reconcile: receipt lookup, or a declared-idempotent replay of the SAME message id | Never a second send; identical to the recovery path the ambiguous-delivery tests prove |
+| `rejected` | A successor row in the same retry chain | The refusal was definitive, so nothing was delivered and a fresh attempt cannot duplicate anything |
+
+Every other state is refused: `accepted` with a live attempt as
+`delivery_in_flight` (exactly the ambiguous-delivery case — sending on top of an
+unresolved attempt is the double-delivery bug), `queued` as `not_dispatched`,
+and `delivered`/`expired` as `already_settled`.
+
+A retry of a rejection does **not** reopen the terminal record. `rejected` stays
+terminal exactly as the state machine proved it: the settled row keeps its
+identity, its reason and its trace, and a successor row inherits the client
+message id, the payload fingerprint and the text — copied in SQL so the
+inherited identity cannot drift — under the next `generation`. The chain is
+still one logical message to its client: a resubmit of that client key resolves
+to the newest generation, which is its live incarnation. The uniqueness key is
+also the fence: two concurrent retries of one row compute the same next
+generation, so exactly one creates it and the other adopts the winner.
+
+Cancel is legal only from `queued`, and settles the message `rejected` with
+reason `cancelled_by_actor` — an edge the state machine already had. A cancel of
+an already-dispatched message is refused with `already_dispatched` rather than
+silently ignored: the provider may already hold the text, and the plane cannot
+recall it. A cancel that loses a race to a dispatch is reported as what is now
+true, not as the race.
+
+Both commands emit their own normalized trace event — `input.retry_requested`
+and `input.cancelled` — distinct from the send's events. They are intents,
+recorded even when they change no state; any state change they cause still emits
+its own `input.*` event afterwards.
+
+### Scheduler-owned redelivery
+
+A message queued behind a quota pause or a pending approval resumes on its own
+when the condition clears, with no client action. The driver is the kernel's
+existing task-state announcement — the `{kind: "state"}` frame the orchestrator,
+the scheduler and the harness event recorder already publish on the task bus.
+The session-input module owns no timer and does no polling, as the contract's
+quota rule requires. The bus gained one in-process fan-out subscription
+(`subscribeAll`) because a redelivery consumer cannot know in advance which task
+ids to subscribe to; the signal itself is unchanged.
+
+Scope is deliberately narrow: only messages queued with reason `quota_paused` or
+`approval_pending` are reconsidered. `context_barrier` is **not** in scope —
+compaction remains policy-only until the kernel has a compaction record (K10).
+
+A redelivery is an ordinary dispatch, so it inherits every guarantee already
+proven: the same idempotency, the same lease-epoch fencing, the same
+ambiguous-delivery rules. The pump is serialized and runs off the publish stack,
+so two announcements can never dispatch one message twice, and a publish inside
+a SQLite transaction cannot re-enter the database. Losing a race to a concurrent
+client command is the fence working, not a pump failure.
+
+The hard case this slice adds is proven end to end: while an automatic
+redelivery is parked inside the adapter with the provider already holding the
+text, a client retry for the same message is refused with `delivery_in_flight`;
+one attempt exists, the provider holds the message once, and only after a
+restart fences the dead owner's attempt into a known-unknown does a retry become
+legal — and it then reconciles rather than re-sends.
