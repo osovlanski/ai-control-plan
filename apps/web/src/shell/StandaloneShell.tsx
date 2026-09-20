@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { NewTask } from "../NewTask.js";
 import { useBoard } from "../board/useBoard.js";
 import { useMissionSnapshot } from "../board/useMissionSnapshot.js";
@@ -7,6 +7,8 @@ import { ContextReadout, QuotaReadout } from "../board/readouts.js";
 import { OrbitalField } from "../board/OrbitalField.js";
 import { actualLifecycle, contextPercent, describeState, fieldPulse, modelIdentityView, observedModel } from "../orbital.js";
 import { MissionConversation } from "./MissionShell.js";
+import { FollowUpComposer } from "./FollowUpComposer.js";
+import { api } from "../api.js";
 
 const destination = (id: string) => `#/shell/${encodeURIComponent(id)}`;
 
@@ -15,6 +17,17 @@ export function StandaloneShell({ active, taskId }: { active: boolean; taskId?: 
   const [revision, setRevision] = useState(0);
   const { tasks, error, loading } = useBoard(revision, active);
   const refresh = () => setRevision(n => n + 1);
+  // Capability discovery, not a guess: a plane with the session-input contract
+  // disabled (the default) leaves the composer exactly as it shipped.
+  const [sessionInput, setSessionInput] = useState(false);
+  useEffect(() => {
+    if (!active) return;
+    let disposed = false;
+    void api.workspace()
+      .then(w => { if (!disposed) setSessionInput(w.sessionInput?.enabled === true); })
+      .catch(() => { if (!disposed) setSessionInput(false); });
+    return () => { disposed = true; };
+  }, [active]);
   return <div className="standalone-shell">
     <aside className="shell-history" aria-label="Mission history">
       <div className="shell-history-heading"><h2>History</h2><a className="btn" href="#/shell">New mission</a></div>
@@ -32,12 +45,12 @@ export function StandaloneShell({ active, taskId }: { active: boolean; taskId?: 
           <p>Set a goal. Inspect the route. Follow the work here.</p></div>
         <div className="shell-dock"><NewTask onPreviewed={refresh} onStarted={id => { refresh(); window.location.hash = destination(id); }} /></div>
       </div>
-      {active && taskId && <ShellMission key={taskId} taskId={taskId} revision={revision} onChanged={refresh} />}
+      {active && taskId && <ShellMission key={taskId} taskId={taskId} revision={revision} onChanged={refresh} sessionInput={sessionInput} />}
     </section>
   </div>;
 }
 
-function ShellMission({ taskId, revision, onChanged }: { taskId: string; revision: number; onChanged: () => void }) {
+function ShellMission({ taskId, revision, onChanged, sessionInput }: { taskId: string; revision: number; onChanged: () => void; sessionInput: boolean }) {
   const { snapshot, error } = useMissionSnapshot(taskId, revision, true);
   const [orbit, setOrbit] = useState(false);
   const controls = `#/missions/${encodeURIComponent(taskId)}`;
@@ -81,10 +94,6 @@ function ShellMission({ taskId, revision, onChanged }: { taskId: string; revisio
           running: execution.assistants.length > 0, lifecycle: actualLifecycle(missionState(task)) }}
         readAvailable={!snapshot.unavailable.includes("Sessions")} registerHref={controls} registerLabel="Mission details" />}
     </details>
-    <footer className="shell-dock shell-followup"><label htmlFor="shell-followup">Follow-up to this mission</label>
-      <textarea id="shell-followup" disabled placeholder="Session-addressed text delivery is not available yet." rows={2} />
-      <p className="fine-print">No text has been sent. Attachments are a future capability. Use approvals above or open the existing mission controls.</p>
-      <a className="btn" href="#/shell">Start a new mission</a>
-    </footer>
+    <FollowUpComposer enabled={sessionInput} sessionId={runs[0]?.id} />
   </>;
 }
