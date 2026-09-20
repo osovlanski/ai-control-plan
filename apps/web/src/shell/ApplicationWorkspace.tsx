@@ -1,4 +1,5 @@
 import type { Workspace } from "../api.js";
+import { DeliveryRecovery } from "./DeliveryRecovery.js";
 import type { Application } from "./routes.js";
 
 const WORKSPACES = {
@@ -41,6 +42,9 @@ export function ApplicationWorkspace({ screen, workspace }: { screen: Applicatio
   const content = WORKSPACES[screen as keyof typeof WORKSPACES];
   return <section className="application-workspace" aria-label={content.title}>
     <div className="application-heading"><span className="eyebrow">Workspace</span><h1>{content.title}</h1><p>{content.intro}</p></div>
+    {/* Real records, not a description of them — and only while the capability
+        that writes them is on. With it off the workspace is unchanged. */}
+    {screen === "traces" && workspace?.sessionInput?.enabled && <DeliveryRecovery />}
     <div className="application-status"><h2>Available today</h2><p>{content.available}</p>
       {screen === "settings" && <p>Current workspace: <strong>{workspace?.workspace ?? "Unavailable"}</strong></p>}
       <a className="btn" href={"href" in content ? content.href : "#/overview"}>{content.action} <span aria-hidden="true">↗</span></a>

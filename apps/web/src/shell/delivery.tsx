@@ -11,6 +11,7 @@
  * merely unconfirmed: the plane has decided it will not resend on its own,
  * which is a fact an operator has to act on.
  */
+import { canCancelInput, canRetryInput } from "@agent-plane/core";
 import { useState } from "react";
 import { api, type SessionInput } from "../api.js";
 
@@ -76,12 +77,13 @@ export function canRetry(input: SessionInput): boolean {
  * offer a button the plane will refuse. A message with a live attempt offers
  * neither: its outcome is not yet known, and both commands would be a lie.
  */
+/** The plane's own command rules (`@agent-plane/core`), so a button is never offered for a refusal. */
 export function canCommandRetry(input: SessionInput): boolean {
-  return input.state === "rejected" || (input.state === "accepted" && input.deliveryUnknown);
+  return canRetryInput(input.state, input.deliveryUnknown).allowed;
 }
 
 export function canCommandCancel(input: SessionInput): boolean {
-  return input.state === "queued";
+  return canCancelInput(input.state).allowed;
 }
 
 /**
