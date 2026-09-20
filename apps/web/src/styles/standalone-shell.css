@@ -42,6 +42,10 @@
 .shell-followup textarea { display: block; width: 100%; resize: none; background: transparent; border: 0; margin: 8px 0; }
 .shell-followup textarea::placeholder { color: var(--text-2); opacity: 1; }
 .shell-followup .btn { display: inline-block; margin-top: 12px; }
+/* Flag-gated follow-up controls; absent from the DOM while the capability is off. */
+.shell-followup-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.shell-followup-actions .fine-print { margin: 0; overflow-wrap: anywhere; }
+.shell-followup-state { margin: 8px 0 0; font-size: 13px; color: var(--text-2); overflow-wrap: anywhere; }
 .shell-workspace :is(a, button, summary, textarea) { scroll-margin-block: 24px; }
 .shell-mission-unavailable { display: grid; gap: 20px; padding-block: 40px; }
 @media (max-width: 1050px) {

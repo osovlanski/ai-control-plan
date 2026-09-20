@@ -71,10 +71,11 @@ is recorded separately — [14 captures](assets/standalone-shell/README.md) and 
 2026-09-19 acceptance section of the canonical record — so the preserved Operator
 baseline remains auditable.
 
-1. **Durable conversational input**: implement the [contract plan](../contracts/session-input.md)
-   behind a disabled-by-default capability, with one deterministic adapter and
-   restart/ambiguous-delivery tests. Then implement one live adapter with actual
-   provider acknowledgement semantics. This is the highest-priority vertical slice.
+1. **Durable conversational input**: the disabled-by-default backend slice of the
+   [contract plan](../contracts/session-input.md) — one deterministic adapter plus
+   restart and ambiguous-delivery tests — is implemented and recorded in
+   [its implementation record](../agentic-os-session-input.md). Remaining: one live
+   adapter with actual provider acknowledgement semantics.
 2. **Transcript delivery UI**: consume those canonical records in both modes;
    retry the same logical input, never generate another message on ambiguous send.
 3. **Sirius proof**: accept ownership/API seam first, then manifest, isolation,
