@@ -450,6 +450,44 @@ export class SessionInputService {
   }
 
   /**
+   * Scheduler-owned redelivery for one task.
+   *
+   * Driven by the kernel's existing task-state announcement (the `{kind:
+   * "state"}` frame on `TaskEventBus`, published by the orchestrator, the
+   * scheduler and the harness recorder) — this module owns no timer and does
+   * no polling, exactly as the contract requires for quota recovery.
+   *
+   * Only messages queued BECAUSE of a session condition that can clear are
+   * reconsidered. `context_barrier` is deliberately absent: compaction is
+   * policy-only until the kernel has a compaction record (K10).
+   *
+   * A redelivery is an ordinary dispatch, so it is subject to the same
+   * idempotency, lease-epoch fencing and ambiguous-delivery rules as a
+   * client-initiated send. Losing a race to a concurrent client command is the
+   * fence working; it is not a pump failure.
+   */
+  async redeliverForTask(taskId: string): Promise<number> {
+    const rows = this.db
+      .prepare(
+        `SELECT id FROM session_inputs
+          WHERE task_id = ? AND workspace = ? AND state = 'queued'
+            AND reason IN ('quota_paused','approval_pending')
+          ORDER BY created_at, id`,
+      )
+      .all(taskId, this.opts.workspace) as Array<{ id: string }>;
+    let moved = 0;
+    for (const { id } of rows) {
+      try {
+        const after = await this.dispatch(id);
+        if (after && after.state !== "queued") moved += 1;
+      } catch (err) {
+        if (!(err instanceof Error) || !/concurrent state change/.test(err.message)) throw err;
+      }
+    }
+    return moved;
+  }
+
+  /**
    * The next incarnation of a settled message: same client key, same payload
    * fingerprint, same text, next generation. Copied in SQL so the inherited
    * identity cannot drift.
