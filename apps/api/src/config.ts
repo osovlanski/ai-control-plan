@@ -106,6 +106,13 @@ export interface WorkspaceConfig {
       egressVerifiedAt?: string;
     };
   };
+  /**
+   * Durable session-addressed conversational input (docs/contracts/session-input.md).
+   * Default FALSE. While it is off the routes are not registered at all, so the
+   * capability is indistinguishable from absent and the Shell composer stays
+   * truthfully disabled.
+   */
+  sessionInput?: { enabled?: boolean };
   /** Execution-Harness cutover switches (execution-harness.md §5/§10). */
   execution?: {
     /**
@@ -133,9 +140,11 @@ export interface ResolvedModelsConfig {
   selection: { enabled: boolean; shadowReviewedAt?: string; egressVerifiedAt?: string };
 }
 
-export interface ResolvedConfig extends Omit<WorkspaceConfig, "execution" | "models"> {
+export interface ResolvedConfig extends Omit<WorkspaceConfig, "execution" | "models" | "sessionInput"> {
   execution: ResolvedExecutionConfig;
   models: ResolvedModelsConfig;
+  /** Always present, always fail-closed by default. */
+  sessionInput: { enabled: boolean };
   /** Directory holding config.yaml and the workspace DB. */
   dir: string;
   dbPath: string;
@@ -193,6 +202,8 @@ const PERSONAL_DEFAULTS: Omit<WorkspaceConfig, "workspace"> = {
   // K13 ships in shadow. Turning this on is an explicit operator act that still
   // has to satisfy every activation gate.
   models: { selection: { enabled: false } },
+  // The session-input contract ships disabled: no route, no ledger write.
+  sessionInput: { enabled: false },
 };
 
 /**
@@ -253,6 +264,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ResolvedConfig
   const warnings: string[] = [];
   const execution = resolveExecution(file.execution, env, configPath, warnings);
   const models = resolveModels(file.models, configPath);
+  const sessionInput = resolveSessionInput(file.sessionInput, configPath);
 
   const config: WorkspaceConfig = {
     workspace: file.workspace ?? workspace,
@@ -277,7 +289,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ResolvedConfig
   }
   ensureCredential(dir);
 
-  return { ...config, execution, models, dir, dbPath: join(dir, "agent-plane.db"), warnings };
+  return { ...config, execution, models, sessionInput, dir, dbPath: join(dir, "agent-plane.db"), warnings };
 }
 
 /**
@@ -373,6 +385,24 @@ function resolveModels(file: WorkspaceConfig["models"], configPath: string): Res
   };
 }
 
+/**
+ * Resolve `sessionInput`. Fail-closed: only an explicit `true` enables it, and
+ * there is deliberately NO environment override — the capability writes durable
+ * provider-facing records, so enabling it is a recorded workspace decision.
+ */
+function resolveSessionInput(
+  file: WorkspaceConfig["sessionInput"],
+  configPath: string,
+): { enabled: boolean } {
+  if (file !== undefined && (typeof file !== "object" || Array.isArray(file))) {
+    throw new Error(`${configPath}: sessionInput must be a mapping`);
+  }
+  if (file?.enabled !== undefined && typeof file.enabled !== "boolean") {
+    throw new Error(`${configPath}: sessionInput.enabled must be a boolean, got ${JSON.stringify(file.enabled)}`);
+  }
+  return { enabled: file?.enabled === true };
+}
+
 function validateModels(models: ResolvedModelsConfig, path: string): void {
   const problems: string[] = [];
   for (const key of ["shadowReviewedAt", "egressVerifiedAt"] as const) {
@@ -444,6 +474,15 @@ function renderDefaultConfig(workspace: string): string {
         "# recommendations are computed and recorded, and execution keeps today's assistant-only semantics.",
         "# Setting it true is necessary but not sufficient; every activation gate in §4.4.3 must also hold.",
         "models:",
+      ].join("\n"),
+    )
+    .replace(
+      /^sessionInput:/m,
+      [
+        "# sessionInput.enabled: durable session-addressed conversational input (docs/contracts/session-input.md).",
+        "# Default false. While it is false the input routes are not registered and no input ledger row is written.",
+        "# Only the deterministic fake adapter can deliver today; every real provider declares the capability unsupported.",
+        "sessionInput:",
       ].join("\n"),
     )
     .replace(
