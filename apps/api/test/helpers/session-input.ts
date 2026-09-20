@@ -142,3 +142,13 @@ export async function command(
   });
   return { statusCode: res.statusCode, body: res.statusCode === 404 ? {} : res.json() };
 }
+
+/**
+ * The kernel's own task-state announcement — the frame the orchestrator, the
+ * scheduler and the harness event recorder all publish — followed by a drain of
+ * the redelivery pump it feeds.
+ */
+export async function announceState(ws: Workspace, taskId: string, state: string): Promise<void> {
+  ws.built.bus.publish(taskId, { kind: "state", state: { state } });
+  await ws.built.sessionInputRedelivery?.();
+}

@@ -93,6 +93,12 @@ export interface BuiltServer {
   modelCatalog: ModelCatalogService;
   /** Present only when `sessionInput.enabled` is true. */
   sessionInputs?: SessionInputService;
+  /**
+   * Resolves once the scheduler-owned redelivery pump has drained everything the
+   * kernel has announced so far. Present only when `sessionInput.enabled` is
+   * true; it exists so a caller can await the pump instead of racing it.
+   */
+  sessionInputRedelivery?: () => Promise<unknown>;
 }
 
 export function buildServer(deps: ServerDeps): BuiltServer {
@@ -909,6 +915,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   // slice, no ledger row is ever written, and the Shell composer keeps saying
   // truthfully that session-addressed delivery is unavailable.
   let sessionInputs: SessionInputService | undefined;
+  let sessionInputRedelivery: (() => Promise<unknown>) | undefined;
   if (config.sessionInput.enabled) {
     const fakes = new Map<string, FakeSessionInputAdapter>();
     const resolve: SessionInputAdapterResolver = deps.sessionInputAdapters ?? ((assistantId) => {
@@ -1024,6 +1031,28 @@ export function buildServer(deps: ServerDeps): BuiltServer {
       command(async (id, actor, expectedVersion) => inputs.cancel(id, actor, expectedVersion)),
     );
 
+    // ---- Scheduler-owned redelivery ----
+    //
+    // The kernel already announces every task-state change on the task bus;
+    // that is the signal, and this subscribes to it rather than inventing a
+    // second one or polling. A message queued behind a quota pause or a
+    // pending approval therefore resumes on its own when the condition clears,
+    // with no client action.
+    //
+    // Work is chained rather than started inline for two reasons: a publish can
+    // happen inside a SQLite transaction, and serializing the pump means two
+    // announcements can never dispatch the same message twice.
+    let pump: Promise<unknown> = Promise.resolve();
+    sessionInputRedelivery = () => pump;
+    const unwatch = bus.subscribeAll((taskId, payload) => {
+      if (payload.kind !== "state") return;
+      pump = pump.then(() =>
+        inputs.redeliverForTask(taskId).catch((err) => {
+          app.log.error(err, "session-input redelivery failed");
+        }),
+      );
+    });
+    app.addHook("onClose", async () => unwatch());
   }
 
   deps.registerExtraRoutes?.(app);
@@ -1042,7 +1071,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     });
   }
 
-  return { app, registry, orchestrator, tasks, bus, checkpoints, cooldowns, telemetry, scheduler, quotaProbes: probes, modelCatalog, sessionInputs };
+  return { app, registry, orchestrator, tasks, bus, checkpoints, cooldowns, telemetry, scheduler, quotaProbes: probes, modelCatalog, sessionInputs, sessionInputRedelivery };
 }
 
 function sseHeaders(reply: FastifyReply): void {

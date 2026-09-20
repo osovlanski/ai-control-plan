@@ -69,6 +69,7 @@ describe("session input — the command rules", () => {
       });
       expect(res.statusCode).toBe(404);
     }
+    expect(ws.built.sessionInputRedelivery).toBeUndefined();
   });
 });
 
