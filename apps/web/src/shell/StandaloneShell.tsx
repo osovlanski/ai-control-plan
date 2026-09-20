@@ -8,7 +8,8 @@ import { OrbitalField } from "../board/OrbitalField.js";
 import { actualLifecycle, contextPercent, describeState, fieldPulse, modelIdentityView, observedModel } from "../orbital.js";
 import { MissionConversation } from "./MissionShell.js";
 import { FollowUpComposer } from "./FollowUpComposer.js";
-import { api } from "../api.js";
+import { DeliveryCommands, DeliveryStatus, useDeliveryCommand } from "./delivery.js";
+import { api, type SessionInput } from "../api.js";
 
 const destination = (id: string) => `#/shell/${encodeURIComponent(id)}`;
 
@@ -83,7 +84,7 @@ function ShellMission({ taskId, revision, onChanged, sessionInput }: { taskId: s
       {detail.state === "LIMIT_PAUSED" && <p className="tone-limit" role="status">Quota pause recorded. Review recovery evidence in mission controls.</p>}
     </div>
     <MissionConversation task={task} snapshot={snapshot} expanded onChanged={onChanged}
-      onOpen={() => { window.location.hash = controls; }} />
+      followUps={sessionInput && !!runs.length} onOpen={() => { window.location.hash = controls; }} />
     <details className="shell-observations"><summary>Context & quota evidence</summary>
       <ContextReadout context={context} /><QuotaReadout scheduler={snapshot.scheduler} unavailable={snapshot.unavailable.includes("Scheduler status")} />
     </details>
@@ -94,6 +95,62 @@ function ShellMission({ taskId, revision, onChanged, sessionInput }: { taskId: s
           running: execution.assistants.length > 0, lifecycle: actualLifecycle(missionState(task)) }}
         readAvailable={!snapshot.unavailable.includes("Sessions")} registerHref={controls} registerLabel="Mission details" />}
     </details>
-    <FollowUpComposer enabled={sessionInput} sessionId={runs[0]?.id} />
+    <SessionInputs enabled={sessionInput} sessionId={runs[0]?.id} />
   </>;
+}
+
+/**
+ * The follow-ups you addressed to this session, read back from the plane's own
+ * ledger rather than remembered by this browser — so a reload, a second tab and
+ * a scheduler-owned redelivery all show the same truth.
+ *
+ * With the capability off (the default) nothing is read and nothing is rendered
+ * but the disabled composer that shipped with Shell mode.
+ */
+function SessionInputs({ enabled, sessionId }: { enabled: boolean; sessionId?: string }) {
+  const [inputs, setInputs] = useState<SessionInput[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [revision, setRevision] = useState(0);
+  const reload = () => setRevision(n => n + 1);
+  useEffect(() => {
+    if (!enabled || !sessionId) return;
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout>;
+    // Polled, because delivery state also changes without this browser acting:
+    // the scheduler redelivers a queued message when its condition clears.
+    const load = async () => {
+      try {
+        const page = await api.sessionInputs(sessionId);
+        if (!disposed) { setInputs(page.inputs); setError(null); }
+      } catch (e) {
+        if (!disposed) setError(e instanceof Error ? e.message : String(e));
+      } finally {
+        if (!disposed) timer = setTimeout(() => void load(), 4000);
+      }
+    };
+    void load();
+    return () => { disposed = true; clearTimeout(timer); };
+  }, [enabled, sessionId, revision]);
+  return <>
+    {enabled && sessionId && <SessionInputTranscript inputs={inputs} error={error} onChanged={reload} />}
+    <FollowUpComposer enabled={enabled} sessionId={sessionId} inputs={inputs} onSent={reload} />
+  </>;
+}
+
+function SessionInputTranscript({ inputs, error, onChanged }: {
+  inputs: SessionInput[]; error: string | null; onChanged: () => void;
+}) {
+  const { busy, error: commandError, run } = useDeliveryCommand(onChanged);
+  if (error) return <p className="error" role="alert">Delivery state unavailable: {error}. Any follow-up you sent is still recorded.</p>;
+  if (!inputs.length) return null;
+  return <section className="shell-inputs" aria-label="Your follow-up messages">
+    {inputs.map(input => <article key={input.id} className="shell-input">
+      <strong>You · <time dateTime={input.createdAt}>{new Date(input.createdAt).toLocaleTimeString()}</time>
+        {(input.generation ?? 1) > 1 && ` · retry ${input.generation}`}</strong>
+      <p>{input.text}</p>
+      <DeliveryStatus input={input} />
+      <div className="shell-input-actions"><DeliveryCommands input={input} busy={busy} run={run} /></div>
+    </article>)}
+    {commandError && <p className="error" role="alert">Command refused: {commandError}. The record is unchanged.</p>}
+  </section>;
 }

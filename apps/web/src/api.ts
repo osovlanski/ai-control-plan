@@ -23,6 +23,16 @@ export interface SessionInput {
   createdAt: string;
   updatedAt: string;
   providerReceipt: { reference: string; ackLevel: string; at: string } | null;
+  /** Incarnation of `clientMessageId`; an explicit retry of a rejection adds one. */
+  generation?: number;
+  /** The settled record this one retries, when it is not the first incarnation. */
+  retryOf?: string | null;
+  /**
+   * Dispatch attempts, oldest first. Present on the single-record and operator
+   * reads; the `diagnostic` is the bounded reason an attempt ended the way it
+   * did, which is the cause behind an unresolved row's verdict.
+   */
+  attempts?: Array<{ ordinal: number; adapter: string; outcome: string; diagnostic: string | null; startedAt: string }>;
 }
 
 export interface Assistant {
@@ -316,6 +326,17 @@ export const api = {
   workspace: () => req<Workspace>("/api/workspace"),
   /** The client generates `clientMessageId` BEFORE the first attempt and reuses it. */
   sendSessionInput: submitSessionInput,
+  // Explicit commands over the MESSAGE id. The plane answers 409 with a reason
+  // when the record's own state forbids the command; that reason is shown as-is
+  // rather than retried, because it is a fact about the record, not a blip.
+  retrySessionInput: (messageId: string, expectedVersion?: number) =>
+    req<SessionInput>(`/api/inputs/${encodeURIComponent(messageId)}/retry`, {
+      method: "POST", body: JSON.stringify({ expectedVersion }),
+    }),
+  cancelSessionInput: (messageId: string, expectedVersion?: number) =>
+    req<SessionInput>(`/api/inputs/${encodeURIComponent(messageId)}/cancel`, {
+      method: "POST", body: JSON.stringify({ expectedVersion }),
+    }),
   sessionInputs: (sessionId: string) =>
     req<{ inputs: SessionInput[]; nextCursor: string | null }>(`/api/sessions/${encodeURIComponent(sessionId)}/inputs`),
   assistants: () => req<Assistant[]>("/api/assistants"),

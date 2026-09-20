@@ -45,7 +45,16 @@
 /* Flag-gated follow-up controls; absent from the DOM while the capability is off. */
 .shell-followup-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
 .shell-followup-actions .fine-print { margin: 0; overflow-wrap: anywhere; }
-.shell-followup-state { margin: 8px 0 0; font-size: 13px; color: var(--text-2); overflow-wrap: anywhere; }
+/* The follow-ups you sent, read back from the ledger. Absent while the
+   capability is off, and absent until this session has one. */
+.shell-inputs { display: grid; gap: 18px; padding: 20px 0; border-top: 1px solid var(--line); }
+.shell-input strong { display: block; color: var(--accent); font-size: 12px; font-weight: 500; }
+.shell-input p { margin: 8px 0 0; white-space: pre-wrap; font-size: 15px; line-height: 1.65; overflow-wrap: anywhere; }
+.delivery-state { margin: 8px 0 0; font-size: 13px; color: var(--tone, var(--text-2)); overflow-wrap: anywhere; }
+/* Guidance, not decoration: it names what the plane will and will not do next. */
+.delivery-guidance { margin: 6px 0 0; font-size: 12px; color: var(--text-2); line-height: 1.7; max-width: 70ch; }
+.shell-input-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
+.shell-input-actions:empty { display: none; }
 .shell-workspace :is(a, button, summary, textarea) { scroll-margin-block: 24px; }
 .shell-mission-unavailable { display: grid; gap: 20px; padding-block: 40px; }
 @media (max-width: 1050px) {

@@ -38,8 +38,11 @@ export function MissionShell({ active, selected, snapshot, onStarted, onChanged,
   </section>;
 }
 
-export function MissionConversation({ task, snapshot, onChanged, onOpen, expanded = false }: {
-  task: Mission; snapshot: Snapshot | null; onChanged: () => void; onOpen: () => void; expanded?: boolean;
+export function MissionConversation({ task, snapshot, onChanged, onOpen, expanded = false, followUps = false }: {
+  task: Mission; snapshot: Snapshot | null; onChanged: () => void; onOpen: () => void;
+  expanded?: boolean;
+  /** True where a session-addressed composer is rendered below this transcript. */
+  followUps?: boolean;
 }) {
   const [sessions, setSessions] = useState<SessionDetail[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -106,6 +109,8 @@ export function MissionConversation({ task, snapshot, onChanged, onOpen, expande
     })}
     <p className="shell-notice" role="status">{notice}</p>
     <div className="shell-conversation-actions"><button className="btn" onClick={onOpen}>Open mission controls</button>
-      <span className="fine-print">Free-text follow-ups are not supported by the task API yet. Approvals and mission controls are available here.</span></div>
+      <span className="fine-print">{followUps
+        ? "Follow-ups you address to this session are recorded below, each with the delivery state the plane can prove."
+        : "Free-text follow-ups are not supported by the task API yet. Approvals and mission controls are available here."}</span></div>
   </div>;
 }
