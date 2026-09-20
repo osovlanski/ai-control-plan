@@ -27,6 +27,12 @@ export interface SessionInput {
   generation?: number;
   /** The settled record this one retries, when it is not the first incarnation. */
   retryOf?: string | null;
+  /**
+   * Dispatch attempts, oldest first. Present on the single-record and operator
+   * reads; the `diagnostic` is the bounded reason an attempt ended the way it
+   * did, which is the cause behind an unresolved row's verdict.
+   */
+  attempts?: Array<{ ordinal: number; adapter: string; outcome: string; diagnostic: string | null; startedAt: string }>;
 }
 
 export interface Assistant {

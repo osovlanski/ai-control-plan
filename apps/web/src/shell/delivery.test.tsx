@@ -1,20 +1,26 @@
 /**
- * The composer's two invariants: it is unchanged while the capability is off,
- * and its wording never claims more than the plane recorded.
+ * The delivery vocabulary and the composer that uses it.
+ *
+ * Two invariants: the composer is unchanged while the capability is off, and no
+ * surface's wording ever claims more than the plane recorded — which is why
+ * `manual_recovery_required` is named rather than softened.
  */
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { SessionInput } from "../api.js";
-import { FollowUpComposer, canCommandCancel, canCommandRetry, canRetry, deliveryLabel } from "./FollowUpComposer.js";
+import { FollowUpComposer } from "./FollowUpComposer.js";
+import {
+  canCommandCancel, canCommandRetry, canRetry, deliveryGuidance, deliveryLabel, deliveryTone, needsManualRecovery,
+} from "./delivery.js";
 
 const input = (over: Partial<SessionInput> = {}): SessionInput => ({
   id: "msg_1", sessionId: "run_1", taskId: "AG-1", clientMessageId: "c1", text: "hi",
-  state: "queued", reason: null, deliveryUnknown: false, version: 1,
+  state: "queued", reason: null, deliveryUnknown: false, generation: 1, version: 1,
   createdAt: "2026-09-20T09:00:00.000Z", updatedAt: "2026-09-20T09:00:00.000Z",
   providerReceipt: null, ...over,
 });
 
-describe("follow-up composer", () => {
+describe("follow-up composer and delivery vocabulary", () => {
   it("stays disabled and says so when the capability is off", () => {
     const html = renderToStaticMarkup(<FollowUpComposer enabled={false} sessionId="run_1" />);
     expect(html).toContain("Session-addressed text delivery is not available yet.");
@@ -34,6 +40,21 @@ describe("follow-up composer", () => {
     expect(html).toContain("Send");
   });
 
+  it("calls a send a retry only while the plane holds an unsettled row for this draft", () => {
+    // The composer reads its own row from the ledger rather than remembering
+    // what it sent, so a reload cannot make it offer a second first-send.
+    const html = renderToStaticMarkup(<FollowUpComposer enabled sessionId="run_1" inputs={[]} />);
+    expect(html).toContain("Send");
+    expect(html).not.toContain("Retry this message");
+  });
+
+  it("shows no delivery state of its own — the transcript owns it", () => {
+    const html = renderToStaticMarkup(<FollowUpComposer enabled sessionId="run_1"
+      inputs={[input({ state: "accepted", deliveryUnknown: true, reason: "manual_recovery_required" })]} />);
+    expect(html).not.toContain("needs manual recovery");
+    expect(html).not.toContain("Retry this delivery");
+  });
+
   it("never renders an unconfirmed delivery as sent", () => {
     expect(deliveryLabel(input({ state: "queued", reason: "approval_pending" })))
       .toBe("Recorded · waiting to send (approval_pending)");
@@ -43,6 +64,30 @@ describe("follow-up composer", () => {
     expect(deliveryLabel(input({ state: "rejected", reason: "session_completed:COMPLETED" })))
       .toBe("Not delivered · session_completed:COMPLETED");
     expect(deliveryLabel(input({ state: "expired" }))).toBe("Expired · not delivered");
+  });
+
+  it("names manual recovery instead of softening it into an unconfirmed send", () => {
+    const stuck = input({ state: "accepted", deliveryUnknown: true, reason: "manual_recovery_required" });
+    expect(needsManualRecovery(stuck)).toBe(true);
+    expect(deliveryLabel(stuck)).toBe("Delivery unresolved · needs manual recovery");
+    // The tone that means "a person is needed", not the one that means success.
+    expect(deliveryTone(stuck)).toBe("tone-human");
+    expect(deliveryGuidance(stuck)).toContain("will not resend");
+    // Every OTHER unresolved row carries its attempt's diagnostic as `reason`,
+    // so the verdict is an equality test and never "has a reason".
+    const unknown = input({ state: "accepted", deliveryUnknown: true, reason: "fake acknowledgement lost in transport" });
+    expect(needsManualRecovery(unknown)).toBe(false);
+    expect(deliveryGuidance(unknown)).toBeNull();
+    expect(deliveryLabel(unknown)).toBe("Sent, but delivery could not be confirmed (fake acknowledgement lost in transport)");
+  });
+
+  it("never tones an unsettled record as delivered", () => {
+    expect(deliveryTone(input({ state: "delivered" }))).toBe("tone-complete");
+    expect(deliveryTone(input({ state: "rejected" }))).toBe("tone-failed");
+    expect(deliveryTone(input({ state: "expired" }))).toBe("tone-failed");
+    expect(deliveryTone(input({ state: "queued" }))).toBe("tone-resource");
+    expect(deliveryTone(input({ state: "accepted" }))).toBe("tone-active");
+    expect(deliveryTone(input({ state: "accepted", deliveryUnknown: true }))).toBe("tone-limit");
   });
 
   it("claims provider receipt only when the plane recorded one", () => {
