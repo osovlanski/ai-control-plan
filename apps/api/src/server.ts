@@ -50,7 +50,7 @@ import { RepositoryIdentityRegistry } from "./repo/identity-registry.js";
 import { renderHandoffMd } from "./render/handoff.js";
 import { renderProgressMd } from "./render/progress.js";
 import { registerAuth, type SessionMap } from "./auth/index.js";
-import { FakeSessionInputAdapter } from "@agent-plane/adapters";
+import { ClaudeAdapter, ClaudeCodeSessionInputAdapter, FakeSessionInputAdapter } from "@agent-plane/adapters";
 import { CredentialStore, credentialPath } from "./auth/credential-file.js";
 
 export interface ServerDeps {
@@ -918,13 +918,28 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   let sessionInputRedelivery: (() => Promise<unknown>) | undefined;
   if (config.sessionInput.enabled) {
     const fakes = new Map<string, FakeSessionInputAdapter>();
+    const lives = new Map<string, ClaudeCodeSessionInputAdapter>();
     const resolve: SessionInputAdapterResolver = deps.sessionInputAdapters ?? ((assistantId) => {
-      // Real providers declare no session-input capability in this slice. A
-      // typed `AgentAdapter.send` is NOT an acknowledgement contract, so it is
-      // deliberately not reused here.
+      // `AgentAdapter.send` is still NOT reused as the delivery seam: it has no
+      // idempotency, receipt or acknowledgement contract, and a typed method is
+      // not acceptance evidence. Claude Code gets its own adapter, which proves
+      // delivery from the CLI's own transcript; every OTHER provider still
+      // declares no session-input capability at all.
       const row = db.prepare("SELECT provider FROM assistants WHERE id = ?").get(assistantId) as
         | { provider: string }
         | undefined;
+      if (row?.provider === "anthropic") {
+        let adapter = lives.get(assistantId);
+        if (!adapter) {
+          const agent = registry.adapter(assistantId);
+          // Only a live-input ClaudeAdapter can be delivered to. Anything else
+          // has no capability rather than a silently faked one.
+          if (!(agent instanceof ClaudeAdapter)) return undefined;
+          adapter = new ClaudeCodeSessionInputAdapter((sessionId) => agent.liveSession(sessionId));
+          lives.set(assistantId, adapter);
+        }
+        return adapter;
+      }
       if (row?.provider !== "fake") return undefined;
       let adapter = fakes.get(assistantId);
       if (!adapter) {
