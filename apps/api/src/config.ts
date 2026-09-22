@@ -106,6 +106,22 @@ export interface WorkspaceConfig {
       egressVerifiedAt?: string;
     };
   };
+  /**
+   * M16 Decision Service (K17). Provider seam only — no site is wired to it
+   * yet. Fail-closed default `rules` reproduces today's behaviour exactly and
+   * makes no network call.
+   */
+  decisions?: {
+    /** typesafe | model | rules (default: rules). Neither vendor provider exists yet (K17). */
+    provider?: "typesafe" | "model" | "rules";
+    /**
+     * Reference NAME only, e.g. "TYPESAFE_API_KEY" — resolved through
+     * `SecretBroker` at the call boundary when a caller actually needs it
+     * (harness/secret-broker.ts). Never the key value, never read from
+     * `process.env` here.
+     */
+    typesafeApiKeyRef?: string;
+  };
   /** Execution-Harness cutover switches (execution-harness.md §5/§10). */
   execution?: {
     /**
@@ -133,9 +149,16 @@ export interface ResolvedModelsConfig {
   selection: { enabled: boolean; shadowReviewedAt?: string; egressVerifiedAt?: string };
 }
 
-export interface ResolvedConfig extends Omit<WorkspaceConfig, "execution" | "models"> {
+/** The resolved decisions block — always present, always fail-closed to "rules". */
+export interface ResolvedDecisionsConfig {
+  provider: "typesafe" | "model" | "rules";
+  typesafeApiKeyRef?: string;
+}
+
+export interface ResolvedConfig extends Omit<WorkspaceConfig, "execution" | "models" | "decisions"> {
   execution: ResolvedExecutionConfig;
   models: ResolvedModelsConfig;
+  decisions: ResolvedDecisionsConfig;
   /** Directory holding config.yaml and the workspace DB. */
   dir: string;
   dbPath: string;
@@ -193,6 +216,9 @@ const PERSONAL_DEFAULTS: Omit<WorkspaceConfig, "workspace"> = {
   // K13 ships in shadow. Turning this on is an explicit operator act that still
   // has to satisfy every activation gate.
   models: { selection: { enabled: false } },
+  // M16 seam only (K17): no vendor provider exists yet, so `rules` is the only
+  // real choice. Reproduces today's regex/threshold behaviour exactly.
+  decisions: { provider: "rules" },
 };
 
 /**
@@ -253,6 +279,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ResolvedConfig
   const warnings: string[] = [];
   const execution = resolveExecution(file.execution, env, configPath, warnings);
   const models = resolveModels(file.models, configPath);
+  const decisions = resolveDecisions(file.decisions, configPath);
 
   const config: WorkspaceConfig = {
     workspace: file.workspace ?? workspace,
@@ -268,6 +295,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ResolvedConfig
 
   validate(config, configPath);
   validateModels(models, configPath);
+  validateDecisions(decisions, configPath);
 
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   chmodSync(dir, 0o700);
@@ -277,7 +305,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ResolvedConfig
   }
   ensureCredential(dir);
 
-  return { ...config, execution, models, dir, dbPath: join(dir, "agent-plane.db"), warnings };
+  return { ...config, execution, models, decisions, dir, dbPath: join(dir, "agent-plane.db"), warnings };
 }
 
 /**
@@ -373,6 +401,37 @@ function resolveModels(file: WorkspaceConfig["models"], configPath: string): Res
   };
 }
 
+const DECISION_PROVIDERS = ["typesafe", "model", "rules"] as const;
+
+/**
+ * Resolve `decisions` to its canonical shape. Fail-closed: an absent block or
+ * an absent `provider` key resolves to `rules`, which makes no network call
+ * and reproduces today's behaviour exactly (K17). `typesafeApiKeyRef` is
+ * carried through as a reference NAME only — never resolved here.
+ */
+function resolveDecisions(file: WorkspaceConfig["decisions"], configPath: string): ResolvedDecisionsConfig {
+  if (file !== undefined && (typeof file !== "object" || Array.isArray(file))) {
+    throw new Error(`${configPath}: decisions must be a mapping`);
+  }
+  const provider = file?.provider ?? "rules";
+  if (!DECISION_PROVIDERS.includes(provider as (typeof DECISION_PROVIDERS)[number])) {
+    throw new Error(`${configPath}: decisions.provider must be one of ${DECISION_PROVIDERS.join(" | ")}, got ${JSON.stringify(provider)}`);
+  }
+  return {
+    provider: provider as ResolvedDecisionsConfig["provider"],
+    ...(file?.typesafeApiKeyRef !== undefined ? { typesafeApiKeyRef: file.typesafeApiKeyRef } : {}),
+  };
+}
+
+function validateDecisions(decisions: ResolvedDecisionsConfig, path: string): void {
+  if (
+    decisions.typesafeApiKeyRef !== undefined &&
+    (typeof decisions.typesafeApiKeyRef !== "string" || decisions.typesafeApiKeyRef.trim() === "")
+  ) {
+    throw new Error(`Invalid config at ${path}:\n  - decisions.typesafeApiKeyRef must be a non-empty string`);
+  }
+}
+
 function validateModels(models: ResolvedModelsConfig, path: string): void {
   const problems: string[] = [];
   for (const key of ["shadowReviewedAt", "egressVerifiedAt"] as const) {
@@ -452,6 +511,14 @@ function renderDefaultConfig(workspace: string): string {
       "# execution.harnessModes: per-mode Execution Harness routing. Only `single` has parity today; default off.",
       "# The deprecated `execution.harnessSingleMode: <bool>` is still accepted for one release and maps to harnessModes.single.",
       "execution:",
+    ].join("\n"),
+  )
+    .replace(
+    /^decisions:/m,
+    [
+      "# decisions.provider: M16 Decision Service seam (K17). No vendor provider exists yet — `rules`",
+      "# reproduces today's regex/threshold behaviour exactly and makes no network call.",
+      "decisions:",
     ].join("\n"),
   );
   return [
