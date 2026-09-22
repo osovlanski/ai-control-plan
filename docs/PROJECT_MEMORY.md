@@ -206,3 +206,78 @@ flag does not prove text delivery. Canonical findings, exact suite outcomes and
 22 fresh deterministic captures are indexed in `docs/ui/agentic-os-ui-v3.md`
 and `docs/ui/assets/shell-review/README.md`. Cockpit ownership remains at
 `a45a750`; its runtime and existing dirty worktrees were not modified.
+
+## 2026-09-22 — M16 K19a: the decision no-basis contract (PROPOSED)
+
+`RulesDecisionProvider` now maps `(site, questionKey)` rather than `site` alone. The previous
+site-only switch returned the same answer for every question asked at a site — harmless while each
+site asked one question, wrong as soon as K19's tool-gate battery asks several.
+
+The contract that falls out, and that K19 must honour when it wires the gate: **`decide()` answers
+only the keys a provider has a basis for, and an absent key means "no basis"** — never `false`,
+never `0`, never `none`. `DecisionAnswer` deliberately has no `unknown` variant and
+`DecisionOutcome` carries no separate unanswered set; absence is the encoding, and
+`noUncheckedIndexedAccess` (on repo-wide) makes the compiler force every caller to handle it. Per
+I-D2 a caller must resolve an absent answer to its site's conservative outcome — for the tool gate,
+prompt the operator. A key a provider *does* map, asked with the wrong primitive, still throws:
+that is a malformed request, not an unanswerable one.
+
+Consequence worth knowing before reading any shadow report: with only the rules provider
+registered, the tool-gate battery comes back with `denied` answered and `risk`, `destructive`,
+`outside_repo`, `exfiltration` and `credential_reach` absent. The §7.2 prompt-injection suite
+(`apps/api/test/decision-injection.test.ts`) therefore asserts a property of absence today. It is a
+real regression guard on the mapping and the contract, and it is not yet a measurement of injection
+resistance; it becomes one, with no edits to that file, once `decisionProviders()` registers a
+provider that can judge risk.
+
+Two errors in `plans/jev-decision-service-plan.md` were corrected rather than worked around, both
+noted in its §11:
+
+- §5 K18 and the §9.3 step table named `pnpm demo:a` as the acceptance vehicle for decision
+  records. `demo-a.spec.ts` never sets `execution.harnessModes.single`, so it runs the legacy
+  orchestrator path, which has no tool gate and records nothing; `demo-b.spec.ts` does set it.
+- The §5 K19 battery listed five questions, none of which the rules provider can answer — which
+  contradicts K18's requirement that the rules answer be recorded on every call "so a shadow
+  comparison always has a baseline". `denied` is now the battery's first key.
+
+## 2026-09-22 — M16 K19b: the decision state boundary (SHIPPED)
+
+`buildToolGateState()` in `packages/core/src/decision.ts` is §4.4's `DecisionStateBuilder`. The
+rule that shaped it: no field survives that no battery question reads. Applying that rule deleted
+the entire content surface — every question in `TOOL_GATE_BATTERY` (`denied`, `risk`,
+`destructive`, `outside_repo`, `exfiltration`, `credential_reach`) is answerable from the action,
+so the state carries the action, the policy tool lists, path counts, path samples, network
+destinations and a trust flag, and nothing else. There is deliberately no field for a README
+excerpt, a source comment, a test fixture, a commit message, prior tool output or the task goal.
+That is not an omission to be filled in later: §4.4's rule is that a question a sentence in a
+README can flip is a question we do not ask, and `rm -rf` is not less destructive because the goal
+text says so. A later slice that wants one of those fields must first name the question that reads
+it.
+
+Trust is Junie's model and it is fail-closed in both directions that matter: a repo absent from
+`repoAllowlist` — and equally a repo that is simply unknown, or an empty allowlist — is UNTRUSTED,
+and an untrusted repo contributes only the structural facts (`pathsInside` / `pathsOutside` /
+`repoTrusted`). Path samples are withheld entirely, because a filename is attacker-chosen content.
+The action itself is never trust-gated: withholding it for an untrusted repo would blind the gate
+exactly where it is most needed.
+
+Order inside the builder is load-bearing and easy to get wrong: **redact → trust-gate → bound**.
+Redacting first means no secret survives by straddling a truncation boundary; trust-gating before
+bounding means untrusted content is dropped rather than merely shortened. Truncation is fixed caps
+in a fixed order, so the same observation always produces the same bytes and the same flag, and the
+flag now reaches `decision_records.state_truncated` through `DecisionRecordContext.stateTruncated`
+— K18 hardcoded that column to 0 because no bounded state existed yet.
+
+The composition seam (`observeToolGate`) now builds its state with the builder and asks the full
+six-question battery instead of an inline one-question state. It cannot see paths, network
+destinations or the repo path — it fires on `tool.started` and carries only the policy inputs — so
+production rows read `repoTrusted: false` with zero path counts until K19c moves the evaluation
+ahead of execution and widens the seam. That is the honest reading of what the seam observes, not a
+defect.
+
+One invariant was missing from the plan and is now §5 K19 (I-D8), with a §11 note: the gate must
+REFUSE to activate (`mode: applied`) at a site whose provider chain holds no judging provider. With
+rules alone, five of six answers are absent, absence resolves conservatively, and activation would
+turn every rules-allowed tool call into an operator prompt — the inverse of the intent, and the
+fastest way to get the gate switched off. §7.1's seven activation preconditions are evidence
+checks; this eighth one is structural, and K19c cannot be reviewed without it.

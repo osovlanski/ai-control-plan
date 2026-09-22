@@ -46,8 +46,8 @@ The suite currently contains 84 API, 10 core, and 8 adapter tests.
 
 The API is deliberately loopback-only. Configuration rejects non-loopback binds
 until an authenticated remote mode exists. Read-only observability clients can
-negotiate the integration boundary through `GET /api/meta`; the current API and
-normalized-event contract version is `1.0`.
+negotiate the integration boundary through `GET /api/meta`; the current API
+contract version is `2.2` and the normalized-event contract version is `1.0`.
 
 | Document | Purpose |
 |---|---|

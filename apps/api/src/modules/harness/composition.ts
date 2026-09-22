@@ -24,13 +24,14 @@ import { deriveEnvelopeUpdate } from "./envelope-derivation.js";
 import { EventRecorder } from "./event-recorder.js";
 import { snapshotQuota } from "./quota-snapshot.js";
 import { HarnessRecovery } from "./recovery.js";
-import { SessionRunner } from "./session-runner.js";
+import { SessionRunner, type RunnerDeps } from "./session-runner.js";
 import { SessionStore } from "./session-store.js";
 import { WorkspaceAuthority } from "./workspace-authority.js";
 import { VerificationStore } from "./verification-store.js";
 import { VerificationCoordinator } from "../verification-coordinator.js";
 import { planProjectVerification, snapshotProjectVerification } from "../project-verification.js";
-import { DEFAULT_REDACTION_RULES } from "@agent-plane/core";
+import { DEFAULT_REDACTION_RULES, TOOL_GATE_BATTERY, buildToolGateState } from "@agent-plane/core";
+import { DecisionService, decisionProviders } from "../decision.js";
 
 /** Legacy `applyEvent` snapshots quota on exactly these event types. */
 const QUOTA_EVENT_TYPES = new Set(["usage.updated", "limit.approaching", "limit.hit"]);
@@ -150,6 +151,40 @@ export function buildHarnessComposition(deps: HarnessCompositionDeps): HarnessCo
       return { warnings: ["project verification skipped: project metadata rejected by workspace authority"] };
     }
   };
+  // M16 K18/K19b — shadow plumbing only. `RulesDecisionProvider` is the sole
+  // registered provider (no vendor call exists until K19c), and `mode` is
+  // hardcoded to "shadow": no activation gate exists yet for this site.
+  const decisions = new DecisionService(config.decisions, decisionProviders(config.decisions), undefined, db);
+  const observeToolGate: NonNullable<RunnerDeps["observeToolGate"]> = (input) => {
+    // K19b: the state is built by the §4.4 builder, never assembled inline, and
+    // the full `TOOL_GATE_BATTERY` is asked so the shadow record carries the
+    // rules baseline beside the five keys a judging provider will answer.
+    //
+    // `repoPath`/`worktreePath`/`paths`/`networkDestinations` are NOT available
+    // on this observation seam — it fires on `tool.started` and carries only
+    // the policy inputs. The builder therefore resolves the repo as UNTRUSTED
+    // and the path counts as zero, which is the fail-closed reading and is
+    // honest about what this seam can see. Widening the seam is K19c's, which
+    // is where the gate moves ahead of execution and actually has the action's
+    // paths to hand.
+    const built = buildToolGateState({
+      toolName: input.toolName,
+      toolsAllow: input.toolsAllow,
+      toolsDeny: input.toolsDeny,
+      repoAllowlist: config.repoAllowlist,
+    });
+    void decisions
+      .decide(
+        { site: "tool-gate", state: built.state, questions: TOOL_GATE_BATTERY, budgetMs: 50 },
+        {
+          taskId: taskOfSession(input.sessionId),
+          sessionId: input.sessionId,
+          mode: "shadow",
+          stateTruncated: built.truncated,
+        },
+      )
+      .catch(onError);
+  };
   const runner = new SessionRunner({
     store: sessionStore,
     recorder,
@@ -160,6 +195,7 @@ export function buildHarnessComposition(deps: HarnessCompositionDeps): HarnessCo
     verificationCoordinator: new VerificationCoordinator(verificationStore, checkpoints, authority),
     softThresholdPct: config.failover.softThresholdPct,
     handoff: new HandoffService(db),
+    observeToolGate,
   });
   const harnessBridge = new HarnessBridge({ runner, store: sessionStore, approvals, db, onError });
 

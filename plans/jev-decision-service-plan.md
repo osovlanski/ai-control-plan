@@ -239,8 +239,9 @@ service installed and `RulesDecisionProvider` selected; no network call exists y
   `CONTROL_PLANE_API_VERSION` additively (2.1 → 2.2), leaving `NORMALIZED_EVENT_VERSION` at 1.0.
   Existing clients keep working; the capability gates the new endpoint only.
 
-**Done when:** a `pnpm demo:a` run writes decision records for every gate evaluation, readable
-over the API, with `provider: "rules"` and `mode: "shadow"` throughout.
+**Done when:** a `pnpm demo:b` run writes decision records for every gate evaluation, readable
+over the API, with `provider: "rules"` and `mode: "shadow"` throughout. (`demo:b`, not `demo:a` —
+see the correction in §11.)
 **Verdict required:** PASS — drive it against a running `pnpm dev` API and paste the rows.
 
 ### K19 — The Tool Gate (the slice that justifies the plan)
@@ -253,6 +254,7 @@ property is exactly what makes this affordable):
 
 | Key | Type | Asks |
 |---|---|---|
+| `denied` | Noul | Is this tool call denied by the workspace's tool allow/deny policy? (the rules baseline — see the §11 correction) |
 | `risk` | Score `[none, low, medium, high, severe]` | How much damage could this action do if the agent has misunderstood the task? |
 | `destructive` | Noul | Does this action delete, overwrite or force-push data that is not recoverable from git? |
 | `outside_repo` | Noul | Does this action read or write outside the task's worktree and allowlisted repo? |
@@ -269,6 +271,23 @@ rules allow + risk ≥ medium
 provider unreachable / degraded → prompt operator  (I-D2)
 read-only workspace             → unchanged        (mode is a ceiling, never raised)
 ```
+
+**Activation precondition — I-D8 (added 2026-09-22, K19b).** The gate MUST REFUSE to activate
+(`mode: applied`) at a site whose registered provider chain contains no judging provider. With
+`RulesDecisionProvider` alone, `risk`, `destructive`, `outside_repo`, `exfiltration` and
+`credential_reach` are all ABSENT on every call; absence resolves to the conservative outcome per
+the no-basis contract and I-D2, so the `rules allow + risk ≥ medium → prompt operator` row would
+fire for **every** rules-allowed tool call. That is the exact inverse of the intended behaviour —
+the gate would prompt on everything, and an operator drowning in prompts switches it off, which
+costs more safety than the gate ever bought. Refusing to activate is therefore not a convenience
+check: it is what keeps I-D2's fail-closed posture from degenerating into a fail-noisy one that
+gets disabled.
+
+Concretely, at activation the service resolves the site's chain and refuses `applied` unless at
+least one registered provider's `describe()` reports it can answer the site's judged keys. The
+refusal is loud (config validation, alongside the existing fail-closed `models` block), names the
+site, and leaves the site in `shadow` — it never silently downgrades. K19c owns the wiring; this
+invariant is stated here because K19c cannot be reviewed without it.
 
 Two structural changes fall out and are part of this slice:
 
@@ -458,7 +477,7 @@ Add the `decisions:` block from §7.4 to `~/.agent-plane/personal/config.yaml`. 
 | Step | Slice | Gate before moving on |
 |---|---|---|
 | 1 | K17 seam | `pnpm typecheck && pnpm test` green, existing tests unchanged |
-| 2 | K18 records | `pnpm dev`, run `pnpm demo:a`, read rows back over `GET /api/decisions` |
+| 2 | K18 records | `pnpm dev`, run `pnpm demo:b`, read rows back over `GET /api/decisions` |
 | 3 | K19 tool gate (shadow) | Shadow records for a dangerous scripted action; injection suite green |
 | 4 | K20 classifier (shadow) | Offline replay report over ≥ 200 goals, committed to `docs/eval-history/` |
 | 5 | K22 report + panel | `pnpm decision:shadow-report` produces a readable report |
@@ -518,6 +537,27 @@ it is the first thing to test in step 1 — not an afterthought at step 7.
 - DB is the source of truth; Markdown is a projection; events are append-only.
 - Explanations are persisted for every routing decision, failover — and now every decision record.
 - Native SDKs over CLI scraping; fail loud on schema drift.
+- **Correction (2026-09-22, K19a):** §5 K18 and the §9.3 step table named `pnpm demo:a` as the
+  acceptance vehicle for decision records. That was wrong. `apps/web/e2e/demo-a.spec.ts` never
+  sets `execution.harnessModes.single`, so its tasks run the legacy orchestrator path, which has
+  no tool gate and therefore evaluates nothing for the gate to record; `demo-b.spec.ts:178` does
+  set it. Both references now read `pnpm demo:b`. Demo A itself is unchanged — it is a published
+  runbook with committed assets.
+- **Correction (2026-09-22, K19a):** the §5 K19 battery listed five questions, none of which
+  `RulesDecisionProvider` has a basis for. That contradicts §5 K18 ("the rules provider's answer is
+  recorded on **every** call, so a shadow comparison always has a baseline") and I-D1, whose
+  `rules deny → block` line is part of the same mapping. `denied` is now the battery's first row:
+  one request, one state, one record, with the rules baseline and the judged questions side by
+  side. It is the only battery key the rules provider answers; the other five come back absent per
+  the no-basis contract on `DecisionProvider`.
+- **Correction (2026-09-22, K19b):** §5 K19 specified the mapping from answers to outcomes but
+  never stated what happens when no provider can answer the judged questions. Nothing in §5, §7.1
+  or §7.4 prevented activating `tool-gate` with only `RulesDecisionProvider` registered — in which
+  case the conservative resolution of five absent answers turns every rules-allowed tool call into
+  an operator prompt. The activation precondition (I-D8) is now stated in §5 K19: the gate refuses
+  `mode: applied` at a site with no judging provider in its chain. §7.1's seven activation
+  preconditions are necessary but were not sufficient; this is the eighth, and it is a structural
+  check, not an evidence one.
 - No new infrastructure without a failing requirement that names it.
 - Workspace isolation, explainable routing, approval boundaries and provider-adapter portability
   are preserved by construction — M16 adds a provider seam, it does not pierce an existing one.

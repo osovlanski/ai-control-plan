@@ -91,7 +91,7 @@ describe("DecisionService", () => {
 
   it("shares one in-flight call across identical concurrent requests (single-flight)", async () => {
     let calls = 0;
-    const provider = new FakeProvider("typesafe", async (r) => {
+    const provider = new FakeProvider("typesafe", async (_r) => {
       calls += 1;
       await new Promise((resolve) => setTimeout(resolve, 20));
       return outcome("typesafe");

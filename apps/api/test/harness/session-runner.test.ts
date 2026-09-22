@@ -1122,6 +1122,30 @@ describe("restart recovery", () => {
   });
 });
 
+describe("M16 K18 — tool-gate shadow observation", () => {
+  it("fires observeToolGate on tool.started, with the exact policy inputs, and never changes the outcome", async () => {
+    const calls: Array<{ toolName: string; toolsAllow?: readonly string[]; toolsDeny?: readonly string[]; sessionId: string }> = [];
+    const runner = new SessionRunner(
+      deps(countingFake(), {
+        observeToolGate: (input) => calls.push(input),
+      }),
+    );
+    const result = await runner.run(
+      request({ policy: { budget: { enforcement: "advisory" }, timeout: { hardMs: 60_000 }, approval: { mode: "auto-approve" }, tools: { mode: "audit", allow: ["shell", "write"] }, checkpoint: { onSoftLimit: true }, isolation: { required: "ambient" } } }),
+    );
+
+    expect(result.outcome).toBe("completed"); // shadow observation changed nothing
+    expect(calls).toEqual([{ toolName: "shell", toolsAllow: ["shell", "write"], toolsDeny: undefined, sessionId: sessionOf() }]);
+  });
+
+  it("never invokes observeToolGate for an event that is not tool.started", async () => {
+    let calls = 0;
+    const runner = new SessionRunner(deps(countingFake({ ok: true, events: defaultBody() }), { observeToolGate: () => { calls += 1; } }));
+    await runner.run(request());
+    expect(calls).toBe(0); // defaultBody() below has no tool.started event
+  });
+});
+
 /** The DEFAULT_SCRIPT body minus its trailing message, for approval scripts. */
 function defaultBody(): FakeScript["events"] {
   return [

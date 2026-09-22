@@ -111,6 +111,20 @@ export interface RunnerDeps {
     runSpec: RunSpec;
     providerSessionRef?: ProviderSessionRef;
   }) => Promise<boolean> | boolean;
+  /**
+   * M16 K18 — shadow-only observation of the tool gate, fired once per
+   * `tool.started` event, right alongside `toolPolicyGuard`'s own evaluation.
+   * Fire-and-forget by design (never awaited here): it records what a
+   * `DecisionService` would have answered and MUST NOT influence, delay or
+   * gate `directive` below — that wiring is K19's, not this one's. Absent by
+   * default, so every existing test is unaffected.
+   */
+  observeToolGate?: (input: {
+    toolName: string;
+    toolsAllow?: readonly string[];
+    toolsDeny?: readonly string[];
+    sessionId: string;
+  }) => void;
 }
 
 const POLICY_UNENFORCEABLE = "policy_unenforceable" as const;
@@ -370,6 +384,20 @@ class RunContext {
         }
         this.observe(event);
         const directive = evaluateGuards(this.snapshot, { kind: "event", event, atMs: this.runner.clock() });
+        // K18 shadow observation — mirrors toolPolicyGuard's own extraction
+        // exactly, but its result is discarded here; it never reaches `directive`.
+        if (event.type === "tool.started" && this.d.observeToolGate) {
+          const toolName =
+            (event.payload as { tool?: string; command?: string } | undefined)?.tool ??
+            (event.payload as { command?: string } | undefined)?.command ??
+            event.summary;
+          this.d.observeToolGate({
+            toolName,
+            toolsAllow: this.snapshot.policy.tools.allow,
+            toolsDeny: this.snapshot.policy.tools.deny,
+            sessionId: this.sessionId,
+          });
+        }
         const nontrivial = directive.action !== "continue";
 
         // Co-commit the triggering event, the guard.decision audit event and the

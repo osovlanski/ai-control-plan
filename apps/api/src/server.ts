@@ -11,6 +11,7 @@ import {
   redactSecrets,
   redactValue,
   type AssistantId,
+  type DecisionSite,
   type RoutingProfile,
   type ScheduleInput,
   type TaskIntent,
@@ -20,6 +21,7 @@ import type { ResolvedConfig } from "./config.js";
 import { appliedMigrations, type Db } from "./db/index.js";
 import { CheckpointService } from "./modules/checkpoint.js";
 import { CooldownStore } from "./modules/cooldown.js";
+import { listDecisions } from "./modules/decision.js";
 import type { HarnessBridge } from "./modules/harness/control-plane-bridge.js";
 import { buildHarnessComposition } from "./modules/harness/composition.js";
 import { effectiveStateSql, effectiveUsageJoin, effectiveUsageSql } from "./modules/harness/state-vocab.js";
@@ -100,6 +102,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   } as const;
   const schedulerRead = { config: { auth: { require: "schedules.read" } } } as const;
   const modelsRead = { config: { auth: { require: "models.read" } } } as const;
+  const decisionsRead = { config: { auth: { require: "decisions.read" } } } as const;
   const contextRead = { config: { auth: { require: "context.read" } } } as const;
   const write = { config: { auth: { require: "commands.write" } } } as const;
 
@@ -255,6 +258,22 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   });
 
   app.post("/api/models/refresh", write, async () => ({ attempts: await modelCatalog.refresh() }));
+
+  // ---- Decisions (K18 / M16) ----
+  // Read-only. `site` and `limit` are the only filters — the K22 shadow
+  // report and this route share the same `listDecisions` query.
+  app.get<{ Querystring: { site?: string; limit?: string } }>("/api/decisions", decisionsRead, (req, reply) => {
+    const { site, limit } = req.query ?? {};
+    const knownSites: readonly DecisionSite[] = ["tool-gate", "task-classifier", "context-breakpoint"];
+    if (site !== undefined && !knownSites.includes(site as DecisionSite)) {
+      return reply.status(400).send({ error: `invalid site: ${site}` });
+    }
+    const parsedLimit = limit !== undefined ? Number(limit) : undefined;
+    if (parsedLimit !== undefined && (!Number.isFinite(parsedLimit) || parsedLimit < 1)) {
+      return reply.status(400).send({ error: "limit must be a positive number" });
+    }
+    return { decisions: listDecisions(db, { site: site as DecisionSite | undefined, limit: parsedLimit }) };
+  });
 
   // ---- Tasks ----
 

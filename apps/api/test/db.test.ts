@@ -47,6 +47,7 @@ describe("migrations", () => {
       "checkpoints",
       "comparisons",
       "cooldowns",
+      "decision_records",
       "dispatches",
       "event_archives",
       "events",
