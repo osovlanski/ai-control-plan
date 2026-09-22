@@ -58,6 +58,7 @@ normalized-event contract version is `1.0`.
 | [`docs/agentic-os-plan.md`](docs/agentic-os-plan.md) | Agentic OS — design & change plan (Phases 6–10, proposed) |
 | [`docs/agentic-os-vnext-plan.md`](docs/agentic-os-vnext-plan.md) | vNext reconciliation and increments 1–17 (proposed) |
 | [`docs/agentic-os-kernel-services.md`](docs/agentic-os-kernel-services.md) | Kernel services M12–M15: model intelligence, scheduler, context lifecycle, runtime seam (proposed) |
+| [`plans/jev-decision-service-plan.md`](plans/jev-decision-service-plan.md) | M16 Decision Service — Jev (System One) tool gate and classifier, K17–K22 (proposed) |
 | [`plans/progress.md`](plans/progress.md) | Living progress log |
 
 ## Demo A — durable waits, quota resume and idle probes
