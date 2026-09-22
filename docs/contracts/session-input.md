@@ -300,3 +300,111 @@ handling, transcript parsing, receipt production and live-adapter registration
 remain on the provider branches. Shared regression tests use only deterministic
 adapters, covering probing, disabled routes, unknown lookup without resend,
 terminal settlement, identity-bound enablement and revocation.
+
+## First live provider adapter — Claude Code CLI, 2026-09-20
+
+The third slice closes the first item of "Still deferred" above: a live
+provider adapter with actual acknowledgement evidence. It is Claude Code CLI
+only, behind the same `sessionInput.enabled` flag, which still defaults to
+**false**. `FakeSessionInputAdapter` is untouched and remains the default and
+the deterministic test adapter; the live one is additive and resolved per
+assistant. Every provider other than Claude Code still declares no
+session-input capability at all. No migration; no schema change.
+
+### What "proof of delivery" means here
+
+A successful write into the CLI's stdin proves the pipe took the bytes, not
+that the agent did — which is the gap the fake adapter was standing in for.
+The Claude Code CLI answers for itself in its own session transcript,
+`~/.claude/projects/<slug>/<provider-session-id>.jsonl`. At the moment it
+**folds** a message into a turn it appends one line stamped with the uuid the
+caller supplied:
+
+| Situation | Line the CLI writes |
+| --- | --- |
+| pushed into a turn already running (the normal case) | `type: "attachment"`, `attachment.type: "queued_command"`, `source_uuid` = our uuid |
+| folded between turns, as its own turn | `type: "user"`, `uuid` = our uuid |
+
+Either line is the receipt, and nothing weaker is:
+
+| Evidence | Claim |
+| --- | --- |
+| `push()` returned | transport only — never `delivered` |
+| CLI's `queue-operation` enqueue record | not used: written before the fold |
+| our uuid in the transcript | `provider-accepted` — the receipt |
+| assistant text afterwards | not claimed |
+
+The uuid is derived deterministically from the server message id, so one
+logical message has exactly one provider identity and a retry cannot mint a
+second one. The receipt reference is `transcript:<session-ref>#<uuid>`.
+
+`provider-consumed` is deliberately not claimable. The CLI's assistant frames
+do not root their `parentUuid` chain at the delivered user message, and queued
+messages coalesce into a single turn, so no assistant output can be honestly
+attributed to one input id — exactly the "an assistant response alone is not a
+reliable input receipt" case this document already refuses.
+
+### Ambiguous delivery, and how it differs from the fake adapter's version
+
+`FakeSessionInputAdapter` declares `idempotentSend`, so an unknown outcome can
+be resolved by sending the same message id again. The real CLI does not
+deduplicate: a second push appends a second user turn. The live adapter
+therefore declares `idempotentSend: false` and `receiptLookup: true`, and
+ambiguity has exactly one safe resolution — read the provider's own record.
+
+That makes `null` from `lookupReceipt` a much stronger claim than it is for the
+fake, because the service re-sends on it. The live adapter returns `null` only
+when nothing can still arrive: the uuid is absent from the transcript AND no
+CLI process for that session is running (the session id is on the process
+command line, because live-input runs mint it themselves). While a process is
+alive the message may yet be folded, so the adapter answers
+`SessionInputUnresolvedError` instead, and the service treats that exactly like
+having no lookup capability at all: the message stays `accepted` with unknown
+delivery and `manual_recovery_required`, never a second send.
+
+`deliver` waits for the transcript with a bounded timeout, because a turn can
+run for minutes and an HTTP request must not. A timeout is an unknown outcome,
+not a failure. A session that ends without ever folding the message is the one
+definitive case: a dead CLI can fold nothing later, so that settles `rejected`
+with `provider_session_ended_undelivered`.
+
+Restart correctness needed one fix in the ledger writer: `delivery_unknown` was
+cleared only on `delivered`, but the schema allows an unknown delivery only
+while `accepted`. Any terminal state means the ambiguity was resolved, so a
+definitive refusal after a failed reconciliation clears it too. No earlier
+adapter could reach that edge.
+
+### Live-input mode
+
+`ClaudeAdapter` gains an opt-in streaming-input launch, wired on only when
+`sessionInput.enabled` is true. It mints the CLI session id itself so the
+provider identity — and therefore the transcript path and the process
+signature — exists before the first byte is pushed. The input stream ends when
+the turn's result arrives, so the run lifecycle is unchanged: one query, one
+settlement. The honest consequence is that live delivery is possible while a
+turn is in flight and not after it; a session with no running turn reports the
+capability as unavailable rather than queueing forever.
+
+`AgentAdapter.send` is still not the delivery seam. It has no idempotency,
+receipt or acknowledgement contract, and it still rejects mid-run text.
+
+### Capability, truthfully per session
+
+`GET /api/sessions/:sessionId/input-capability` reports what one session can do
+right now, probed against the provider rather than inferred from config.
+`SessionInputAdapter` gained an optional `probeTarget`; an adapter that omits
+it is available wherever its declared capabilities say it is, which is why the
+fully in-process fake needed no change. A Claude session whose CLI has exited
+answers `available: false` / `no_live_provider_session`; a kernel record that
+disagrees with the live process about which provider session it is answers
+`provider_session_mismatch` and is never written into; a session on any other
+assistant answers `adapter_input_unsupported` — never a silent fallback to the
+deterministic adapter.
+
+### Still deferred
+
+* Codex and Cursor adapters.
+* Retention/deletion policy for inputs and receipts, and the goal-creation
+  idempotency key.
+* `compacting` handling, still blocked on K10.
+* Operator/Shell delivery cards beyond the minimal flag-gated Shell composer.

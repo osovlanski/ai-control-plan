@@ -1,7 +1,8 @@
+import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { query, type PermissionResult, type Query, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
+import { query, type PermissionResult, type Query, type SDKMessage, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import type {
   AdapterContextSample,
   AgentAdapter,
@@ -15,6 +16,7 @@ import type {
   RunSpec,
 } from "@agent-plane/core";
 import { newRunId, NotSupportedError } from "@agent-plane/core";
+import type { ClaudeLiveSession } from "./claude-session-input.js";
 import { EventQueue } from "./event-queue.js";
 
 interface ClaudeRunState {
@@ -26,6 +28,24 @@ interface ClaudeRunState {
   stream?: Query;
   /** Advertised model maximum, lifted from `result.modelUsage[*].contextWindow`. */
   advertisedMaxTokens?: number;
+  /** Present only in live-input mode (see `ClaudeAdapterOptions.liveInput`). */
+  live?: LiveInputChannel;
+}
+
+/**
+ * The stdin side of a live-input run. Only built when `liveInput` is on, so a
+ * default run keeps the string-prompt launch it has always had.
+ *
+ * `closed` is the one piece of truth that matters to the session-input
+ * adapter: while it is false the CLI can still fold a pushed message into the
+ * running turn, and once it is true nothing more can arrive.
+ */
+interface LiveInputChannel {
+  providerSessionRef: string;
+  cwd: string;
+  pending: SDKUserMessage[];
+  wake?: () => void;
+  closed: boolean;
 }
 
 /** Tools that mutate a file on disk, and where to find the path in their input. */
@@ -52,6 +72,7 @@ export class ClaudeAdapter implements AgentAdapter {
   constructor(
     readonly id: AssistantId,
     private queryFn: typeof query = query,
+    private options: ClaudeAdapterOptions = {},
   ) {}
 
   async describe(): Promise<CapabilityManifest> {
@@ -115,9 +136,25 @@ export class ClaudeAdapter implements AgentAdapter {
 
     const handle: RunHandle = { runId, assistantId: this.id };
 
+    // Live-input mode mints the CLI session id here rather than reading it back
+    // from `system/init`, because the session-addressed input adapter needs the
+    // provider identity — and therefore the transcript path and the process
+    // signature — to exist BEFORE the first byte is pushed. The CLI honours a
+    // caller-supplied `sessionId`, and a resume keeps the ref it is resuming.
+    const live = this.options.liveInput && !resumeRef
+      ? {
+          providerSessionRef: randomUUID(),
+          cwd: run.workdir,
+          pending: [] as SDKUserMessage[],
+          closed: false,
+        }
+      : undefined;
+    if (live) state.live = live;
+
     const stream = this.queryFn({
-      prompt: run.prompt,
+      prompt: live ? this.inputStream(live, run.prompt) : run.prompt,
       options: {
+        ...(live ? { sessionId: live.providerSessionRef } : {}),
         cwd: run.workdir,
         model: run.model?.id,
         resume: resumeRef,
@@ -158,8 +195,52 @@ export class ClaudeAdapter implements AgentAdapter {
       emit({ type: "run.ended", summary: "Run ended with error", payload: { ok: false } });
       state.queue.end();
     } finally {
+      closeLive(state);
       this.runs.delete(String(runId));
     }
+  }
+
+  /**
+   * The stdin half of a live-input run: the mission prompt first, then every
+   * message the session-input adapter pushes, until the turn settles.
+   *
+   * The generator ENDS when the run's result arrives. That is deliberate: it
+   * keeps the run lifecycle byte-for-byte what it has always been — one query,
+   * one settlement — instead of holding a session open forever and leaving the
+   * orchestrator with a run that never ends. The consequence is the honest one:
+   * live input is possible while a turn is in flight, and not after it.
+   */
+  private async *inputStream(live: LiveInputChannel, prompt: string): AsyncGenerator<SDKUserMessage> {
+    yield userMessage(randomUUID(), prompt, live.providerSessionRef);
+    for (;;) {
+      while (live.pending.length > 0) yield live.pending.shift()!;
+      if (live.closed) return;
+      await new Promise<void>((resolve) => {
+        live.wake = resolve;
+      });
+      live.wake = undefined;
+    }
+  }
+
+  /**
+   * The live-input seam for `ClaudeCodeSessionInputAdapter`. Undefined for a
+   * run that is not in live-input mode or has already settled — which is what
+   * makes the session-input capability manifest able to answer truthfully
+   * instead of assuming a process is there.
+   */
+  liveSession(runId: string): ClaudeLiveSession | undefined {
+    const live = this.runs.get(runId)?.live;
+    if (!live) return undefined;
+    return {
+      providerSessionRef: live.providerSessionRef,
+      cwd: live.cwd,
+      alive: () => !live.closed,
+      push: (uuid, text) => {
+        if (live.closed) throw new NotSupportedError(`live input pushed to settled run ${runId}`);
+        live.pending.push(userMessage(uuid, text, live.providerSessionRef));
+        live.wake?.();
+      },
+    };
   }
 
   private mapMessage(
@@ -279,6 +360,9 @@ export class ClaudeAdapter implements AgentAdapter {
         return;
       }
       case "result": {
+        // The turn has settled: nothing more can be folded, so the input side
+        // closes here and the query ends exactly as a string-prompt run does.
+        closeLive(state);
         // Advertised model maximum (K9) — a different fact from the effective
         // autocompaction window `observeContext` reads. Keep the largest across
         // model-usage entries (subagents may run smaller-window models).
@@ -405,8 +489,40 @@ export class ClaudeAdapter implements AgentAdapter {
   }
 
   async cancel(handle: RunHandle): Promise<void> {
-    this.runs.get(handle.runId)?.abort.abort();
+    const state = this.runs.get(handle.runId);
+    if (!state) return;
+    closeLive(state);
+    state.abort.abort();
   }
+}
+
+/** Options that change how a run is launched. Everything here defaults OFF. */
+export interface ClaudeAdapterOptions {
+  /**
+   * Launch runs in streaming-input mode so a session-addressed message can be
+   * pushed into the live CLI. Wired ON only when `sessionInput.enabled` is
+   * true; with it off the launch path is identical to what it has always been.
+   */
+  liveInput?: boolean;
+}
+
+/** One user turn on the wire. `uuid` is what the CLI stamps into its transcript. */
+function userMessage(uuid: string, text: string, sessionId: string): SDKUserMessage {
+  return {
+    type: "user",
+    uuid: uuid as SDKUserMessage["uuid"],
+    session_id: sessionId,
+    parent_tool_use_id: null,
+    message: { role: "user", content: text },
+  };
+}
+
+/** Idempotent: a settled run may be closed by the result, the pump and cancel. */
+function closeLive(state: ClaudeRunState): void {
+  const live = state.live;
+  if (!live || live.closed) return;
+  live.closed = true;
+  live.wake?.();
 }
 
 function detectAuth(): CapabilityManifest["core"]["auth"] {
