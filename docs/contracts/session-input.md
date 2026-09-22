@@ -265,3 +265,36 @@ text, a client retry for the same message is refused with `delivery_in_flight`;
 one attempt exists, the provider holds the message once, and only after a
 restart fences the dead owner's attempt into a known-unknown does a retry become
 legal — and it then reconciles rather than re-sends.
+
+## Provider-neutral live-input prerequisite — 2026-09-22
+
+The shared prerequisite is extracted from the Claude adapter work onto
+`f48ff484f53669da260537885d6d9edf2459db3e`. It adds the existing optional
+`probeTarget`, `SessionInputAvailability`, `SessionInputUnresolvedError`, and
+`GET /api/sessions/:sessionId/input-capability` unchanged in meaning. The service
+resolves the configured adapter and probes the exact session. No real provider
+is wired by this prerequisite; unsupported providers remain unavailable.
+
+A lookup exception preserves unknown delivery with `manual_recovery_required`;
+only a definitive rejection settles it rejected. Settling any terminal state
+clears `delivery_unknown`, matching the existing SQLite constraint. A lookup
+returning `null` still asserts definitive absence; adapters must throw
+`SessionInputUnresolvedError` when they cannot establish that fact. There is no
+new retry permission and no new acknowledgement level.
+
+`SessionInputOptInGate` is an additive, reusable gate for providers requiring
+explicit session enablement. It starts empty, binds the kernel session ID,
+assistant ID and verified provider session reference, and rechecks the provider
+probe before sending. A new process has no grants; enabling the workspace flag
+alone does not grant any session. Revocation prevents new delivery but allows
+receipt lookup to settle prior ambiguity. The gate does not grant a stronger
+acknowledgement than its wrapped adapter. Codex must use this gate if its live
+transport is proven. Claude retains its existing workspace-level opt-in and
+provider-specific behavior; this prerequisite does not wrap Claude or introduce
+a session-enable API.
+
+The shared core exports were already wildcard exports; provider process
+handling, transcript parsing, receipt production and live-adapter registration
+remain on the provider branches. Shared regression tests use only deterministic
+adapters, covering probing, disabled routes, unknown lookup without resend,
+terminal settlement, identity-bound enablement and revocation.

@@ -10,6 +10,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { FakeSessionInputAdapter } from "@agent-plane/adapters";
 import type { SessionInputAdapter } from "@agent-plane/core";
+import type { SessionInputAdapterResolver } from "../../src/modules/session-input.js";
 import { credentialPath, readCredential } from "../../src/auth/credential-file.js";
 import { loadConfig, type ResolvedConfig } from "../../src/config.js";
 import { openDb, type Db } from "../../src/db/index.js";
@@ -37,6 +38,8 @@ export function writeWorkspaceConfig(
       "    provider: fake",
       "  real-a:",
       "    provider: anthropic",
+      "  codex-a:",
+      "    provider: openai",
       "sessionInput:",
       `  enabled: ${opts.sessionInput}`,
       "",
@@ -50,6 +53,8 @@ export function boot(
     workspace?: string;
     sessionInput?: boolean;
     adapter?: SessionInputAdapter;
+    /** Full resolver, for a test that wires more than the deterministic fake. */
+    adapters?: SessionInputAdapterResolver;
     /** Reuse a fixed lease epoch to simulate the SAME incarnation restarting. */
     now?: () => Date;
   } = {},
@@ -62,7 +67,8 @@ export function boot(
     config,
     db,
     now: opts.now,
-    sessionInputAdapters: opts.adapter ? (id) => (id === "fake-a" ? opts.adapter : undefined) : undefined,
+    sessionInputAdapters:
+      opts.adapters ?? (opts.adapter ? (id) => (id === "fake-a" ? opts.adapter : undefined) : undefined),
   });
   built.registry.init();
   const headers = {

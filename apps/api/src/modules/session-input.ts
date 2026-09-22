@@ -139,6 +139,21 @@ export interface SessionInputSubmission {
   expiresAt?: string;
 }
 
+/** What a session can do with conversational input right now, adapter-probed. */
+export interface SessionInputCapabilityView {
+  available: boolean;
+  reason?: string;
+  assistantId?: string;
+  capabilityVersion?: string;
+  kinds?: readonly string[];
+  ackLevel?: SessionInputCapabilities["ackLevel"];
+  idempotentSend?: boolean;
+  receiptLookup?: boolean;
+  condition?: SessionInputCondition;
+  policy?: "dispatch" | "queue" | "reject";
+  policyReason?: string;
+}
+
 /** Resolves the input adapter for an assistant. Returns undefined = unsupported. */
 export type SessionInputAdapterResolver = (assistantId: string) => SessionInputAdapter | undefined;
 
@@ -620,7 +635,23 @@ export class SessionInputService {
   ): Promise<SessionInputRow | undefined> {
     if (!adapter || !capabilities) return row;
     if (capabilities.receiptLookup && adapter.lookupReceipt) {
-      const receipt = await adapter.lookupReceipt(this.target(session), row.id);
+      let receipt: SessionInputReceipt | null;
+      try {
+        receipt = await adapter.lookupReceipt(this.target(session), row.id);
+      } catch (err) {
+        if (err instanceof SessionInputRejectedError) {
+          this.db.transaction(() => {
+            this.settleWithin(row, "rejected", err.reason, session, null);
+          })();
+          return this.get(row.id);
+        }
+        // The adapter cannot say. That is NOT permission to send again — it is
+        // the same position as having no lookup at all, so the row stays
+        // unknown and waits for an operator instead of risking a double
+        // delivery. A live provider that later takes the message is picked up
+        // by the next reconcile.
+        return this.needsManualRecovery(row);
+      }
       if (receipt) {
         const prior = this.attempts(row.id).at(-1)?.attemptId ?? null;
         return this.recordReceipt(row.id, prior, receipt, capabilities, session);
@@ -630,10 +661,50 @@ export class SessionInputService {
       return this.attempt(row, session, adapter, capabilities);
     }
     if (capabilities.idempotentSend) return this.attempt(row, session, adapter, capabilities);
+    return this.needsManualRecovery(row);
+  }
+
+  private needsManualRecovery(row: SessionInputRow): SessionInputRow | undefined {
     this.db
       .prepare("UPDATE session_inputs SET reason = ?, updated_at = ? WHERE id = ?")
       .run("manual_recovery_required", this.now(), row.id);
     return this.get(row.id);
+  }
+
+  /**
+   * What this session can actually do with conversational input, right now.
+   *
+   * Deliberately not derived from "an adapter exists for this assistant":
+   * a real adapter is asked about THIS target, so a session whose provider
+   * has exited reports unavailable rather than inheriting the capability of the
+   * assistant that configured it.
+   */
+  async capability(sessionId: string): Promise<SessionInputCapabilityView> {
+    const session = this.session(sessionId);
+    if (!session) return { available: false, reason: "session_unknown" };
+    const adapter = this.opts.adapters(session.assistantId);
+    if (!adapter) return { available: false, reason: "adapter_input_unsupported", assistantId: session.assistantId };
+    const capabilities = adapter.capabilities();
+    const base = {
+      assistantId: session.assistantId,
+      capabilityVersion: capabilities.capabilityVersion,
+      kinds: capabilities.kinds,
+      ackLevel: capabilities.ackLevel,
+      idempotentSend: capabilities.idempotentSend,
+      receiptLookup: capabilities.receiptLookup,
+    };
+    const probe = adapter.probeTarget
+      ? await adapter.probeTarget(this.target(session))
+      : { available: true };
+    const policy = inputPolicy(conditionOf(session), capabilities);
+    return {
+      ...base,
+      ...(probe.reason ? { reason: probe.reason } : {}),
+      available: probe.available,
+      condition: conditionOf(session),
+      policy: policy.decision,
+      ...(policy.decision !== "dispatch" ? { policyReason: policy.reason } : {}),
+    };
   }
 
   private openAttempt(
@@ -761,9 +832,13 @@ export class SessionInputService {
     const at = this.now();
     const info = this.db
       .prepare(
+        // Only `accepted` may carry an unknown delivery — that is the ledger's
+        // own constraint. Reaching ANY terminal state therefore means the
+        // ambiguity was resolved, not just `delivered`: a definitive refusal
+        // after a failed reconciliation is knowledge too.
         `UPDATE session_inputs
             SET state = ?, reason = ?, version = version + 1, updated_at = ?,
-                delivery_unknown = CASE WHEN ? = 'delivered' THEN 0 ELSE delivery_unknown END
+                delivery_unknown = CASE WHEN ? = 'accepted' THEN delivery_unknown ELSE 0 END
           WHERE id = ? AND state = ? AND version = ?`,
       )
       .run(to, reason, at, to, row.id, row.state, row.version);
