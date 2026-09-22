@@ -1,0 +1,148 @@
+{
+  "cliVersion": "codex-cli 0.154.0",
+  "checks": [
+    {
+      "operation": "initialize",
+      "response": {
+        "resultKeys": [
+          "userAgent",
+          "codexHome",
+          "platformFamily",
+          "platformOs"
+        ]
+      },
+      "notifications": [
+        {
+          "method": "remoteControl/status/changed",
+          "paramKeys": [
+            "status",
+            "serverName",
+            "installationId",
+            "environmentId"
+          ]
+        },
+        {
+          "method": "deprecationNotice",
+          "paramKeys": [
+            "summary",
+            "details"
+          ]
+        },
+        {
+          "method": "deprecationNotice",
+          "paramKeys": [
+            "summary",
+            "details"
+          ]
+        }
+      ]
+    },
+    {
+      "operation": "thread/read-before-resume",
+      "resultKeys": [
+        "thread"
+      ],
+      "thread": {
+        "id": "01a0c938-ac77-7952-9567-cc44ed6b2c50",
+        "status": {
+          "type": "notLoaded"
+        },
+        "turns": [
+          {
+            "id": "01a0c938-b65b-7b41-8526-7cbe5fbe239a",
+            "status": "interrupted",
+            "itemTypes": [
+              "userMessage",
+              "agentMessage"
+            ]
+          }
+        ]
+      },
+      "sdkRunStillActive": true
+    },
+    {
+      "operation": "thread/resume",
+      "error": {
+        "code": -32600,
+        "message": "thread 01a0c938-ac77-7952-9567-cc44ed6b2c50 already has an active writer"
+      },
+      "resultKeys": [],
+      "sdkRunStillActive": true
+    },
+    {
+      "operation": "turn/steer",
+      "error": {
+        "code": -32600,
+        "message": "thread not found: 01a0c938-ac77-7952-9567-cc44ed6b2c50"
+      },
+      "resultKeys": [],
+      "sdkRunStillActive": true
+    },
+    {
+      "operation": "initialize",
+      "response": {
+        "resultKeys": [
+          "userAgent",
+          "codexHome",
+          "platformFamily",
+          "platformOs"
+        ]
+      },
+      "notifications": [
+        {
+          "method": "remoteControl/status/changed",
+          "paramKeys": [
+            "status",
+            "serverName",
+            "installationId",
+            "environmentId"
+          ]
+        },
+        {
+          "method": "deprecationNotice",
+          "paramKeys": [
+            "summary",
+            "details"
+          ]
+        }
+      ]
+    },
+    {
+      "operation": "thread/read-after-restart",
+      "resultKeys": [
+        "thread"
+      ],
+      "thread": {
+        "id": "01a0c938-ac77-7952-9567-cc44ed6b2c50",
+        "status": {
+          "type": "notLoaded"
+        },
+        "turns": [
+          {
+            "id": "01a0c938-b65b-7b41-8526-7cbe5fbe239a",
+            "status": "interrupted",
+            "itemTypes": [
+              "userMessage",
+              "agentMessage"
+            ]
+          }
+        ]
+      },
+      "sdkRunStillActive": true
+    }
+  ],
+  "sameThreadId": "01a0c938-ac77-7952-9567-cc44ed6b2c50",
+  "expectedTurnId": "01a0c938-b65b-7b41-8526-7cbe5fbe239a",
+  "receipt": {
+    "exactMarkerInDurableFile": false,
+    "messageIdentityReceiptProven": false
+  },
+  "verdict": "BLOCKED",
+  "agentEventTypes": [
+    "run.started",
+    "message",
+    "tool.started",
+    "error",
+    "run.ended"
+  ]
+}

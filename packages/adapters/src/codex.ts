@@ -13,6 +13,7 @@ import type {
   RunSpec,
 } from "@agent-plane/core";
 import { newRunId, NotSupportedError } from "@agent-plane/core";
+import { CodexAppServerRuntime } from "./codex-app-server-runtime.js";
 import { EventQueue } from "./event-queue.js";
 
 interface CodexRunState {
@@ -27,10 +28,13 @@ export interface CodexAdapterOptions {
   authEnvVars?: string[];
   providerDetail?: Record<string, unknown>;
   codex?: CodexOptions;
+  /** Explicit execution-transport opt-in; session input still needs a per-session grant. */
+  appServerInput?: boolean;
 }
 
 /**
- * OpenAI Codex adapter over @openai/codex-sdk (JSONL event stream).
+ * OpenAI Codex adapter over @openai/codex-sdk (JSONL event stream) by default.
+ * The opt-in app-server path owns execution and the separate input contract.
  *
  * Honesty notes (verified against SDK 0.149 type declarations):
  * - Usage arrives per-turn via turn.completed — mapped to usage.updated.
@@ -42,10 +46,17 @@ export interface CodexAdapterOptions {
  */
 export class CodexAdapter implements AgentAdapter {
   private codex: Codex;
+  private readonly appServer?: CodexAppServerRuntime;
+
+  get sessionInput() { return this.appServer?.sessionInput; }
   private runs = new Map<string, CodexRunState>();
 
   constructor(readonly id: AssistantId, private options: CodexAdapterOptions = {}) {
+    if (options.appServerInput && options.codex && Object.entries(options.codex).some(([key, value]) => key !== "codexPathOverride" && value !== undefined)) {
+      throw new NotSupportedError("custom SDK options on the Codex app-server input transport");
+    }
     this.codex = new Codex(options.codex);
+    if (options.appServerInput) this.appServer = new CodexAppServerRuntime(id, options.codex?.codexPathOverride);
   }
 
   async describe(): Promise<CapabilityManifest> {
@@ -65,7 +76,7 @@ export class CodexAdapter implements AgentAdapter {
       // M14 K9: `turn.completed` token accounting is NOT established as live
       // context occupancy, and this SDK layer exposes no context-usage payload.
       // App Server `thread/compact/start` + `thread/tokenUsage/updated` exist
-      // beyond it but require an app-server transport that is not wired.
+      // beyond it; the optional input transport does not enable these controls.
       context: {
         occupancy: "unavailable",
         effectiveWindow: "unavailable",
@@ -76,7 +87,7 @@ export class CodexAdapter implements AgentAdapter {
         observesAutoCompaction: false,
       },
       providerDetail: {
-        runtime: "@openai/codex-sdk",
+        runtime: this.appServer ? "codex-app-server" : "@openai/codex-sdk",
         sandboxModes: ["read-only", "workspace-write", "danger-full-access"],
         approvalPolicies: ["never", "on-request", "on-failure", "untrusted"],
         ...this.options.providerDetail,
@@ -86,11 +97,13 @@ export class CodexAdapter implements AgentAdapter {
   }
 
   async start(run: RunSpec): Promise<RunHandle> {
+    if (this.appServer) return this.appServer.start(run);
     const thread = this.codex.startThread(this.threadOptions(run));
     return this.launch(thread, run);
   }
 
   async resume(ref: ProviderSessionRef, run: RunSpec): Promise<RunHandle> {
+    if (this.appServer) return this.appServer.start(run, ref);
     const thread = this.codex.resumeThread(ref, this.threadOptions(run));
     return this.launch(thread, run);
   }
@@ -261,12 +274,14 @@ export class CodexAdapter implements AgentAdapter {
   }
 
   events(handle: RunHandle): AsyncIterable<NormalizedEvent> {
+    if (this.appServer) return this.appServer.events(handle);
     const state = this.runs.get(handle.runId);
     if (!state) throw new NotSupportedError(`events for unknown run ${handle.runId}`);
     return state.queue;
   }
 
   async cancel(handle: RunHandle): Promise<void> {
+    if (this.appServer) return this.appServer.cancel(handle);
     this.runs.get(handle.runId)?.abort.abort();
   }
 }

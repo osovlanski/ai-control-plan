@@ -1,0 +1,73 @@
+{
+  "cliVersion": "codex-cli 0.154.0",
+  "beforeOptIn": {
+    "available": false,
+    "reason": "session_input_not_enabled"
+  },
+  "enable": {
+    "available": true,
+    "providerSessionRef": "01a0ca83-2768-7843-b40f-642dcf31f8f7"
+  },
+  "capability": {
+    "capabilityVersion": "codex-app-server-transport-v1",
+    "kinds": [
+      "text"
+    ],
+    "ackLevel": "transport",
+    "idempotentSend": false,
+    "receiptLookup": false,
+    "liveDelivery": [
+      "running"
+    ]
+  },
+  "receipt": {
+    "messageId": "manual-message-1",
+    "reference": "codex-steer:01a0ca83-2768-7843-b40f-642dcf31f8f7:01a0ca83-2f84-70a0-a7bd-de7d3c541e90",
+    "ackLevel": "transport",
+    "at": "2026-09-22T19:06:39.219Z"
+  },
+  "duplicateRefused": true,
+  "afterExit": {
+    "available": false,
+    "reason": "codex_live_session_unavailable"
+  },
+  "outputContainsMarker": true,
+  "history": {
+    "userItems": [
+      {
+        "keys": [
+          "type",
+          "id",
+          "clientId",
+          "content"
+        ],
+        "id": "01a0ca83-3d1c-79a2-bc0f-35b924e5f072",
+        "clientId": null,
+        "hasMarker": false,
+        "hasCallerMessageId": false
+      },
+      {
+        "keys": [
+          "type",
+          "id",
+          "clientId",
+          "content"
+        ],
+        "id": "01a0ca83-579c-7e72-bb9d-d29455693abd",
+        "clientId": null,
+        "hasMarker": true,
+        "hasCallerMessageId": false
+      }
+    ]
+  },
+  "verdict": "TRANSPORT_ONLY",
+  "eventTypes": [
+    "run.started",
+    "message",
+    "tool.started",
+    "tool.completed",
+    "message",
+    "usage.updated",
+    "run.ended"
+  ]
+}

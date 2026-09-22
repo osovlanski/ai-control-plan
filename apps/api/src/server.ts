@@ -53,7 +53,7 @@ import { RepositoryIdentityRegistry } from "./repo/identity-registry.js";
 import { renderHandoffMd } from "./render/handoff.js";
 import { renderProgressMd } from "./render/progress.js";
 import { registerAuth, type SessionMap } from "./auth/index.js";
-import { ClaudeAdapter, ClaudeCodeSessionInputAdapter, FakeSessionInputAdapter } from "@agent-plane/adapters";
+import { ClaudeAdapter, ClaudeCodeSessionInputAdapter, CodexAdapter, FakeSessionInputAdapter } from "@agent-plane/adapters";
 import { CredentialStore, credentialPath } from "./auth/credential-file.js";
 
 export interface ServerDeps {
@@ -961,6 +961,10 @@ export function buildServer(deps: ServerDeps): BuiltServer {
       const row = db.prepare("SELECT provider FROM assistants WHERE id = ?").get(assistantId) as
         | { provider: string }
         | undefined;
+      if (row?.provider === "openai") {
+        const owner = registry.adapter(assistantId);
+        return owner instanceof CodexAdapter ? owner.sessionInput : undefined;
+      }
       if (row?.provider === "anthropic") {
         let adapter = lives.get(assistantId);
         if (!adapter) {
