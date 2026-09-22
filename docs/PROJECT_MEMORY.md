@@ -201,3 +201,15 @@ flag does not prove text delivery. Canonical findings, exact suite outcomes and
 22 fresh deterministic captures are indexed in `docs/ui/agentic-os-ui-v3.md`
 and `docs/ui/assets/shell-review/README.md`. Cockpit ownership remains at
 `a45a750`; its runtime and existing dirty worktrees were not modified.
+
+## 2026-09-22 — shared live-input prerequisite (SHIPPED)
+
+Live provider input branches share `feat/agentic-os-session-input-live-contract`
+from redelivery `f48ff48`. The prerequisite extracts probing and unresolved
+receipt reconciliation from Claude; it does not register any real adapter.
+Claude and Codex must be sibling implementations, with no duplicated shared
+contract patches. The additive `SessionInputOptInGate` is required for Codex:
+explicit grants bind the kernel session, assistant and provider session and are
+revoked on restart. Claude's existing enablement and receipt contract remain
+unchanged. The SDK `exec` stdin is not a live input channel; Codex support stays
+blocked until app-server can address the execution adapter's own active session.

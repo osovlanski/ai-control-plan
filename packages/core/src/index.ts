@@ -17,3 +17,4 @@ export * from "./verification-planner.js";
 export * from "./repository-identity.js";
 
 export * from "./scheduler.js";
+export * from "./session-input-opt-in.js";

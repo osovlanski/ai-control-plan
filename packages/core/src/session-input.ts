@@ -274,6 +274,15 @@ export interface SessionInputReceipt {
 export interface SessionInputAdapter {
   capabilities(): SessionInputCapabilities;
   /**
+   * Whether THIS target can be delivered to right now. Optional: an adapter
+   * that omits it is available wherever its capabilities say it is, which is
+   * true of a fully in-process adapter. A real provider must implement it,
+   * because "this assistant has an adapter" and "this session has a live
+   * provider process" are different facts and a manifest that conflates them
+   * is a false claim.
+   */
+  probeTarget?(target: SessionInputTarget): Promise<SessionInputAvailability>;
+  /**
    * Deliver once. Implementations MUST be idempotent on `message.messageId`
    * when they declare `idempotentSend`, and MUST throw rather than invent a
    * receipt when delivery did not happen.
@@ -281,6 +290,28 @@ export interface SessionInputAdapter {
   deliver(target: SessionInputTarget, message: SessionInputMessage): Promise<SessionInputReceipt>;
   /** Present only when `receiptLookup` is declared. Null means "no such delivery". */
   lookupReceipt?(target: SessionInputTarget, messageId: string): Promise<SessionInputReceipt | null>;
+}
+
+/** Answer to `probeTarget`. `reason` is a stable machine code, never prose for display only. */
+export interface SessionInputAvailability {
+  available: boolean;
+  reason?: string;
+  /** Normalized provider session identity, when the adapter can see one. */
+  providerSessionRef?: string;
+}
+
+/**
+ * The adapter cannot say whether a message arrived — distinct from `null`,
+ * which asserts it definitely did not. Raised by `lookupReceipt` when the
+ * provider still might consume an earlier send, so re-sending could double
+ * deliver. The service treats it exactly like having no lookup capability at
+ * all: the message stays unknown and waits for an operator.
+ */
+export class SessionInputUnresolvedError extends Error {
+  constructor(readonly reason: string) {
+    super(`session input delivery unresolved: ${reason}`);
+    this.name = "SessionInputUnresolvedError";
+  }
 }
 
 /** A definitive provider/policy refusal. Anything else is treated as an unknown outcome. */

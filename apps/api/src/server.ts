@@ -985,6 +985,15 @@ export function buildServer(deps: ServerDeps): BuiltServer {
       },
     );
 
+    // Probe the adapter for this exact session, rather than inferring liveness from configuration.
+    app.get<{ Params: { sessionId: string } }>(
+      "/api/sessions/:sessionId/input-capability", read.sessions,
+      async (req, reply) => {
+        if (!inputs.session(req.params.sessionId)) return reply.status(404).send({ error: "not found" });
+        return inputs.capability(req.params.sessionId);
+      },
+    );
+
     // Resolves a lost response: the client knows its own message id from the
     // 202 it never received only via this read plus its client key listing.
     app.get<{ Params: { id: string } }>("/api/inputs/:id", read.sessions, (req, reply) => {
