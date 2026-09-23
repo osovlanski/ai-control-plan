@@ -20,18 +20,30 @@ tree wins.
 Topology (every ancestry link verified, 2026-09-23):
 
 ```text
-f48ff48  redelivery base
-  └─ 0221ab2  feat/agentic-os-session-input-live-contract   provider-neutral contract + opt-in gate
+main (91c9781)
+  └─ 0221ab2  feat/agentic-os-session-input-live-contract   PR #50 → main
        ├─ f745600  …-claude-adapter    PR #47 → live-contract
        │    └─ 2adca5c  …-delivery-ui  PR #48 → claude-adapter
-       └─ 4c0c6bd  …-codex-adapter     transport-only claims; PR → live-contract
+       └─ 4c0c6bd  …-codex-adapter     PR #51 → live-contract; transport-only claims
 ```
+
+`main` carries **none** of this lineage. PR #50 is therefore the whole linear
+chain — 18 commits, 114 files — not a single slice. Its body lists which parts
+were already reviewed (as #44 and #46, both of which merged into side branches
+that never reached `main`) and which never had a PR at all: the conversational
+shell and standalone Shell slices. PR #44's own body flagged that gap on
+2026-09-20. The `#44` / `#46` merge commits are side branches off this line, not
+ancestors of it; `f48ff48` is the ancestor that carries their content forward.
+
+**Open decision:** land #50 as one 18-commit unit, or re-stack the shell slices
+as their own PRs to `main` first. The second costs time and buys a review unit
+per slice.
 
 - **Status:** the topology repair is complete — the provider-neutral contract is
   genuinely shared rather than duplicated, and both adapters descend from it.
-- **Next:** merge bottom-up — `live-contract → main`, then #47, then the Codex
-  adapter, then #48. A four-deep stack re-rebases on every commit to `main`, so
-  this is the stream that costs the most to leave open.
+- **Next:** merge bottom-up — #50, then #47, then #51, then #48. A four-deep
+  stack re-rebases on every commit to `main`, so this is the stream that costs
+  the most to leave open.
 - **Deferred:** the Codex correlated-receipt spike (does `clientUserMessageId`
   support durable, message-correlated receipts?). It branches from the Codex
   adapter, so running it before that lands means rebasing research mid-flight.
@@ -78,7 +90,7 @@ Open items carried out of K19c, none of them K19d's job:
 
 ### Ordering
 
-1. Land stream A bottom-up.
+1. Land stream A bottom-up: #50 → #47 → #51 → #48.
 2. Stream B K19d — concurrently; the two touch disjoint files.
 3. The Codex receipt spike, once the Codex adapter is on `main`.
 4. Stream C only after authenticated remote mode is designed and approved.
