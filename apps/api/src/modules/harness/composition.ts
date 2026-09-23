@@ -215,6 +215,8 @@ export function buildHarnessComposition(deps: HarnessCompositionDeps): HarnessCo
         rulesDenied: toolDeniedRules(input.toolName, { allow: input.toolsAllow, deny: input.toolsDeny }),
         approvalMode: input.approvalMode,
         outcome,
+        // K19g: facts of the raw action; the record below keeps the judge's answers verbatim.
+        floors: built.floors,
       });
       // Written here rather than via `decide(req, ctx)` because the record
       // carries the verdict, which only exists after the answers do. Still one
