@@ -8,6 +8,81 @@
 
 **Live verification against real providers (2026-08-22) — see log entry below for the full report.** Two real defects found and fixed in `claude.ts`/`orchestrator.ts`; everything else in the core loop, handoff, parallel compare, and telemetry worked against real `claude`/`codex` CLIs on the first try.
 
+## Workstreams (2026-09-23)
+
+Three streams are in flight. Every SHA below was verified against `origin` on the
+date in the heading; a SHA here is a **claim about the remote**, so `git fetch`
+and re-check before acting on one. Where this section and the tree disagree, the
+tree wins.
+
+### A — Session input: live contract → provider adapters → delivery UI
+
+Topology (every ancestry link verified, 2026-09-23):
+
+```text
+f48ff48  redelivery base
+  └─ 0221ab2  feat/agentic-os-session-input-live-contract   provider-neutral contract + opt-in gate
+       ├─ f745600  …-claude-adapter    PR #47 → live-contract
+       │    └─ 2adca5c  …-delivery-ui  PR #48 → claude-adapter
+       └─ 4c0c6bd  …-codex-adapter     transport-only claims; PR → live-contract
+```
+
+- **Status:** the topology repair is complete — the provider-neutral contract is
+  genuinely shared rather than duplicated, and both adapters descend from it.
+- **Next:** merge bottom-up — `live-contract → main`, then #47, then the Codex
+  adapter, then #48. A four-deep stack re-rebases on every commit to `main`, so
+  this is the stream that costs the most to leave open.
+- **Deferred:** the Codex correlated-receipt spike (does `clientUserMessageId`
+  support durable, message-correlated receipts?). It branches from the Codex
+  adapter, so running it before that lands means rebasing research mid-flight.
+  The Codex adapter's transport-only claims stand until empirical evidence
+  replaces them.
+
+### B — M16 Decision Service (Jev / System One) — K17–K22
+
+Plan: [`plans/jev-decision-service-plan.md`](jev-decision-service-plan.md). Proposed
+design; slices below are implementation status.
+
+- **K17** seam + `RulesDecisionProvider` — pushed (`af90b61`, PR #49).
+- **K18** decision records + `decisions.read` — complete on the OCI working copy,
+  **not pushed as of this note**.
+- **K19a** question-key mapping, the no-basis contract, §7.2 injection suite —
+  same: complete locally, not pushed.
+- **K19b** `DecisionStateBuilder` (§4.4) — same.
+- **K19c** tool gate wired in shadow mode — same.
+- **Next:** K19d — register `ModelDecisionProvider` (§4.3). Until a judging
+  provider exists, every gate outcome is "prompt — no basis", the injection suite
+  is vacuous, and calibration cannot be measured.
+
+Open items carried out of K19c, none of them K19d's job:
+
+| Item | Where it belongs |
+|---|---|
+| §5 K19's "the only widening" never fires — the gate must not reinterpret an existing `approvalMode`. Needs an opt-in `gate-assisted` mode, gated on measured calibration (I-D5). | activation slice |
+| The Claude adapter gets **audit** tier under `auto-approve`, because `canUseTool` is installed only under `prompt-on-escalation`. The mode that most needs a gate is the one with no pre-exec hook. | its own slice |
+| Bedrock emits no tool events, so the gate never evaluates there. | recorded as known-unreachable |
+| §7.4 attestations are not checked yet. | activation slice |
+
+- **Blocked on nothing.** Shares no files with stream A; the two run concurrently.
+- **PR #49 is red** on a lint error; the fix is in the unpushed work above.
+
+### C — Remote deployment (Vercel / Railway frontend split)
+
+- [`docs/adr/agentic-os-deployment.md`](../docs/adr/agentic-os-deployment.md) —
+  **Proposed. No deployment is authorized by that ADR.**
+- **Blocker:** there is no authenticated remote mode. Configuration rejects a
+  non-loopback API host by construction, and the ADR already rejects a public
+  proxy to the loopback API and provider credentials in Vercel/CI.
+- Not schedulable as a workstream until that remote-auth design exists. It is a
+  prerequisite, not a backlog item.
+
+### Ordering
+
+1. Land stream A bottom-up.
+2. Stream B K19d — concurrently; the two touch disjoint files.
+3. The Codex receipt spike, once the Codex adapter is on `main`.
+4. Stream C only after authenticated remote mode is designed and approved.
+
 ## Done
 
 - [x] Reviewed the original proposal (`docs/original-plan.md`)
