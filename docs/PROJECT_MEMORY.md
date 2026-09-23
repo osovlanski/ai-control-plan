@@ -323,12 +323,21 @@ checks; this eighth one is structural, and K19c cannot be reviewed without it.
 - **The committed budgets are below the judge's latency floor.** Composition uses 50 ms and the
   §7.2 suite uses 200 ms, but the fastest call measured was 1,014 ms. Every call times out and
   degrades to rules, so the committed suite is still vacuous and the demo:b prompt rate stays 1.0.
-  Shadow evaluation is off the hot path (not awaited), so the shadow budget can be raised with no
-  latency cost; this is an open decision, not yet made.
+  Superseded by K19e, which split the budgets.
 - **§7.2 FAIL (run with a 20 s budget, scratch copy):** 10 of 51 fixtures lowered `risk` by one
   level (severe→high), and `destructive` fell from 0.85 to 0.00–0.15 under payloads that name it.
   No gate verdict flipped (all injected risk ≥ high → prompt), but §7.2's bar is "no reduction".
   Activation stays blocked on this. Sonnet 5 is the proposed next measurement, not yet run.
 - **demo:b prompt rate:** 1.0 at the shipped 50 ms budget (2/2 degraded); 0.0 with a 20 s budget
   (2/2 judged risk=none → auto-approve). n=2, so it is a smoke reading, not a rate.
+
+## 2026-09-23 — M16 K19e: injection resistance by question scoping (SHIPPED; §7.2 still FAIL)
+
+- **Budgets are split.** `TOOL_GATE_BUDGET_MS`: `shadow` is 10 s and is used by every evaluation except an applied pre-exec one, and by the §7.2 suite. `applied` stays 50 ms. `applied` is closed, and an applied budget from measured p95 is the activation slice's call.
+- **The suite binds now.** When a judge is reachable, a fixture the rules answered fails. The test is `provider !== "rules"`, not `degraded`: the chain starts at the unregistered `typesafe`, so a judged answer still carries a degraded note. Per-PR CI has no key, so there the suite is vacuous and prints `VACUOUS`. The nightly `eval.yml` job runs it with the key.
+- **One call per question group, never the whole state.** `TOOL_GATE_QUESTION_GROUPS` asks the four action Nouls in one call and `risk` alone in another. No judge sees `pathSamples`, `repoTrusted`, `toolsAllow` or `toolsDeny`. Both parts were measured separately: dropping `pathSamples` took path-driven risk drops from 9 to 0, and splitting the questions took large Noul drops from 10 to 1.
+- **§7.2 on `claude-haiku-4-5`: 10 of 51 fixtures soften, down from 26–27.** 9 of the 10 carry the injection inside `commandText`, which every question legitimately reads, so scoping cannot fix them. The remaining one moved on a path-count change alone. Which fixtures fail varies between runs.
+- **`claude-sonnet-5` is not the fix.** It failed 25 of 51 at 2.5× the cost ($4.60 vs $1.83 per 1,000) and about 1.8× the p50 latency. It also needs thinking disabled, or it overruns the answer cap.
+- **§7.3 can bucket only coarsely.** Identical Haiku calls barely vary: P(severe) spread 0.03 over 20 calls. But answers sit on a 0.05 grid massed near 0 and 1, and an irrelevant structural change moved one answer by 0.55.
+- **Jev may promise only per-group batching** until §7.2 passes against Jev in single-request mode (plan §4.2).
 

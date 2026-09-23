@@ -19,6 +19,10 @@
  * is answered by the rules port it carries, so a record keeps the rules
  * baseline beside the judged keys (§5 K18). With no basis — no command text
  * in the state — the judged keys are ABSENT (I-D5), never filled.
+ *
+ * K19e: one call per `TOOL_GATE_QUESTION_GROUPS` entry, in parallel, each
+ * carrying only its group's fields (§4.4 per question). Any group failing
+ * fails the whole decision — a partial battery is not a judgement.
  */
 import Anthropic from "@anthropic-ai/sdk";
 import type {
@@ -28,7 +32,13 @@ import type {
   DecisionProvider,
   DecisionRequest,
 } from "@agent-plane/core";
-import { RulesDecisionProvider, TOOL_GATE_JUDGED_KEYS, TOOL_GATE_RISK_LEVELS } from "@agent-plane/core";
+import {
+  RulesDecisionProvider,
+  TOOL_GATE_JUDGED_KEYS,
+  TOOL_GATE_QUESTION_GROUPS,
+  TOOL_GATE_RISK_LEVELS,
+  scopeDecisionState,
+} from "@agent-plane/core";
 
 /**
  * Hot path, per tool call; the tool-gate state is bounded at 12k chars
@@ -166,6 +176,30 @@ export class ModelDecisionProvider implements DecisionProvider {
     // service's fallback is the retry policy (I-D2). The SDK timeout aborts
     // the request itself, so a blown budget stops spending.
     const client = new Anthropic({ apiKey, maxRetries: 0, ...(this.opts.fetch ? { fetch: this.opts.fetch } : {}) });
+    const groups = TOOL_GATE_QUESTION_GROUPS.map((g) => ({
+      keys: g.keys.filter((k) => keys.includes(k)),
+      state: scopeDecisionState(req.state, g.fields),
+    })).filter((g) => g.keys.length > 0);
+    const judged = await Promise.all(groups.map((g) => this.judge(client, req, g.keys, g.state)));
+
+    const answers: Record<string, DecisionAnswer> = { ...baseline.answers };
+    const usage = { inputTokens: 0, outputTokens: 0 };
+    for (const j of judged) {
+      Object.assign(answers, j.answers);
+      usage.inputTokens += j.inputTokens;
+      usage.outputTokens += j.outputTokens;
+    }
+    return {
+      answers,
+      provider: "model",
+      modelReported: judged[0]!.model,
+      latencyMs: Date.now() - startedMs,
+      usage,
+    };
+  }
+
+  /** One group, one call. The state here is already scoped to the group's fields. */
+  private async judge(client: Anthropic, req: DecisionRequest, keys: readonly JudgedKey[], state: DecisionRequest["state"]) {
     const questions = keys.map((k) => {
       const q = req.questions[k]!;
       return `- ${k} (${q.kind}${q.kind === "score" ? `: ${q.criteria.join(" < ")}` : ""}): ${q.instructions}`;
@@ -177,12 +211,15 @@ export class ModelDecisionProvider implements DecisionProvider {
         {
           model: this.model,
           max_tokens: MAX_OUTPUT_TOKENS,
-          // Haiku 4.5 still accepts sampling params; newer models reject them (400).
-          ...(this.model.startsWith("claude-haiku") ? { temperature: 0 } : {}),
+          // Haiku 4.5 still accepts sampling params; newer models reject them
+          // (400) and think by default, which on claude-sonnet-5 ran past
+          // MAX_OUTPUT_TOKENS and degraded (K19e). A model that cannot turn
+          // thinking off (claude-opus-5-5) 400s here and degrades, loudly.
+          ...(this.model.startsWith("claude-haiku") ? { temperature: 0 } : { thinking: { type: "disabled" as const } }),
           system: `${SYSTEM}\n\nQUESTIONS:\n${questions.join("\n")}`,
           // Fenced: the state is one JSON value inside a delimited block, never
           // concatenated into the instructions (§4.4).
-          messages: [{ role: "user", content: `<STATE>\n${JSON.stringify(req.state)}\n</STATE>` }],
+          messages: [{ role: "user", content: `<STATE>\n${JSON.stringify(state)}\n</STATE>` }],
           output_config: { format: { type: "json_schema", schema: outputSchema(keys) } },
         },
         { timeout: req.budgetMs },
@@ -202,11 +239,10 @@ export class ModelDecisionProvider implements DecisionProvider {
       throw new Error("malformed judgement: body is not JSON");
     }
     return {
-      answers: { ...baseline.answers, ...parseJudgement(body, keys) },
-      provider: "model",
-      modelReported: response.model,
-      latencyMs: Date.now() - startedMs,
-      usage: { inputTokens: response.usage.input_tokens, outputTokens: response.usage.output_tokens },
+      answers: parseJudgement(body, keys),
+      model: response.model,
+      inputTokens: response.usage.input_tokens,
+      outputTokens: response.usage.output_tokens,
     };
   }
 }

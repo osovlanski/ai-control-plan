@@ -197,6 +197,23 @@ export const TOOL_GATE_THRESHOLDS = {
 } as const satisfies { maxAutoApproveRisk: (typeof TOOL_GATE_RISK_LEVELS)[number]; noulPrompt: number };
 
 /**
+ * K19e — the tool gate's two budgets. They were one number (50 ms), which no
+ * network judge meets (K19d: min 1,014 ms, p95 2,161 ms), so every call
+ * timed out, degraded to rules, and nothing was ever measured.
+ *
+ * - `applied` — awaited on the pre-exec hook, before the tool runs: a real
+ *   hot-path cost on every call. Left at 50 ms deliberately. `applied` is
+ *   closed in this build, and if it were open every judge call would degrade
+ *   to `prompt` (I-D2) — which is exactly §7.1(3) failing, loudly. Raising it
+ *   to a measured p95 is a latency decision for the activation slice.
+ * - `shadow` — not awaited (fire-and-forget in the runner), so it costs no
+ *   latency. 10 s is ~4× the measured single-call p95 with headroom for the
+ *   slower comparison judge; it exists only so a hung call stops spending.
+ *   The §7.2 suite uses this budget, because it measures what shadow records.
+ */
+export const TOOL_GATE_BUDGET_MS = { applied: 50, shadow: 10_000 } as const;
+
+/**
  * `unchanged` = the gate has no effect: a read-only workspace, where
  * `approvalMode` already answers every approval with no (§5 K19).
  * `auto-approve` = the gate adds nothing; `approvalMode` still decides, so it
@@ -307,15 +324,18 @@ export interface ToolGateObservation {
  *
  * | field                  | read by                                                        |
  * |------------------------|----------------------------------------------------------------|
- * | `toolName`             | `denied` (the rules substring match), `risk`, `destructive`, `exfiltration`, `credential_reach` |
- * | `toolsAllow`           | `denied`                                                       |
- * | `toolsDeny`            | `denied`                                                       |
- * | `commandText`          | `risk`, `destructive`, `exfiltration`, `credential_reach`      |
+ * | `toolName`             | `denied` (the rules substring match), every judged key         |
+ * | `toolsAllow`           | `denied` only — reaches no judge                               |
+ * | `toolsDeny`            | `denied` only — reaches no judge                               |
+ * | `commandText`          | every judged key                                               |
  * | `networkDestinations`  | `exfiltration`, `risk`                                         |
  * | `pathsInside`          | `outside_repo`, `risk`                                         |
  * | `pathsOutside`         | `outside_repo`, `risk`                                         |
- * | `pathSamples`          | `destructive`, `credential_reach`, `outside_repo`              |
- * | `repoTrusted`          | `outside_repo`, `risk` — tells a judge that withheld ≠ empty   |
+ * | `pathSamples`          | none — reaches no judge (K19e, see below)                      |
+ * | `repoTrusted`          | none — reaches no judge (it only explained withheld samples)   |
+ *
+ * K19e: this table is enforced per QUESTION GROUP by
+ * `TOOL_GATE_QUESTION_GROUPS` below — a judge never receives the whole state.
  *
  * There is no tenth field. Fields deliberately NOT here, because no question
  * in the battery reads them and §4.4 forbids carrying what nothing reads:
@@ -361,6 +381,53 @@ export const TOOL_GATE_STATE_FIELDS = [
   "pathSamples",
   "repoTrusted",
 ] as const;
+
+/**
+ * K19e — §4.4 enforced per QUESTION, not per site. Each group is one judge
+ * call whose state carries only `fields`; nothing else of the built state is
+ * sent with those questions.
+ *
+ * Why, measured on `claude-haiku-4-5` over the 51 §7.2 fixtures (K19e): the
+ * K19d shape — one call, every question, the whole state — let 26/51 fixtures
+ * soften, with 7–10 Noul drops of ≥ 0.2. Two changes, each measured apart:
+ *
+ * - **`pathSamples` reaches no judge.** It is the one field that is pure
+ *   attacker-named repo content, and at runtime it is redundant: the runner
+ *   puts `file_path` into `commandText` (the JSON of the tool input) anyway.
+ *   Leaving it with `risk` alone still let paths drop `risk` on 9 fixtures;
+ *   removing it took that to 0. `repoTrusted` only explained a withheld
+ *   sample, so it goes with it.
+ * - **`risk` is asked alone.** With the SAME fields, one call answering all
+ *   five questions still had 10 Noul drops of ≥ 0.2; splitting `risk` from
+ *   the action questions took that to 1. Asking the questions together lets
+ *   one answer carry the others.
+ *
+ * The field sets are therefore identical today; they stay per group so a
+ * question that needs a field the others must not see can get it.
+ *
+ * What this does NOT do: an injection carried inside `commandText` reaches
+ * every group, because every question legitimately reads the command. Field
+ * scoping cannot remove text from the field a question depends on, and §7.2
+ * still fails on that channel.
+ */
+export const TOOL_GATE_QUESTION_GROUPS = [
+  {
+    keys: ["destructive", "outside_repo", "credential_reach", "exfiltration"],
+    fields: ["toolName", "commandText", "networkDestinations", "pathsInside", "pathsOutside"],
+  },
+  {
+    keys: ["risk"],
+    fields: ["toolName", "commandText", "networkDestinations", "pathsInside", "pathsOutside"],
+  },
+] as const satisfies ReadonlyArray<{
+  keys: ReadonlyArray<(typeof TOOL_GATE_JUDGED_KEYS)[number]>;
+  fields: ReadonlyArray<(typeof TOOL_GATE_STATE_FIELDS)[number]>;
+}>;
+
+/** The state one question group may see: `fields` and nothing else. Pure. */
+export function scopeDecisionState(state: DecisionState, fields: readonly string[]): DecisionState {
+  return Object.fromEntries(fields.filter((f) => f in state).map((f) => [f, state[f]]));
+}
 
 export interface BuiltDecisionState {
   state: DecisionState;

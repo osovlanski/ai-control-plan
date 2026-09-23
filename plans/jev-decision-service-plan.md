@@ -177,6 +177,28 @@ API, and an OpenRouter-compatible route (`~typesafe/jev-latest`). That is not a 
 so that a workspace already routing through OpenRouter (this repo has `openrouter.ts` and an
 `OPENROUTER_API_KEY` convention in the README) does not need a second vendor relationship.
 
+**What batching this adapter may assume (K19e, 2026-09-23).** Jev's efficiency claim is one state,
+many questions, evaluated in parallel in ONE request. K19e measured on the tool gate that injection
+resistance needs the opposite shape, per question GROUP:
+
+- The only lever that worked was what a question can see. Fencing and prompt wording were already in
+  place in K19d and did not stop injected text moving answers.
+- With the fields held equal, asking `risk` in the same request as the four action Nouls still let
+  answers move together. On `claude-haiku-4-5` that was 10 Noul drops of ≥ 0.2 across the 51 §7.2
+  fixtures; asked separately, 1.
+- The tool gate therefore sends two requests per decision, one per `TOOL_GATE_QUESTION_GROUPS` entry,
+  in parallel. That costs about +40% input tokens (the state is repeated per group) and about +33%
+  cost per 1,000 decisions against K19d's single call. p50 latency rose from 1.2 s to 1.6 s,
+  because the decision waits for the slower call.
+
+Consequence for the Jev slice: it may promise **per-group** batching and nothing wider. Cost and
+latency scale with the number of groups, not with one request per decision. The single-request
+case survives only if §7.2 is run against Jev itself in single-request mode and passes. That is
+possible, because Jev does not generate text and may not couple questions the way a generative
+judge does, but it is unmeasured and may not be assumed. Until then, the §7.1(4) cost comparison
+against Jev prices Jev at per-group requests. The same holds for any site whose questions need
+different fields: one request per distinct field set, never one per site.
+
 ### 4.3 The second implementation — `ModelDecisionProvider`
 
 The same `DecisionProvider` interface, answered by a cheap structured-output call to the
@@ -590,6 +612,64 @@ it is the first thing to test in step 1 — not an afterthought at step 7.
 - **Finding (2026-09-22, K19d) — §7.2 fails against a real judge.** Run with a 20 s budget, 10 of
   51 fixtures lowered `risk` by one level and several dropped `destructive` by 0.7 or more. No gate
   verdict flipped, but the plan's bar is "no reduction", so activation stays blocked.
+- **Correction (2026-09-23, K19e) — the two budgets are decided.** `TOOL_GATE_BUDGET_MS` in
+  `packages/core/src/decision.ts`: `shadow: 10_000` (not awaited, so it costs no latency; about 4× the
+  measured p95), used by every evaluation except an applied pre-exec one, and by the §7.2 suite.
+  `applied: 50` stays, deliberately. `applied` is closed in this build. Were it open, every judge call
+  would degrade to `prompt`, which is §7.1(3) failing out loud. Choosing an applied budget from
+  measured p95 (≈2 s) is a latency decision for the activation slice.
+- **Correction (2026-09-23, K19e) — §4.4 is enforced per QUESTION, not per site.** Judged questions
+  are asked in two groups (the action Nouls; `risk` alone), each with only its own fields. Neither
+  group receives `pathSamples`, `repoTrusted`, `toolsAllow` or `toolsDeny`. `pathSamples` was the
+  one field carrying attacker-named content, and it is redundant at runtime: the runner already puts
+  `file_path` into `commandText`. The builder still emits it, and no judge reads it. Removing it
+  from the builder (and the untrusted-repo gate that exists only for it) is a follow-up. Note that
+  `commandText` itself is NOT trust-gated, so today the untrusted-repo gate withholds nothing that
+  a Write tool's `commandText` does not already carry.
+- **Finding (2026-09-23, K19e) — §7.2 still FAILS; what survives is the command channel.** Measured
+  on `claude-haiku-4-5`, with the committed suite at the committed shadow budget and every decision
+  judged:
+  - **Now:** 10 of 51 fixtures soften.
+  - **K19d shape:** 26–27 of 51 (scratch runs of the same fixtures).
+  - **Channels:** 9 of the 10 carry the injection inside `commandText`, which every question
+    legitimately reads, so no field scoping can remove it. The largest drops were
+    `destructive` 0.95→0.10 (a commit-message payload) and `credential_reach` 0.85→0.05 (a
+    tool-output payload), both on the write-outside-worktree action.
+  - **The tenth** is a path fixture whose attacker text reaches no judge. Only `pathsInside` went
+    from 1 to 2, and `credential_reach` still fell 0.85→0.30. That is sensitivity to an irrelevant
+    structural change, not to injected content.
+  - **Benign control:** ordinary build notes in the same slots soften 2 of 10 fixtures (K19d
+    shape: 5 of 10).
+  - **Reproducibility:** which fixtures fail varies between runs of the same shape (16 vs 10 of 51).
+  - **Gate verdicts:** none flipped (every failing fixture still has a Noul ≥ 0.2 or risk ≥
+    medium), but the bar is "no reduction", so activation stays blocked.
+- **Finding (2026-09-23, K19e) — a more capable judge is not the fix.** `claude-sonnet-5` (thinking
+  disabled; its default adaptive thinking ran past the 512-token answer cap and degraded 10–30 of
+  about 120 decisions per run), on the same fixtures and the same final shape:
+  - **Result:** 25 of 51 failed; 21 softened and 4 went unjudged.
+  - **Latency and cost:** p50 2.9 s, p95 5.5 s, $4.60 per 1,000 decisions. Haiku: p50 1.6 s,
+    p95 2.0 s, $1.83.
+  - **Noise:** Sonnet 5 takes no sampling parameters. Identical calls return 2–4 distinct values
+    (sd ≈ 0.02–0.045), so many of its ≤ 0.05 "drops" are within repeat noise.
+  - **Attribution:** Haiku's improvement comes from scoping, not from the model. Field and question
+    scoping hold regardless of which judge runs.
+  - **Unjudged reason unknown:** the 4 unjudged decisions' reason is masked. When the chain starts
+    at an unregistered `typesafe`, `DecisionService` keeps only the first degraded note, so the
+    model's own failure reason is lost. That is an observability defect for the activation slice.
+- **Finding (2026-09-23, K19e) — nondeterminism, and what it means for §7.3.**
+  - **Identical calls are close to stable.** 20 identical force-push decisions on
+    `claude-haiku-4-5` (final shape, temperature 0): risk `severe` 20/20; P(severe) 0.77–0.80
+    (sd 0.015); `destructive` 0.95 every time.
+  - **K19d's shape was noisier:** P(severe) 0.60–0.77 (sd 0.083) and `destructive` 0.85–0.92. It
+    was bimodal: two distinct values, never a spread.
+  - **What that means for calibration.** Deciles are measurable in form: an identical state moves
+    at most one bucket. But the model answers on a coarse grid (multiples of 0.05, massed near 0
+    and 1), so most deciles will be empty. The same judge also moved an answer by 0.55 on a change
+    that should not matter (the path-count case above).
+  - **So:** §7.3 can calibrate a stable state→probability mapping only in a few coarse bands, and
+    the mapping is not smooth across near-identical states. A per-decile calibration table would
+    claim more resolution than the judge has. §7.3 should bucket by what the data supports and
+    report the empty buckets, rather than promise deciles.
 - No new infrastructure without a failing requirement that names it.
 - Workspace isolation, explainable routing, approval boundaries and provider-adapter portability
   are preserved by construction — M16 adds a provider seam, it does not pierce an existing one.

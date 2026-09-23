@@ -31,7 +31,14 @@ import { VerificationStore } from "./verification-store.js";
 import { VerificationCoordinator } from "../verification-coordinator.js";
 import { planProjectVerification, snapshotProjectVerification } from "../project-verification.js";
 import type { DecisionProvider } from "@agent-plane/core";
-import { DEFAULT_REDACTION_RULES, TOOL_GATE_BATTERY, buildToolGateState, resolveToolGate, toolDeniedRules } from "@agent-plane/core";
+import {
+  DEFAULT_REDACTION_RULES,
+  TOOL_GATE_BATTERY,
+  TOOL_GATE_BUDGET_MS,
+  buildToolGateState,
+  resolveToolGate,
+  toolDeniedRules,
+} from "@agent-plane/core";
 import { DecisionService, decisionProviders, insertDecisionRecord } from "../decision.js";
 
 /** Legacy `applyEvent` snapshots quota on exactly these event types. */
@@ -196,7 +203,11 @@ export function buildHarnessComposition(deps: HarnessCompositionDeps): HarnessCo
         repoPath: input.repoPath,
         repoAllowlist: config.repoAllowlist,
       });
-      const req = { site: "tool-gate" as const, state: built.state, questions: TOOL_GATE_BATTERY, budgetMs: 50 };
+      // K19e: only an applied pre-exec evaluation is awaited on the hot path;
+      // everything else runs in the background and gets the shadow budget.
+      const hot = activation.mode === "applied" && input.hook === "pre-exec";
+      const budgetMs = hot ? TOOL_GATE_BUDGET_MS.applied : TOOL_GATE_BUDGET_MS.shadow;
+      const req = { site: "tool-gate" as const, state: built.state, questions: TOOL_GATE_BATTERY, budgetMs };
       const outcome = await decisions.decide(req);
       // The deny comes from the deterministic match on the RAW inputs — the
       // same one toolPolicyGuard runs — never from any provider's answer (I-D1).
