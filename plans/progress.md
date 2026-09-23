@@ -55,16 +55,34 @@ per slice.
 Plan: [`plans/jev-decision-service-plan.md`](jev-decision-service-plan.md). Proposed
 design; slices below are implementation status.
 
-- **K17** seam + `RulesDecisionProvider` — pushed (`af90b61`, PR #49).
-- **K18** decision records + `decisions.read` — complete on the OCI working copy,
-  **not pushed as of this note**.
-- **K19a** question-key mapping, the no-basis contract, §7.2 injection suite —
-  same: complete locally, not pushed.
-- **K19b** `DecisionStateBuilder` (§4.4) — same.
-- **K19c** tool gate wired in shadow mode — same.
-- **Next:** K19d — register `ModelDecisionProvider` (§4.3). Until a judging
-  provider exists, every gate outcome is "prompt — no basis", the injection suite
-  is vacuous, and calibration cannot be measured.
+K17 through K19e are pushed and PR #49 is green. Everything ships in shadow:
+the default provider is `rules`, `applied` is closed, nothing is activated.
+
+| Slice | What it added |
+|---|---|
+| K17 | the `DecisionProvider` seam + `RulesDecisionProvider` |
+| K18 | `decision_records`, `decisions.read`, API 2.1 → 2.2 |
+| K19a | question-key mapping, the no-basis contract, the §7.2 suite |
+| K19b | `DecisionStateBuilder` (§4.4) |
+| K19c | the tool gate wired at the pre-exec hook, shadow only |
+| K19d | `ModelDecisionProvider` on `claude-haiku-4-5` |
+| K19e | per-question state scoping, split shadow/applied budgets |
+
+- **§7.2 still FAILS, and that is the blocker on activation.** 10 of 51 fixtures
+  soften a judged answer, down from 26–27 before scoping. **9 of the 10 carry the
+  injection inside `commandText`** — the one field every command question must
+  read, so scoping cannot remove it. The tenth moved on a path-count change alone.
+- **Scoping was measured, not assumed.** Dropping `pathSamples` took path-driven
+  risk drops from 9 to 0; splitting the questions took large Noul drops from 10
+  to 1.
+- **A bigger judge is not the fix.** `claude-sonnet-5` failed 25 of 51 at 2.5× the
+  cost and ~1.8× the p50 latency of Haiku 4.5.
+- **§7.3 can only bucket coarsely.** Identical Haiku calls barely vary (P(severe)
+  spread 0.03 over 20), but answers sit on a 0.05 grid massed near 0 and 1, and an
+  irrelevant structural change moved one answer by 0.55.
+- **Next:** decide whether §7.2's "no reduction" bar survives contact with
+  `commandText`-embedded injection (see the open items below). Nothing downstream
+  moves until that is settled.
 
 Open items carried out of K19c, none of them K19d's job:
 
@@ -74,9 +92,11 @@ Open items carried out of K19c, none of them K19d's job:
 | The Claude adapter gets **audit** tier under `auto-approve`, because `canUseTool` is installed only under `prompt-on-escalation`. The mode that most needs a gate is the one with no pre-exec hook. | its own slice |
 | Bedrock emits no tool events, so the gate never evaluates there. | recorded as known-unreachable |
 | §7.4 attestations are not checked yet. | activation slice |
+| §7.2's bar is "no reduction". 9 of 10 residual failures put the injection inside `commandText`, which every command question must read — no scoping removes it. Either the bar distinguishes "a field the question must read" from "a field it should never have seen", or activation is blocked permanently. **Owner decision.** | plan revision, before the activation slice |
+| An applied budget derived from measured p95 (K19e left `applied` at 50 ms, below the judge's 1,014 ms floor, because `applied` is closed). | activation slice |
 
-- **Blocked on nothing.** Shares no files with stream A; the two run concurrently.
-- **PR #49 is red** on a lint error; the fix is in the unpushed work above.
+- **Shares no files with stream A**; the two run concurrently.
+- **PR #49 is green** on `a6a006f` and carries K17–K19e.
 
 ### C — Remote deployment (Vercel / Railway frontend split)
 
