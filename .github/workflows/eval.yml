@@ -32,6 +32,16 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: pnpm eval
 
+      # M16 §7.2: the prompt-injection suite binds only where a judge is
+      # reachable. Per-PR CI is credential-free, so there it is vacuous and says
+      # so; this is the run that measures the real judge. A red run opens the
+      # issue below.
+      - name: Prompt-injection suite against the real judge (M16 §7.2)
+        if: always()
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: pnpm --filter @agent-plane/api exec vitest run test/decision-injection.test.ts
+
       - name: Upload scorecard
         if: always()
         uses: actions/upload-artifact@v4

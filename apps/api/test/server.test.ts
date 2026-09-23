@@ -6,6 +6,7 @@ import { loadConfig } from "../src/config.js";
 import { openDb, type Db } from "../src/db/index.js";
 import { buildServer, type BuiltServer } from "../src/server.js";
 import { credentialPath, readCredential } from "../src/auth/credential-file.js";
+import { insertDecisionRecord } from "../src/modules/decision.js";
 
 let home: string;
 let db: Db;
@@ -37,7 +38,7 @@ describe("api server", () => {
     const res = await app.inject({ method: "GET", url: "/api/meta", headers: bearer() });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toMatchObject({
-      apiVersion: "2.1",
+      apiVersion: "2.2",
       eventVersion: "1.0",
       authRequired: true,
       capabilities: [
@@ -51,6 +52,7 @@ describe("api server", () => {
         "schedules.read",
         "models.read",
         "context.read",
+        "decisions.read",
         "commands.write",
       ],
     });
@@ -174,5 +176,43 @@ describe("api server", () => {
     expect(body.state).toBe("CREATED");
     expect(body.runs).toEqual([]);
     expect(body.active).toBe(false);
+  });
+});
+
+describe("GET /api/decisions (M16 K18)", () => {
+  it("requires authentication", async () => {
+    const { app } = makeApp();
+    expect((await app.inject({ method: "GET", url: "/api/decisions" })).statusCode).toBe(401);
+  });
+
+  it("reads back rows written for the tool-gate site, most recent first", async () => {
+    const { app } = makeApp();
+    insertDecisionRecord(
+      db,
+      { site: "tool-gate", state: { toolName: "shell" }, questions: { denied: { kind: "noul", instructions: "x" } }, budgetMs: 50 },
+      { answers: { denied: { kind: "noul", value: 0 } }, provider: "rules", latencyMs: 1 },
+      { mode: "shadow" },
+      "2026-09-22T00:00:00.000Z",
+    );
+    insertDecisionRecord(
+      db,
+      { site: "tool-gate", state: { toolName: "write" }, questions: { denied: { kind: "noul", instructions: "x" } }, budgetMs: 50 },
+      { answers: { denied: { kind: "noul", value: 1 } }, provider: "rules", latencyMs: 2 },
+      { mode: "shadow" },
+      "2026-09-22T00:00:01.000Z",
+    );
+
+    const res = await app.inject({ method: "GET", url: "/api/decisions", headers: bearer() });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as { decisions: Array<{ provider: string; mode: string; site: string; answers: unknown }> };
+    expect(body.decisions).toHaveLength(2);
+    expect(body.decisions.every((d) => d.provider === "rules" && d.mode === "shadow" && d.site === "tool-gate")).toBe(true);
+    expect(body.decisions[0]!.answers).toEqual({ denied: { kind: "noul", value: 1 } }); // most recent first
+  });
+
+  it("rejects an unknown site filter", async () => {
+    const { app } = makeApp();
+    const res = await app.inject({ method: "GET", url: "/api/decisions?site=not-a-site", headers: bearer() });
+    expect(res.statusCode).toBe(400);
   });
 });

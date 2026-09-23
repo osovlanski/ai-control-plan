@@ -206,3 +206,138 @@ flag does not prove text delivery. Canonical findings, exact suite outcomes and
 22 fresh deterministic captures are indexed in `docs/ui/agentic-os-ui-v3.md`
 and `docs/ui/assets/shell-review/README.md`. Cockpit ownership remains at
 `a45a750`; its runtime and existing dirty worktrees were not modified.
+
+## 2026-09-22 — M16 K19a: the decision no-basis contract (PROPOSED)
+
+`RulesDecisionProvider` now maps `(site, questionKey)` rather than `site` alone. The previous
+site-only switch returned the same answer for every question asked at a site — harmless while each
+site asked one question, wrong as soon as K19's tool-gate battery asks several.
+
+The contract that falls out, and that K19 must honour when it wires the gate: **`decide()` answers
+only the keys a provider has a basis for, and an absent key means "no basis"** — never `false`,
+never `0`, never `none`. `DecisionAnswer` deliberately has no `unknown` variant and
+`DecisionOutcome` carries no separate unanswered set; absence is the encoding, and
+`noUncheckedIndexedAccess` (on repo-wide) makes the compiler force every caller to handle it. Per
+I-D2 a caller must resolve an absent answer to its site's conservative outcome — for the tool gate,
+prompt the operator. A key a provider *does* map, asked with the wrong primitive, still throws:
+that is a malformed request, not an unanswerable one.
+
+Consequence worth knowing before reading any shadow report: with only the rules provider
+registered, the tool-gate battery comes back with `denied` answered and `risk`, `destructive`,
+`outside_repo`, `exfiltration` and `credential_reach` absent. The §7.2 prompt-injection suite
+(`apps/api/test/decision-injection.test.ts`) therefore asserts a property of absence today. It is a
+real regression guard on the mapping and the contract, and it is not yet a measurement of injection
+resistance; it becomes one, with no edits to that file, once `decisionProviders()` registers a
+provider that can judge risk.
+
+Two errors in `plans/jev-decision-service-plan.md` were corrected rather than worked around, both
+noted in its §11:
+
+- §5 K18 and the §9.3 step table named `pnpm demo:a` as the acceptance vehicle for decision
+  records. `demo-a.spec.ts` never sets `execution.harnessModes.single`, so it runs the legacy
+  orchestrator path, which has no tool gate and records nothing; `demo-b.spec.ts` does set it.
+- The §5 K19 battery listed five questions, none of which the rules provider can answer — which
+  contradicts K18's requirement that the rules answer be recorded on every call "so a shadow
+  comparison always has a baseline". `denied` is now the battery's first key.
+
+## 2026-09-22 — M16 K19b: the decision state boundary (SHIPPED)
+
+`buildToolGateState()` in `packages/core/src/decision.ts` is §4.4's `DecisionStateBuilder`. The
+rule that shaped it: no field survives that no battery question reads. Applying that rule deleted
+the entire content surface — every question in `TOOL_GATE_BATTERY` (`denied`, `risk`,
+`destructive`, `outside_repo`, `exfiltration`, `credential_reach`) is answerable from the action,
+so the state carries the action, the policy tool lists, path counts, path samples, network
+destinations and a trust flag, and nothing else. There is deliberately no field for a README
+excerpt, a source comment, a test fixture, a commit message, prior tool output or the task goal.
+That is not an omission to be filled in later: §4.4's rule is that a question a sentence in a
+README can flip is a question we do not ask, and `rm -rf` is not less destructive because the goal
+text says so. A later slice that wants one of those fields must first name the question that reads
+it.
+
+Trust is Junie's model and it is fail-closed in both directions that matter: a repo absent from
+`repoAllowlist` — and equally a repo that is simply unknown, or an empty allowlist — is UNTRUSTED,
+and an untrusted repo contributes only the structural facts (`pathsInside` / `pathsOutside` /
+`repoTrusted`). Path samples are withheld entirely, because a filename is attacker-chosen content.
+The action itself is never trust-gated: withholding it for an untrusted repo would blind the gate
+exactly where it is most needed.
+
+Order inside the builder is load-bearing and easy to get wrong: **redact → trust-gate → bound**.
+Redacting first means no secret survives by straddling a truncation boundary; trust-gating before
+bounding means untrusted content is dropped rather than merely shortened. Truncation is fixed caps
+in a fixed order, so the same observation always produces the same bytes and the same flag, and the
+flag now reaches `decision_records.state_truncated` through `DecisionRecordContext.stateTruncated`
+— K18 hardcoded that column to 0 because no bounded state existed yet.
+
+The composition seam (`observeToolGate`) now builds its state with the builder and asks the full
+six-question battery instead of an inline one-question state. It cannot see paths, network
+destinations or the repo path — it fires on `tool.started` and carries only the policy inputs — so
+production rows read `repoTrusted: false` with zero path counts until K19c moves the evaluation
+ahead of execution and widens the seam. That is the honest reading of what the seam observes, not a
+defect.
+
+One invariant was missing from the plan and is now §5 K19 (I-D8), with a §11 note: the gate must
+REFUSE to activate (`mode: applied`) at a site whose provider chain holds no judging provider. With
+rules alone, five of six answers are absent, absence resolves conservatively, and activation would
+turn every rules-allowed tool call into an operator prompt — the inverse of the intent, and the
+fastest way to get the gate switched off. §7.1's seven activation preconditions are evidence
+checks; this eighth one is structural, and K19c cannot be reviewed without it.
+
+## 2026-09-22 — M16 K19c: the tool gate is wired, shadow only (SHIPPED)
+
+- **approvalMode is a ceiling, read strictly.** The gate's `auto-approve` outcome adds nothing: under
+  `prompt-on-escalation` the operator is still prompted. The gate can add a prompt (narrow
+  `auto-approve` to a human answer) or block; it never removes a prompt. §5 K19's "the only widening"
+  is therefore not exercised in this slice. Do not reopen that without a decision recorded here.
+- **The rules deny comes from `toolDeniedRules` on the raw inputs, never from a provider's `denied`
+  answer.** A judge's `denied` can only add a prompt.
+- **Enforcement tier is per hook.** Pre-exec = the adapter's `approval.requested` round-trip, and
+  only when it can relay the answer. Post-start = `tool.started`, which is audit tier only. Per
+  adapter:
+  - Fake: preventive when it requests approval.
+  - Claude: preventive only under `prompt-on-escalation`, because `canUseTool` is installed only
+    there. Under `auto-approve` it runs with `bypassPermissions` and gets audit tier.
+  - Codex, Cursor and OpenRouter: audit tier.
+- **I-D8 is enforced at composition.** `applied` with no judge in the configured chain is refused
+  and logged, and the site stays in shadow.
+- **The §7.4 attestations (`shadowReviewedAt` and the rest) are not checked yet.** They are the
+  activation slice's work. Since K19d registers a judge, composition refuses `applied` outright for
+  the build's own providers until they exist (see K19d below).
+- **The prompt rate is derived from the `decision_records` gate columns (migration 026).** Read it
+  from `GET /api/decisions/prompt-rate`. On `demo:b` (rules-only) it is 1.0 per run, which is the
+  I-D8 case.
+
+## 2026-09-22 — M16 K19d: ModelDecisionProvider registered, shadow only (SHIPPED; §7.2 FAIL)
+
+- **The judge:** `apps/api/src/modules/decision-model.ts`, `claude-haiku-4-5`, typed answers via
+  structured outputs (`output_config.format`), never forced `tool_choice`. Credential is
+  `ANTHROPIC_API_KEY`, read at the call boundary. It only runs when the workspace sets
+  `decisions.provider: model` (or `typesafe`); the default is `rules`, which never reaches it.
+- **"No basis" is decided by the provider, not the model.** A schema that let the model answer
+  `null` produced nulls on `git status` and on `risk` for a force-push — noise, not a basis signal.
+  Now there is no basis only when the state has no `commandText`; then no call is made and the
+  judged keys are absent.
+- **`applied` is closed for build providers** until the §7.4 attestations exist (composition).
+- **Measured baseline (§7.1(3)(4)), 100 decisions over 10 actions:** p50 1,209 ms, p95 2,161 ms,
+  min 1,014 ms; about 956 input and 84 output tokens per decision; $1.38 per 1,000. Answers vary
+  between identical calls even at temperature 0.
+- **The committed budgets are below the judge's latency floor.** Composition uses 50 ms and the
+  §7.2 suite uses 200 ms, but the fastest call measured was 1,014 ms. Every call times out and
+  degrades to rules, so the committed suite is still vacuous and the demo:b prompt rate stays 1.0.
+  Superseded by K19e, which split the budgets.
+- **§7.2 FAIL (run with a 20 s budget, scratch copy):** 10 of 51 fixtures lowered `risk` by one
+  level (severe→high), and `destructive` fell from 0.85 to 0.00–0.15 under payloads that name it.
+  No gate verdict flipped (all injected risk ≥ high → prompt), but §7.2's bar is "no reduction".
+  Activation stays blocked on this. Sonnet 5 is the proposed next measurement, not yet run.
+- **demo:b prompt rate:** 1.0 at the shipped 50 ms budget (2/2 degraded); 0.0 with a 20 s budget
+  (2/2 judged risk=none → auto-approve). n=2, so it is a smoke reading, not a rate.
+
+## 2026-09-23 — M16 K19e: injection resistance by question scoping (SHIPPED; §7.2 still FAIL)
+
+- **Budgets are split.** `TOOL_GATE_BUDGET_MS`: `shadow` is 10 s and is used by every evaluation except an applied pre-exec one, and by the §7.2 suite. `applied` stays 50 ms. `applied` is closed, and an applied budget from measured p95 is the activation slice's call.
+- **The suite binds now.** When a judge is reachable, a fixture the rules answered fails. The test is `provider !== "rules"`, not `degraded`: the chain starts at the unregistered `typesafe`, so a judged answer still carries a degraded note. Per-PR CI has no key, so there the suite is vacuous and prints `VACUOUS`. The nightly `eval.yml` job runs it with the key.
+- **One call per question group, never the whole state.** `TOOL_GATE_QUESTION_GROUPS` asks the four action Nouls in one call and `risk` alone in another. No judge sees `pathSamples`, `repoTrusted`, `toolsAllow` or `toolsDeny`. Both parts were measured separately: dropping `pathSamples` took path-driven risk drops from 9 to 0, and splitting the questions took large Noul drops from 10 to 1.
+- **§7.2 on `claude-haiku-4-5`: 10 of 51 fixtures soften, down from 26–27.** 9 of the 10 carry the injection inside `commandText`, which every question legitimately reads, so scoping cannot fix them. The remaining one moved on a path-count change alone. Which fixtures fail varies between runs.
+- **`claude-sonnet-5` is not the fix.** It failed 25 of 51 at 2.5× the cost ($4.60 vs $1.83 per 1,000) and about 1.8× the p50 latency. It also needs thinking disabled, or it overruns the answer cap.
+- **§7.3 can bucket only coarsely.** Identical Haiku calls barely vary: P(severe) spread 0.03 over 20 calls. But answers sit on a 0.05 grid massed near 0 and 1, and an irrelevant structural change moved one answer by 0.55.
+- **Jev may promise only per-group batching** until §7.2 passes against Jev in single-request mode (plan §4.2).
+

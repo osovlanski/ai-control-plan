@@ -8,6 +8,113 @@
 
 **Live verification against real providers (2026-08-22) — see log entry below for the full report.** Two real defects found and fixed in `claude.ts`/`orchestrator.ts`; everything else in the core loop, handoff, parallel compare, and telemetry worked against real `claude`/`codex` CLIs on the first try.
 
+## Workstreams (2026-09-23)
+
+Three streams are in flight. Every SHA below was verified against `origin` on the
+date in the heading; a SHA here is a **claim about the remote**, so `git fetch`
+and re-check before acting on one. Where this section and the tree disagree, the
+tree wins.
+
+### A — Session input: live contract → provider adapters → delivery UI
+
+Topology (every ancestry link verified, 2026-09-23):
+
+```text
+main (91c9781)
+  └─ 0221ab2  feat/agentic-os-session-input-live-contract   PR #50 → main
+       ├─ f745600  …-claude-adapter    PR #47 → live-contract
+       │    └─ 2adca5c  …-delivery-ui  PR #48 → claude-adapter
+       └─ 4c0c6bd  …-codex-adapter     PR #51 → live-contract; transport-only claims
+```
+
+`main` carries **none** of this lineage. PR #50 is therefore the whole linear
+chain — 18 commits, 114 files — not a single slice. Its body lists which parts
+were already reviewed (as #44 and #46, both of which merged into side branches
+that never reached `main`) and which never had a PR at all: the conversational
+shell and standalone Shell slices. PR #44's own body flagged that gap on
+2026-09-20. The `#44` / `#46` merge commits are side branches off this line, not
+ancestors of it; `f48ff48` is the ancestor that carries their content forward.
+
+**Open decision:** land #50 as one 18-commit unit, or re-stack the shell slices
+as their own PRs to `main` first. The second costs time and buys a review unit
+per slice.
+
+- **Status:** the topology repair is complete — the provider-neutral contract is
+  genuinely shared rather than duplicated, and both adapters descend from it.
+- **Next:** merge bottom-up — #50, then #47, then #51, then #48. A four-deep
+  stack re-rebases on every commit to `main`, so this is the stream that costs
+  the most to leave open.
+- **Deferred:** the Codex correlated-receipt spike (does `clientUserMessageId`
+  support durable, message-correlated receipts?). It branches from the Codex
+  adapter, so running it before that lands means rebasing research mid-flight.
+  The Codex adapter's transport-only claims stand until empirical evidence
+  replaces them.
+
+### B — M16 Decision Service (Jev / System One) — K17–K22
+
+Plan: [`plans/jev-decision-service-plan.md`](jev-decision-service-plan.md). Proposed
+design; slices below are implementation status.
+
+K17 through K19e are pushed and PR #49 is green. Everything ships in shadow:
+the default provider is `rules`, `applied` is closed, nothing is activated.
+
+| Slice | What it added |
+|---|---|
+| K17 | the `DecisionProvider` seam + `RulesDecisionProvider` |
+| K18 | `decision_records`, `decisions.read`, API 2.1 → 2.2 |
+| K19a | question-key mapping, the no-basis contract, the §7.2 suite |
+| K19b | `DecisionStateBuilder` (§4.4) |
+| K19c | the tool gate wired at the pre-exec hook, shadow only |
+| K19d | `ModelDecisionProvider` on `claude-haiku-4-5` |
+| K19e | per-question state scoping, split shadow/applied budgets |
+
+- **§7.2 still FAILS, and that is the blocker on activation.** 10 of 51 fixtures
+  soften a judged answer, down from 26–27 before scoping. **9 of the 10 carry the
+  injection inside `commandText`** — the one field every command question must
+  read, so scoping cannot remove it. The tenth moved on a path-count change alone.
+- **Scoping was measured, not assumed.** Dropping `pathSamples` took path-driven
+  risk drops from 9 to 0; splitting the questions took large Noul drops from 10
+  to 1.
+- **A bigger judge is not the fix.** `claude-sonnet-5` failed 25 of 51 at 2.5× the
+  cost and ~1.8× the p50 latency of Haiku 4.5.
+- **§7.3 can only bucket coarsely.** Identical Haiku calls barely vary (P(severe)
+  spread 0.03 over 20), but answers sit on a 0.05 grid massed near 0 and 1, and an
+  irrelevant structural change moved one answer by 0.55.
+- **Next:** decide whether §7.2's "no reduction" bar survives contact with
+  `commandText`-embedded injection (see the open items below). Nothing downstream
+  moves until that is settled.
+
+Open items carried out of K19c, none of them K19d's job:
+
+| Item | Where it belongs |
+|---|---|
+| §5 K19's "the only widening" never fires — the gate must not reinterpret an existing `approvalMode`. Needs an opt-in `gate-assisted` mode, gated on measured calibration (I-D5). | activation slice |
+| The Claude adapter gets **audit** tier under `auto-approve`, because `canUseTool` is installed only under `prompt-on-escalation`. The mode that most needs a gate is the one with no pre-exec hook. | its own slice |
+| Bedrock emits no tool events, so the gate never evaluates there. | recorded as known-unreachable |
+| §7.4 attestations are not checked yet. | activation slice |
+| §7.2's bar is "no reduction". 9 of 10 residual failures put the injection inside `commandText`, which every command question must read — no scoping removes it. Either the bar distinguishes "a field the question must read" from "a field it should never have seen", or activation is blocked permanently. **Owner decision.** | plan revision, before the activation slice |
+| An applied budget derived from measured p95 (K19e left `applied` at 50 ms, below the judge's 1,014 ms floor, because `applied` is closed). | activation slice |
+
+- **Shares no files with stream A**; the two run concurrently.
+- **PR #49 is green** on `a6a006f` and carries K17–K19e.
+
+### C — Remote deployment (Vercel / Railway frontend split)
+
+- [`docs/adr/agentic-os-deployment.md`](../docs/adr/agentic-os-deployment.md) —
+  **Proposed. No deployment is authorized by that ADR.**
+- **Blocker:** there is no authenticated remote mode. Configuration rejects a
+  non-loopback API host by construction, and the ADR already rejects a public
+  proxy to the loopback API and provider credentials in Vercel/CI.
+- Not schedulable as a workstream until that remote-auth design exists. It is a
+  prerequisite, not a backlog item.
+
+### Ordering
+
+1. Land stream A bottom-up: #50 → #47 → #51 → #48.
+2. Stream B K19d — concurrently; the two touch disjoint files.
+3. The Codex receipt spike, once the Codex adapter is on `main`.
+4. Stream C only after authenticated remote mode is designed and approved.
+
 ## Done
 
 - [x] Reviewed the original proposal (`docs/original-plan.md`)

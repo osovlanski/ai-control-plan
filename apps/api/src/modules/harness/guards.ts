@@ -14,6 +14,7 @@ import type {
   HandoffRequest,
   FailureKind,
   NormalizedEvent,
+  ToolGateVerdict,
   UsagePayload,
 } from "@agent-plane/core";
 
@@ -36,7 +37,12 @@ export interface GuardSnapshot {
 }
 
 export type GuardTrigger =
-  | { kind: "event"; event: NormalizedEvent; atMs: number }
+  /**
+   * `gate` is the M16 tool-gate verdict (K19c), present ONLY when the site is
+   * `applied` and this event is the adapter's pre-exec approval round-trip.
+   * The runner resolves it (async) before calling the guards, which stay pure.
+   */
+  | { kind: "event"; event: NormalizedEvent; atMs: number; gate?: ToolGateVerdict }
   | { kind: "tick"; atMs: number };
 
 export type GuardName = "budget" | "timeout" | "tool" | "approval" | "quota";
@@ -134,6 +140,7 @@ export function timeoutGuard(snap: GuardSnapshot, trigger: GuardTrigger): GuardD
 }
 
 export function toolPolicyGuard(snap: GuardSnapshot, trigger: GuardTrigger): GuardDirective {
+  if (trigger.kind === "event" && trigger.event.type === "approval.requested") return toolGateDirective(snap, trigger.gate);
   if (trigger.kind !== "event" || trigger.event.type !== "tool.started") return CONTINUE("tool");
   const tools = snap.policy.tools;
   const name =
@@ -153,6 +160,31 @@ export function toolPolicyGuard(snap: GuardSnapshot, trigger: GuardTrigger): Gua
     reason: `tool "${name}" is denied by policy (mode: ${tools.mode})`,
     failure: { kind: "tool_denied", retryable: false },
   };
+}
+
+/**
+ * K19c — the applied tool gate at the pre-exec hook, BEFORE the tool runs.
+ *
+ * Arbitration is unchanged: `prompt` is a `pause` (priority 2) and `block` a
+ * `cancel` (4), both existing slots. On `approval.requested` the approval
+ * guard also returns `pause`; `evaluateGuards` keeps the FIRST of equal
+ * priority and `tool` precedes `approval` in GUARD_ORDER, so a gate prompt
+ * surfaces as `guard: "tool"` — which is how the runner knows the operator
+ * must answer even under `auto-approve`. A read-only workspace is never
+ * touched here: the mode already answers every approval with no.
+ */
+function toolGateDirective(snap: GuardSnapshot, gate: ToolGateVerdict | undefined): GuardDirective {
+  if (!gate || snap.policy.approval.mode === "read-only") return CONTINUE("tool");
+  if (gate.outcome === "block") {
+    return {
+      guard: "tool",
+      action: "cancel",
+      reason: `tool gate: ${gate.reason}`,
+      failure: { kind: "tool_denied", retryable: false },
+    };
+  }
+  if (gate.outcome === "prompt") return { guard: "tool", action: "pause", reason: `tool gate: ${gate.reason}` };
+  return CONTINUE("tool");
 }
 
 export function approvalGuard(_snap: GuardSnapshot, trigger: GuardTrigger): GuardDirective {
