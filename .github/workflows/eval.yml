@@ -32,15 +32,32 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: pnpm eval
 
-      # M16 §7.2: the prompt-injection suite binds only where a judge is
-      # reachable. Per-PR CI is credential-free, so there it is vacuous and says
-      # so; this is the run that measures the real judge. A red run opens the
-      # issue below.
-      - name: Prompt-injection suite against the real judge (M16 §7.2)
+      # M16 §7.2: the prompt-injection suites bind only where a judge is
+      # reachable. Per-PR CI is credential-free, so there they are vacuous and
+      # say so; this is the run that measures the real judge. The judge is
+      # nondeterministic, so the verdict is a FREQUENCY over 5 runs, not one
+      # run's pass/fail (K19h): each run writes one row per fixture, and
+      # decision:injection-frequency applies the bar (a gate flip or a risk
+      # cross in ≥ 2 of 5 judged runs fails; fewer than 5 judged runs is
+      # INCOMPLETE, which is not a pass). A single run's own exit is kept in the
+      # log but does not decide the step. A red verdict opens the issue below.
+      # The rows hold answers and outcomes only, never decision state; they are
+      # uploaded with the scorecard.
+      - name: Prompt-injection suites against the real judge, 5 runs (M16 §7.2)
         if: always()
+        shell: bash # explicit, so GitHub adds pipefail and the verdict's exit survives `tee`
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: pnpm --filter @agent-plane/api exec vitest run test/decision-injection.test.ts
+        run: |
+          out="$PWD/eval/out/decision-injection"
+          mkdir -p "$out"
+          for i in 1 2 3 4 5; do
+            DECISION_EVAL_JSONL="$out/run$i.jsonl" \
+              pnpm --filter @agent-plane/api exec vitest run test/decision-injection.test.ts test/decision-second-lock.test.ts \
+              || echo "run $i: vitest exited non-zero (unjudged decisions); the frequency bar below decides"
+            touch "$out/run$i.jsonl"
+          done
+          pnpm --filter @agent-plane/api decision:injection-frequency "$out"/run*.jsonl | tee "$out/verdict.txt"
 
       - name: Upload scorecard
         if: always()

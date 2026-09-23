@@ -88,11 +88,11 @@ Open items carried out of K19c, none of them K19d's job:
 
 | Item | Where it belongs |
 |---|---|
-| §5 K19's "the only widening" never fires — the gate must not reinterpret an existing `approvalMode`. Needs an opt-in `gate-assisted` mode, gated on measured calibration (I-D5). | activation slice |
+| ~~§5 K19's "the only widening" never fires — needs an opt-in `gate-assisted` mode.~~ **Closed by owner decision (K19h, 2026-09-23):** the gate is a second lock only; the widening is dropped and `gate-assisted` removed. | — |
 | The Claude adapter gets **audit** tier under `auto-approve`, because `canUseTool` is installed only under `prompt-on-escalation`. The mode that most needs a gate is the one with no pre-exec hook. | its own slice |
 | Bedrock emits no tool events, so the gate never evaluates there. | recorded as known-unreachable |
 | §7.4 attestations are not checked yet. | activation slice |
-| §7.2's bar is "no reduction". 9 of 10 residual failures put the injection inside `commandText`, which every command question must read — no scoping removes it. Either the bar distinguishes "a field the question must read" from "a field it should never have seen", or activation is blocked permanently. **Owner decision.** | plan revision, before the activation slice |
+| ~~§7.2's bar is "no reduction".~~ **Decided (K19h):** the bar is gate-outcome flips or risk crosses in 2 or more of 5 runs, applied nightly. It still FAILS on the second-lock set (plan §5 K19h). | done; activation stays blocked on the result |
 | An applied budget derived from measured p95 (K19e left `applied` at 50 ms, below the judge's 1,014 ms floor, because `applied` is closed). | activation slice |
 
 - **Shares no files with stream A**; the two run concurrently.
