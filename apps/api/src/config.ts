@@ -121,6 +121,14 @@ export interface WorkspaceConfig {
      * `process.env` here.
      */
     typesafeApiKeyRef?: string;
+    /**
+     * Per-site mode (§7.4). `shadow` records what the site would do and changes
+     * nothing; it is the default and the fail-closed value (I-D3). `applied`
+     * is refused at load time — and the site kept in shadow, loudly — unless a
+     * judging provider is registered in the chain (I-D8). K19c wires only
+     * `tool-gate`; the §7.4 attestations are the activation slice's.
+     */
+    sites?: { "tool-gate"?: { mode?: "shadow" | "applied" } };
   };
   /** Execution-Harness cutover switches (execution-harness.md §5/§10). */
   execution?: {
@@ -153,6 +161,8 @@ export interface ResolvedModelsConfig {
 export interface ResolvedDecisionsConfig {
   provider: "typesafe" | "model" | "rules";
   typesafeApiKeyRef?: string;
+  /** The REQUESTED mode. The effective one is resolved against the provider chain (I-D8) at composition. */
+  sites: { "tool-gate": { mode: "shadow" | "applied" } };
 }
 
 export interface ResolvedConfig extends Omit<WorkspaceConfig, "execution" | "models" | "decisions"> {
@@ -218,7 +228,7 @@ const PERSONAL_DEFAULTS: Omit<WorkspaceConfig, "workspace"> = {
   models: { selection: { enabled: false } },
   // M16 seam only (K17): no vendor provider exists yet, so `rules` is the only
   // real choice. Reproduces today's regex/threshold behaviour exactly.
-  decisions: { provider: "rules" },
+  decisions: { provider: "rules", sites: { "tool-gate": { mode: "shadow" } } },
 };
 
 /**
@@ -417,8 +427,13 @@ function resolveDecisions(file: WorkspaceConfig["decisions"], configPath: string
   if (!DECISION_PROVIDERS.includes(provider as (typeof DECISION_PROVIDERS)[number])) {
     throw new Error(`${configPath}: decisions.provider must be one of ${DECISION_PROVIDERS.join(" | ")}, got ${JSON.stringify(provider)}`);
   }
+  const toolGateMode = file?.sites?.["tool-gate"]?.mode ?? "shadow";
+  if (toolGateMode !== "shadow" && toolGateMode !== "applied") {
+    throw new Error(`${configPath}: decisions.sites.tool-gate.mode must be shadow | applied, got ${JSON.stringify(toolGateMode)}`);
+  }
   return {
     provider: provider as ResolvedDecisionsConfig["provider"],
+    sites: { "tool-gate": { mode: toolGateMode } },
     ...(file?.typesafeApiKeyRef !== undefined ? { typesafeApiKeyRef: file.typesafeApiKeyRef } : {}),
   };
 }

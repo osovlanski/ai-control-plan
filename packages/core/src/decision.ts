@@ -12,7 +12,7 @@
  */
 import type { ContextCapability, ContextObservation, ContextPolicy } from "./context.js";
 import { CONTEXT_STALE_MS } from "./context.js";
-import type { RedactionRule } from "./adapter.js";
+import type { PermissionPolicy, RedactionRule } from "./adapter.js";
 import { DEFAULT_REDACTION_RULES, redactValue } from "./redaction.js";
 
 /** The three System One primitives, transcribed. */
@@ -59,6 +59,12 @@ export interface DecisionOutcome {
   /** Model identity as the provider reported it, never as we assumed it (K7 discipline). */
   modelReported?: string;
   latencyMs: number;
+  /**
+   * Tokens the provider was billed for this call, from ITS OWN accounting
+   * (§7.1(4)). Absent for a provider that makes no metered call — never 0 as a
+   * stand-in, which would read as a measured free call.
+   */
+  usage?: { inputTokens: number; outputTokens: number };
   /** Set whenever the primary provider did not answer. Names the reason, never the secret. */
   degraded?: { from: "typesafe" | "model"; reason: string };
 }
@@ -70,6 +76,13 @@ export interface DecisionCapability {
    *  provider account. `third-party` = a new vendor relationship (I-D7). */
   egress: "local" | "byo-account" | "third-party";
   limits?: { maxStateChars?: number; requestsPerMinute?: number };
+  /**
+   * K19c / I-D8: the question keys, per site, this provider can actually JUDGE.
+   * The activation gate refuses `mode: applied` at a site unless a provider in
+   * the configured chain lists every judged key for it. Absent = judges nothing,
+   * which is what `RulesDecisionProvider` truthfully reports.
+   */
+  judges?: Partial<Record<DecisionSite, readonly string[]>>;
 }
 
 /**
@@ -148,6 +161,93 @@ export const TOOL_GATE_BATTERY: Record<string, DecisionQuestion> = {
     instructions: "Does this action read credentials, tokens, `.env` files or provider config?",
   },
 };
+
+/* ------------------------------------------------------------------------- *
+ * §5 K19 (K19c) — answers → gate outcome
+ * ------------------------------------------------------------------------- */
+
+/**
+ * The battery keys a judging provider must answer. `denied` is not here: it is
+ * the rules baseline, and the gate takes the deny from the deterministic policy
+ * match itself, never from any provider's answer (I-D1).
+ */
+export const TOOL_GATE_JUDGED_KEYS = ["risk", "destructive", "outside_repo", "exfiltration", "credential_reach"] as const;
+
+/**
+ * K19c tool-gate thresholds — the ONE place these numbers live.
+ *
+ * **UNCALIBRATED (I-D5).** No provider's probabilities have been measured
+ * against observed outcomes, so these are chosen to err toward prompting, not
+ * derived from evidence. Before any of them is trusted, §7.3 must measure, per
+ * key: decile buckets of the returned P(true) (and of `risk`'s per-level
+ * probabilities) against the operator's approve/deny answers on prompted
+ * actions, and the observed prompt rate those answers imply (§8). A changed
+ * `model_reported` invalidates that measurement.
+ *
+ * - `maxAutoApproveRisk: "low"` — §5 K19 names this boundary (`risk ≤ low`).
+ *   It is the only threshold the plan fixes.
+ * - `noulPrompt: 0.2` — §5 K19 says "any Noul ≥ threshold" and names no number.
+ *   0.2 is deliberately below an even-odds reading: a judge that gives one in
+ *   five for "this deletes unrecoverable data" has not cleared the action.
+ *   `confidence` is recorded but read by no threshold here (§7.3).
+ */
+export const TOOL_GATE_THRESHOLDS = {
+  maxAutoApproveRisk: "low",
+  noulPrompt: 0.2,
+} as const satisfies { maxAutoApproveRisk: (typeof TOOL_GATE_RISK_LEVELS)[number]; noulPrompt: number };
+
+/**
+ * `unchanged` = the gate has no effect: a read-only workspace, where
+ * `approvalMode` already answers every approval with no (§5 K19).
+ * `auto-approve` = the gate adds nothing; `approvalMode` still decides, so it
+ * can never remove a prompt the mode would raise — the mode is a ceiling.
+ */
+export type ToolGateOutcome = "block" | "auto-approve" | "prompt" | "unchanged";
+
+export interface ToolGateVerdict {
+  outcome: ToolGateOutcome;
+  /** Names the row of the §5 K19 mapping that fired — absence and a measured low read differently here. */
+  reason: string;
+}
+
+/**
+ * The §5 K19 mapping, subordinate to I-D1. Pure.
+ *
+ * `rulesDenied` is the deterministic allow/deny match computed by the caller
+ * from the RAW policy inputs — never a provider's `denied` answer, so no
+ * probability can unblock a rules deny. A judge's `denied` is just another
+ * Noul: it can add a prompt, never remove a block.
+ */
+export function resolveToolGate(input: {
+  rulesDenied: boolean;
+  approvalMode: PermissionPolicy["mode"];
+  outcome: DecisionOutcome;
+}): ToolGateVerdict {
+  const { rulesDenied, approvalMode, outcome } = input;
+  // Read-only first: it must behave exactly as today, including for a denied tool.
+  if (approvalMode === "read-only") return { outcome: "unchanged", reason: "read-only workspace: approvalMode is the ceiling" };
+  if (rulesDenied) return { outcome: "block", reason: "rules deny (final, I-D1)" };
+  if (outcome.degraded) return { outcome: "prompt", reason: `provider degraded (I-D2): ${outcome.degraded.reason}` };
+
+  const { answers } = outcome;
+  const absent = TOOL_GATE_JUDGED_KEYS.filter((k) => answers[k] === undefined);
+  if (absent.length > 0) return { outcome: "prompt", reason: `no basis (answer absent): ${absent.join(", ")}` };
+
+  const prompts: string[] = [];
+  const risk = answers.risk;
+  const riskIdx = risk?.kind === "score" ? TOOL_GATE_RISK_LEVELS.indexOf(risk.value as never) : -1;
+  if (riskIdx < 0) prompts.push("risk malformed");
+  else if (riskIdx > TOOL_GATE_RISK_LEVELS.indexOf(TOOL_GATE_THRESHOLDS.maxAutoApproveRisk)) prompts.push(`risk=${risk!.value}`);
+  for (const key of ["denied", ...TOOL_GATE_JUDGED_KEYS.slice(1)]) {
+    const a = answers[key];
+    if (a === undefined) continue; // only `denied` can be absent here, and its deny is taken from the rules match
+    // A non-finite or wrong-primitive answer fails closed rather than comparing false.
+    if (a.kind !== "noul" || !Number.isFinite(a.value)) prompts.push(`${key} malformed`);
+    else if (a.value >= TOOL_GATE_THRESHOLDS.noulPrompt) prompts.push(`${key}=${a.value}`);
+  }
+  if (prompts.length > 0) return { outcome: "prompt", reason: `judged: ${prompts.join(", ")}` };
+  return { outcome: "auto-approve", reason: `judged: risk=${risk!.value}, every noul < ${TOOL_GATE_THRESHOLDS.noulPrompt}` };
+}
 
 /* ------------------------------------------------------------------------- *
  * §4.4 — DecisionStateBuilder: the untrusted-input boundary (I-D4)
@@ -387,9 +487,10 @@ function classifyGoalRules(goal: string): (typeof TASK_CLASSIFIER_LABELS)[number
 
 /**
  * Verbatim port of the `denied` computation in `toolPolicyGuard()` —
- * apps/api/src/modules/harness/guards.ts:143-145.
+ * apps/api/src/modules/harness/guards.ts:143-145. Exported for the K19c gate,
+ * which takes the deny from this match on the raw inputs, never from an answer.
  */
-function toolDeniedRules(name: string, tools: { allow?: readonly string[]; deny?: readonly string[] }): boolean {
+export function toolDeniedRules(name: string, tools: { allow?: readonly string[]; deny?: readonly string[] }): boolean {
   return (
     (tools.deny?.some((d) => name.includes(d)) ?? false) ||
     (tools.allow !== undefined && !tools.allow.some((a) => name.includes(a)))

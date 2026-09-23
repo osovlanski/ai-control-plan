@@ -24,7 +24,7 @@ const env = (overrides: Record<string, string> = {}) => ({ AGENT_PLANE_HOME: hom
 describe("decisions config", () => {
   it("defaults to the rules provider, which makes no network call", () => {
     const config = loadConfig(env());
-    expect(config.decisions).toEqual({ provider: "rules" });
+    expect(config.decisions).toEqual({ provider: "rules", sites: { "tool-gate": { mode: "shadow" } } });
   });
 
   it("renders the decisions block in the first-boot default config", () => {
@@ -39,7 +39,7 @@ describe("decisions config", () => {
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, "config.yaml"), "decisions:\n  provider: typesafe\n  typesafeApiKeyRef: TYPESAFE_API_KEY\n");
     const config = loadConfig(env({ TYPESAFE_API_KEY: "should-never-be-read" }));
-    expect(config.decisions).toEqual({ provider: "typesafe", typesafeApiKeyRef: "TYPESAFE_API_KEY" });
+    expect(config.decisions).toEqual({ provider: "typesafe", typesafeApiKeyRef: "TYPESAFE_API_KEY", sites: { "tool-gate": { mode: "shadow" } } });
   });
 
   it("rejects an unknown provider", () => {

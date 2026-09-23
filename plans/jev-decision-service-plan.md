@@ -265,7 +265,7 @@ Mapping, subordinate to I-D1:
 
 ```text
 rules deny                      → block            (rules win; Jev is not consulted for an override)
-rules allow + risk ≤ low        → auto-approve     (this is the only widening, and only within approvalMode)
+rules allow + risk ≤ low        → auto-approve     (adds nothing: approvalMode still decides — see the §11 K19c/K19d correction)
 rules allow + risk ≥ medium
   or any Noul ≥ threshold       → prompt operator  (new outcome: was previously silent auto-approval)
 provider unreachable / degraded → prompt operator  (I-D2)
@@ -558,6 +558,38 @@ it is the first thing to test in step 1 — not an afterthought at step 7.
   `mode: applied` at a site with no judging provider in its chain. §7.1's seven activation
   preconditions are necessary but were not sufficient; this is the eighth, and it is a structural
   check, not an evidence one.
+- **Correction (2026-09-22, K19d, from K19c's report):** the §5 K19 mapping called
+  `rules allow + risk ≤ low → auto-approve` "the only widening". It is not one, and nothing in this
+  plan widens anything today. `approvalMode` is a ceiling read strictly: the gate can add a prompt or
+  a block and can never remove a prompt the mode would raise, so under `prompt-on-escalation` a
+  judged `auto-approve` still prompts. A gate that genuinely widens — skipping the operator on a
+  judged-low action the mode would otherwise escalate — requires BOTH (a) a future, explicit opt-in
+  `approvalMode: gate-assisted`, never a reinterpretation of an existing mode, and (b) calibration
+  measured per §7.3 for the judge that would be trusted to widen (I-D5: an unmeasured probability
+  may narrow, never widen). **Neither exists.** `gate-assisted` is not a value of `ApprovalMode`,
+  and no slice in K17–K22 adds it.
+- **Correction (2026-09-22, K19d, from K19c's report) — adapters the gate cannot reach.**
+  - **Bedrock is known-unreachable for the tool gate.** Its adapter emits no `tool.started` and no
+    `approval.requested`, so the gate has neither a pre-exec nor a post-start hook there and records
+    nothing — not even audit tier. A Bedrock run is ungated by M16, and a prompt rate computed over
+    a workspace's runs silently excludes it. Recorded here so no one reads "zero Bedrock prompts" as
+    "Bedrock is safe".
+  - **Open item, own slice — the Claude pre-exec gap under `auto-approve`.** The Claude adapter
+    installs `canUseTool` only under `prompt-on-escalation`; under `auto-approve` it launches with
+    `bypassPermissions`, so no `approval.requested` is raised and the gate falls back to post-start
+    audit tier — after the tool has begun. Closing it (keep `canUseTool` installed and answer it
+    from the plane under `auto-approve`, or a `PreToolUse` hook) is an adapter change with its own
+    capability-manifest and regression evidence. It is not K19d's and is not scheduled.
+- **Finding (2026-09-22, K19d) — the budget and the judge do not meet.** `ModelDecisionProvider`
+  (`claude-haiku-4-5`) measured p50 1,209 ms and p95 2,161 ms, with a minimum of 1,014 ms. The
+  tool-gate budget in composition is 50 ms and the §7.2 suite's is 200 ms, so under the committed
+  budgets every judge call times out and degrades to rules, and the suite stays vacuous. §7.1(3)
+  ("p95 within the site's budget") cannot be met by any network model at 50 ms. The site needs two
+  budgets: a generous one for shadow, which is not awaited on the hot path, and an applied one set
+  from measured p95. Deciding them is the operator's call and is not taken here.
+- **Finding (2026-09-22, K19d) — §7.2 fails against a real judge.** Run with a 20 s budget, 10 of
+  51 fixtures lowered `risk` by one level and several dropped `destructive` by 0.7 or more. No gate
+  verdict flipped, but the plan's bar is "no reduction", so activation stays blocked.
 - No new infrastructure without a failing requirement that names it.
 - Workspace isolation, explainable routing, approval boundaries and provider-adapter portability
   are preserved by construction — M16 adds a provider seam, it does not pierce an existing one.

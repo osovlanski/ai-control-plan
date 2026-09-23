@@ -281,3 +281,54 @@ rules alone, five of six answers are absent, absence resolves conservatively, an
 turn every rules-allowed tool call into an operator prompt — the inverse of the intent, and the
 fastest way to get the gate switched off. §7.1's seven activation preconditions are evidence
 checks; this eighth one is structural, and K19c cannot be reviewed without it.
+
+## 2026-09-22 — M16 K19c: the tool gate is wired, shadow only (SHIPPED)
+
+- **approvalMode is a ceiling, read strictly.** The gate's `auto-approve` outcome adds nothing: under
+  `prompt-on-escalation` the operator is still prompted. The gate can add a prompt (narrow
+  `auto-approve` to a human answer) or block; it never removes a prompt. §5 K19's "the only widening"
+  is therefore not exercised in this slice. Do not reopen that without a decision recorded here.
+- **The rules deny comes from `toolDeniedRules` on the raw inputs, never from a provider's `denied`
+  answer.** A judge's `denied` can only add a prompt.
+- **Enforcement tier is per hook.** Pre-exec = the adapter's `approval.requested` round-trip, and
+  only when it can relay the answer. Post-start = `tool.started`, which is audit tier only. Per
+  adapter:
+  - Fake: preventive when it requests approval.
+  - Claude: preventive only under `prompt-on-escalation`, because `canUseTool` is installed only
+    there. Under `auto-approve` it runs with `bypassPermissions` and gets audit tier.
+  - Codex, Cursor and OpenRouter: audit tier.
+- **I-D8 is enforced at composition.** `applied` with no judge in the configured chain is refused
+  and logged, and the site stays in shadow.
+- **The §7.4 attestations (`shadowReviewedAt` and the rest) are not checked yet.** They are the
+  activation slice's work. Since K19d registers a judge, composition refuses `applied` outright for
+  the build's own providers until they exist (see K19d below).
+- **The prompt rate is derived from the `decision_records` gate columns (migration 026).** Read it
+  from `GET /api/decisions/prompt-rate`. On `demo:b` (rules-only) it is 1.0 per run, which is the
+  I-D8 case.
+
+## 2026-09-22 — M16 K19d: ModelDecisionProvider registered, shadow only (SHIPPED; §7.2 FAIL)
+
+- **The judge:** `apps/api/src/modules/decision-model.ts`, `claude-haiku-4-5`, typed answers via
+  structured outputs (`output_config.format`), never forced `tool_choice`. Credential is
+  `ANTHROPIC_API_KEY`, read at the call boundary. It only runs when the workspace sets
+  `decisions.provider: model` (or `typesafe`); the default is `rules`, which never reaches it.
+- **"No basis" is decided by the provider, not the model.** A schema that let the model answer
+  `null` produced nulls on `git status` and on `risk` for a force-push — noise, not a basis signal.
+  Now there is no basis only when the state has no `commandText`; then no call is made and the
+  judged keys are absent.
+- **`applied` is closed for build providers** until the §7.4 attestations exist (composition).
+- **Measured baseline (§7.1(3)(4)), 100 decisions over 10 actions:** p50 1,209 ms, p95 2,161 ms,
+  min 1,014 ms; about 956 input and 84 output tokens per decision; $1.38 per 1,000. Answers vary
+  between identical calls even at temperature 0.
+- **The committed budgets are below the judge's latency floor.** Composition uses 50 ms and the
+  §7.2 suite uses 200 ms, but the fastest call measured was 1,014 ms. Every call times out and
+  degrades to rules, so the committed suite is still vacuous and the demo:b prompt rate stays 1.0.
+  Shadow evaluation is off the hot path (not awaited), so the shadow budget can be raised with no
+  latency cost; this is an open decision, not yet made.
+- **§7.2 FAIL (run with a 20 s budget, scratch copy):** 10 of 51 fixtures lowered `risk` by one
+  level (severe→high), and `destructive` fell from 0.85 to 0.00–0.15 under payloads that name it.
+  No gate verdict flipped (all injected risk ≥ high → prompt), but §7.2's bar is "no reduction".
+  Activation stays blocked on this. Sonnet 5 is the proposed next measurement, not yet run.
+- **demo:b prompt rate:** 1.0 at the shipped 50 ms budget (2/2 degraded); 0.0 with a 20 s budget
+  (2/2 judged risk=none → auto-approve). n=2, so it is a smoke reading, not a rate.
+

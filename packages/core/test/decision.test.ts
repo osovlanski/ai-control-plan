@@ -9,7 +9,15 @@
  */
 import { describe, expect, it } from "vitest";
 import { buildContextObservation, DEFAULT_CONTEXT_POLICY, type ContextCapability } from "../src/context.js";
-import { RulesDecisionProvider, TOOL_GATE_BATTERY, type DecisionRequest } from "../src/decision.js";
+import {
+  RulesDecisionProvider,
+  TOOL_GATE_BATTERY,
+  TOOL_GATE_THRESHOLDS,
+  resolveToolGate,
+  type DecisionAnswer,
+  type DecisionOutcome,
+  type DecisionRequest,
+} from "../src/decision.js";
 
 const provider = new RulesDecisionProvider();
 
@@ -140,5 +148,73 @@ describe("RulesDecisionProvider", () => {
     });
     expect(out.answers.kind).toMatchObject({ value: "coding" });
     expect(out.answers.complexity).toBeUndefined();
+  });
+});
+
+describe("K19c resolveToolGate — the §5 K19 mapping, subordinate to I-D1", () => {
+  const score = (value: string): DecisionAnswer => ({ kind: "score", value, probabilities: { [value]: 1 }, confidence: 1 });
+  const noul = (value: number): DecisionAnswer => ({ kind: "noul", value });
+  const judged = (over: Record<string, DecisionAnswer | undefined> = {}): DecisionOutcome => {
+    const answers: Record<string, DecisionAnswer> = {};
+    const all: Record<string, DecisionAnswer | undefined> = {
+      denied: noul(0), risk: score("low"), destructive: noul(0.01), outside_repo: noul(0.01), exfiltration: noul(0.01), credential_reach: noul(0.01), ...over,
+    };
+    for (const [k, v] of Object.entries(all)) if (v !== undefined) answers[k] = v;
+    return { answers, provider: "model", latencyMs: 1 };
+  };
+  const resolve = (outcome: DecisionOutcome, over: Partial<{ rulesDenied: boolean; approvalMode: "auto-approve" | "prompt-on-escalation" | "read-only" }> = {}) =>
+    resolveToolGate({ rulesDenied: false, approvalMode: "auto-approve", outcome, ...over });
+
+  it("rules deny → block, whatever the judge says (a probability never unblocks)", () => {
+    expect(resolve(judged({ denied: noul(0), risk: score("none") }), { rulesDenied: true }).outcome).toBe("block");
+  });
+
+  it("rules allow + risk ≤ low + every noul under threshold → auto-approve", () => {
+    expect(resolve(judged()).outcome).toBe("auto-approve");
+    expect(resolve(judged({ risk: score("none") })).outcome).toBe("auto-approve");
+  });
+
+  it("risk ≥ medium → prompt", () => {
+    for (const r of ["medium", "high", "severe"]) expect(resolve(judged({ risk: score(r) })).outcome).toBe("prompt");
+  });
+
+  it("any noul ≥ TOOL_GATE_THRESHOLDS.noulPrompt → prompt, including a judge's `denied`", () => {
+    const t = TOOL_GATE_THRESHOLDS.noulPrompt;
+    for (const key of ["denied", "destructive", "outside_repo", "exfiltration", "credential_reach"]) {
+      expect(resolve(judged({ [key]: noul(t) })).outcome).toBe("prompt");
+      expect(resolve(judged({ [key]: noul(t - 0.01) })).outcome).toBe("auto-approve");
+    }
+  });
+
+  it("absence and a measured low take different paths and read differently", () => {
+    const absent = resolve(judged({ risk: undefined }));
+    const low = resolve(judged({ risk: score("low") }));
+    expect(absent).toEqual({ outcome: "prompt", reason: "no basis (answer absent): risk" });
+    expect(low.outcome).toBe("auto-approve");
+    expect(low.reason).toContain("risk=low");
+  });
+
+  it("rules-only (every judged key absent) → prompt, naming all five", () => {
+    const rulesOnly: DecisionOutcome = { answers: { denied: noul(0) }, provider: "rules", latencyMs: 0 };
+    expect(resolve(rulesOnly)).toEqual({
+      outcome: "prompt",
+      reason: "no basis (answer absent): risk, destructive, outside_repo, exfiltration, credential_reach",
+    });
+  });
+
+  it("degraded provider → prompt (I-D2), even when the fallback's answers look clean", () => {
+    const v = resolve({ ...judged(), degraded: { from: "typesafe", reason: "529" } });
+    expect(v).toEqual({ outcome: "prompt", reason: "provider degraded (I-D2): 529" });
+  });
+
+  it("malformed answers fail closed: NaN noul, unknown risk level, wrong primitive", () => {
+    expect(resolve(judged({ destructive: noul(Number.NaN) })).outcome).toBe("prompt");
+    expect(resolve(judged({ risk: score("catastrophic") })).outcome).toBe("prompt");
+    expect(resolve(judged({ risk: noul(0) })).outcome).toBe("prompt");
+    expect(resolve(judged({ exfiltration: score("low") })).outcome).toBe("prompt");
+  });
+
+  it("read-only → unchanged, even for a rules deny or a severe risk", () => {
+    expect(resolve(judged({ risk: score("severe") }), { approvalMode: "read-only", rulesDenied: true }).outcome).toBe("unchanged");
   });
 });

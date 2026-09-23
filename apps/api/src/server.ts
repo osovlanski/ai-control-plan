@@ -11,6 +11,7 @@ import {
   redactSecrets,
   redactValue,
   type AssistantId,
+  type DecisionProvider,
   type DecisionSite,
   type RoutingProfile,
   type ScheduleInput,
@@ -21,7 +22,7 @@ import type { ResolvedConfig } from "./config.js";
 import { appliedMigrations, type Db } from "./db/index.js";
 import { CheckpointService } from "./modules/checkpoint.js";
 import { CooldownStore } from "./modules/cooldown.js";
-import { listDecisions } from "./modules/decision.js";
+import { listDecisions, toolGatePromptRates } from "./modules/decision.js";
 import type { HarnessBridge } from "./modules/harness/control-plane-bridge.js";
 import { buildHarnessComposition } from "./modules/harness/composition.js";
 import { effectiveStateSql, effectiveUsageJoin, effectiveUsageSql } from "./modules/harness/state-vocab.js";
@@ -63,6 +64,8 @@ export interface ServerDeps {
   /** Transport handed to those sources. Test/demo only. */
   modelCatalogFetch?: typeof globalThis.fetch;
   registerExtraRoutes?: (app: FastifyInstance) => void;
+  /** M16 decision providers beyond rules. Test/scratch only — production registers `decisionProviders()` (K19d: the model judge). */
+  decisionProviders?: DecisionProvider[];
 }
 
 export interface BuiltServer {
@@ -126,6 +129,8 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     registry,
     onError: (err) => app.log.error(err),
     onQuotaObserved: () => orchestrator.scheduler?.quotaObserved(),
+    decisionProviders: deps.decisionProviders,
+    onWarning: (message) => app.log.warn(message),
   });
   const harnessRecovery = composed.harnessRecovery;
   const harnessBridge: HarnessBridge | undefined = deps.orchestrator ? undefined : composed.harnessBridge;
@@ -273,6 +278,15 @@ export function buildServer(deps: ServerDeps): BuiltServer {
       return reply.status(400).send({ error: "limit must be a positive number" });
     }
     return { decisions: listDecisions(db, { site: site as DecisionSite | undefined, limit: parsedLimit }) };
+  });
+
+  // K19c / §8: tool-gate prompt rate per run, for the K22 chart.
+  app.get<{ Querystring: { limit?: string } }>("/api/decisions/prompt-rate", decisionsRead, (req, reply) => {
+    const limit = req.query?.limit !== undefined ? Number(req.query.limit) : undefined;
+    if (limit !== undefined && (!Number.isFinite(limit) || limit < 1)) {
+      return reply.status(400).send({ error: "limit must be a positive number" });
+    }
+    return { promptRates: toolGatePromptRates(db, { limit }) };
   });
 
   // ---- Tasks ----

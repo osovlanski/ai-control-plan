@@ -30,8 +30,9 @@ import { WorkspaceAuthority } from "./workspace-authority.js";
 import { VerificationStore } from "./verification-store.js";
 import { VerificationCoordinator } from "../verification-coordinator.js";
 import { planProjectVerification, snapshotProjectVerification } from "../project-verification.js";
-import { DEFAULT_REDACTION_RULES, TOOL_GATE_BATTERY, buildToolGateState } from "@agent-plane/core";
-import { DecisionService, decisionProviders } from "../decision.js";
+import type { DecisionProvider } from "@agent-plane/core";
+import { DEFAULT_REDACTION_RULES, TOOL_GATE_BATTERY, buildToolGateState, resolveToolGate, toolDeniedRules } from "@agent-plane/core";
+import { DecisionService, decisionProviders, insertDecisionRecord } from "../decision.js";
 
 /** Legacy `applyEvent` snapshots quota on exactly these event types. */
 const QUOTA_EVENT_TYPES = new Set(["usage.updated", "limit.approaching", "limit.hit"]);
@@ -45,12 +46,18 @@ export interface HarnessCompositionDeps {
   registry: Registry;
   onError: (err: unknown) => void;
   onQuotaObserved?: () => void;
+  /** Replaces `decisionProviders(config.decisions)`. Test/scratch only — production registers `decisionProviders()` (K19d: the model judge). */
+  decisionProviders?: DecisionProvider[];
+  /** Where an I-D8 activation refusal is said out loud. */
+  onWarning?: (message: string) => void;
 }
 
 export interface HarnessComposition {
   harnessBridge: HarnessBridge;
   harnessRecovery: HarnessRecovery;
   projectVerification: (worktreePath: string) => ReturnType<typeof planProjectVerification>;
+  /** The tool gate's EFFECTIVE mode after the I-D8 check — `shadow` whenever `applied` was refused. */
+  toolGateMode: "shadow" | "applied";
 }
 
 /** Fail-closed mode resolution (increment 3, D6): a Harness session only ever
@@ -151,39 +158,71 @@ export function buildHarnessComposition(deps: HarnessCompositionDeps): HarnessCo
       return { warnings: ["project verification skipped: project metadata rejected by workspace authority"] };
     }
   };
-  // M16 K18/K19b — shadow plumbing only. `RulesDecisionProvider` is the sole
-  // registered provider (no vendor call exists until K19c), and `mode` is
-  // hardcoded to "shadow": no activation gate exists yet for this site.
-  const decisions = new DecisionService(config.decisions, decisionProviders(config.decisions), undefined, db);
-  const observeToolGate: NonNullable<RunnerDeps["observeToolGate"]> = (input) => {
-    // K19b: the state is built by the §4.4 builder, never assembled inline, and
-    // the full `TOOL_GATE_BATTERY` is asked so the shadow record carries the
-    // rules baseline beside the five keys a judging provider will answer.
-    //
-    // `repoPath`/`worktreePath`/`paths`/`networkDestinations` are NOT available
-    // on this observation seam — it fires on `tool.started` and carries only
-    // the policy inputs. The builder therefore resolves the repo as UNTRUSTED
-    // and the path counts as zero, which is the fail-closed reading and is
-    // honest about what this seam can see. Widening the seam is K19c's, which
-    // is where the gate moves ahead of execution and actually has the action's
-    // paths to hand.
-    const built = buildToolGateState({
-      toolName: input.toolName,
-      toolsAllow: input.toolsAllow,
-      toolsDeny: input.toolsDeny,
-      repoAllowlist: config.repoAllowlist,
-    });
-    void decisions
-      .decide(
-        { site: "tool-gate", state: built.state, questions: TOOL_GATE_BATTERY, budgetMs: 50 },
+  // M16 tool gate (K18 records, K19b state boundary, K19c wiring). The
+  // effective mode is resolved ONCE here against the provider chain: `applied`
+  // with no judging provider is refused and the site kept in shadow (I-D8),
+  // loudly, never silently.
+  const decisions = new DecisionService(
+    config.decisions,
+    deps.decisionProviders ?? decisionProviders(config.decisions),
+    undefined,
+    db,
+  );
+  let activation = decisions.activation("tool-gate", config.decisions.sites["tool-gate"].mode);
+  // K19d registers the first real judge, so I-D8 alone would now let a
+  // workspace with a key reach `applied`. The §7.4 attestations that must also
+  // hold do not exist yet (the activation slice's), so `applied` stays closed
+  // for the build's own providers. Only an injected test/scratch chain opens it.
+  if (activation.mode === "applied" && !deps.decisionProviders) {
+    activation = {
+      mode: "shadow",
+      refusal:
+        "decisions.sites.tool-gate.mode: applied REFUSED — the §7.4 activation attestations are not implemented " +
+        "in this build (K19d ships the judge in shadow only). The site stays in shadow.",
+    };
+  }
+  if (activation.refusal) deps.onWarning?.(activation.refusal);
+  const toolGate: NonNullable<RunnerDeps["toolGate"]> = {
+    mode: activation.mode,
+    async evaluate(input) {
+      // K19b: the state is built by the §4.4 builder, never assembled inline.
+      const built = buildToolGateState({
+        toolName: input.toolName,
+        commandText: input.commandText,
+        paths: input.paths,
+        toolsAllow: input.toolsAllow,
+        toolsDeny: input.toolsDeny,
+        worktreePath: input.worktreePath,
+        repoPath: input.repoPath,
+        repoAllowlist: config.repoAllowlist,
+      });
+      const req = { site: "tool-gate" as const, state: built.state, questions: TOOL_GATE_BATTERY, budgetMs: 50 };
+      const outcome = await decisions.decide(req);
+      // The deny comes from the deterministic match on the RAW inputs — the
+      // same one toolPolicyGuard runs — never from any provider's answer (I-D1).
+      const verdict = resolveToolGate({
+        rulesDenied: toolDeniedRules(input.toolName, { allow: input.toolsAllow, deny: input.toolsDeny }),
+        approvalMode: input.approvalMode,
+        outcome,
+      });
+      // Written here rather than via `decide(req, ctx)` because the record
+      // carries the verdict, which only exists after the answers do. Still one
+      // row per evaluation, through the one writer.
+      insertDecisionRecord(
+        db,
+        req,
+        outcome,
         {
           taskId: taskOfSession(input.sessionId),
           sessionId: input.sessionId,
-          mode: "shadow",
+          mode: activation.mode,
           stateTruncated: built.truncated,
+          gate: { ...verdict, hook: input.hook, tier: input.hook === "pre-exec" ? "preventive" : "audit" },
         },
-      )
-      .catch(onError);
+        new Date().toISOString(),
+      );
+      return verdict;
+    },
   };
   const runner = new SessionRunner({
     store: sessionStore,
@@ -195,9 +234,9 @@ export function buildHarnessComposition(deps: HarnessCompositionDeps): HarnessCo
     verificationCoordinator: new VerificationCoordinator(verificationStore, checkpoints, authority),
     softThresholdPct: config.failover.softThresholdPct,
     handoff: new HandoffService(db),
-    observeToolGate,
+    toolGate,
   });
   const harnessBridge = new HarnessBridge({ runner, store: sessionStore, approvals, db, onError });
 
-  return { harnessBridge, harnessRecovery, projectVerification };
+  return { harnessBridge, harnessRecovery, projectVerification, toolGateMode: activation.mode };
 }

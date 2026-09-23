@@ -35,6 +35,7 @@ import type {
   RunHandle,
   RunSpec,
   TerminalSessionState,
+  ToolGateVerdict,
   UsagePayload,
 } from "@agent-plane/core";
 import { DEFAULT_CONTEXT_POLICY, buildContextObservation, evaluationResult, newExecutionSessionId, outcomeOf, redactValue } from "@agent-plane/core";
@@ -112,19 +113,36 @@ export interface RunnerDeps {
     providerSessionRef?: ProviderSessionRef;
   }) => Promise<boolean> | boolean;
   /**
-   * M16 K18 — shadow-only observation of the tool gate, fired once per
-   * `tool.started` event, right alongside `toolPolicyGuard`'s own evaluation.
-   * Fire-and-forget by design (never awaited here): it records what a
-   * `DecisionService` would have answered and MUST NOT influence, delay or
-   * gate `directive` below — that wiring is K19's, not this one's. Absent by
-   * default, so every existing test is unaffected.
+   * M16 tool gate (K18 shadow plumbing, K19c wiring). Evaluated at two hooks:
+   *
+   * - `pre-exec` — the adapter's `approval.requested` round-trip, when the
+   *   adapter can relay the answer. The tool has not run. PREVENTIVE tier.
+   * - `post-start` — `tool.started`. The tool is already running. AUDIT tier:
+   *   the gate records; the only enforcement is `toolPolicyGuard`'s existing
+   *   rules-deny cancel.
+   *
+   * `mode` is the EFFECTIVE mode (I-D8 already applied at composition). Only
+   * `applied` + `pre-exec` is awaited and fed to the guards; everything else is
+   * fire-and-forget and MUST NOT influence, delay or gate the directive.
+   * Absent by default, so every existing test is unaffected.
    */
-  observeToolGate?: (input: {
-    toolName: string;
-    toolsAllow?: readonly string[];
-    toolsDeny?: readonly string[];
-    sessionId: string;
-  }) => void;
+  toolGate?: {
+    mode: "shadow" | "applied";
+    evaluate(input: ToolGateInput): Promise<ToolGateVerdict>;
+  };
+}
+
+export interface ToolGateInput {
+  hook: "pre-exec" | "post-start";
+  toolName: string;
+  commandText?: string;
+  paths?: string[];
+  toolsAllow?: readonly string[];
+  toolsDeny?: readonly string[];
+  approvalMode: ExecutionRequest["policy"]["approval"]["mode"];
+  worktreePath?: string;
+  repoPath?: string;
+  sessionId: string;
 }
 
 const POLICY_UNENFORCEABLE = "policy_unenforceable" as const;
@@ -383,21 +401,8 @@ class RunContext {
           firstEvent = false;
         }
         this.observe(event);
-        const directive = evaluateGuards(this.snapshot, { kind: "event", event, atMs: this.runner.clock() });
-        // K18 shadow observation — mirrors toolPolicyGuard's own extraction
-        // exactly, but its result is discarded here; it never reaches `directive`.
-        if (event.type === "tool.started" && this.d.observeToolGate) {
-          const toolName =
-            (event.payload as { tool?: string; command?: string } | undefined)?.tool ??
-            (event.payload as { command?: string } | undefined)?.command ??
-            event.summary;
-          this.d.observeToolGate({
-            toolName,
-            toolsAllow: this.snapshot.policy.tools.allow,
-            toolsDeny: this.snapshot.policy.tools.deny,
-            sessionId: this.sessionId,
-          });
-        }
+        const gate = await this.evaluateToolGate(event, adapter);
+        const directive = evaluateGuards(this.snapshot, { kind: "event", event, atMs: this.runner.clock(), gate });
         const nontrivial = directive.action !== "continue";
 
         // Co-commit the triggering event, the guard.decision audit event and the
@@ -1070,7 +1075,9 @@ class RunContext {
         this.snapshot.softCheckpointed = true;
         return undefined;
       case "pause": {
-        const outcome = await this.approvalFlow(adapter, handle);
+        // `guard: "tool"` on a pause is the applied tool gate's prompt (K19c):
+        // the operator answers even under auto-approve (see toolGateDirective).
+        const outcome = await this.approvalFlow(adapter, handle, directive.guard === "tool");
         if (outcome === "cancelled") return { kind: "cancel", by: this.cancelBy };
         if (outcome === "delivery_unknown") {
           return {
@@ -1102,6 +1109,7 @@ class RunContext {
   private async approvalFlow(
     adapter: AgentAdapter,
     handle: RunHandle,
+    gatePrompt = false,
   ): Promise<"delivered" | "cancelled" | "delivery_unknown"> {
     // The provider_request_id rode on the approval.requested payload that the
     // triggering recorder batch just persisted.
@@ -1109,9 +1117,11 @@ class RunContext {
     if (!providerRequestId) return "delivered";
 
     // Only prompt-on-escalation pauses for a human. auto-approve answers yes and
-    // read-only answers no, immediately — no AWAITING_APPROVAL hop (§4).
+    // read-only answers no, immediately — no AWAITING_APPROVAL hop (§4). The
+    // one addition (K19c): an applied tool-gate prompt narrows auto-approve to
+    // a human answer. It never reaches read-only (toolGateDirective).
     const mode = this.request.policy.approval.mode;
-    if (mode !== "prompt-on-escalation") {
+    if (mode !== "prompt-on-escalation" && !gatePrompt) {
       if (typeof adapter.send === "function") {
         await adapter.send(handle, {
           kind: "approval",
@@ -1179,6 +1189,64 @@ class RunContext {
   }
 
   private lastApprovalRequestId: string | undefined;
+
+  /**
+   * K19c. Returns a verdict ONLY when it must gate this event: site `applied`
+   * and the pre-exec hook. Otherwise the evaluation is recorded in the
+   * background and `undefined` goes to the guards — shadow changes nothing.
+   * An applied evaluation that throws resolves to `prompt` (I-D2).
+   */
+  private async evaluateToolGate(event: NormalizedEvent, adapter: AgentAdapter): Promise<ToolGateVerdict | undefined> {
+    const gate = this.d.toolGate;
+    if (!gate) return undefined;
+    const input = this.toolGateInput(event, adapter);
+    if (!input) return undefined;
+    const pending = gate.evaluate(input);
+    if (gate.mode !== "applied" || input.hook !== "pre-exec") {
+      void pending.catch(() => {});
+      return undefined;
+    }
+    try {
+      return await pending;
+    } catch (err) {
+      return { outcome: "prompt", reason: `gate evaluation failed (I-D2): ${redactMessage(err)}` };
+    }
+  }
+
+  private toolGateInput(event: NormalizedEvent, adapter: AgentAdapter): ToolGateInput | undefined {
+    let hook: ToolGateInput["hook"];
+    if (event.type === "approval.requested") {
+      // Pre-exec only when the answer can actually reach the provider; an
+      // adapter that cannot relay has no hook the gate could hold closed.
+      const relay = this.d.registry.manifest(this.request.assistantId)?.harness?.approvalRelay ?? typeof adapter.send === "function";
+      if (!relay) return undefined;
+      hook = "pre-exec";
+    } else if (event.type === "tool.started") {
+      hook = "post-start";
+    } else {
+      return undefined;
+    }
+    const p = (event.payload ?? {}) as { tool?: string; command?: string; input?: unknown };
+    const input = (p.input && typeof p.input === "object" ? p.input : {}) as Record<string, unknown>;
+    // Same name extraction toolPolicyGuard uses, so `rulesDenied` matches it.
+    const toolName = p.tool ?? p.command ?? event.summary;
+    const commandText =
+      typeof p.command === "string" ? p.command : typeof input.command === "string" ? input.command : p.input !== undefined ? JSON.stringify(p.input) : undefined;
+    const paths = ["file_path", "notebook_path", "path"].flatMap((k) => (typeof input[k] === "string" ? [input[k] as string] : []));
+    const policy = this.snapshot.policy;
+    return {
+      hook,
+      toolName,
+      commandText,
+      paths,
+      toolsAllow: policy.tools.allow,
+      toolsDeny: policy.tools.deny,
+      approvalMode: policy.approval.mode,
+      worktreePath: this.request.context.worktree?.worktreePath,
+      repoPath: this.request.context.worktree?.repoPath,
+      sessionId: this.sessionId,
+    };
+  }
 
   private recordEvents(
     events: NormalizedEvent[],

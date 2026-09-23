@@ -3,15 +3,14 @@
  * `plans/jev-decision-service-plan.md` §5, K17), plus the K18 decision-record
  * write path.
  *
- * No vendor call exists yet: only `RulesDecisionProvider` is registered.
- * `typesafe` and `model` are named in the fallback chain because the chain's
- * SHAPE is part of this slice's seam — a later slice registers real
- * providers for those ids and nothing here changes (I-D6).
+ * K19d registers `ModelDecisionProvider` (`decision-model.ts`) under `model`;
+ * `typesafe` is still named in the chain with nothing behind it (I-D6).
  */
 import { createHash } from "node:crypto";
-import type { DecisionOutcome, DecisionProvider, DecisionRequest, DecisionSite } from "@agent-plane/core";
-import { RulesDecisionProvider } from "@agent-plane/core";
+import type { DecisionOutcome, DecisionProvider, DecisionRequest, DecisionSite, ToolGateVerdict } from "@agent-plane/core";
+import { RulesDecisionProvider, TOOL_GATE_JUDGED_KEYS } from "@agent-plane/core";
 import type { Db } from "../db/index.js";
+import { ModelDecisionProvider } from "./decision-model.js";
 
 export interface DecisionServiceConfig {
   /** The first provider to try. The chain still falls back toward "rules". */
@@ -42,6 +41,8 @@ export interface DecisionRecordContext {
    * a state that was never bounded was never truncated either.
    */
   stateTruncated?: boolean;
+  /** K19c: what the tool gate did with this decision (migration 026). Absent on every other site. */
+  gate?: ToolGateVerdict & { hook: "pre-exec" | "post-start"; tier: "preventive" | "audit" };
 }
 
 /**
@@ -59,9 +60,14 @@ export interface DecisionRecordRow {
   answers: DecisionOutcome["answers"];
   latencyMs: number;
   inputTokens: number | null;
+  outputTokens: number | null;
   mode: "shadow" | "applied";
   degradedReason: string | null;
   stateTruncated: boolean;
+  gateOutcome: ToolGateVerdict["outcome"] | null;
+  gateReason: string | null;
+  gateHook: "pre-exec" | "post-start" | null;
+  gateTier: "preventive" | "audit" | null;
   createdAt: string;
 }
 
@@ -80,8 +86,9 @@ export function insertDecisionRecord(
 ): void {
   db.prepare(
     `INSERT INTO decision_records
-       (task_id, session_id, site, provider, model_reported, question_set_hash, answers_json, latency_ms, input_tokens, mode, degraded_reason, state_truncated, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (task_id, session_id, site, provider, model_reported, question_set_hash, answers_json, latency_ms, input_tokens, output_tokens, mode, degraded_reason, state_truncated, created_at,
+        gate_outcome, gate_reason, gate_hook, gate_tier)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     ctx.taskId ?? null,
     ctx.sessionId ?? null,
@@ -91,15 +98,20 @@ export function insertDecisionRecord(
     questionSetHash(req.questions),
     JSON.stringify(outcome.answers),
     outcome.latencyMs,
-    // No K17/K18 provider does its own token accounting yet — NULL is honest,
-    // a fabricated count would not be (I-D5's discipline applies here too).
-    null,
+    // The provider's own accounting (K19d), or NULL when it made no metered
+    // call — a fabricated count would not be honest (I-D5's discipline).
+    outcome.usage?.inputTokens ?? null,
+    outcome.usage?.outputTokens ?? null,
     ctx.mode,
     outcome.degraded?.reason ?? null,
     // §4.4 deterministic truncation, as the builder reported it — a truncated
     // state is a named condition on the record, never a silent one.
     ctx.stateTruncated ? 1 : 0,
     createdAt,
+    ctx.gate?.outcome ?? null,
+    ctx.gate?.reason ?? null,
+    ctx.gate?.hook ?? null,
+    ctx.gate?.tier ?? null,
   );
 }
 
@@ -125,10 +137,15 @@ export function listDecisions(db: Db, opts: { site?: DecisionSite; limit?: numbe
     answers_json: string;
     latency_ms: number;
     input_tokens: number | null;
+    output_tokens: number | null;
     mode: "shadow" | "applied";
     degraded_reason: string | null;
     state_truncated: number;
     created_at: string;
+    gate_outcome: ToolGateVerdict["outcome"] | null;
+    gate_reason: string | null;
+    gate_hook: "pre-exec" | "post-start" | null;
+    gate_tier: "preventive" | "audit" | null;
   }>;
   return rows.map((r) => ({
     id: r.id,
@@ -141,10 +158,55 @@ export function listDecisions(db: Db, opts: { site?: DecisionSite; limit?: numbe
     answers: JSON.parse(r.answers_json) as DecisionOutcome["answers"],
     latencyMs: r.latency_ms,
     inputTokens: r.input_tokens,
+    outputTokens: r.output_tokens,
     mode: r.mode,
     degradedReason: r.degraded_reason,
     stateTruncated: r.state_truncated === 1,
+    gateOutcome: r.gate_outcome,
+    gateReason: r.gate_reason,
+    gateHook: r.gate_hook,
+    gateTier: r.gate_tier,
     createdAt: r.created_at,
+  }));
+}
+
+export interface ToolGatePromptRate {
+  sessionId: string;
+  taskId: string | null;
+  mode: "shadow" | "applied";
+  evaluations: number;
+  /** In `shadow`, prompts that WOULD have been raised. */
+  prompts: number;
+  promptRate: number;
+}
+
+/**
+ * K19c / §8: prompt rate per run, derived from the gate rows themselves (DB is
+ * truth — no counter to drift). A gate that prompts on everything gets
+ * switched off; this is the number K22 charts to catch that before it happens.
+ * Every evaluation counts, pre-exec and post-start alike: `gate_hook` on the
+ * rows is there for a reader who wants them split.
+ */
+export function toolGatePromptRates(db: Db, opts: { limit?: number } = {}): ToolGatePromptRate[] {
+  const limit = Math.min(Math.max(opts.limit ?? 100, 1), 500);
+  const rows = db
+    .prepare(
+      `SELECT session_id, MAX(task_id) AS task_id, mode, COUNT(*) AS evaluations,
+              SUM(CASE WHEN gate_outcome = 'prompt' THEN 1 ELSE 0 END) AS prompts
+         FROM decision_records
+        WHERE site = 'tool-gate' AND gate_outcome IS NOT NULL AND session_id IS NOT NULL
+        GROUP BY session_id, mode
+        ORDER BY MAX(id) DESC
+        LIMIT ?`,
+    )
+    .all(limit) as Array<{ session_id: string; task_id: string | null; mode: "shadow" | "applied"; evaluations: number; prompts: number }>;
+  return rows.map((r) => ({
+    sessionId: r.session_id,
+    taskId: r.task_id,
+    mode: r.mode,
+    evaluations: r.evaluations,
+    prompts: r.prompts,
+    promptRate: r.prompts / r.evaluations,
   }));
 }
 
@@ -152,15 +214,18 @@ export function listDecisions(db: Db, opts: { site?: DecisionSite; limit?: numbe
  * Every `DecisionProvider` this build has BEYOND `RulesDecisionProvider`,
  * which `DecisionService` always registers itself (I-D6).
  *
- * Empty today — no vendor call exists (§5 K17). It is a function rather than
- * an inline `[]` so that the slice registering `TypeSafeDecisionProvider` or
- * `ModelDecisionProvider` edits ONE place and every consumer picks it up with
- * no change of its own: the composition root, and the §7.2 prompt-injection
- * suite, which only becomes a real measurement once a provider that can judge
- * risk is registered here.
+ * K19d registers `ModelDecisionProvider`. Registering is not selecting: the
+ * chain starts at `config.provider`, whose default is `rules`, so a workspace
+ * that has not chosen `model` (or `typesafe`) never reaches it and emits no
+ * byte (I-D7). Every consumer picks this list up with no change of its own —
+ * the composition root, and the §7.2 injection suite, which drives the chain
+ * from the top and so measures the judge whenever a credential is present.
+ *
+ * The credential is the workspace's own Anthropic account key, read at the
+ * call boundary on every decision, never stored on the provider.
  */
 export function decisionProviders(_config: DecisionServiceConfig): DecisionProvider[] {
-  return [];
+  return [new ModelDecisionProvider({ apiKey: () => process.env.ANTHROPIC_API_KEY })];
 }
 
 const FALLBACK_ORDER: DecisionProvider["id"][] = ["typesafe", "model", "rules"];
@@ -214,6 +279,34 @@ export class DecisionService {
       insertDecisionRecord(this.db, req, outcome, record, new Date(this.clock()).toISOString());
     }
     return outcome;
+  }
+
+  /**
+   * I-D8 (§5 K19): `applied` is refused at a site unless a provider in the
+   * CONFIGURED chain declares it judges every judged key there. With rules
+   * alone every judged answer is absent, absence resolves to prompt, and an
+   * applied gate would prompt on every rules-allowed call — the fastest way to
+   * get it switched off. The refusal never silently downgrades: the caller gets
+   * the reason and must say it out loud.
+   */
+  activation(site: "tool-gate", requested: "shadow" | "applied"): { mode: "shadow" | "applied"; refusal?: string } {
+    if (requested === "shadow") return { mode: "shadow" };
+    const chain = FALLBACK_ORDER.slice(Math.max(FALLBACK_ORDER.indexOf(this.config.provider), 0));
+    const judge = chain.some((id) => {
+      // An unreachable judge (no credential) judges nothing, whatever it could.
+      const d = this.providers.get(id)?.describe();
+      const judged = (d?.reachable && d.judges?.[site]) || [];
+      return TOOL_GATE_JUDGED_KEYS.every((k) => judged.includes(k));
+    });
+    if (judge) return { mode: "applied" };
+    return {
+      mode: "shadow",
+      refusal:
+        `decisions.sites.${site}.mode: applied REFUSED — no provider in the configured chain ` +
+        `(${chain.join(" → ")}) judges ${TOOL_GATE_JUDGED_KEYS.join(", ")}. With rules alone those answers ` +
+        `are absent, absence resolves to prompt, and every rules-allowed tool call would prompt the operator ` +
+        `(I-D8). The site stays in shadow.`,
+    };
   }
 
   private async decideUncached(req: DecisionRequest): Promise<DecisionOutcome> {

@@ -18,6 +18,7 @@ import type {
   RunHandle,
   RunId,
   TaskId,
+  ToolGateVerdict,
 } from "@agent-plane/core";
 import { FakeAdapter, type FakeScript } from "@agent-plane/adapters";
 import { openDb, type Db } from "../../src/db/index.js";
@@ -26,7 +27,7 @@ import { TaskStore } from "../../src/modules/tasks.js";
 import { ApprovalService } from "../../src/modules/harness/approval-service.js";
 import { EventRecorder } from "../../src/modules/harness/event-recorder.js";
 import { HandoffService } from "../../src/modules/harness/handoff.js";
-import { SessionRunner, type RunnerDeps } from "../../src/modules/harness/session-runner.js";
+import { SessionRunner, type RunnerDeps, type ToolGateInput } from "../../src/modules/harness/session-runner.js";
 import { SessionStore } from "../../src/modules/harness/session-store.js";
 import { WorkspaceAuthority } from "../../src/modules/harness/workspace-authority.js";
 import {
@@ -1122,27 +1123,101 @@ describe("restart recovery", () => {
   });
 });
 
-describe("M16 K18 — tool-gate shadow observation", () => {
-  it("fires observeToolGate on tool.started, with the exact policy inputs, and never changes the outcome", async () => {
-    const calls: Array<{ toolName: string; toolsAllow?: readonly string[]; toolsDeny?: readonly string[]; sessionId: string }> = [];
-    const runner = new SessionRunner(
-      deps(countingFake(), {
-        observeToolGate: (input) => calls.push(input),
-      }),
-    );
+describe("M16 tool gate — K18 shadow observation, K19c wiring", () => {
+  const recordingGate = (mode: "shadow" | "applied", verdict: ToolGateVerdict) => {
+    const calls: ToolGateInput[] = [];
+    return { calls, gate: { mode, evaluate: async (input: ToolGateInput) => (calls.push(input), verdict) } };
+  };
+
+  it("shadow: evaluates tool.started post-start with the exact policy inputs, and never changes the outcome", async () => {
+    const { calls, gate } = recordingGate("shadow", { outcome: "prompt", reason: "would prompt" });
+    const runner = new SessionRunner(deps(countingFake(), { toolGate: gate }));
     const result = await runner.run(
       request({ policy: { budget: { enforcement: "advisory" }, timeout: { hardMs: 60_000 }, approval: { mode: "auto-approve" }, tools: { mode: "audit", allow: ["shell", "write"] }, checkpoint: { onSoftLimit: true }, isolation: { required: "ambient" } } }),
     );
 
-    expect(result.outcome).toBe("completed"); // shadow observation changed nothing
-    expect(calls).toEqual([{ toolName: "shell", toolsAllow: ["shell", "write"], toolsDeny: undefined, sessionId: sessionOf() }]);
+    expect(result.outcome).toBe("completed"); // a shadow prompt changed nothing
+    expect(calls).toEqual([
+      expect.objectContaining({ hook: "post-start", toolName: "shell", commandText: "ls src", toolsAllow: ["shell", "write"], toolsDeny: undefined, approvalMode: "auto-approve", sessionId: sessionOf() }),
+    ]);
   });
 
-  it("never invokes observeToolGate for an event that is not tool.started", async () => {
-    let calls = 0;
-    const runner = new SessionRunner(deps(countingFake({ ok: true, events: defaultBody() }), { observeToolGate: () => { calls += 1; } }));
+  it("never evaluates an event that is neither tool.started nor approval.requested", async () => {
+    const { calls, gate } = recordingGate("applied", { outcome: "prompt", reason: "x" });
+    const runner = new SessionRunner(deps(countingFake({ ok: true, events: defaultBody() }), { toolGate: gate }));
     await runner.run(request());
-    expect(calls).toBe(0); // defaultBody() below has no tool.started event
+    expect(calls).toEqual([]); // defaultBody() has no tool.started and no approval
+  });
+
+  it("shadow: a would-be prompt at pre-exec leaves auto-approve answering yes with no approvals row", async () => {
+    const { calls, gate } = recordingGate("shadow", { outcome: "prompt", reason: "would prompt" });
+    const runner = new SessionRunner(deps(countingFake({ ok: true, events: defaultBody(), approvalAfter: 1 }), { toolGate: gate }));
+    const result = await runner.run(request());
+    expect(result.outcome).toBe("completed");
+    expect(calls.map((c) => c.hook)).toEqual(["pre-exec"]);
+    expect(calls[0]).toMatchObject({ toolName: "shell", commandText: "rm -rf ./dist" });
+    const count = db.prepare("SELECT COUNT(*) c FROM approvals WHERE session_id = ?").get(sessionOf()) as { c: number };
+    expect(count.c).toBe(0);
+  });
+
+  it("applied prompt at pre-exec: auto-approve is narrowed to an operator answer through ApprovalService", async () => {
+    const { gate } = recordingGate("applied", { outcome: "prompt", reason: "judged: risk=high" });
+    const runner = new SessionRunner(deps(countingFake({ ok: true, events: defaultBody(), approvalAfter: 1 }), { toolGate: gate }));
+    const done = runner.run(request()); // auto-approve policy
+
+    await waitFor(() => store.forRequest("erq_1")?.state === "AWAITING_APPROVAL");
+    const sid = sessionOf();
+    const approvals = new ApprovalService(db);
+    const prq = approvals.pending(sid)[0]!.providerRequestId;
+    approvals.answer(sid, prq, "approved", "user:operator");
+
+    const result = await done;
+    expect(result.outcome).toBe("completed");
+    expect(approvals.get(sid, prq)!.state).toBe("delivered");
+    const decision = db
+      .prepare("SELECT payload FROM events WHERE run_id = ? AND type = 'guard.decision'")
+      .get(sid) as { payload: string };
+    expect(JSON.parse(decision.payload)).toMatchObject({ guard: "tool", directive: "pause", reason: "tool gate: judged: risk=high" });
+  });
+
+  it("applied auto-approve verdict never removes a prompt-on-escalation prompt (approvalMode is a ceiling)", async () => {
+    const { gate } = recordingGate("applied", { outcome: "auto-approve", reason: "judged: risk=none" });
+    const runner = new SessionRunner(deps(countingFake({ ok: true, events: defaultBody(), approvalAfter: 1 }), { toolGate: gate }));
+    const done = runner.run(request(promptOnEscalation()));
+    await waitFor(() => store.forRequest("erq_1")?.state === "AWAITING_APPROVAL");
+    const sid = sessionOf();
+    const approvals = new ApprovalService(db);
+    approvals.answer(sid, approvals.pending(sid)[0]!.providerRequestId, "approved", "user");
+    expect((await done).outcome).toBe("completed");
+  });
+
+  it("applied block at pre-exec cancels before the tool runs, as tool_denied", async () => {
+    const { gate } = recordingGate("applied", { outcome: "block", reason: "rules deny (final, I-D1)" });
+    const runner = new SessionRunner(deps(countingFake({ ok: true, events: defaultBody(), approvalAfter: 1 }), { toolGate: gate }));
+    const result = await runner.run(request());
+    expect(result.outcome).toBe("failed");
+    expect(result.failure).toMatchObject({ kind: "tool_denied", retryable: false });
+  });
+
+  it("read-only: an applied prompt or block verdict is ignored — behaviour is exactly today's", async () => {
+    for (const outcome of ["prompt", "block"] as const) {
+      const { gate } = recordingGate("applied", { outcome, reason: "x" });
+      const runner = new SessionRunner(deps(countingFake({ ok: true, events: defaultBody(), approvalAfter: 1 }), { toolGate: gate }));
+      const result = await runner.run(request({ executionRequestId: `erq_ro_${outcome}`, policy: { ...request().policy, approval: { mode: "read-only" } } }));
+      // read-only answers the approval "no"; the fake ends the run as denied.
+      expect(result.failure?.kind).toBe("provider_fault");
+    }
+  });
+
+  it("applied: a gate evaluation that throws fails closed to an operator prompt (I-D2)", async () => {
+    const gate = { mode: "applied" as const, evaluate: async (): Promise<ToolGateVerdict> => { throw new Error("boom"); } };
+    const runner = new SessionRunner(deps(countingFake({ ok: true, events: defaultBody(), approvalAfter: 1 }), { toolGate: gate }));
+    const done = runner.run(request());
+    await waitFor(() => store.forRequest("erq_1")?.state === "AWAITING_APPROVAL");
+    const sid = sessionOf();
+    const approvals = new ApprovalService(db);
+    approvals.answer(sid, approvals.pending(sid)[0]!.providerRequestId, "denied", "user");
+    expect((await done).outcome).toBe("failed");
   });
 });
 
