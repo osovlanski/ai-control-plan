@@ -5,6 +5,8 @@ import {
 } from "@agent-plane/core";
 import type { CodexAppServerProtocol } from "./codex-app-server-protocol.js";
 
+import { readCodexThreadHistory, type CodexHistoryReader } from "./codex-app-server-history.js";
+
 /** Only the execution owner may supply this connection; history readers cannot. */
 export interface CodexInputConnection {
   threadId: string;
@@ -12,7 +14,7 @@ export interface CodexInputConnection {
   rpc: CodexAppServerProtocol;
 }
 
-/** Transport-only. A steer response identifies a turn, never our message ID. */
+/** Steer is transport-only; only a fresh provider history record proves acceptance. */
 export class CodexSessionInputAdapter implements SessionInputAdapter {
   private readonly gate = new SessionInputOptInGate();
   private readonly grantVersions = new Map<string, number>();
@@ -22,13 +24,14 @@ export class CodexSessionInputAdapter implements SessionInputAdapter {
   constructor(
     private readonly assistantId: string,
     private readonly connection: (providerSessionRef: string) => CodexInputConnection | undefined,
+    private readonly readHistory: CodexHistoryReader = readCodexThreadHistory,
   ) {}
 
   capabilities(): SessionInputCapabilities {
     return {
-      capabilityVersion: "codex-app-server-transport-v1",
-      kinds: ["text"], ackLevel: "transport", idempotentSend: false,
-      receiptLookup: false, liveDelivery: ["running"],
+      capabilityVersion: "codex-app-server-receipt-v2",
+      kinds: ["text"], ackLevel: "provider-accepted", idempotentSend: false,
+      receiptLookup: true, liveDelivery: ["running"],
     };
   }
 
@@ -89,19 +92,53 @@ export class CodexSessionInputAdapter implements SessionInputAdapter {
     this.attempted.add(key);
     const expectedTurnId = live.turnId;
     const response = await live.rpc.request("turn/steer", {
-      threadId: live.threadId, expectedTurnId, input: [{ type: "text", text: message.text }],
+      threadId: live.threadId, expectedTurnId, clientUserMessageId: message.messageId, input: [{ type: "text", text: message.text }],
     });
     // Errors, malformed results and mismatched turns are conservatively unknown.
     // Never use an error string or later history absence as proof of non-delivery.
     if (response.error || response.result?.turnId !== expectedTurnId) {
       throw new SessionInputUnresolvedError("manual_recovery_required");
     }
-    return {
-      messageId: message.messageId, reference: `codex-steer:${live.threadId}:${expectedTurnId}`,
-      ackLevel: "transport", at: new Date().toISOString(),
-    };
+    // The service uses the declared acknowledgement for returned receipts.
+    // Never return a transport receipt under a provider-accepted declaration:
+    // the response only leaves an unknown attempt for read-only reconciliation.
+    throw new SessionInputUnresolvedError("transport_ack_only");
   }
 
-  // Deliberately no lookupReceipt: receiptLookup=false means the service leaves
-  // unknown outcomes requiring manual recovery, including after process restart.
+  async lookupReceipt(target: SessionInputTarget, messageId: string): Promise<SessionInputReceipt> {
+    if (target.assistantId !== this.assistantId || !target.providerSessionRef || !messageId) {
+      throw new SessionInputUnresolvedError("codex_receipt_unresolved");
+    }
+    try {
+      const thread = object(await this.readHistory(target.providerSessionRef));
+      if (thread.id !== target.providerSessionRef || !Array.isArray(thread.turns)) {
+        throw new SessionInputUnresolvedError("codex_receipt_unresolved");
+      }
+      for (const value of thread.turns) {
+        const turn = object(value);
+        for (const candidate of Array.isArray(turn.items) ? turn.items : []) {
+          const item = object(candidate);
+          // No text matching, turn IDs, assistant output, or provider-only IDs.
+          if (item.type === "userMessage" && item.clientId === messageId &&
+              typeof item.id === "string" && item.id.length > 0 && Array.isArray(item.content)) {
+            return {
+              messageId, ackLevel: "provider-accepted",
+              reference: `codex-user:${target.providerSessionRef}:${item.id}`,
+              at: new Date().toISOString(),
+            };
+          }
+        }
+      }
+    } catch {
+      throw new SessionInputUnresolvedError("codex_receipt_unresolved");
+    }
+    // Absence, even after process death, is not permission to replay. In the
+    // live matrix an acknowledged queued steer could disappear on interruption.
+    // Old transport-v1 messages also lack clientId; they remain manual recovery.
+    throw new SessionInputUnresolvedError("codex_receipt_unresolved");
+  }
+}
+
+function object(value: unknown): Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
