@@ -1,0 +1,97 @@
+{
+  "cliVersion": "codex-cli 0.154.0",
+  "origin": "SDK-pinned app-server generate-json-schema",
+  "requests": {
+    "TurnSteerParams": {
+      "fields": [
+        "clientUserMessageId",
+        "expectedTurnId",
+        "input",
+        "threadId"
+      ],
+      "required": [
+        "expectedTurnId",
+        "input",
+        "threadId"
+      ]
+    },
+    "TurnStartParams": {
+      "fields": [
+        "approvalPolicy",
+        "approvalsReviewer",
+        "clientUserMessageId",
+        "cwd",
+        "effort",
+        "input",
+        "model",
+        "outputSchema",
+        "personality",
+        "sandboxPolicy",
+        "serviceTier",
+        "serviceTierForTurn",
+        "summary",
+        "threadId",
+        "toolOutput",
+        "turnTrigger"
+      ],
+      "required": [
+        "input",
+        "threadId"
+      ]
+    },
+    "ThreadReadParams": {
+      "fields": [
+        "includeTurns",
+        "threadId"
+      ],
+      "required": [
+        "threadId"
+      ]
+    },
+    "ThreadResumeParams": {
+      "fields": [
+        "approvalPolicy",
+        "approvalsReviewer",
+        "baseInstructions",
+        "config",
+        "cwd",
+        "developerInstructions",
+        "excludeTurns",
+        "model",
+        "modelProvider",
+        "personality",
+        "sandbox",
+        "serviceTier",
+        "threadId"
+      ],
+      "required": [
+        "threadId"
+      ]
+    }
+  },
+  "responses": {
+    "TurnSteerResponse": {
+      "fields": [
+        "turnId"
+      ]
+    },
+    "ThreadReadResponse": {
+      "fields": [
+        "thread"
+      ]
+    },
+    "userMessage": {
+      "fields": [
+        "clientId",
+        "content",
+        "id",
+        "type"
+      ],
+      "required": [
+        "content",
+        "id",
+        "type"
+      ]
+    }
+  }
+}
