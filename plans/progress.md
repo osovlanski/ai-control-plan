@@ -58,8 +58,8 @@ design; slices below are implementation status.
 **Merge status (2026-09-24, verified against `origin`):**
 
 - **On `main`:** K17–K19e (#49, `d151c54`), K19f–K19g (#52, squash-merged at `6e0a8cd`) and
-  K19h–K19j (#55, merge commit `818ef1d`). #55 landed K19h/K19i as `a6f5cc1..96bd525` applied to
-  `main`, because #53 and #54 had been squash-merged into their stacked bases
+  K19h–K19j (#55, squash-merged at `818ef1d`, whose tree equals the PR head `3e58671`). #55
+  landed K19h/K19i as `a6f5cc1..96bd525` applied to `main`, because #53 and #54 had been squash-merged into their stacked bases
   (`claude/k19f-command-lexer`, `claude/k19h-second-lock`) instead of `main`.
 - **Gate on `818ef1d`:** typecheck clean; tests core 341, adapters 21, API 1110 (+83 skipped),
   web 50; lint clean on tracked files.
