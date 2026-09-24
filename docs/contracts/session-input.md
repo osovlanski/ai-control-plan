@@ -143,3 +143,49 @@ before claiming every user intent has durable retry semantics.
 
 Review outcome for this pass: boundary is explicit and consistent with current
 source; backend implementation and stakeholder acceptance remain deferred.
+
+## Implementation status — 2026-09-20
+
+The first vertical slice of §"Smallest implementation and review gate" is
+implemented on `feat/agentic-os-session-input`, behind `sessionInput.enabled`,
+which defaults to **false**. While the flag is false the routes below are not
+registered at all, no ledger row is ever written, and the Shell composer keeps
+its pre-slice disabled wording. Migration `025_session_input.sql` applies
+unconditionally so enabling the flag later needs no schema step.
+
+Implemented and covered by tests:
+
+* `POST /api/sessions/:sessionId/inputs`, `GET /api/sessions/:sessionId/inputs`
+  and `GET /api/inputs/:id`. These names are now valid routes **when the flag is
+  on**; they remain absent otherwise. 202 means kernel persistence only; a
+  message refused on arrival answers 422 carrying its persisted record.
+* `session_inputs`, `session_input_attempts`, `session_input_events` with the
+  unique `(workspace, session_id, client_message_id)` key, the payload
+  fingerprint, per-attempt lease epoch and capability version, and the six
+  normalized `input.*` events written in the state-change transaction.
+* The five-state machine, with `accepted -> expired` deliberately absent.
+* The session-condition policy for all eight conditions in §"Session-state
+  behavior". Seven are derived from kernel records; `compacting` is policy-only,
+  because the kernel has no compaction record yet (K10 is unimplemented).
+  Inventing one would be a false audit.
+* Capability negotiation (`kinds`, `ackLevel`, `idempotentSend`,
+  `receiptLookup`, `liveDelivery`). `delivered` requires a provider-level
+  acknowledgement; a transport-only adapter leaves the message `accepted` with
+  explicit unknown delivery.
+* Restart fencing by lease epoch, and unknown-outcome reconciliation by receipt
+  lookup, by declared-idempotent replay of the same message id, or — with
+  neither — by refusing to send again and requiring explicit recovery.
+* One deterministic adapter, `FakeSessionInputAdapter`. Every real provider
+  resolves to no input capability and is rejected before dispatch.
+
+Still deferred, and still only proposed text above:
+
+* Any live provider adapter and its actual acknowledgement evidence.
+* A dedicated retry/cancel command over a message id and expected version;
+  today a resubmit of the original client key is the whole retry protocol.
+* Scheduler-owned redelivery of a queued message when a quota pause or approval
+  clears; a queued message is dispatched on the next submit or explicit
+  dispatch, not by a background pump.
+* Retention/deletion policy for inputs and receipts, and the goal-creation
+  idempotency key noted above.
+* Operator/Shell delivery cards beyond the minimal flag-gated Shell composer.
