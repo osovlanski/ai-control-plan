@@ -139,6 +139,12 @@ export interface ExecutionContext {
    */
   target?: ExecutionTarget;
   worktree?: { repoPath: string; branch: string; worktreePath: string; baseRef: string };
+  /**
+   * M16 K19k: a task with no repository runs in a kernel-owned scratch
+   * directory (created at start, removed when the task is terminal). The tool
+   * gate treats it as the task's worktree. Never set alongside `worktree`.
+   */
+  scratchPath?: string;
   /** Composed context bundle digests (Agentic OS era). */
   bundleRefs?: string[];
   /** When `origin.kind === "handoff"`. */

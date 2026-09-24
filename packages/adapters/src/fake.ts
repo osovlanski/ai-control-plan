@@ -186,6 +186,16 @@ export class FakeAdapter implements AgentAdapter {
       emit({ type: "tool.started", summary: `MCP ${m[1]}`, payload: { toolUseId: `mcp${mcp}`, tool: m[1], input: { query: "fake" } } });
       emit({ type: "tool.completed", summary: `MCP ${m[1]} → ok`, payload: { toolUseId: `mcp${mcp}`, exitCode: 0 } });
     }
+    // K19k: `[FAKE:READ:<path>]` emits one Read per marker; `{cwd}` is the run's
+    // workdir, so a path inside a task's scratch directory can be scripted.
+    let read = 0;
+    for (const m of run.prompt.matchAll(/\[FAKE:READ:([^\]]+)\]/g)) {
+      if (state.cancelled) break;
+      read += 1;
+      const filePath = m[1]!.replaceAll("{cwd}", run.workdir);
+      emit({ type: "tool.started", summary: `Read ${filePath}`, payload: { toolUseId: `read${read}`, tool: "Read", input: { file_path: filePath } } });
+      emit({ type: "tool.completed", summary: `Read ${filePath} → ok`, payload: { toolUseId: `read${read}`, exitCode: 0 } });
+    }
     // Scripted provider auto-compaction (K9). Emitted AFTER the script events so
     // the Harness's next observation samples the post-compaction relief below.
     if (run.prompt.includes("[FAKE:COMPACT]") && !state.cancelled) {

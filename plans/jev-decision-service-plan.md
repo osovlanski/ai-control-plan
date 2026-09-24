@@ -714,17 +714,59 @@ this build meets it:
 
 | # | Precondition | Verdict | Evidence |
 |---|---|---|---|
-| 1 | ≥ 14 days or ≥ 500 shadow decisions | **FAIL** | The operator DB has no `decision_records` table: that workspace has not run a build with migration 025. Its 21 tool calls were recorded, but never gated. |
+| 1 | ≥ 14 days or ≥ 500 shadow decisions | **FAIL** | **Update 2026-09-24:** migrations 025–027 now applied to the operator DB, and one harness-mode task wrote 7 shadow rows. But the operator config does not set `execution.harnessModes.single`, and the legacy path has no gate, so ordinary operator tasks still write no rows. The soak cannot accumulate until that is set (owner's call). |
 | 2 | Disagreements with the rules baseline read by a human, reading recorded | **FAIL** | Nothing to read yet (see 1). No reading is recorded. |
 | 3 | p95 latency within the site's budget | **PASS** | No network call on the gate path. Floors take about 9 µs per typical command and under 10 ms at the 64 KiB cap (`tool-floors.test.ts`), against the 50 ms applied budget. |
 | 4 | Cost per 1,000 decisions, from own accounting | **PASS** | Zero. The gate calls only the rules provider, and its rows carry no tokens. The discovery job's cost is offline and separate. |
 | 5 | Egress test green | **FAIL** | By construction nothing leaves the process on the gate path, but no test asserts that for the composed gate. `decision-model.test.ts` covers only what the judge sends. |
 | 6 | Injection resistance | **PASS** | Now read as "no carrier removes a floor", pinned per PR without a credential (`decision-second-lock.test.ts`). §7.2's judge bar is no longer this row (owner decision above). |
-| 7 | Prompt rate measured and read | **FAIL** | Measured: 8 of 21 on the operator DB, 29 of 50 on the corpus. Not yet read by the operator, and 21 calls is not a rate. |
+| 7 | Prompt rate measured and read | **FAIL** | Measured: 8 of 21 on the operator DB, 29 of 50 on the corpus; live, 4 of 7 gate rows on one operator task (2026-09-24). Not yet read by the operator, and one task is not a rate. |
 | 8 | I-D8, the structural check | **FAIL** | It still requires a judging provider for `applied`, which floors do not need. Composition keeps `applied` closed regardless. The activation slice replaces it. |
 | — | §7.4 attestations checked at runtime | **FAIL** | Not implemented (activation slice). |
 
 **Not in K19j:** activation, a looser path floor, wildcard server declarations, the Gate UI tab.
+
+### K19k — A scratch worktree for a task with no repository (added 2026-09-24)
+
+**Why.** After K19j, all 8 prompts left on the operator DB came from one task with no repository.
+With no worktree, the path rule counts every absolute or home path as outside (K19i). And such a
+task ran with its working directory set to the workspace directory itself, beside the DB,
+`api-credential.json` and the Anthropic key file.
+
+**What shipped (shadow only).**
+
+- A task with no repository gets `<workspace>/scratch/<taskId>`, mode 0700, created at start by
+  the orchestrator. It is the run's workdir on every path (legacy, harness, dispatch replay).
+- `ExecutionContext.scratchPath` carries it. The tool gate uses it as the worktree when there is no
+  repository worktree. The path floor is unchanged: anything outside scratch, including `..` back to
+  the workspace directory, still hits `path-outside-worktree`.
+- The kernel removes it when the task goes terminal (the scheduler's terminal hook). A boot sweep
+  removes any scratch whose task is terminal or unknown.
+- A plain directory, not a git worktree: there is no repository to branch from.
+- **No migration.** Nothing new is persisted.
+
+**Measured (2026-09-24).**
+
+- **Operator DB replay, floors over recorded calls:** 8 of 21 before and after. Replay cannot move:
+  the recorded calls carry no worktree, and every one of the 8 names a path under `~` that is
+  outside any scratch directory too (`ls ~/`, `ls ~/workspace/...`, `Read
+  /home/ubuntu/workspace/reference-images/...`).
+- **Live, the same repo-less task on the operator workspace (harness mode), before and after:**
+  4 of 7 rows prompt before, 4 of 9 after. Both runs listed `~/.agent-plane` twice, and both
+  prompted on it. The extra 2 rows after are one more `search` call, which auto-approves. K19k
+  removed no prompt from this task.
+- **Where it does remove prompts:** a file tool on the task's own files. Claude Code's `Read`
+  takes an absolute path, so a read of `<scratch>/notes.md` prompted before (no worktree, absolute
+  path) and auto-approves now. Pinned in `scratch-worktree.test.ts`, which fails with the gate
+  change reverted.
+- **K19h corpus:** 29 of 50, unchanged.
+
+**Reading.** The 8 operator prompts are the floor doing its job: the task was asked to look through
+the operator's home directory. The lever for those is the operator's approval, not the gate.
+
+**Not in K19k:** a looser path floor, a git-backed scratch, keeping scratch after a task ends, and
+recording the scratch path on the harness `runs` row. Floor discovery replays such calls with no
+worktree, which is stricter than the gate.
 
 ### K20 — Task classifier
 

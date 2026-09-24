@@ -395,3 +395,9 @@ checks; this eighth one is structural, and K19c cannot be reviewed without it.
 ## 2026-09-24 — Merge policy for stacked PRs (SHIPPED)
 
 Stacked PRs merge with merge commits only, never squash: squashing #53/#54 into their stacked bases re-wrote history and forced #55 to re-land K19h/K19i as a range diff. #55 itself was squash-merged (`818ef1d`, one parent), so no stacked commit SHA is an ancestor of `main`; content proof is by tree equality. Agents open PRs but never merge them; the owner merges.
+
+## 2026-09-24 — K19k: scratch directory for repo-less tasks (SHIPPED, shadow)
+
+- **A task with no repository used to run with its cwd set to the workspace directory**, beside `agent-plane.db`, `api-credential.json` and the Anthropic key file. It now runs in `<workspace>/scratch/<taskId>` (0700). The kernel removes it at terminal, and a boot sweep removes any left behind.
+- **The gate treats scratch as the worktree; the path floor is unchanged.** `..` back to the workspace directory still prompts.
+- **It removed none of the operator's 8 prompts.** They name paths under `~`, which are outside any scratch directory too. Do not expect a prompt-rate gain from scratch on home-directory tasks.
