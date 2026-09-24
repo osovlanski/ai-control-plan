@@ -3,8 +3,9 @@
  * `plans/jev-decision-service-plan.md` §5, K17), plus the K18 decision-record
  * write path.
  *
- * K19d registers `ModelDecisionProvider` (`decision-model.ts`) under `model`;
- * `typesafe` is still named in the chain with nothing behind it (I-D6).
+ * K19d registers `ModelDecisionProvider` (`decision-model.ts`) under `model`.
+ * `typesafe` is named in the chain but not registered: configuring it fails at
+ * construction (K19i), and a chain that starts above it skips it.
  */
 import { createHash } from "node:crypto";
 import type { DecisionOutcome, DecisionProvider, DecisionRequest, DecisionSite, ToolGateVerdict } from "@agent-plane/core";
@@ -256,6 +257,19 @@ export class DecisionService {
   ) {
     for (const p of extraProviders) this.providers.set(p.id, p);
     this.providers.set("rules", new RulesDecisionProvider());
+    // I-D2, degrade LOUD (K19i): a configured provider this build does not
+    // register used to fall through to rules with a `degraded` note on every
+    // call, and the gate prompted on each one. That made every §7.2
+    // gate-outcome figure through K19g true by construction, and a workspace
+    // following §7.4's example (`provider: typesafe`) prompt on every tool
+    // call. It is a configuration error, so it stops the process at startup.
+    if (!this.providers.has(config.provider)) {
+      throw new Error(
+        `decisions.provider: ${JSON.stringify(config.provider)} is not registered in this build ` +
+          `(registered: ${[...this.providers.keys()].join(", ")}). Configure one of those, or remove ` +
+          `decisions.provider to use rules.`,
+      );
+    }
   }
 
   /**

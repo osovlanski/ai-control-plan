@@ -3,6 +3,7 @@ import { ensureCredential } from "./auth/credential-file.js";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { parse, stringify } from "yaml";
+import type { McpToolAccess, McpToolPolicy } from "@agent-plane/core";
 
 /**
  * Workspace instance configuration (revised architecture §1).
@@ -112,7 +113,7 @@ export interface WorkspaceConfig {
    * makes no network call.
    */
   decisions?: {
-    /** typesafe | model | rules (default: rules). Neither vendor provider exists yet (K17). */
+    /** typesafe | model | rules (default: rules). `typesafe` is not registered in this build: choosing it fails at startup (K19i). Since K19i the tool gate reads no judge whatever this says; floors decide. */
     provider?: "typesafe" | "model" | "rules";
     /**
      * Reference NAME only, e.g. "TYPESAFE_API_KEY" — resolved through
@@ -129,6 +130,12 @@ export interface WorkspaceConfig {
      * `tool-gate`; the §7.4 attestations are the activation slice's.
      */
     sites?: { "tool-gate"?: { mode?: "shadow" | "applied" } };
+    /**
+     * K19j: what each MCP tool does, `server → tool → read-only | mutating`.
+     * Only this file declares it; an undeclared tool stays `opaque` and
+     * prompts. `read-only` removes that one prompt and nothing else.
+     */
+    mcpTools?: Record<string, Record<string, McpToolAccess>>;
   };
   /** Execution-Harness cutover switches (execution-harness.md §5/§10). */
   execution?: {
@@ -163,6 +170,8 @@ export interface ResolvedDecisionsConfig {
   typesafeApiKeyRef?: string;
   /** The REQUESTED mode. The effective one is resolved against the provider chain (I-D8) at composition. */
   sites: { "tool-gate": { mode: "shadow" | "applied" } };
+  /** Null-prototype maps of own keys only; empty when nothing is declared. */
+  mcpTools: McpToolPolicy;
 }
 
 export interface ResolvedConfig extends Omit<WorkspaceConfig, "execution" | "models" | "decisions"> {
@@ -434,8 +443,36 @@ function resolveDecisions(file: WorkspaceConfig["decisions"], configPath: string
   return {
     provider: provider as ResolvedDecisionsConfig["provider"],
     sites: { "tool-gate": { mode: toolGateMode } },
+    mcpTools: resolveMcpTools(file?.mcpTools, configPath),
     ...(file?.typesafeApiKeyRef !== undefined ? { typesafeApiKeyRef: file.typesafeApiKeyRef } : {}),
   };
+}
+
+/**
+ * Fail closed at load: a value other than `read-only` or `mutating` is an
+ * error, never a silent opaque. Server and tool names are agent-visible data at
+ * lookup time, so they are copied into null-prototype maps of own keys (see
+ * `pools`).
+ */
+function resolveMcpTools(declared: unknown, configPath: string): McpToolPolicy {
+  const policy = Object.create(null) as Record<string, Record<string, McpToolAccess>>;
+  if (declared === undefined || declared === null) return policy;
+  const isMap = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+  if (!isMap(declared)) throw new Error(`${configPath}: decisions.mcpTools must be a mapping of server → tool → read-only | mutating`);
+  for (const server of Object.getOwnPropertyNames(declared)) {
+    const tools = declared[server];
+    if (!isMap(tools)) throw new Error(`${configPath}: decisions.mcpTools.${server} must be a mapping of tool → read-only | mutating`);
+    const out = Object.create(null) as Record<string, McpToolAccess>;
+    for (const tool of Object.getOwnPropertyNames(tools)) {
+      const access = tools[tool];
+      if (access !== "read-only" && access !== "mutating") {
+        throw new Error(`${configPath}: decisions.mcpTools.${server}.${tool} must be read-only | mutating, got ${JSON.stringify(access)}`);
+      }
+      out[tool] = access;
+    }
+    policy[server] = out;
+  }
+  return policy;
 }
 
 function validateDecisions(decisions: ResolvedDecisionsConfig, path: string): void {

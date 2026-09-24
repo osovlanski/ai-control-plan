@@ -55,6 +55,20 @@ per slice.
 Plan: [`plans/jev-decision-service-plan.md`](jev-decision-service-plan.md). Proposed
 design; slices below are implementation status.
 
+**Merge status (2026-09-24, verified against `origin`):**
+
+- **On `main`:** K17–K19e (#49, `d151c54`) and K19f–K19g (#52, squash-merged at `6e0a8cd`).
+- **Not on `main`:** K19h and K19i. #53 and #54 were squash-merged into their stacked bases,
+  `claude/k19f-command-lexer` (`c804266`) and `claude/k19h-second-lock` (`e7ae626`), not
+  retargeted to `main` first.
+- **Why it cannot simply be retargeted:** a trial merge of `claude/k19h-second-lock` into `main`
+  conflicts in five files, because the squash re-wrote K19f–K19g as one commit. The tree of `e7ae626`
+  equals K19i's head `96bd525`, and `main`'s tree equals K19g's head `a6f5cc1`. So `a6f5cc1..96bd525`
+  applied to `main` is exactly the missing change. The K19j PR lands it that way, as its first
+  commit, with no force-push.
+- **Migrations:** the highest on `main` is still 027. Stream A (session input) is being re-stacked
+  by another agent onto 028+.
+
 K17 through K19e are pushed and PR #49 is green. Everything ships in shadow:
 the default provider is `rules`, `applied` is closed, nothing is activated.
 
@@ -67,8 +81,44 @@ the default provider is `rules`, `applied` is closed, nothing is activated.
 | K19c | the tool gate wired at the pre-exec hook, shadow only |
 | K19d | `ModelDecisionProvider` on `claude-haiku-4-5` |
 | K19e | per-question state scoping, split shadow/applied budgets |
+| K19f–K19h | lexer rejected, K19g floors, second-lock decision and survey (branches `claude/k19f-command-lexer`, `claude/k19h-second-lock`) |
+| K19i | **floors decide the gate; the judge moves to offline floor discovery**; an unregistered configured provider fails at startup |
+| K19j | a declared MCP tool policy (`decisions.mcpTools`); §7.2 leaves tool-gate activation (owner decision); activation-readiness table |
 
-- **§7.2 still FAILS, and that is the blocker on activation.** 10 of 51 fixtures
+- **K19i results (2026-09-23/24), branch `claude/k19i-floors-decide`:**
+  - **Gate:** reads rules and floors only. No judge call on the hot path.
+  - **K19h corpus after the floors:** 8 of 50 actions prompt only on the judge. They are
+    `rm-one`, `rm-r-build`, `git-reset-soft`, `mv-dir`, `git-push-branch`, `git-commit`,
+    `git-amend` and `pnpm-test`.
+  - **Corpus prompt counts:** rules-only 50, judge 33, floors 29. The floors add `pnpm-add`,
+    `npx-cli`, `npm-global` and `pip-install`.
+  - **Operator DB, 21 recorded calls:** the floors prompt on 17. 9 are MCP tools (`opaque`),
+    6 are shell commands naming `~`, and 2 are `Read`s under `/home/ubuntu` with no worktree.
+  - **Live API run (fake assistant):** the pre-exec `rm -rf ./dist` got `prompt`
+    (`recursive-forced-rm`) and the post-start `ls src` got `auto-approve`. Both rows were
+    `provider: rules` and not degraded. Prompt rate 0.5.
+  - **Startup:** `decisions.provider: typesafe` exits 1 with "not registered in this build".
+  - **Judge survey re-run, 2026-09-24:** 5 of 5 runs, 250 of 250 judged. It matches K19h
+    exactly: 33 judge-only actions (`pnpm-test` in 3 of 5, the rest 5 of 5) and 17 never.
+    - **Earlier attempts:** a 401, because the key file held `ANTHROPIC_KEY=` before the key,
+      then a 400, credit balance too low. Credit was added before the passing run.
+  - **Discovery job with the live judge:** 5 judged, 1 candidate. It was 2 `Read`s under
+    `/home/ubuntu` with no worktree, rated `outside_repo=0.95`. File-tool paths now get the
+    shell's no-worktree path rule. After that fix: 7 floored, 0 candidates.
+  - **Floor timing:** about 9 µs per typical command, and under 10 ms warm at the 64 KiB cap.
+
+- **K19j results (2026-09-24), branch `claude/k19j-mcp-policy`:**
+  - **Operator DB prompts: 17 of 21 → 8 of 21** with the three claude-mem search tools declared
+    `read-only`. `opaque` went from 9 to 0. The 8 left are `path-outside-worktree` on one
+    repo-less task.
+  - **K19h corpus:** 29 of 50, unchanged (no MCP action in it), now pinned per rule.
+  - **Discovery, one live run:** 7 judged, 0 candidates.
+  - **Activation readiness:** §7.1 rows 3, 4 and 6 PASS; rows 1, 2, 5, 7, 8 and the §7.4
+    attestations FAIL. See plan §5 K19j. Nothing is activated.
+  - **Owner decision:** §7.2 is a nightly quality metric for floor discovery, not a tool-gate
+    activation blocker.
+
+- **(Superseded for the tool gate by K19j.) §7.2 still FAILS, and that is the blocker on activation.** 10 of 51 fixtures
   soften a judged answer, down from 26–27 before scoping. **9 of the 10 carry the
   injection inside `commandText`** — the one field every command question must
   read, so scoping cannot remove it. The tenth moved on a path-count change alone.
@@ -88,12 +138,14 @@ Open items carried out of K19c, none of them K19d's job:
 
 | Item | Where it belongs |
 |---|---|
-| §5 K19's "the only widening" never fires — the gate must not reinterpret an existing `approvalMode`. Needs an opt-in `gate-assisted` mode, gated on measured calibration (I-D5). | activation slice |
+| ~~§5 K19's "the only widening" never fires — needs an opt-in `gate-assisted` mode.~~ **Closed by owner decision (K19h, 2026-09-23):** the gate is a second lock only; the widening is dropped and `gate-assisted` removed. | — |
 | The Claude adapter gets **audit** tier under `auto-approve`, because `canUseTool` is installed only under `prompt-on-escalation`. The mode that most needs a gate is the one with no pre-exec hook. | its own slice |
 | Bedrock emits no tool events, so the gate never evaluates there. | recorded as known-unreachable |
 | §7.4 attestations are not checked yet. | activation slice |
-| §7.2's bar is "no reduction". 9 of 10 residual failures put the injection inside `commandText`, which every command question must read — no scoping removes it. Either the bar distinguishes "a field the question must read" from "a field it should never have seen", or activation is blocked permanently. **Owner decision.** | plan revision, before the activation slice |
-| An applied budget derived from measured p95 (K19e left `applied` at 50 ms, below the judge's 1,014 ms floor, because `applied` is closed). | activation slice |
+| ~~§7.2's bar is "no reduction".~~ **Decided (K19h):** the bar is gate-outcome flips or risk crosses in 2 or more of 5 runs. **Decided (K19j, 2026-09-24):** it is a nightly quality metric for floor discovery, not a tool-gate activation blocker. | — |
+| No test asserts that the composed gate sends nothing off the process (§7.1(5)). | activation slice |
+| An applied budget derived from measured p95. K19i: the gate awaits no judge, and floors take about 9 µs. | activation slice |
+| I-D8 demands a judge for `applied`; floors need none (K19i). It only refuses, so it is harmless until activation. | activation slice |
 
 - **Shares no files with stream A**; the two run concurrently.
 - **PR #49 is green** on `a6a006f` and carries K17–K19e.

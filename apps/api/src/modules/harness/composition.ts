@@ -33,11 +33,13 @@ import { planProjectVerification, snapshotProjectVerification } from "../project
 import type { DecisionProvider } from "@agent-plane/core";
 import {
   DEFAULT_REDACTION_RULES,
+  RulesDecisionProvider,
   TOOL_GATE_BATTERY,
   TOOL_GATE_BUDGET_MS,
   buildToolGateState,
-  resolveToolGate,
+  resolveFloorGate,
   toolDeniedRules,
+  toolGateFloorHits,
 } from "@agent-plane/core";
 import { DecisionService, decisionProviders, insertDecisionRecord } from "../decision.js";
 
@@ -168,7 +170,8 @@ export function buildHarnessComposition(deps: HarnessCompositionDeps): HarnessCo
   // M16 tool gate (K18 records, K19b state boundary, K19c wiring). The
   // effective mode is resolved ONCE here against the provider chain: `applied`
   // with no judging provider is refused and the site kept in shadow (I-D8),
-  // loudly, never silently.
+  // loudly, never silently. Constructing the service also refuses, at
+  // startup, a configured provider this build does not register (K19i).
   const decisions = new DecisionService(
     config.decisions,
     deps.decisionProviders ?? decisionProviders(config.decisions),
@@ -189,6 +192,7 @@ export function buildHarnessComposition(deps: HarnessCompositionDeps): HarnessCo
     };
   }
   if (activation.refusal) deps.onWarning?.(activation.refusal);
+  const rules = new RulesDecisionProvider();
   const toolGate: NonNullable<RunnerDeps["toolGate"]> = {
     mode: activation.mode,
     async evaluate(input) {
@@ -203,20 +207,24 @@ export function buildHarnessComposition(deps: HarnessCompositionDeps): HarnessCo
         repoPath: input.repoPath,
         repoAllowlist: config.repoAllowlist,
       });
-      // K19e: only an applied pre-exec evaluation is awaited on the hot path;
-      // everything else runs in the background and gets the shadow budget.
-      const hot = activation.mode === "applied" && input.hook === "pre-exec";
-      const budgetMs = hot ? TOOL_GATE_BUDGET_MS.applied : TOOL_GATE_BUDGET_MS.shadow;
-      const req = { site: "tool-gate" as const, state: built.state, questions: TOOL_GATE_BATTERY, budgetMs };
-      const outcome = await decisions.decide(req);
+      // K19i: the judge is off the hot path. Floors decide; the rules
+      // provider still answers `denied`, so every row keeps its baseline (K18).
+      // The judge runs only in the offline floor discovery job.
+      const req = { site: "tool-gate" as const, state: built.state, questions: TOOL_GATE_BATTERY, budgetMs: TOOL_GATE_BUDGET_MS.applied };
+      const outcome = await rules.decide(req);
       // The deny comes from the deterministic match on the RAW inputs — the
       // same one toolPolicyGuard runs — never from any provider's answer (I-D1).
-      const verdict = resolveToolGate({
+      const verdict = resolveFloorGate({
         rulesDenied: toolDeniedRules(input.toolName, { allow: input.toolsAllow, deny: input.toolsDeny }),
         approvalMode: input.approvalMode,
-        outcome,
-        // K19g: facts of the raw action; the record below keeps the judge's answers verbatim.
-        floors: built.floors,
+        hits: toolGateFloorHits({
+          toolName: input.toolName,
+          commandText: input.commandText,
+          paths: input.paths,
+          worktreePath: input.worktreePath,
+          shell: input.shell,
+          mcpTools: config.decisions.mcpTools,
+        }),
       });
       // Written here rather than via `decide(req, ctx)` because the record
       // carries the verdict, which only exists after the answers do. Still one
