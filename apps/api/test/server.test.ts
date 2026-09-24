@@ -38,7 +38,7 @@ describe("api server", () => {
     const res = await app.inject({ method: "GET", url: "/api/meta", headers: bearer() });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toMatchObject({
-      apiVersion: "2.2",
+      apiVersion: "2.3",
       eventVersion: "1.0",
       authRequired: true,
       capabilities: [

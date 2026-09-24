@@ -588,6 +588,15 @@ function renderDefaultConfig(workspace: string): string {
       ].join("\n"),
     )
     .replace(
+      /^sessionInput:/m,
+      [
+        "# sessionInput.enabled: durable session-addressed conversational input (docs/contracts/session-input.md).",
+        "# Default false. While it is false the input routes are not registered and no input ledger row is written.",
+        "# Only the deterministic fake adapter can deliver today; every real provider declares the capability unsupported.",
+        "sessionInput:",
+      ].join("\n"),
+    )
+    .replace(
     /^execution:/m,
     [
       "# execution.harnessModes: per-mode Execution Harness routing. Only `single` has parity today; default off.",

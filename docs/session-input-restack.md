@@ -33,7 +33,7 @@ Classes: (a) content already on main; (b) needed session-input core; (c) conflic
 | `558a90326ed5a15da38b602e3dd6ada3ba4136b8` | (d) | Core retry/cancel, commands migration/tests plus web client/composer changes. Clean file boundary. | Take apps/api and packages/core only; commands migration 029 |
 | `3f13093add1bb3cbf79427b997b0071900b76a30` | (b) | Scheduler-owned redelivery, SSE and API regression tests; independent of Shell. | Cherry-pick |
 | `f48ff484f53669da260537885d6d9edf2459db3e` | (b) | Retry/cancel and redelivery contract/status additions. | Cherry-pick |
-| `0221ab2f48600dbb2b496e350318974e941feaea` | (b) | Provider-neutral live contract, session opt-in and API tests; core-only. | Cherry-pick; preserve main memory and additive API version |
+| `0221ab2f48600dbb2b496e350318974e941feaea` | (b) | Provider-neutral live contract, session opt-in and API tests; core-only. | Cherry-pick; preserve main memory; API 2.3 follows main 2.2 |
 
 ## Reconciliation boundaries
 

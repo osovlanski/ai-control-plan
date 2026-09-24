@@ -1,7 +1,7 @@
 # Durable session-addressed conversational input — implementation record
 
-2026-09-20. Branch `feat/agentic-os-session-input`, built on the standalone
-Shell slice (`a7401a3`). Contract: [`contracts/session-input.md`](contracts/session-input.md).
+2026-09-20 implementation, restacked on main on 2026-09-24 as
+`feat/session-input-core`; main’s Shell is preserved without a follow-up composer. Contract: [`contracts/session-input.md`](contracts/session-input.md).
 
 ## What this slice is
 
@@ -35,7 +35,7 @@ outcome may be unknown, and turning uncertainty into a terminal "not delivered"
 would be a false audit. Such a message stays `accepted` with
 `delivery_unknown = 1` and an `input.delivery_unknown` trace.
 
-**Idempotency.** `UNIQUE(workspace, session_id, client_message_id)` plus a
+**Idempotency.** `UNIQUE(workspace, session_id, client_message_id, generation)` plus a
 payload fingerprint. The same key with the same payload returns the original
 record; the same key with different text is a 409, because that is a client bug
 and not a retry. The row and its `input.queued` trace are committed in one
@@ -71,7 +71,10 @@ is rejected before dispatch.
 run events and must not fabricate a per-run sequence number. Every event carries
 message, attempt, session, task and workspace ids, the actor and a safe reason.
 
-## Validation
+## Historical validation
+
+The counts below describe the original slice, including its composer. Fresh
+backend-only restack evidence is recorded in [session-input-restack.md](session-input-restack.md).
 
 `pnpm lint`, `pnpm typecheck`, `pnpm build`, `pnpm test` (941 API + 56 web),
 `pnpm test:harness-on`, `pnpm test:recovery-chaos` and the Chromium E2E project
@@ -86,6 +89,5 @@ real provider would. No child process is forked.
 ## Not in this slice
 
 No live provider adapter, no default-on flag, no Sirius/NanoClaw work, no
-deployment change, and no Shell/Operator delivery cards beyond a minimal
-flag-gated composer. `compacting` is a policy arm only — the kernel has no
+deployment change, no Shell/Operator delivery cards and no follow-up composer. `compacting` is a policy arm only — the kernel has no
 compaction record until K10 exists.

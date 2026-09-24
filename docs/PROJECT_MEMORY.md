@@ -405,3 +405,7 @@ Stacked PRs merge with merge commits only, never squash: squashing #53/#54 into 
 ## 2026-09-22 — shared live-input prerequisite (SHIPPED)
 
 Live provider input branches share `feat/agentic-os-session-input-live-contract` from redelivery `f48ff48`. The prerequisite extracts probing and unresolved receipt reconciliation from Claude; it does not register any real adapter. Claude and Codex must be sibling implementations, with no duplicated shared contract patches. The additive `SessionInputOptInGate` is required for Codex: explicit grants bind the kernel session, assistant and provider session and are revoked on restart. Claude's existing enablement and receipt contract remain unchanged. The SDK `exec` stdin is not a live input channel; Codex support stays blocked until app-server can address the execution adapter's own active session.
+
+## 2026-09-24 — session-input restack boundary (PROPOSED)
+
+Owner decision: main’s Shell survives. `feat/session-input-core` supersedes the core portion of #50; its composer is deferred to a separate port. Claude #47 and Codex #51 remain sibling adapters over this shared contract; #48 follows the composer port. No real adapter is registered by the core, and input defaults off. Migration slots 025–027 belong to main’s decision service; input uses 028 and 029. API 2.3 is additive over main’s 2.2. Session opt-in grants bind kernel session, assistant and provider session and are revoked on restart.

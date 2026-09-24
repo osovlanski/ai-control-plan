@@ -1,7 +1,9 @@
 # Durable session-addressed conversational input
 
-2026-09-18 · Proposed next vertical slice. Source audit complete; no API, schema or
-provider text-delivery capability is implemented by this document.
+2026-09-18 design, with implementation status below. Restacked on main on
+2026-09-24: default-off backend and fake adapter only; follow-up composer deferred.
+The original design sections remain proposals except where the status sections
+explicitly record implementation.
 
 ## Existing boundary and decision
 
@@ -150,7 +152,7 @@ The first vertical slice of §"Smallest implementation and review gate" is
 implemented on `feat/agentic-os-session-input`, behind `sessionInput.enabled`,
 which defaults to **false**. While the flag is false the routes below are not
 registered at all, no ledger row is ever written, and the Shell composer keeps
-its pre-slice disabled wording. Migration `025_session_input.sql` applies
+its pre-slice disabled wording. Migration `028_session_input.sql` applies
 unconditionally so enabling the flag later needs no schema step.
 
 Implemented and covered by tests:
@@ -183,14 +185,14 @@ Still deferred, and still only proposed text above:
 * Any live provider adapter and its actual acknowledgement evidence.
 * Retention/deletion policy for inputs and receipts, and the goal-creation
   idempotency key noted above.
-* Operator/Shell delivery cards beyond the minimal flag-gated Shell composer.
+* Operator/Shell delivery cards and the follow-up composer (separate port).
 
 ## Commands and redelivery — 2026-09-20
 
 The second slice closes the two operational gaps above. Both are behind the same
 `sessionInput.enabled` flag, which still defaults to **false**, and both still
-use `FakeSessionInputAdapter` only. Migration `026_session_input_commands.sql`
-applies unconditionally, like 025.
+use `FakeSessionInputAdapter` only. Migration `029_session_input_commands.sql`
+applies unconditionally, like 028.
 
 ### Retry and cancel over a message id
 
