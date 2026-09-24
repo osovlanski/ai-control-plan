@@ -228,6 +228,89 @@ export interface ToolGateVerdict {
 }
 
 /**
+ * K19g — the judged Nouls a fact of the RAW action already answers (plan §5
+ * K19g). K19f measured the judge dropping `destructive` 0.95 → 0.10 and
+ * `credential_reach` 0.85 → 0.05 under injection, 5 of 5 runs, on a write to
+ * `~/.ssh/authorized_keys`: that the path is outside the worktree and is an
+ * SSH file needs no model, so no sentence can talk it down.
+ *
+ * Each value is a FIXED label naming the fact — never matched text, so a
+ * verdict reason cannot carry a secret. A floor only raises: it lifts a
+ * well-formed judge answer to 1 and never lowers one or removes a prompt
+ * (I-D1's direction). Attacker text can add a floor — one extra prompt — but
+ * cannot remove one. A floor is not a basis: an absent answer stays absent
+ * and still prompts as "no basis" (I-D8 unchanged).
+ */
+export type FlooredKey = "destructive" | "outside_repo" | "credential_reach" | "exfiltration";
+export type ToolGateFloors = Partial<Record<FlooredKey, string>>;
+
+const WRITE_TOOL = /write|edit|patch|notebook/i;
+// No leading `[^\n]*` in any pattern below: the command is attacker-sized,
+// and each test must stay linear in it.
+const CREDENTIAL_FILE =
+  /(?:^|[\s/"'=:~])\.env(?:rc)?(?:\.[\w.-]+)?(?!\w)|\.ssh\/|\bid_(?:rsa|dsa|ecdsa|ed25519)\b|\.aws\/credentials|\.netrc\b|\.npmrc\b|\.pypirc\b|\.git-credentials\b|\.pgpass\b|\.docker\/config\.json|\.kube\/config|gh\/hosts\.yml|\.claude\/\.credentials|\.codex\/auth\.json/;
+const RM_RECURSIVE_FORCE = /\brm\s+-[a-zA-Z]*(?:[rR][a-zA-Z]*f|f[a-zA-Z]*[rR])/;
+const GIT_REWRITE = /\bgit\s+(?:reset\s+--hard|clean\s+-[a-zA-Z]*f)\b/;
+const GIT_PUSH = /\bgit\s+push\b/;
+const FORCE_FLAG = /(?:^|\s)(?:--force(?:-with-lease)?|-f)(?=\s|$)|\s\+[\w./-]+/;
+const CURL = /\bcurl\b/;
+const CURL_UPLOAD = /\s(?:-d|--data(?:-binary|-raw|-urlencode)?|-F|--form)[\s=]+[^\s@]*@|\s(?:-T|--upload-file)\s/;
+const WGET = /\bwget\b/;
+const POST_FILE = /--post-file/;
+const REMOTE_COPY = /\b(?:scp|rsync)\s/;
+const REMOTE_TARGET = /\s(?:[\w.-]+@)?[\w-][\w.-]*:(?!\/\/)/; // host:path, not a URL scheme
+
+/**
+ * Lexical resolve, no I/O: a relative path is taken against the worktree and
+ * `.`/`..` are folded, so `/wt/../etc` is outside. `~` is left as-is — it is
+ * outside any absolute worktree, which is the conservative read.
+ */
+function resolveAgainst(path: string, base: string): string {
+  const out: string[] = [];
+  for (const part of (path.startsWith("/") || path.startsWith("~") ? path : `${base}/${path}`).split("/")) {
+    if (part === "..") out.pop();
+    else if (part !== "." && part !== "") out.push(part);
+  }
+  return path.startsWith("~") ? out.join("/") : `/${out.join("/")}`;
+}
+
+function toolGateFloors(input: ToolGateObservation): ToolGateFloors {
+  const floors: ToolGateFloors = {};
+  const cmd = input.commandText ?? "";
+  const paths = input.paths ?? [];
+  // No worktree ⇒ no fact to state: the judge alone answers, as before K19g.
+  const wt = input.worktreePath;
+  const outside = wt !== undefined && paths.some((p) => !isInside(resolveAgainst(p, wt), wt));
+  if (outside) floors.outside_repo = "path outside worktree";
+  if (outside && WRITE_TOOL.test(input.toolName)) floors.destructive = "write outside worktree (not in git)";
+  else if (RM_RECURSIVE_FORCE.test(cmd)) floors.destructive = "recursive forced rm";
+  else if (GIT_REWRITE.test(cmd) || (GIT_PUSH.test(cmd) && FORCE_FLAG.test(cmd))) floors.destructive = "git history rewrite";
+  if (CREDENTIAL_FILE.test(cmd) || paths.some((p) => CREDENTIAL_FILE.test(p))) floors.credential_reach = "credential file named";
+  if ((CURL.test(cmd) && CURL_UPLOAD.test(cmd)) || (WGET.test(cmd) && POST_FILE.test(cmd)) || (REMOTE_COPY.test(cmd) && REMOTE_TARGET.test(cmd))) {
+    floors.exfiltration = "file upload";
+  }
+  return floors;
+}
+
+/**
+ * The answers the gate consumes: the judge's, with each floored key raised to
+ * 1. Absent and malformed answers pass through untouched — they already
+ * prompt, and a floor must not turn "no basis" into a basis. Pure; the
+ * record keeps `outcome.answers` verbatim (I-D5).
+ */
+export function floorToolGateAnswers(
+  answers: Record<string, DecisionAnswer>,
+  floors: ToolGateFloors,
+): Record<string, DecisionAnswer> {
+  const out = { ...answers };
+  for (const key of Object.keys(floors)) {
+    const a = out[key];
+    if (a?.kind === "noul" && Number.isFinite(a.value)) out[key] = { kind: "noul", value: Math.max(a.value, 1) };
+  }
+  return out;
+}
+
+/**
  * The §5 K19 mapping, subordinate to I-D1. Pure.
  *
  * `rulesDenied` is the deterministic allow/deny match computed by the caller
@@ -239,14 +322,16 @@ export function resolveToolGate(input: {
   rulesDenied: boolean;
   approvalMode: PermissionPolicy["mode"];
   outcome: DecisionOutcome;
+  /** K19g: facts the raw action already answers, from `buildToolGateState`. Only ever raise. */
+  floors?: ToolGateFloors;
 }): ToolGateVerdict {
-  const { rulesDenied, approvalMode, outcome } = input;
+  const { rulesDenied, approvalMode, outcome, floors = {} } = input;
   // Read-only first: it must behave exactly as today, including for a denied tool.
   if (approvalMode === "read-only") return { outcome: "unchanged", reason: "read-only workspace: approvalMode is the ceiling" };
   if (rulesDenied) return { outcome: "block", reason: "rules deny (final, I-D1)" };
   if (outcome.degraded) return { outcome: "prompt", reason: `provider degraded (I-D2): ${outcome.degraded.reason}` };
 
-  const { answers } = outcome;
+  const answers = floorToolGateAnswers(outcome.answers, floors);
   const absent = TOOL_GATE_JUDGED_KEYS.filter((k) => answers[k] === undefined);
   if (absent.length > 0) return { outcome: "prompt", reason: `no basis (answer absent): ${absent.join(", ")}` };
 
@@ -260,7 +345,11 @@ export function resolveToolGate(input: {
     if (a === undefined) continue; // only `denied` can be absent here, and its deny is taken from the rules match
     // A non-finite or wrong-primitive answer fails closed rather than comparing false.
     if (a.kind !== "noul" || !Number.isFinite(a.value)) prompts.push(`${key} malformed`);
-    else if (a.value >= TOOL_GATE_THRESHOLDS.noulPrompt) prompts.push(`${key}=${a.value}`);
+    else if (a.value >= TOOL_GATE_THRESHOLDS.noulPrompt) {
+      const rule = floors[key as FlooredKey];
+      // A floored key names the fact, not a number: the 1 is ours, not the judge's.
+      prompts.push(rule ? `${key} (rule: ${rule})` : `${key}=${a.value}`);
+    }
   }
   if (prompts.length > 0) return { outcome: "prompt", reason: `judged: ${prompts.join(", ")}` };
   return { outcome: "auto-approve", reason: `judged: risk=${risk!.value}, every noul < ${TOOL_GATE_THRESHOLDS.noulPrompt}` };
@@ -433,6 +522,8 @@ export interface BuiltDecisionState {
   state: DecisionState;
   /** True when any deterministic cap below actually cut something. Recorded, never silent. */
   truncated: boolean;
+  /** K19g: computed from the RAW observation, beside the state — no judge sees them. */
+  floors: ToolGateFloors;
 }
 
 /** A path is inside when it is the worktree or sits under it. Prefix-safe (`/wt-2` is not under `/wt`). */
@@ -521,7 +612,7 @@ export function buildToolGateState(
     if (JSON.stringify(state).length > MAX_DECISION_STATE_CHARS) delete state.commandText;
   }
 
-  return { state: state as unknown as DecisionState, truncated };
+  return { state: state as unknown as DecisionState, truncated, floors: toolGateFloors(input) };
 }
 
 const CHOICE_ANSWER = (value: string, criteria: readonly string[]): DecisionAnswer => {
