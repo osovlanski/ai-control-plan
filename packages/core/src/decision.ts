@@ -274,7 +274,8 @@ function resolveAgainst(path: string, base: string): string {
   return path.startsWith("~") ? out.join("/") : `/${out.join("/")}`;
 }
 
-function toolGateFloors(input: ToolGateObservation): ToolGateFloors {
+/** K19g's keyed floors. Also re-stated as gate rules by `toolGateFloorHits` (`tool-floors.ts`). */
+export function toolGateFloors(input: ToolGateObservation): ToolGateFloors {
   const floors: ToolGateFloors = {};
   const cmd = input.commandText ?? "";
   const paths = input.paths ?? [];

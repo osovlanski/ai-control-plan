@@ -112,7 +112,7 @@ export interface WorkspaceConfig {
    * makes no network call.
    */
   decisions?: {
-    /** typesafe | model | rules (default: rules). Neither vendor provider exists yet (K17). */
+    /** typesafe | model | rules (default: rules). `typesafe` is not registered in this build: choosing it fails at startup (K19i). Since K19i the tool gate reads no judge whatever this says; floors decide. */
     provider?: "typesafe" | "model" | "rules";
     /**
      * Reference NAME only, e.g. "TYPESAFE_API_KEY" — resolved through

@@ -9,6 +9,8 @@
     "open": "tsx src/bin/open-web.ts",
     "rotate": "tsx src/bin/rotate-credential.ts",
     "model:shadow-report": "tsx src/bin/model-shadow-report.ts",
+    "decision:injection-frequency": "tsx src/bin/decision-injection-frequency.ts",
+    "decision:floor-discovery": "tsx src/bin/decision-floor-discovery.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:harness-on": "vitest run",

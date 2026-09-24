@@ -67,6 +67,30 @@ the default provider is `rules`, `applied` is closed, nothing is activated.
 | K19c | the tool gate wired at the pre-exec hook, shadow only |
 | K19d | `ModelDecisionProvider` on `claude-haiku-4-5` |
 | K19e | per-question state scoping, split shadow/applied budgets |
+| K19f–K19h | lexer rejected, K19g floors, second-lock decision and survey (branches `claude/k19f-command-lexer`, `claude/k19h-second-lock`) |
+| K19i | **floors decide the gate; the judge moves to offline floor discovery**; an unregistered configured provider fails at startup |
+
+- **K19i results (2026-09-23/24), branch `claude/k19i-floors-decide`:**
+  - **Gate:** reads rules and floors only. No judge call on the hot path.
+  - **K19h corpus after the floors:** 8 of 50 actions prompt only on the judge. They are
+    `rm-one`, `rm-r-build`, `git-reset-soft`, `mv-dir`, `git-push-branch`, `git-commit`,
+    `git-amend` and `pnpm-test`.
+  - **Corpus prompt counts:** rules-only 50, judge 33, floors 29. The floors add `pnpm-add`,
+    `npx-cli`, `npm-global` and `pip-install`.
+  - **Operator DB, 21 recorded calls:** the floors prompt on 17. 9 are MCP tools (`opaque`),
+    6 are shell commands naming `~`, and 2 are `Read`s under `/home/ubuntu` with no worktree.
+  - **Live API run (fake assistant):** the pre-exec `rm -rf ./dist` got `prompt`
+    (`recursive-forced-rm`) and the post-start `ls src` got `auto-approve`. Both rows were
+    `provider: rules` and not degraded. Prompt rate 0.5.
+  - **Startup:** `decisions.provider: typesafe` exits 1 with "not registered in this build".
+  - **Judge survey re-run, 2026-09-24:** 5 of 5 runs, 250 of 250 judged. It matches K19h
+    exactly: 33 judge-only actions (`pnpm-test` in 3 of 5, the rest 5 of 5) and 17 never.
+    - **Earlier attempts:** a 401, because the key file held `ANTHROPIC_KEY=` before the key,
+      then a 400, credit balance too low. Credit was added before the passing run.
+  - **Discovery job with the live judge:** 5 judged, 1 candidate. It was 2 `Read`s under
+    `/home/ubuntu` with no worktree, rated `outside_repo=0.95`. File-tool paths now get the
+    shell's no-worktree path rule. After that fix: 7 floored, 0 candidates.
+  - **Floor timing:** about 9 µs per typical command, and under 10 ms warm at the 64 KiB cap.
 
 - **§7.2 still FAILS, and that is the blocker on activation.** 10 of 51 fixtures
   soften a judged answer, down from 26–27 before scoping. **9 of the 10 carry the
@@ -88,12 +112,13 @@ Open items carried out of K19c, none of them K19d's job:
 
 | Item | Where it belongs |
 |---|---|
-| §5 K19's "the only widening" never fires — the gate must not reinterpret an existing `approvalMode`. Needs an opt-in `gate-assisted` mode, gated on measured calibration (I-D5). | activation slice |
+| ~~§5 K19's "the only widening" never fires — needs an opt-in `gate-assisted` mode.~~ **Closed by owner decision (K19h, 2026-09-23):** the gate is a second lock only; the widening is dropped and `gate-assisted` removed. | — |
 | The Claude adapter gets **audit** tier under `auto-approve`, because `canUseTool` is installed only under `prompt-on-escalation`. The mode that most needs a gate is the one with no pre-exec hook. | its own slice |
 | Bedrock emits no tool events, so the gate never evaluates there. | recorded as known-unreachable |
 | §7.4 attestations are not checked yet. | activation slice |
-| §7.2's bar is "no reduction". 9 of 10 residual failures put the injection inside `commandText`, which every command question must read — no scoping removes it. Either the bar distinguishes "a field the question must read" from "a field it should never have seen", or activation is blocked permanently. **Owner decision.** | plan revision, before the activation slice |
-| An applied budget derived from measured p95 (K19e left `applied` at 50 ms, below the judge's 1,014 ms floor, because `applied` is closed). | activation slice |
+| ~~§7.2's bar is "no reduction".~~ **Decided (K19h):** the bar is gate-outcome flips or risk crosses in 2 or more of 5 runs. It still FAILS on the second-lock set. Whether it stays an activation bar now that the gate reads no judge is an owner decision (K19i leaves it unchanged). | owner |
+| An applied budget derived from measured p95. K19i: the gate awaits no judge, and floors take about 9 µs. | activation slice |
+| I-D8 demands a judge for `applied`; floors need none (K19i). It only refuses, so it is harmless until activation. | activation slice |
 
 - **Shares no files with stream A**; the two run concurrently.
 - **PR #49 is green** on `a6a006f` and carries K17–K19e.

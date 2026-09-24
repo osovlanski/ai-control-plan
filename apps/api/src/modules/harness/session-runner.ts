@@ -38,7 +38,7 @@ import type {
   ToolGateVerdict,
   UsagePayload,
 } from "@agent-plane/core";
-import { DEFAULT_CONTEXT_POLICY, buildContextObservation, evaluationResult, newExecutionSessionId, outcomeOf, redactValue } from "@agent-plane/core";
+import { DEFAULT_CONTEXT_POLICY, buildContextObservation, evaluationResult, newExecutionSessionId, outcomeOf, redactValue, toolActionFromEvent } from "@agent-plane/core";
 import { evaluateContextGuard } from "./context-guard.js";
 import type { SessionStore } from "./session-store.js";
 import type { EventRecorder } from "./event-recorder.js";
@@ -137,6 +137,8 @@ export interface ToolGateInput {
   toolName: string;
   commandText?: string;
   paths?: string[];
+  /** K19i: `commandText` is shell (it came from a `command` field), not the JSON of the tool input. */
+  shell?: boolean;
   toolsAllow?: readonly string[];
   toolsDeny?: readonly string[];
   approvalMode: ExecutionRequest["policy"]["approval"]["mode"];
@@ -1226,19 +1228,15 @@ class RunContext {
     } else {
       return undefined;
     }
-    const p = (event.payload ?? {}) as { tool?: string; command?: string; input?: unknown };
-    const input = (p.input && typeof p.input === "object" ? p.input : {}) as Record<string, unknown>;
     // Same name extraction toolPolicyGuard uses, so `rulesDenied` matches it.
-    const toolName = p.tool ?? p.command ?? event.summary;
-    const commandText =
-      typeof p.command === "string" ? p.command : typeof input.command === "string" ? input.command : p.input !== undefined ? JSON.stringify(p.input) : undefined;
-    const paths = ["file_path", "notebook_path", "path"].flatMap((k) => (typeof input[k] === "string" ? [input[k] as string] : []));
+    const { toolName, commandText, paths, shell } = toolActionFromEvent(event.payload, event.summary);
     const policy = this.snapshot.policy;
     return {
       hook,
       toolName,
       commandText,
       paths,
+      shell,
       toolsAllow: policy.tools.allow,
       toolsDeny: policy.tools.deny,
       approvalMode: policy.approval.mode,
