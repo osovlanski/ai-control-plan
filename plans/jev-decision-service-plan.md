@@ -587,10 +587,16 @@ owner decision (§7.2).
   - **The limit:** 21 calls is not a rate. The MCP share is the §8 risk to watch in the prompt-rate
     panel. It follows from a policy choice: an MCP tool's effect is unknown, and the floors prompt
     on what they cannot read.
-- **The judge survey re-run is BLOCKED (2026-09-24).** Run 1 with the operator's key returned
-  `model provider 401 Error` on the first calls. The circuit then opened, and 0 of 50 were judged.
-  It was not retried. The judge's side of the count above is K19h's pinned survey (5 of 5 runs at
-  temperature 0). The floors' side needs no credential.
+- **The judge survey re-run is BLOCKED (2026-09-24), in two attempts:**
+  1. **`model provider 401 Error`.** The key file held `ANTHROPIC_KEY=sk-ant-…`, so the whole line
+     was sent as the key.
+  2. **After the file was fixed, `model provider 400 Error`.** One 1-token diagnostic call returned
+     `invalid_request_error: Your credit balance is too low to access the Anthropic API.`
+
+  0 of 50 were judged in each attempt. The provider reports status and error class only, by design
+  (an API message can echo input), and that is why the diagnostic call was needed. The judge's side
+  of the count above is K19h's pinned survey (5 of 5 runs at temperature 0). The floors' side needs
+  no credential.
 - **Live drive (2026-09-24), `pnpm --filter @agent-plane/api start` on a scratch workspace with a
   fake assistant under `prompt-on-escalation`:**
   - **Rows:** `GET /api/decisions` returned two shadow rows, both `provider: rules`, answers

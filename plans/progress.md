@@ -83,10 +83,12 @@ the default provider is `rules`, `applied` is closed, nothing is activated.
     (`recursive-forced-rm`) and the post-start `ls src` got `auto-approve`. Both rows were
     `provider: rules` and not degraded. Prompt rate 0.5.
   - **Startup:** `decisions.provider: typesafe` exits 1 with "not registered in this build".
-  - **Judge survey re-run:** BLOCKED. Run 1 returned `model provider 401 Error` and judged 0
-    of 50. Not retried.
-  - **Discovery job with the operator key:** judged 0 and left 5 unjudged (401). No
-    candidates.
+  - **Judge survey re-run:** BLOCKED, 0 of 50 judged in both attempts.
+    - **Attempt 1:** `model provider 401 Error`. The key file held `ANTHROPIC_KEY=sk-ant-…`.
+    - **Attempt 2, file fixed:** `model provider 400 Error`. A diagnostic call returned
+      "Your credit balance is too low to access the Anthropic API."
+  - **Discovery job with the operator key:** judged 0 and left 5 unjudged (the 401 attempt). No
+    candidates. Not re-run after the credit error.
   - **Floor timing:** about 9 µs per typical command, and under 10 ms warm at the 64 KiB cap.
 
 - **§7.2 still FAILS, and that is the blocker on activation.** 10 of 51 fixtures
