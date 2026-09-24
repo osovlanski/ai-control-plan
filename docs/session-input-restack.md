@@ -41,6 +41,39 @@ The conflict report is about the final branch trees, not proof that the original
 
 The two mixed commits split at file boundaries without a core dependency on the composer. No content from `348269c` is required by the backend. Preserve main’s entire web tree. Preserve default-off configuration and the fake-only default adapter resolver.
 
-## Validation
+## Validation on the initial main baseline
 
-Pending implementation and gates. Historical validation in imported documents is not fresh evidence for this restack.
+Historical validation in imported documents is not fresh evidence for this restack.
+
+Completed evidence on 2026-09-24:
+
+- Lint, typecheck and build passed. Full package tests: core 135, adapters 21,
+  API 1,109 and web 50 passed. Forced-harness: 1,109 passed; recovery chaos: 56 passed.
+- Chromium: 31 passed. Demo A: 1 passed; Demo A.5: 1 passed; Demo B: 5 passed.
+- Focused restart, ambiguous-delivery, live-contract and redelivery suite: 21 passed.
+- Actual send-count audit: four unsafe-replay scenarios, five operator retries each,
+  **zero resends**, one attempt and one provider delivery per scenario. Covers
+  restart without guarantees, lost acknowledgement without guarantees, unresolved
+  receipt lookup with idempotency false, and unresolved lookup with idempotency true.
+- The original contract intentionally permits safe same-ID replay when an adapter
+  guarantees idempotency, and a fresh attempt after authoritative absence. Those
+  tests are retained; “zero resends” above is scoped to unresolved unsafe replay,
+  not a claim that the entire suite makes zero repeat deliver calls.
+- A real `pnpm --filter @agent-plane/api dev` instance in a temporary fake-provider
+  workspace returned API 2.3, capability available, HTTP 202/provider-accepted;
+  duplicate submission preserved one row/attempt, changed payload returned 409,
+  restart preserved the settled record, and flag-off returned 404 without a write.
+- Upgrade regression applies main’s first 27 migrations, inserts a decision record,
+  applies only 028/029 and proves that record unchanged; migration numbers are unique.
+- Entire `apps/web` tree is identical to main. Shared service/SSE/contracts/fake
+  adapter match source `0221ab2` byte-for-byte. Default-off and fake-only resolver retained.
+- First sandboxed full test attempt hit Git-spawn/listener EPERM. Unsandboxed run
+  found one stale auth-header expectation (2.2 versus additive 2.3); corrected.
+- Secret scan covers staged, unstaged, last commit and full branch additions.
+  Only documented Git SHAs matched; zero credential findings. No transcripts added.
+
+Local raw captures: `/tmp/session-input-core-*.log`; send-count capture:
+`/tmp/session-input-core-no-resend.log`. Captures are not committed.
+
+The owner requested a fresh rebase after M16 landed; these initial-baseline results
+are retained as history. Updated-main verification follows after the rebase.

@@ -3,7 +3,8 @@
 2026-09-22. Base: `f48ff484f53669da260537885d6d9edf2459db3e`.
 Source of extracted behavior: Claude adapter `da1f7d0`.
 
-Verdict: **PASS**. No live provider adapter is included.
+Historical verdict for the 2026-09-22 branch: **PASS**. No live provider adapter is included.
+Fresh restack evidence: [session-input-restack.md](session-input-restack.md).
 
 - `pnpm lint`, `pnpm typecheck`, `pnpm test`, `pnpm build`: passed.
 - Full suite: core 118, adapters 21, API 964, web 57; 1,160 passed.
