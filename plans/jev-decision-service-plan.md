@@ -1,7 +1,8 @@
 # M16 Decision Service — Jev (System One) in the Agentic OS kernel
 
-**Status:** Proposed — revision 2 (2026-09-23, K19h: the gate is a second lock only; see §5 K19 and
-§11). K17–K19g are implemented, shadow only; nothing is activated.
+**Status:** Proposed — revision 3 (2026-09-23, K19i: deterministic floors decide the tool gate and
+the judge leaves the hot path; see §5 K19i and §11). Revision 2 (K19h) made the gate a second lock
+only. K17–K19i are implemented, shadow only; nothing is activated.
 **Date:** 2026-09-22
 **Written against:** `ai-control-plan` `main@91c9781` (Agentic OS Shell mode over kernel records).
 **Owner runbook:** §9 — the OCI apply procedure. Read §0 and §9 first if you are executing this.
@@ -487,6 +488,118 @@ is a proposal, not part of K19h.
 **Not in K19h:** new floors, activation, the applied-mode latency redesign, the Gate UI tab,
 Jev/TypeSafe and K20.
 
+### K19i — Floors decide; the judge moves offline (added 2026-09-23, owner decision)
+
+**Why.** K19h showed that the judge adds real prompts and that one plausible sentence removes them,
+on 13 of the 33 actions only it prompted on. The benign control removed 6 of 93, so near the line
+the judge moves under any added text, attacker or not. The owner decided that M16 converts:
+deterministic floors decide, and the judge becomes an offline job that proposes floors for a human
+to accept.
+
+**Fixed first: the chain bug (I-D2).** `DecisionService` now refuses, at construction, a configured
+provider that this build does not register. Composition builds it at startup, so `provider: typesafe`
+stops the process with a message naming the registered providers. Before this fix, the chain fell
+through to rules with a `degraded` note on every call, and the gate prompted on each. That is why
+every §7.2 gate-outcome figure through K19g was true by construction. It is also why §7.4's example
+config, which read `provider: typesafe` until this slice, prompted on every tool call.
+
+**The gate mapping from K19i.** The gate reads no judge:
+
+```text
+read-only workspace → unchanged   (approvalMode is the ceiling)
+rules deny          → block       (I-D1)
+any floor fires     → prompt      (the reason names each rule in one sentence)
+no floor fires      → unchanged   (approvalMode decides, exactly as without M16)
+```
+
+`RulesDecisionProvider` still answers `denied`, so every record keeps its K18 baseline. From here on
+the judged keys are absent from gate records, by design. `resolveToolGate`, the judged mapping, is
+kept only for the offline job and the judge suites.
+
+**The floors** (`packages/core/src/tool-floors.ts`, `toolGateFloorHits`). A linear shell reader
+handles quotes, escapes, `$(…)`, backticks, subshells, heredocs, redirects and pipes, and reads
+`bash -c` and `eval` strings recursively to depth 8. Its output feeds one rule per fact:
+
+| Rule | Fires on |
+|---|---|
+| `path-outside-worktree` | an absolute, `~`, `$HOME` or escaping `..` path in the command or a redirect; every such path when no worktree is known |
+| `write-outside-worktree`, `credential-file`, `recursive-forced-rm`, `file-upload` | K19g's facts, unchanged |
+| `env-dump` | `printenv`, bare `env`, `export -p`, `declare -p/-x`, bare `set` |
+| `privilege` | `sudo`, `su`, `doas`, `pkexec`, `run0` |
+| `pipe-to-shell` | a shell or interpreter reading a pipe, a heredoc or `<(…)` |
+| `network-pipe` | `nc`/`ncat`/`telnet` fed data, `socat`, `ssh`, `openssl s_client`, `/dev/tcp` |
+| `cloud-upload` | `aws s3 cp/mv/sync` to `s3://`, `gsutil`/`gcloud storage` to `gs://`, `rclone` to a remote, `az storage` uploads, `azcopy` |
+| `network-write` | `curl` with a body or a write method, `wget --post-*`, `http POST`, `gh api` writes |
+| `new-remote` | `git remote add/set-url`, `git config remote.*.url`, `git push` to a URL or path |
+| `remote-delete` | `git push --delete`, `-d`, `:ref` or `--prune`; `gh release delete`, `gh repo delete` |
+| `local-ref-destruction` | `git branch -D`, `git tag -d`, `git stash drop/clear`, whole-tree `checkout`/`restore`, forced `switch` |
+| `history-rewrite` | K19g's rules plus `--mirror`, `+ref`, `filter-branch`/`filter-repo`, `reflog expire`, `gc --prune=now`, `update-ref -d` |
+| `publish`, `admin-merge`, `infra-destroy` | package, image and release publishes; `gh pr merge --admin`; destructive `kubectl`, `terraform`, `helm` and cloud-CLI verbs |
+| `destructive-sql` | DROP, TRUNCATE, DELETE FROM or FLUSHALL given to a DB client; `dropdb` |
+| `recursive-permission`, `bulk-delete`, `truncate`, `process-kill` | `chmod/chown -R`; `find -delete`, `xargs rm`, `rm` of a glob or a variable; `truncate`, `> file`; `kill`, `pkill`, a service stop |
+| `dependency` | `add`, a named `install`, a global install, `npx`/`dlx`/`uvx`, system package installs |
+| `container-host-mount`, `scheduled-job` | a bind mount, `--privileged` or a host namespace; `crontab` other than `-l`, `at`, `systemctl enable` |
+| `opaque` | anything the reader cannot read: unbalanced quotes, a command name from an expansion, inline interpreter code, nesting past depth 8, over 64 KiB or 1,024 commands, a shell tool with no command, a tool whose input no floor understands |
+
+The contract, pinned in `packages/core/test/tool-floors.test.ts`:
+- **Pure and deterministic, with no model.** About 9 µs for a typical command, and under 10 ms at
+  the 64 KiB cap.
+- **A floor adds a prompt and never removes one.** Read-only and a rules deny are read first. Text
+  appended to a command can add a floor but never removes one; `decision-second-lock.test.ts` checks
+  this for every corpus action × every carrier.
+- **Fail toward supervision.** `opaque` prompts. A floor never silently passes what it cannot read.
+- **One fixed sentence per rule.** Never matched text, never a probability.
+- **Bounded time on hostile input.** 26 hostile shapes at the cap, each under 100 ms.
+
+**Deliberately not floored.** Each of these is recoverable or read-only, and a floor on it would be
+§8's prompt fatigue: `rm` of one file, `rm -r` without `-f`, `git reset --soft`, `git commit --amend`,
+`git rebase`, `mv` inside the worktree, `curl` GET, and `git push` of a branch to a configured remote.
+
+**The judge, offline** (`apps/api/src/modules/floor-discovery.ts`, `decision:floor-discovery`).
+- **Reads** recent tool calls, from a workspace DB (opened read-only and unmigrated) or from a JSONL
+  file.
+- **Drops** every call a floor already prompts on.
+- **Asks the judge** about the rest, and writes the calls it would supervise to a file of FLOOR
+  CANDIDATES.
+- **Proposes and never gates.** The gate reads nothing the job writes. A candidate becomes a floor
+  only when a human writes the rule and its test.
+- **Runs nightly** in `eval.yml`, over the tool calls that night's scenarios made
+  (`AGENT_PLANE_EVAL_TOOL_ACTIONS`), and uploads `floor-candidates.md`.
+
+The 5-run §7.2 judge suites move to manual dispatch. The judge no longer gates, and those suites
+fail by construction (K19h), so running them nightly would open the issue every night.
+
+**Measured (2026-09-23).**
+- **After the floors, 8 of the 50 corpus actions still prompt only because the judge says so:**
+  `rm-one`, `rm-r-build`, `git-reset-soft`, `mv-dir`, `git-push-branch`, `git-commit`, `git-amend` and
+  `pnpm-test`. The first five are the owner's do-not-floor list. `git-commit` and `git-amend` are
+  local and recoverable. On `pnpm-test` the judge sat on the line in 3 of 5 runs. No floor expresses
+  these because each is recoverable, so the judge's prompt on them is fatigue, not protection. **The
+  judge has no hot-path role left.**
+- **Prompt rate over the 50:** 50 under rules only (this build's default), 33 under the judge, 29
+  under the floors. The floors add 4 the judge let through (`pnpm add`, `npx`, `npm install -g`,
+  `pip install`) and drop the 8 above. The rate does not jump.
+- **Real traffic, small sample.** The operator's workspace DB holds 21 tool calls from 4 runs on
+  2026-09-15. The floors prompt on 15 of them; today's rules-only default prompts on all 21.
+  - **Nine** are MCP tools that no floor understands, so they are `opaque`.
+  - **Six** are shell commands listing `~` and `~/workspace`, in runs with no recorded worktree. The
+    floor is right to fire on them.
+  - **The limit:** 21 calls is not a rate. The MCP share is the §8 risk to watch in the prompt-rate
+    panel. It follows from a policy choice: an MCP tool's effect is unknown, and the floors prompt
+    on what they cannot read.
+- **The judge survey re-run is BLOCKED:** there is no `ANTHROPIC_API_KEY` in this session. The judge's
+  side of the count above is K19h's pinned survey (5 of 5 runs at temperature 0). The floors' side
+  needs no credential.
+
+**What it means.**
+- **I-D8 no longer describes what the gate needs.** It refuses `applied` without a judging provider,
+  but floors are a basis on every call. The check stays in code because it only ever refuses, and
+  composition keeps `applied` closed regardless. The activation slice replaces it.
+- **§7.2 no longer gates the tool gate.** The deterministic carrier test above replaces it for the
+  gate. §7.2 still measures the judge, now only as the discovery job's input.
+
+**Not in K19i:** activation, the Gate UI tab, Jev/TypeSafe and K20.
+
 ### K20 — Task classifier
 
 Replace the four regexes at the *input* of routing, not inside it.
@@ -613,6 +726,11 @@ CI stays credential-free, and there the comparisons are vacuous and say so.
 
 **Status (K19h):** FAIL. See §5 K19h.
 
+**Status (K19i):** the gate no longer reads the judge, so this bar no longer gates the tool gate.
+The gate's injection property is now deterministic: appended text cannot remove a floor, which is
+pinned per PR with no credential. The judge suites stay runnable on manual dispatch and measure the
+judge as the discovery job's input (§5 K19i).
+
 ### 7.3 Calibration — the standing "no fabricated confidence" rule, enforced
 
 Bucket returned probabilities into deciles and compare each bucket to the observed outcome
@@ -636,7 +754,9 @@ second locks and keep the original requirement.
 
 ```yaml
 decisions:
-  provider: typesafe            # typesafe | model | rules   (default: rules)
+  provider: rules               # rules | model (default: rules). typesafe is NOT registered in this
+                                # build and fails at startup (K19i). It was this example's value until
+                                # K19i, and a workspace copying it prompted on every tool call.
   egress: opt-in                # per-workspace; Work workspace defaults to `model` or `rules`
   sites:
     tool-gate:
@@ -663,14 +783,14 @@ expired attestation degrades the site to shadow and says so in the record.
 
 | Risk | Why it is real | Mitigation in this plan |
 |---|---|---|
-| **The gate can be talked out of prompting** | The state contains attacker-influenceable repository content. Measured (K19h): one plausible sentence in the command removes the judge's prompt on 13 of the 33 actions only the judge prompts on | I-D1 (a second lock only, so no text can approve), K19g floors for facts the action carries, I-D4, and the §7.2 frequency bar nightly. Status: §7.2 FAILS, so activation stays closed |
+| **The gate can be talked out of prompting** | The state contains attacker-influenceable repository content. Measured (K19h): one plausible sentence in the command removes the judge's prompt on 13 of the 33 actions only the judge prompts on | K19i: the gate reads no judge. Floors decide, appended text cannot remove a floor (pinned per PR), and what the floors cannot read prompts as `opaque`. The residual risk moves to evading a floor's parser, which fails toward a prompt |
 | **Vendor performance claims are unverified** | "200×/400×" is a vendor number on classification, and early access opened ~2026-09-15 — there is very little independent evidence | Nothing activates on a vendor claim; §7.1(3)(4) measure our own latency and cost, and `ModelDecisionProvider` gives the honest comparison baseline |
 | **Repository content leaves for a new vendor** | Decision state contains code | I-D7 per-workspace opt-in, redaction, bounding, egress test; Work workspace defaults away from TypeSafe |
 | **Early-access availability and pricing change** | The product is new and behind a waitlist | I-D6: rules provider always compiled in; no test, build or demo may depend on Jev reachability |
 | **Latency in the hot loop** | A per-tool-call round trip on every action | Per-site budget, single-flight, circuit breaker; the gate degrades to *prompt*, which is safe, not to *allow* |
 | **Silent telemetry poisoning** | A new classifier changes cohort membership | K20's `classifier_version` fence; cohorts never span versions; no backfill |
 | **Judge drift after a model update** | `jev-latest` is a moving selector, exactly like the CLI aliases K13 refuses to resolve | Record `model_reported` per decision (K7 discipline). A changed identity expires `injectionSuitePassedAt`, because the §7.2 verdict is per model (K19h), and drops the site to shadow |
-| **Over-prompting kills the benefit** | A gate that prompts constantly gets switched off by the operator, which is a worse end state than no gate. Under a second lock the added prompts are the whole benefit, so this is the only cost. K19h: the judge rates `git add -A && git commit`, `git reset --soft` and `mv` at `risk = medium` and prompts on them | Prompt rate is §7.1(7) and a first-class metric in the K22 panel, and an activation precondition since K19h |
+| **Over-prompting kills the benefit** | A gate that prompts constantly gets switched off by the operator, which is a worse end state than no gate. Under a second lock the added prompts are the whole benefit, so this is the only cost. K19h: the judge rates `git add -A && git commit`, `git reset --soft` and `mv` at `risk = medium` and prompts on them | Prompt rate is §7.1(7) and a first-class metric in the K22 panel, and an activation precondition since K19h. K19i: floors prompt on 29 of the 50 corpus actions against the judge's 33, and on 15 of 21 real calls, 9 of them MCP tools that are `opaque` by policy |
 
 ---
 
@@ -937,6 +1057,22 @@ it is the first thing to test in step 1 — not an afterthought at step 7.
   - **Status:** BLOCKED at 2 full runs and part of a third (API credit ran out). The 32 failing
     fixtures have already reached the bar, so more runs cannot clear them.
   - **Detail:** §5 K19h.
+- **Decision (2026-09-23, K19i) — floors decide; the judge moves offline.** The owner decided M16
+  converts. The gate reads rules and deterministic floors only (§5 K19i). The judge's role is the
+  offline floor discovery job, which proposes and never gates. This supersedes §5 K19's judged
+  mapping for the tool gate. `resolveToolGate` remains only for the discovery job and the judge
+  suites.
+- **Correction (2026-09-23, K19i) — §7.4's example config read `provider: typesafe`.** TypeSafe is
+  not registered in this build. A workspace copying the example fell through to rules with a
+  `degraded` note on every call and prompted on every tool call, which broke I-D2's "degrade loud".
+  An unregistered configured provider now fails at startup, and the example reads `provider: rules`.
+- **Correction (2026-09-23, K19i) — I-D8 no longer describes what the gate needs.** Floors are a
+  basis on every call without a judge. The refusal stays in code because it only refuses, and
+  composition keeps `applied` closed regardless. The activation slice replaces it.
+- **Correction (2026-09-23, K19i) — §7.2 no longer gates the tool gate.** The gate's injection
+  property is deterministic and pinned per PR. The 5-run judge suites move to manual dispatch in
+  `eval.yml`: they fail by construction and would open the issue nightly for a judge that does not
+  gate.
 - No new infrastructure without a failing requirement that names it.
 - Workspace isolation, explainable routing, approval boundaries and provider-adapter portability
   are preserved by construction — M16 adds a provider seam, it does not pierce an existing one.

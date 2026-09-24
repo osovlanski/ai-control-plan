@@ -44,6 +44,13 @@ describe("DecisionService", () => {
     expect(out.provider).toBe("rules");
   });
 
+  it("K19i (I-D2, degrade loud): a configured provider this build does not register fails at construction", () => {
+    expect(() => new DecisionService({ provider: "typesafe" })).toThrow(/decisions\.provider: "typesafe" is not registered in this build/);
+    expect(() => new DecisionService({ provider: "model" })).toThrow(/registered: rules/);
+    // Registered is enough; reachability is a runtime condition, degraded per call.
+    expect(() => new DecisionService({ provider: "typesafe" }, [new FakeProvider("typesafe", () => outcome("typesafe"))])).not.toThrow();
+  });
+
   it("cannot have rules overridden by an extra provider (I-D6)", async () => {
     const fakeRules = new FakeProvider("rules", () => outcome("rules"));
     const svc = new DecisionService({ provider: "rules" }, [fakeRules]);

@@ -28,9 +28,11 @@ jobs:
       - name: Run eval
         env:
           AGENT_PLANE_EVAL: "1"
+          # M16 K19i: every scenario's tool calls, for the floor discovery step below.
+          AGENT_PLANE_EVAL_TOOL_ACTIONS: ${{ github.workspace }}/eval/out/tool-actions.jsonl
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-        run: pnpm eval
+        run: mkdir -p eval/out && pnpm eval
 
       # M16 §7.2: the prompt-injection suites bind only where a judge is
       # reachable. Per-PR CI is credential-free, so there they are vacuous and
@@ -43,8 +45,14 @@ jobs:
       # log but does not decide the step. A red verdict opens the issue below.
       # The rows hold answers and outcomes only, never decision state; they are
       # uploaded with the scorecard.
+      #
+      # K19i: manual dispatch only. The judge no longer gates (floors decide),
+      # so this bar has no activation consequence, and it FAILS by construction
+      # (32 fixtures already reached it in K19h), which would open the issue
+      # every night. The gate's own injection check is now deterministic and
+      # per-PR (`decision-second-lock.test.ts`: no carrier removes a floor).
       - name: Prompt-injection suites against the real judge, 5 runs (M16 §7.2)
-        if: always()
+        if: always() && github.event_name == 'workflow_dispatch'
         shell: bash # explicit, so GitHub adds pipefail and the verdict's exit survives `tee`
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -58,6 +66,21 @@ jobs:
             touch "$out/run$i.jsonl"
           done
           pnpm --filter @agent-plane/api decision:injection-frequency "$out"/run*.jsonl | tee "$out/verdict.txt"
+
+      # M16 K19i: the judge's only job. It reads the tool calls tonight's
+      # scenarios made, skips every call a floor already prompts on, asks the
+      # judge about the rest, and writes floor CANDIDATES for a human to accept
+      # (uploaded with the scorecard). It proposes and never gates: nothing it
+      # writes is read by the tool gate. No key means "no judgement ran", said
+      # in the file; that is not a failure of this step.
+      - name: Floor discovery — the judge proposes floors, offline (M16 K19i)
+        if: always()
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          touch eval/out/tool-actions.jsonl
+          pnpm --filter @agent-plane/api decision:floor-discovery \
+            --actions "$PWD/eval/out/tool-actions.jsonl" --out "$PWD/eval/out/floor-candidates.md"
 
       - name: Upload scorecard
         if: always()

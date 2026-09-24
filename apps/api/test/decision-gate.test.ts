@@ -87,6 +87,23 @@ describe("I-D8 — the gate refuses `applied` without a judging provider", () =>
     expect(warnings[0]).toMatch(/tool-gate\.mode: applied REFUSED/);
   });
 
+  it("composition (K19i, I-D2): §7.4's old example `provider: typesafe` fails at startup instead of prompting on every call", () => {
+    const config = loadConfig({ AGENT_PLANE_HOME: join(dir, "home-k19i") });
+    config.decisions.provider = "typesafe";
+    const tasks = new TaskStore(db);
+    expect(() =>
+      buildHarnessComposition({
+        db,
+        config,
+        tasks,
+        bus: new TaskEventBus(),
+        checkpoints: new CheckpointService(db, tasks),
+        registry: new Registry(db, config),
+        onError: () => {},
+      }),
+    ).toThrow(/decisions\.provider: "typesafe" is not registered in this build/);
+  });
+
   it("composition (K19d): even with the build's judge reachable, applied stays closed until §7.4 attestations exist", () => {
     const saved = process.env.ANTHROPIC_API_KEY;
     process.env.ANTHROPIC_API_KEY = "test-key";

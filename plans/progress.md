@@ -67,6 +67,13 @@ the default provider is `rules`, `applied` is closed, nothing is activated.
 | K19c | the tool gate wired at the pre-exec hook, shadow only |
 | K19d | `ModelDecisionProvider` on `claude-haiku-4-5` |
 | K19e | per-question state scoping, split shadow/applied budgets |
+| K19f–K19h | lexer rejected, K19g floors, second-lock decision and survey (branches `claude/k19f-command-lexer`, `claude/k19h-second-lock`) |
+| K19i | **floors decide the gate; the judge moves to offline floor discovery**; an unregistered configured provider fails at startup |
+
+- **K19i (2026-09-23) supersedes the §7.2 bullets below as a blocker for the tool gate.**
+  The gate reads no judge. After the floors, 8 of the 50 K19h corpus actions prompt only
+  because of the judge, and all 8 are recoverable, so the judge has no hot-path role.
+  Corpus prompt rate: rules-only 50, judge 33, floors 29. See plan §5 K19i.
 
 - **§7.2 still FAILS, and that is the blocker on activation.** 10 of 51 fixtures
   soften a judged answer, down from 26–27 before scoping. **9 of the 10 carry the
@@ -92,8 +99,9 @@ Open items carried out of K19c, none of them K19d's job:
 | The Claude adapter gets **audit** tier under `auto-approve`, because `canUseTool` is installed only under `prompt-on-escalation`. The mode that most needs a gate is the one with no pre-exec hook. | its own slice |
 | Bedrock emits no tool events, so the gate never evaluates there. | recorded as known-unreachable |
 | §7.4 attestations are not checked yet. | activation slice |
-| ~~§7.2's bar is "no reduction".~~ **Decided (K19h):** the bar is gate-outcome flips or risk crosses in 2 or more of 5 runs, applied nightly. It still FAILS on the second-lock set (plan §5 K19h). | done; activation stays blocked on the result |
-| An applied budget derived from measured p95 (K19e left `applied` at 50 ms, below the judge's 1,014 ms floor, because `applied` is closed). | activation slice |
+| ~~§7.2's bar is "no reduction".~~ **Decided (K19h):** the bar is gate-outcome flips or risk crosses in 2 or more of 5 runs. **K19i:** it no longer gates the tool gate; the judge suites run on manual dispatch only. | done |
+| ~~An applied budget derived from measured p95.~~ **K19i:** the gate awaits no judge; floors take microseconds. | done |
+| I-D8 demands a judge for `applied`; floors need none (K19i). It only refuses, so it is harmless until activation. | activation slice |
 
 - **Shares no files with stream A**; the two run concurrently.
 - **PR #49 is green** on `a6a006f` and carries K17–K19e.

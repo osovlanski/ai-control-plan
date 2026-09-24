@@ -15,5 +15,6 @@ export * from "./fingerprint.js";
 export * from "./verification-planner.js";
 export * from "./repository-identity.js";
 export * from "./decision.js";
+export * from "./tool-floors.js";
 
 export * from "./scheduler.js";
