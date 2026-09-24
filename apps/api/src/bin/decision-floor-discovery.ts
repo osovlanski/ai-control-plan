@@ -48,5 +48,6 @@ else process.stdout.write(text);
 console.error(
   `floor discovery: ${report.scanned} calls, ${report.distinct} distinct, ${report.floored} floored, ` +
     `${report.judged} judged, ${report.unjudged} unjudged, ${report.candidates.length} candidates` +
+    (report.unjudgedReasons.length ? ` (unjudged: ${report.unjudgedReasons.join("; ")})` : "") +
     (out ? ` → ${out}` : ""),
 );

@@ -54,7 +54,7 @@ describe("discoverFloorCandidates", () => {
       judge,
     );
     expect(asked).not.toContain("printenv");
-    expect(report).toMatchObject({ scanned: 5, distinct: 4, floored: 1, judged: 2, unjudged: 1 });
+    expect(report).toMatchObject({ scanned: 5, distinct: 4, floored: 1, judged: 2, unjudged: 1, unjudgedReasons: ["no key"] });
     expect(report.candidates).toEqual([
       {
         toolName: "Bash",
@@ -73,7 +73,7 @@ describe("discoverFloorCandidates", () => {
   it("with no reachable judge it says so, rather than reporting an empty list as a finding", async () => {
     const report = await discoverFloorCandidates([bash("ls src")], async () => ({ answers: {}, provider: "rules", latencyMs: 0 }));
     expect(report).toMatchObject({ judged: 0, unjudged: 1, candidates: [] });
-    expect(renderCandidates(report, "t")).toContain("**No judgement ran**");
+    expect(renderCandidates(report, "t")).toContain("**No judgement ran** (no judging provider in the chain)");
   });
 });
 

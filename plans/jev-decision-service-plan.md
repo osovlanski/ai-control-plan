@@ -566,8 +566,8 @@ The contract, pinned in `packages/core/test/tool-floors.test.ts`:
 - **Runs nightly** in `eval.yml`, over the tool calls that night's scenarios made
   (`AGENT_PLANE_EVAL_TOOL_ACTIONS`), and uploads `floor-candidates.md`.
 
-The 5-run §7.2 judge suites move to manual dispatch. The judge no longer gates, and those suites
-fail by construction (K19h), so running them nightly would open the issue every night.
+The 5-run §7.2 judge suites, the bar and their nightly run are unchanged. The bar is still an
+owner decision (§7.2).
 
 **Measured (2026-09-23).**
 - **After the floors, 8 of the 50 corpus actions still prompt only because the judge says so:**
@@ -587,16 +587,31 @@ fail by construction (K19h), so running them nightly would open the issue every 
   - **The limit:** 21 calls is not a rate. The MCP share is the §8 risk to watch in the prompt-rate
     panel. It follows from a policy choice: an MCP tool's effect is unknown, and the floors prompt
     on what they cannot read.
-- **The judge survey re-run is BLOCKED:** there is no `ANTHROPIC_API_KEY` in this session. The judge's
-  side of the count above is K19h's pinned survey (5 of 5 runs at temperature 0). The floors' side
-  needs no credential.
+- **The judge survey re-run is BLOCKED (2026-09-24).** Run 1 with the operator's key returned
+  `model provider 401 Error` on the first calls. The circuit then opened, and 0 of 50 were judged.
+  It was not retried. The judge's side of the count above is K19h's pinned survey (5 of 5 runs at
+  temperature 0). The floors' side needs no credential.
+- **Live drive (2026-09-24), `pnpm --filter @agent-plane/api start` on a scratch workspace with a
+  fake assistant under `prompt-on-escalation`:**
+  - **Rows:** `GET /api/decisions` returned two shadow rows, both `provider: rules`, answers
+    `denied` only, and neither degraded.
+  - **Pre-exec** `rm -rf ./dist`: `prompt`, `floors: [recursive-forced-rm] Force-deletes
+    recursively; check the target.`
+  - **Post-start** `ls src`: `auto-approve`, `no floor fired; approvalMode decides`.
+  - **Prompt rate:** 0.5 (1 of 2).
+  - **Startup check:** the same workspace with `decisions.provider: typesafe` exited 1 before
+    listening, with `decisions.provider: "typesafe" is not registered in this build (registered:
+    model, rules)`.
+- **Discovery job on the operator DB, with the operator's key (2026-09-24):** 21 calls, 11 distinct,
+  6 floored, 0 judged, 5 unjudged (`model provider 401 Error`), 0 candidates. The DB checksum was
+  unchanged.
 
 **What it means.**
 - **I-D8 no longer describes what the gate needs.** It refuses `applied` without a judging provider,
   but floors are a basis on every call. The check stays in code because it only ever refuses, and
   composition keeps `applied` closed regardless. The activation slice replaces it.
-- **§7.2 no longer gates the tool gate.** The deterministic carrier test above replaces it for the
-  gate. §7.2 still measures the judge, now only as the discovery job's input.
+- **§7.2 is unchanged and still an owner decision.** For the record, the gate no longer reads the
+  judge, and the carrier test above shows that appended text cannot remove a floor.
 
 **Not in K19i:** activation, the Gate UI tab, Jev/TypeSafe and K20.
 
@@ -726,10 +741,9 @@ CI stays credential-free, and there the comparisons are vacuous and say so.
 
 **Status (K19h):** FAIL. See §5 K19h.
 
-**Status (K19i):** the gate no longer reads the judge, so this bar no longer gates the tool gate.
-The gate's injection property is now deterministic: appended text cannot remove a floor, which is
-pinned per PR with no credential. The judge suites stay runnable on manual dispatch and measure the
-judge as the discovery job's input (§5 K19i).
+**Status (K19i):** the bar is unchanged and still an owner decision. A fact for that decision: the
+gate no longer reads the judge, and appended text cannot remove a floor. That is pinned per PR with
+no credential (§5 K19i).
 
 ### 7.3 Calibration — the standing "no fabricated confidence" rule, enforced
 
@@ -1069,10 +1083,9 @@ it is the first thing to test in step 1 — not an afterthought at step 7.
 - **Correction (2026-09-23, K19i) — I-D8 no longer describes what the gate needs.** Floors are a
   basis on every call without a judge. The refusal stays in code because it only refuses, and
   composition keeps `applied` closed regardless. The activation slice replaces it.
-- **Correction (2026-09-23, K19i) — §7.2 no longer gates the tool gate.** The gate's injection
-  property is deterministic and pinned per PR. The 5-run judge suites move to manual dispatch in
-  `eval.yml`: they fail by construction and would open the issue nightly for a judge that does not
-  gate.
+- **Note (2026-09-23, K19i) — §7.2 is unchanged.** The bar, its nightly run and its role in
+  activation are still the owner's decision. K19i only adds a fact: the gate reads no judge, and
+  appended text cannot remove a floor.
 - No new infrastructure without a failing requirement that names it.
 - Workspace isolation, explainable routing, approval boundaries and provider-adapter portability
   are preserved by construction — M16 adds a provider seam, it does not pierce an existing one.

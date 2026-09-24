@@ -70,10 +70,24 @@ the default provider is `rules`, `applied` is closed, nothing is activated.
 | K19f–K19h | lexer rejected, K19g floors, second-lock decision and survey (branches `claude/k19f-command-lexer`, `claude/k19h-second-lock`) |
 | K19i | **floors decide the gate; the judge moves to offline floor discovery**; an unregistered configured provider fails at startup |
 
-- **K19i (2026-09-23) supersedes the §7.2 bullets below as a blocker for the tool gate.**
-  The gate reads no judge. After the floors, 8 of the 50 K19h corpus actions prompt only
-  because of the judge, and all 8 are recoverable, so the judge has no hot-path role.
-  Corpus prompt rate: rules-only 50, judge 33, floors 29. See plan §5 K19i.
+- **K19i results (2026-09-23/24), branch `claude/k19i-floors-decide`:**
+  - **Gate:** reads rules and floors only. No judge call on the hot path.
+  - **K19h corpus after the floors:** 8 of 50 actions prompt only on the judge. They are
+    `rm-one`, `rm-r-build`, `git-reset-soft`, `mv-dir`, `git-push-branch`, `git-commit`,
+    `git-amend` and `pnpm-test`.
+  - **Corpus prompt counts:** rules-only 50, judge 33, floors 29. The floors add `pnpm-add`,
+    `npx-cli`, `npm-global` and `pip-install`.
+  - **Operator DB, 21 recorded calls:** the floors prompt on 15. 9 are MCP tools (`opaque`)
+    and 6 are shell commands naming `~`.
+  - **Live API run (fake assistant):** the pre-exec `rm -rf ./dist` got `prompt`
+    (`recursive-forced-rm`) and the post-start `ls src` got `auto-approve`. Both rows were
+    `provider: rules` and not degraded. Prompt rate 0.5.
+  - **Startup:** `decisions.provider: typesafe` exits 1 with "not registered in this build".
+  - **Judge survey re-run:** BLOCKED. Run 1 returned `model provider 401 Error` and judged 0
+    of 50. Not retried.
+  - **Discovery job with the operator key:** judged 0 and left 5 unjudged (401). No
+    candidates.
+  - **Floor timing:** about 9 µs per typical command, and under 10 ms warm at the 64 KiB cap.
 
 - **§7.2 still FAILS, and that is the blocker on activation.** 10 of 51 fixtures
   soften a judged answer, down from 26–27 before scoping. **9 of the 10 carry the
@@ -99,8 +113,8 @@ Open items carried out of K19c, none of them K19d's job:
 | The Claude adapter gets **audit** tier under `auto-approve`, because `canUseTool` is installed only under `prompt-on-escalation`. The mode that most needs a gate is the one with no pre-exec hook. | its own slice |
 | Bedrock emits no tool events, so the gate never evaluates there. | recorded as known-unreachable |
 | §7.4 attestations are not checked yet. | activation slice |
-| ~~§7.2's bar is "no reduction".~~ **Decided (K19h):** the bar is gate-outcome flips or risk crosses in 2 or more of 5 runs. **K19i:** it no longer gates the tool gate; the judge suites run on manual dispatch only. | done |
-| ~~An applied budget derived from measured p95.~~ **K19i:** the gate awaits no judge; floors take microseconds. | done |
+| ~~§7.2's bar is "no reduction".~~ **Decided (K19h):** the bar is gate-outcome flips or risk crosses in 2 or more of 5 runs. It still FAILS on the second-lock set. Whether it stays an activation bar now that the gate reads no judge is an owner decision (K19i leaves it unchanged). | owner |
+| An applied budget derived from measured p95. K19i: the gate awaits no judge, and floors take about 9 µs. | activation slice |
 | I-D8 demands a judge for `applied`; floors need none (K19i). It only refuses, so it is harmless until activation. | activation slice |
 
 - **Shares no files with stream A**; the two run concurrently.

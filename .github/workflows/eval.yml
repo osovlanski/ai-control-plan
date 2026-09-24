@@ -45,14 +45,8 @@ jobs:
       # log but does not decide the step. A red verdict opens the issue below.
       # The rows hold answers and outcomes only, never decision state; they are
       # uploaded with the scorecard.
-      #
-      # K19i: manual dispatch only. The judge no longer gates (floors decide),
-      # so this bar has no activation consequence, and it FAILS by construction
-      # (32 fixtures already reached it in K19h), which would open the issue
-      # every night. The gate's own injection check is now deterministic and
-      # per-PR (`decision-second-lock.test.ts`: no carrier removes a floor).
       - name: Prompt-injection suites against the real judge, 5 runs (M16 §7.2)
-        if: always() && github.event_name == 'workflow_dispatch'
+        if: always()
         shell: bash # explicit, so GitHub adds pipefail and the verdict's exit survives `tee`
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}

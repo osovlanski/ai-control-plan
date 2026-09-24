@@ -79,6 +79,8 @@ export interface DiscoveryReport {
   judged: number;
   /** The judge did not answer (no credential, a timeout, an error). Counted, never guessed. */
   unjudged: number;
+  /** Distinct reasons the judge did not answer, as the service reported them (never the secret). */
+  unjudgedReasons: string[];
   candidates: FloorCandidate[];
 }
 
@@ -98,7 +100,7 @@ export async function discoverFloorCandidates(
       if (a.seenAt > g.lastSeen) g.lastSeen = a.seenAt;
     } else groups.set(key, { action: a, occurrences: 1, lastSeen: a.seenAt });
   }
-  const report: DiscoveryReport = { scanned: actions.length, distinct: groups.size, floored: 0, judged: 0, unjudged: 0, candidates: [] };
+  const report: DiscoveryReport = { scanned: actions.length, distinct: groups.size, floored: 0, judged: 0, unjudged: 0, unjudgedReasons: [], candidates: [] };
   for (const { action, occurrences, lastSeen } of groups.values()) {
     const observation = { toolName: action.toolName, commandText: action.commandText, paths: action.paths, worktreePath: action.worktreePath };
     if (toolGateFloorHits({ ...observation, shell: action.shell }).length > 0) {
@@ -113,6 +115,8 @@ export async function discoverFloorCandidates(
     });
     if (outcome.provider === "rules" || outcome.degraded) {
       report.unjudged += 1;
+      const why = outcome.degraded?.reason ?? "no judging provider in the chain";
+      if (!report.unjudgedReasons.includes(why)) report.unjudgedReasons.push(why);
       continue;
     }
     report.judged += 1;
@@ -146,7 +150,10 @@ export function renderCandidates(report: DiscoveryReport, generatedAt: string): 
     "",
   ];
   if (report.judged === 0 && report.distinct > report.floored) {
-    lines.push("**No judgement ran** (no reachable judge). Nothing below is evidence of an absence.", "");
+    lines.push(
+      `**No judgement ran** (${report.unjudgedReasons.join("; ") || "no judge"}). Nothing below is evidence of an absence.`,
+      "",
+    );
   }
   for (const c of report.candidates) {
     lines.push(`## \`${c.toolName}\` × ${c.occurrences} (last ${c.lastSeen})`, "", "```text", c.commandText, "```", "", `Judge: ${c.judgeReason}`, "");
