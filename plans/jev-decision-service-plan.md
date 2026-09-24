@@ -580,23 +580,27 @@ owner decision (§7.2).
   under the floors. The floors add 4 the judge let through (`pnpm add`, `npx`, `npm install -g`,
   `pip install`) and drop the 8 above. The rate does not jump.
 - **Real traffic, small sample.** The operator's workspace DB holds 21 tool calls from 4 runs on
-  2026-09-15. The floors prompt on 15 of them; today's rules-only default prompts on all 21.
+  2026-09-15. The floors prompt on 17 of them; today's rules-only default prompts on all 21.
   - **Nine** are MCP tools that no floor understands, so they are `opaque`.
   - **Six** are shell commands listing `~` and `~/workspace`, in runs with no recorded worktree. The
     floor is right to fire on them.
+  - **Two** are `Read`s of a file under `/home/ubuntu` in a worktree-less run. Floor discovery
+    proposed them (below). They passed at first because file tools took the path rule from K19g,
+    which states no fact without a worktree. File-tool paths now get the shell's path rule.
   - **The limit:** 21 calls is not a rate. The MCP share is the §8 risk to watch in the prompt-rate
     panel. It follows from a policy choice: an MCP tool's effect is unknown, and the floors prompt
     on what they cannot read.
-- **The judge survey re-run is BLOCKED (2026-09-24), in two attempts:**
+- **Judge survey re-run: PASS on the third attempt (2026-09-24), after credit was added.** 5 of 5
+  runs, 250 of 250 judged. It reproduces K19h exactly: the same 33 judge-only actions (32 in 5 of 5
+  runs, `pnpm-test` in 3 of 5) and the same 17 at 0 of 5. So the pinned set holds, and after the
+  floors the same 8 remain judge-only. The first two attempts were BLOCKED:
   1. **`model provider 401 Error`.** The key file held `ANTHROPIC_KEY=sk-ant-…`, so the whole line
      was sent as the key.
   2. **After the file was fixed, `model provider 400 Error`.** One 1-token diagnostic call returned
      `invalid_request_error: Your credit balance is too low to access the Anthropic API.`
 
-  0 of 50 were judged in each attempt. The provider reports status and error class only, by design
-  (an API message can echo input), and that is why the diagnostic call was needed. The judge's side
-  of the count above is K19h's pinned survey (5 of 5 runs at temperature 0). The floors' side needs
-  no credential.
+  0 of 50 were judged in each of those attempts. The provider reports status and error class only,
+  by design (an API message can echo input), and that is why the diagnostic call was needed.
 - **Live drive (2026-09-24), `pnpm --filter @agent-plane/api start` on a scratch workspace with a
   fake assistant under `prompt-on-escalation`:**
   - **Rows:** `GET /api/decisions` returned two shadow rows, both `provider: rules`, answers
@@ -608,9 +612,12 @@ owner decision (§7.2).
   - **Startup check:** the same workspace with `decisions.provider: typesafe` exited 1 before
     listening, with `decisions.provider: "typesafe" is not registered in this build (registered:
     model, rules)`.
-- **Discovery job on the operator DB, with the operator's key (2026-09-24):** 21 calls, 11 distinct,
-  6 floored, 0 judged, 5 unjudged (`model provider 401 Error`), 0 candidates. The DB checksum was
-  unchanged.
+- **Discovery job on the operator DB with the live judge: PASS (2026-09-24).** 21 calls, 11 distinct,
+  6 floored, 5 judged, 0 unjudged, **1 candidate**: 2 `Read`s of a path under `/home/ubuntu`, which
+  the judge rated `outside_repo=0.95`. The DB checksum was unchanged. The candidate exposed an
+  inconsistency in the floors, now fixed and tested: without a worktree, a file tool's absolute path
+  was not treated as outside, while a shell command's was. After the fix the same job reports 7
+  floored and 0 candidates.
 
 **What it means.**
 - **I-D8 no longer describes what the gate needs.** It refuses `applied` without a judging provider,
@@ -810,7 +817,7 @@ expired attestation degrades the site to shadow and says so in the record.
 | **Latency in the hot loop** | A per-tool-call round trip on every action | Per-site budget, single-flight, circuit breaker; the gate degrades to *prompt*, which is safe, not to *allow* |
 | **Silent telemetry poisoning** | A new classifier changes cohort membership | K20's `classifier_version` fence; cohorts never span versions; no backfill |
 | **Judge drift after a model update** | `jev-latest` is a moving selector, exactly like the CLI aliases K13 refuses to resolve | Record `model_reported` per decision (K7 discipline). A changed identity expires `injectionSuitePassedAt`, because the §7.2 verdict is per model (K19h), and drops the site to shadow |
-| **Over-prompting kills the benefit** | A gate that prompts constantly gets switched off by the operator, which is a worse end state than no gate. Under a second lock the added prompts are the whole benefit, so this is the only cost. K19h: the judge rates `git add -A && git commit`, `git reset --soft` and `mv` at `risk = medium` and prompts on them | Prompt rate is §7.1(7) and a first-class metric in the K22 panel, and an activation precondition since K19h. K19i: floors prompt on 29 of the 50 corpus actions against the judge's 33, and on 15 of 21 real calls, 9 of them MCP tools that are `opaque` by policy |
+| **Over-prompting kills the benefit** | A gate that prompts constantly gets switched off by the operator, which is a worse end state than no gate. Under a second lock the added prompts are the whole benefit, so this is the only cost. K19h: the judge rates `git add -A && git commit`, `git reset --soft` and `mv` at `risk = medium` and prompts on them | Prompt rate is §7.1(7) and a first-class metric in the K22 panel, and an activation precondition since K19h. K19i: floors prompt on 29 of the 50 corpus actions against the judge's 33, and on 17 of 21 real calls, 9 of them MCP tools that are `opaque` by policy |
 
 ---
 

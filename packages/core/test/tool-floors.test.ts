@@ -214,6 +214,11 @@ describe("K19i floors — evasions resolve to a rule or to opaque, never to sile
     expect(toolGateFloorHits({ toolName: "Bash", worktreePath: WT }).map((h) => h.rule)).toEqual(["opaque"]);
   });
 
+  it("no worktree: a file tool's absolute path is outside too (K19i discovery found a Read that passed)", () => {
+    expect(toolGateFloorHits({ toolName: "Read", paths: ["/home/u/notes.md"], commandText: "{}" }).map((h) => h.rule)).toEqual(["path-outside-worktree"]);
+    expect(toolGateFloorHits({ toolName: "Read", paths: ["src/a.ts"], commandText: "{}" })).toEqual([]);
+  });
+
   it("no worktree: every absolute, home or `..` path is outside", () => {
     expect(rules("ls /srv", { worktreePath: undefined })).toContain("path-outside-worktree");
     expect(rules("cat ../x", { worktreePath: undefined })).toContain("path-outside-worktree");

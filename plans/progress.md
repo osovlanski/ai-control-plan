@@ -77,18 +77,19 @@ the default provider is `rules`, `applied` is closed, nothing is activated.
     `git-amend` and `pnpm-test`.
   - **Corpus prompt counts:** rules-only 50, judge 33, floors 29. The floors add `pnpm-add`,
     `npx-cli`, `npm-global` and `pip-install`.
-  - **Operator DB, 21 recorded calls:** the floors prompt on 15. 9 are MCP tools (`opaque`)
-    and 6 are shell commands naming `~`.
+  - **Operator DB, 21 recorded calls:** the floors prompt on 17. 9 are MCP tools (`opaque`),
+    6 are shell commands naming `~`, and 2 are `Read`s under `/home/ubuntu` with no worktree.
   - **Live API run (fake assistant):** the pre-exec `rm -rf ./dist` got `prompt`
     (`recursive-forced-rm`) and the post-start `ls src` got `auto-approve`. Both rows were
     `provider: rules` and not degraded. Prompt rate 0.5.
   - **Startup:** `decisions.provider: typesafe` exits 1 with "not registered in this build".
-  - **Judge survey re-run:** BLOCKED, 0 of 50 judged in both attempts.
-    - **Attempt 1:** `model provider 401 Error`. The key file held `ANTHROPIC_KEY=sk-ant-…`.
-    - **Attempt 2, file fixed:** `model provider 400 Error`. A diagnostic call returned
-      "Your credit balance is too low to access the Anthropic API."
-  - **Discovery job with the operator key:** judged 0 and left 5 unjudged (the 401 attempt). No
-    candidates. Not re-run after the credit error.
+  - **Judge survey re-run, 2026-09-24:** 5 of 5 runs, 250 of 250 judged. It matches K19h
+    exactly: 33 judge-only actions (`pnpm-test` in 3 of 5, the rest 5 of 5) and 17 never.
+    - **Earlier attempts:** a 401, because the key file held `ANTHROPIC_KEY=` before the key,
+      then a 400, credit balance too low. Credit was added before the passing run.
+  - **Discovery job with the live judge:** 5 judged, 1 candidate. It was 2 `Read`s under
+    `/home/ubuntu` with no worktree, rated `outside_repo=0.95`. File-tool paths now get the
+    shell's no-worktree path rule. After that fix: 7 floored, 0 candidates.
   - **Floor timing:** about 9 µs per typical command, and under 10 ms warm at the 64 KiB cap.
 
 - **§7.2 still FAILS, and that is the blocker on activation.** 10 of 51 fixtures

@@ -1160,6 +1160,10 @@ export function toolGateFloorHits(input: ToolGateObservation & { shell?: boolean
   } else if (!KNOWN_FILE_TOOLS.test(input.toolName) && !KNOWN_NO_EFFECT_TOOLS.test(input.toolName)) {
     opaque(ctx, "a tool whose input no floor understands");
   }
+  // The same path rule a shell command gets. K19g's check above states no fact
+  // when there is no worktree; this one treats every absolute, home or `..`
+  // path as outside then (found by floor discovery on a worktree-less `Read`).
+  for (const path of input.paths ?? []) checkPathWord(ctx, { text: path, dynamic: false, glob: false, quoted: true, procsub: false });
   const seen = new Set<string>();
   return ctx.hits
     .filter((h) => {
