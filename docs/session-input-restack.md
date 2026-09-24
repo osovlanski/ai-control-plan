@@ -1,6 +1,6 @@
 # Session-input restack
 
-## Remote baseline and owner decision
+## Initial remote baseline and owner decision
 
 2026-09-24. Classification completed before branch creation or cherry-picks.
 
@@ -95,5 +95,22 @@ shared-contract and reconciliation commits. Kept every main M16 entry and only
 appended the final session-input decision. Config and exports merged automatically;
 no M16 logic, tests, plans or workflow changed.
 
-Fresh gates on this base: pending. Initial-baseline results above are not counted
-as verification of this new base.
+Verdict on this base: **PASS**.
+
+- Lint, typecheck and build passed.
+- Full packages: core **343**, adapters **21**, API **1,183** and web **50** passed.
+  API has **83 skipped** credential-dependent M16 cases; no real-provider run was attempted.
+- Forced harness: **1,183 passed, 83 skipped**. Recovery chaos: **56 passed**.
+- Focused restart/ambiguity/shared-contract/redelivery: **21 passed**.
+- Chromium: **31 passed**. Demo A / A.5 / B: **1 / 1 / 5 passed**.
+- Real dev-API smoke passed again: API 2.3, 29 migrations, available fake capability,
+  provider-accepted delivery, stable duplicate/restart identity and one attempt,
+  payload conflict 409, and flag-off 404 with no new row.
+- Fresh four-scenario send-count audit: **zero resends across 20 retries**,
+  one attempt and one provider delivery per case. Safe replay caveat above remains.
+- Secret scan: only documented commit SHAs matched; zero credential findings.
+- Rechecked remote main and both adapter lease SHAs immediately before publication;
+  main stayed at the base above, and #47/#51 stayed at their pinned source heads.
+
+Raw captures for this base: `/tmp/session-input-core-latest-*.log`.
+The earlier `session-input-core-*.log` captures remain historical only.
