@@ -57,17 +57,16 @@ design; slices below are implementation status.
 
 **Merge status (2026-09-24, verified against `origin`):**
 
-- **On `main`:** K17–K19e (#49, `d151c54`) and K19f–K19g (#52, squash-merged at `6e0a8cd`).
-- **Not on `main`:** K19h and K19i. #53 and #54 were squash-merged into their stacked bases,
-  `claude/k19f-command-lexer` (`c804266`) and `claude/k19h-second-lock` (`e7ae626`), not
-  retargeted to `main` first.
-- **Why it cannot simply be retargeted:** a trial merge of `claude/k19h-second-lock` into `main`
-  conflicts in five files, because the squash re-wrote K19f–K19g as one commit. The tree of `e7ae626`
-  equals K19i's head `96bd525`, and `main`'s tree equals K19g's head `a6f5cc1`. So `a6f5cc1..96bd525`
-  applied to `main` is exactly the missing change. The K19j PR lands it that way, as its first
-  commit, with no force-push.
-- **Migrations:** the highest on `main` is still 027. Stream A (session input) is being re-stacked
-  by another agent onto 028+.
+- **On `main`:** K17–K19e (#49, `d151c54`), K19f–K19g (#52, squash-merged at `6e0a8cd`) and
+  K19h–K19j (#55, merge commit `818ef1d`). #55 landed K19h/K19i as `a6f5cc1..96bd525` applied to
+  `main`, because #53 and #54 had been squash-merged into their stacked bases
+  (`claude/k19f-command-lexer`, `claude/k19h-second-lock`) instead of `main`.
+- **Gate on `818ef1d`:** typecheck clean; tests core 341, adapters 21, API 1110 (+83 skipped),
+  web 50; lint clean on tracked files.
+- **Migrations:** the highest on `main` is 027. 028 is reserved for session input (Stream A,
+  being re-stacked by another agent).
+- **Merge policy:** stacked PRs merge with merge commits only, never squash. Agents never merge;
+  the owner does.
 
 K17 through K19e are pushed and PR #49 is green. Everything ships in shadow:
 the default provider is `rules`, `applied` is closed, nothing is activated.
