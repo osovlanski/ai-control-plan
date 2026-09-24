@@ -18,6 +18,7 @@ import {
   toolGateFloorHits,
   type DecisionOutcome,
   type DecisionRequest,
+  type McpToolPolicy,
   type ToolAction,
 } from "@agent-plane/core";
 import type { Db } from "../db/index.js";
@@ -90,6 +91,7 @@ const CLIP = 400;
 export async function discoverFloorCandidates(
   actions: readonly RecentToolAction[],
   decide: (req: DecisionRequest) => Promise<DecisionOutcome>,
+  mcpTools?: McpToolPolicy,
 ): Promise<DiscoveryReport> {
   const groups = new Map<string, { action: RecentToolAction; occurrences: number; lastSeen: string }>();
   for (const a of actions) {
@@ -103,7 +105,7 @@ export async function discoverFloorCandidates(
   const report: DiscoveryReport = { scanned: actions.length, distinct: groups.size, floored: 0, judged: 0, unjudged: 0, unjudgedReasons: [], candidates: [] };
   for (const { action, occurrences, lastSeen } of groups.values()) {
     const observation = { toolName: action.toolName, commandText: action.commandText, paths: action.paths, worktreePath: action.worktreePath };
-    if (toolGateFloorHits({ ...observation, shell: action.shell }).length > 0) {
+    if (toolGateFloorHits({ ...observation, shell: action.shell, mcpTools }).length > 0) {
       report.floored += 1;
       continue;
     }

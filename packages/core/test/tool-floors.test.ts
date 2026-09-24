@@ -2,10 +2,12 @@ import { describe, expect, it } from "vitest";
 import {
   FLOOR_REASONS,
   MAX_FLOOR_COMMAND_CHARS,
+  mcpToolName,
   resolveFloorGate,
   toolActionFromEvent,
   toolGateFloorHits,
   type FloorRule,
+  type McpToolPolicy,
 } from "../src/index.js";
 
 const WT = "/wt/AG-1";
@@ -348,5 +350,60 @@ describe("K19i — the runner and the discovery job extract the same action", ()
       paths: ["/wt/a.ts"],
       shell: false,
     });
+  });
+});
+
+describe("K19j MCP tool policy — a declaration removes only the opaque prompt", () => {
+  const policy: McpToolPolicy = {
+    "plugin_claude-mem_mcp-search": { search: "read-only", get_observations: "read-only", smart_search: "read-only" },
+    notion: { "notion-create-pages": "mutating" },
+  };
+  const mcp = (toolName: string, input: Record<string, unknown> = {}, mcpTools: McpToolPolicy | undefined = policy) => {
+    const action = toolActionFromEvent({ tool: toolName, input }, undefined);
+    return toolGateFloorHits({ ...action, worktreePath: WT, mcpTools }).map((h) => h.rule);
+  };
+
+  it("parses both runtimes' names and nothing else", () => {
+    expect(mcpToolName("mcp__plugin_claude-mem_mcp-search__get_observations")).toEqual({ server: "plugin_claude-mem_mcp-search", tool: "get_observations" });
+    expect(mcpToolName("mcp:notion.notion-create-pages")).toEqual({ server: "notion", tool: "notion-create-pages" });
+    for (const n of ["Read", "mcp__", "mcp__server", "mcp____tool", "mcp__server__", "mcp:server", "mcp:.tool"]) expect(mcpToolName(n), n).toBeUndefined();
+  });
+
+  it("a declared read-only tool no longer prompts; the gate then adds nothing", () => {
+    expect(mcp("mcp__plugin_claude-mem_mcp-search__get_observations", { ids: [1, 2] })).toEqual([]);
+    expect(mcp("mcp:plugin_claude-mem_mcp-search.search", { query: "x" })).toEqual([]);
+    expect(resolveFloorGate({ rulesDenied: false, approvalMode: "prompt-on-escalation", hits: [] }).outcome).toBe("auto-approve");
+  });
+
+  it("read-only removes the opaque hit only: its path argument is still floored", () => {
+    expect(mcp("mcp__plugin_claude-mem_mcp-search__smart_search", { query: "x", path: "/etc" })).toEqual(["path-outside-worktree"]);
+    expect(mcp("mcp__plugin_claude-mem_mcp-search__smart_search", { query: "x", path: `${WT}/src` })).toEqual([]);
+  });
+
+  it("a declared mutating tool prompts, and says so", () => {
+    const hits = toolGateFloorHits({ toolName: "mcp__notion__notion-create-pages", commandText: "{}", worktreePath: WT, mcpTools: policy });
+    expect(hits).toEqual([{ rule: "mcp-mutating", reason: FLOOR_REASONS["mcp-mutating"] }]);
+  });
+
+  it("fails closed: no policy, an undeclared server or tool, or an inherited key stays opaque", () => {
+    expect(toolGateFloorHits({ toolName: "mcp__plugin_claude-mem_mcp-search__search", commandText: "{}", worktreePath: WT }).map((h) => h.rule)).toEqual(["opaque"]);
+    expect(mcp("mcp__plugin_claude-mem_mcp-search__search", {}, {})).toEqual(["opaque"]);
+    expect(mcp("mcp__plugin_claude-mem_mcp-search__smart_unfold")).toEqual(["opaque"]);
+    expect(mcp("mcp__other__search")).toEqual(["opaque"]);
+    expect(mcp("mcp__notion__constructor")).toEqual(["opaque"]);
+    expect(mcp("mcp__constructor__name")).toEqual(["opaque"]);
+    expect(mcp("mcp____proto____x")).toEqual(["opaque"]);
+    // Only the exact name: case and a look-alike separator do not match.
+    expect(mcp("MCP__plugin_claude-mem_mcp-search__search")).toEqual(["opaque"]);
+    expect(mcp("mcp__plugin_claude-mem_mcp-search__Search")).toEqual(["opaque"]);
+  });
+
+  it("an unexpected access value in a hand-built policy is not read-only", () => {
+    const bad = { s: { t: "safe" } } as unknown as McpToolPolicy;
+    expect(mcp("mcp__s__t", {}, bad)).toEqual(["opaque"]);
+  });
+
+  it("a shell tool is never read through the MCP policy", () => {
+    expect(toolGateFloorHits({ toolName: "mcp__s__t", commandText: "printenv", worktreePath: WT, shell: true, mcpTools: { s: { t: "read-only" } } }).map((h) => h.rule)).toEqual(["env-dump"]);
   });
 });

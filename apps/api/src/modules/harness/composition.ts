@@ -223,6 +223,7 @@ export function buildHarnessComposition(deps: HarnessCompositionDeps): HarnessCo
           paths: input.paths,
           worktreePath: input.worktreePath,
           shell: input.shell,
+          mcpTools: config.decisions.mcpTools,
         }),
       });
       // Written here rather than via `decide(req, ctx)` because the record

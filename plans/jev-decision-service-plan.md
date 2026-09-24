@@ -628,6 +628,104 @@ owner decision (§7.2).
 
 **Not in K19i:** activation, the Gate UI tab, Jev/TypeSafe and K20.
 
+### K19j — A declared MCP tool policy; §7.2 leaves activation (added 2026-09-24)
+
+**Why.** On the operator DB the floors prompted on 17 of 21 real calls, and 9 of those were MCP
+tools prompting as `opaque`. A gate that prompts on about 80% of calls gets switched off (§8).
+
+**The 9 opaque calls, classified.** All nine are one server, `plugin_claude-mem_mcp-search` (the
+claude-mem memory plugin). Its MCP server talks to a local worker on `127.0.0.1` and makes no call
+off the host.
+
+| Tool | Calls | Read or write | Network | Filesystem |
+|---|---|---|---|---|
+| `get_observations` | 6 | read: fetches stored observations by id | loopback worker only | reads the plugin's own store under `~/.claude-mem` |
+| `smart_search` | 2 | read: tree-sitter search over source files | none | reads files under `path`, or the MCP server's cwd when `path` is absent |
+| `search` | 1 | read: queries the memory index | loopback worker only | reads the plugin's own store |
+
+The store holds memory from every project on the host, not only this repository. That is the
+operator's to accept by declaring the tool. When `smart_search` gets an explicit `path`, the path
+floor still reads it.
+
+**What shipped.**
+
+- **Config:** `decisions.mcpTools` in the workspace config maps `server → tool → read-only | mutating`.
+  - **Trust-gated like `repoAllowlist`:** only the operator's workspace file declares it, and the
+    default declares nothing.
+  - **Fail-closed:** any other value fails at load with the key named. An undeclared server or
+    tool stays `opaque`, as before.
+  - **Lookup:** own keys of null-prototype maps, so a tool named `constructor` or `__proto__`
+    finds nothing.
+- **Floors:** both runtimes' names are read, `mcp__<server>__<tool>` (Claude Code) and
+  `mcp:<server>.<tool>` (Codex). A name that splits wrongly finds no declaration and stays opaque.
+  - **`read-only`** removes only the `opaque` hit. Every other floor still runs, including the path
+    rule on a `path` argument. So a declaration alone never makes a call `auto-approve`: that
+    verdict still means "the gate adds nothing; `approvalMode` decides".
+  - **`mutating`** prompts with the new `mcp-mutating` rule, which names what it is.
+- **Discovery job:** reads the same policy from the workspace config. A declared read-only tool is
+  therefore judged offline exactly when the gate would pass it. `--db` and `--actions` runs get no
+  policy, so every MCP call there stays floored.
+- **No migration.** Main's highest is still 027.
+
+**Measured (2026-09-24).**
+
+- **Operator DB, 21 calls, with the three tools declared `read-only`:** prompts fell from **17 to
+  8** (81% to 38%).
+
+  | Floor rule | Before | After |
+  |---|---|---|
+  | `opaque` | 9 | 0 |
+  | `path-outside-worktree` | 8 | 8 |
+
+  All 8 left are one repo-less task with no worktree listing or reading under `~`. The path rule
+  treats every home path as outside then (K19i), so the next lever is running such tasks with a
+  worktree, not a looser floor. 21 calls is still not a rate (§7.1(1)).
+- **K19h corpus:** **29 of 50, unchanged.** The corpus has no MCP action. Per rule (an action
+  counts under each rule it hits): `dependency` 5, `path-outside-worktree` 4, `privilege`,
+  `env-dump`, `local-ref-destruction`, `process-kill` and `infra-destroy` 2 each, and one each for
+  `bulk-delete`, `recursive-permission`, `truncate`, `destructive-sql`, `container-host-mount`,
+  `network-write`, `remote-delete`, `new-remote`, `network-pipe`, `cloud-upload`, `admin-merge`,
+  `publish` and `scheduled-job`. Pinned in `decision-second-lock.test.ts`.
+- **Live drive:** API on a scratch workspace, a fake assistant under `prompt-on-escalation`, with
+  the policy declared. Five shadow rows, prompt rate 0.4:
+
+  | Call | Gate |
+  |---|---|
+  | `ls src` | `auto-approve` |
+  | `get_observations` (Claude name) | `auto-approve` |
+  | `search` (Codex name) | `auto-approve` |
+  | `smart_unfold` (not declared) | `prompt`, `opaque` |
+  | `notion-create-pages` (`mutating`) | `prompt`, `mcp-mutating` |
+
+  The same workspace with `notion-create-pages: safe` exited 1 at startup with
+  `decisions.mcpTools.notion.notion-create-pages must be read-only | mutating`.
+- **Discovery job, one live run** on a scratch copy of the operator workspace with the policy
+  declared: 11 distinct, 4 floored, 7 judged, 0 unjudged, **0 candidates**. The judge would not
+  supervise the three declared tools either. The operator DB checksum was unchanged.
+
+**Owner decision (2026-09-24): §7.2 is not an activation precondition for the tool gate.** It is
+recorded in §7.1, §7.2 and §11. Since K19i the gate reads no judge, so an injection that moves
+the judge cannot move the gate. What guards the gate against carried text is the per-PR test that
+no carrier removes a floor. §7.2 stays, as a nightly quality metric for floor discovery: a judge
+that injected text can talk out of a prompt will under-propose floors.
+
+**Activation readiness (2026-09-24), shadow only, nothing activated.** Each §7.1 precondition as
+this build meets it:
+
+| # | Precondition | Verdict | Evidence |
+|---|---|---|---|
+| 1 | ≥ 14 days or ≥ 500 shadow decisions | **FAIL** | The operator DB has no `decision_records` table: that workspace has not run a build with migration 025. Its 21 tool calls were recorded, but never gated. |
+| 2 | Disagreements with the rules baseline read by a human, reading recorded | **FAIL** | Nothing to read yet (see 1). No reading is recorded. |
+| 3 | p95 latency within the site's budget | **PASS** | No network call on the gate path. Floors take about 9 µs per typical command and under 10 ms at the 64 KiB cap (`tool-floors.test.ts`), against the 50 ms applied budget. |
+| 4 | Cost per 1,000 decisions, from own accounting | **PASS** | Zero. The gate calls only the rules provider, and its rows carry no tokens. The discovery job's cost is offline and separate. |
+| 5 | Egress test green | **FAIL** | By construction nothing leaves the process on the gate path, but no test asserts that for the composed gate. `decision-model.test.ts` covers only what the judge sends. |
+| 6 | Injection resistance | **PASS** | Now read as "no carrier removes a floor", pinned per PR without a credential (`decision-second-lock.test.ts`). §7.2's judge bar is no longer this row (owner decision above). |
+| 7 | Prompt rate measured and read | **FAIL** | Measured: 8 of 21 on the operator DB, 29 of 50 on the corpus. Not yet read by the operator, and 21 calls is not a rate. |
+| 8 | I-D8, the structural check | **FAIL** | It still requires a judging provider for `applied`, which floors do not need. Composition keeps `applied` closed regardless. The activation slice replaces it. |
+| — | §7.4 attestations checked at runtime | **FAIL** | Not implemented (activation slice). |
+
+**Not in K19j:** activation, a looser path floor, wildcard server declarations, the Gate UI tab.
+
 ### K20 — Task classifier
 
 Replace the four regexes at the *input* of routing, not inside it.
@@ -704,8 +802,10 @@ its own evidence.
    comparative claim.
 5. Egress test green: a test that asserts exactly what leaves the process for a decision, in the
    spirit of the existing K8 egress verification.
-6. Prompt-injection suite green (§7.2) — under the frequency bar, on the K19h second-lock set as
-   well as the original fixtures.
+6. Injection resistance. **For the tool gate (owner decision, K19j, 2026-09-24):** no carrier
+   removes a floor, pinned per PR. The gate reads no judge since K19i, so §7.2 does not gate its
+   activation. For a site that reads a judge (K20, K21): the §7.2 suite green under the frequency
+   bar, on the K19h second-lock set as well as the original fixtures.
 7. **Prompt rate measured and read** (§8): the share of rules-allowed calls the gate would prompt
    on, per workspace, from shadow records, with the operator's reading recorded. This replaces
    "calibration measured" as the seventh precondition (K19h). A second lock only adds prompts,
@@ -754,6 +854,11 @@ CI stays credential-free, and there the comparisons are vacuous and say so.
 
 **Status (K19h):** FAIL. See §5 K19h.
 
+**Status (K19j, owner decision 2026-09-24): a nightly quality metric for floor discovery, not an
+activation blocker for the tool gate.** The judge has no hot-path role, so a flip here cannot
+change a gate verdict. It can make the discovery job under-propose floors, and that is what the
+nightly run now measures. The bar and the nightly `eval.yml` run are unchanged.
+
 **Status (K19i):** the bar is unchanged and still an owner decision. A fact for that decision: the
 gate no longer reads the judge, and appended text cannot remove a floor. That is pinned per PR with
 no credential (§5 K19i).
@@ -790,7 +895,8 @@ decisions:
       mode: shadow              # shadow | applied           (default and fail-closed: shadow)
       shadowReviewedAt: ""      # ISO 8601 operator attestation; must span ≥ 7 days, < 30 days old
       egressVerifiedAt: ""      # ISO 8601; expires after 30 days
-      injectionSuitePassedAt: ""# ISO 8601; the §7.2 frequency verdict, for this model_reported
+      injectionSuitePassedAt: ""# ISO 8601; the §7.2 frequency verdict, for this model_reported.
+                                # Not read for tool-gate since K19j: the gate reads no judge.
       promptRateReviewedAt: ""  # ISO 8601; §7.1(7), replaces calibrationMeasuredAt (K19h)
 ```
 
@@ -817,7 +923,7 @@ expired attestation degrades the site to shadow and says so in the record.
 | **Latency in the hot loop** | A per-tool-call round trip on every action | Per-site budget, single-flight, circuit breaker; the gate degrades to *prompt*, which is safe, not to *allow* |
 | **Silent telemetry poisoning** | A new classifier changes cohort membership | K20's `classifier_version` fence; cohorts never span versions; no backfill |
 | **Judge drift after a model update** | `jev-latest` is a moving selector, exactly like the CLI aliases K13 refuses to resolve | Record `model_reported` per decision (K7 discipline). A changed identity expires `injectionSuitePassedAt`, because the §7.2 verdict is per model (K19h), and drops the site to shadow |
-| **Over-prompting kills the benefit** | A gate that prompts constantly gets switched off by the operator, which is a worse end state than no gate. Under a second lock the added prompts are the whole benefit, so this is the only cost. K19h: the judge rates `git add -A && git commit`, `git reset --soft` and `mv` at `risk = medium` and prompts on them | Prompt rate is §7.1(7) and a first-class metric in the K22 panel, and an activation precondition since K19h. K19i: floors prompt on 29 of the 50 corpus actions against the judge's 33, and on 17 of 21 real calls, 9 of them MCP tools that are `opaque` by policy |
+| **Over-prompting kills the benefit** | A gate that prompts constantly gets switched off by the operator, which is a worse end state than no gate. Under a second lock the added prompts are the whole benefit, so this is the only cost. K19h: the judge rates `git add -A && git commit`, `git reset --soft` and `mv` at `risk = medium` and prompts on them | Prompt rate is §7.1(7) and a first-class metric in the K22 panel, and an activation precondition since K19h. K19i: floors prompt on 29 of the 50 corpus actions against the judge's 33, and on 17 of 21 real calls, 9 of them MCP tools that are `opaque` by policy. K19j: with those three tools declared `read-only`, 8 of 21 |
 
 ---
 
@@ -1099,6 +1205,14 @@ it is the first thing to test in step 1 — not an afterthought at step 7.
 - **Note (2026-09-23, K19i) — §7.2 is unchanged.** The bar, its nightly run and its role in
   activation are still the owner's decision. K19i only adds a fact: the gate reads no judge, and
   appended text cannot remove a floor.
+- **Decision (2026-09-24, K19j) — §7.2 is not an activation precondition for the tool gate.**
+  The owner reclassified it as a nightly quality metric for floor discovery. The judge has no
+  hot-path role since K19i, so §7.1(6) for the tool gate is now "no carrier removes a floor",
+  pinned per PR. The bar, the nightly run and `model_reported` expiry are unchanged, and §7.2
+  still binds any site that reads a judge. This supersedes the K19i note above.
+- **Decision (2026-09-24, K19j) — MCP tools are declared, not guessed.** `decisions.mcpTools` in
+  the workspace config declares each MCP tool `read-only` or `mutating`. Undeclared stays
+  `opaque`. `read-only` removes only that prompt (§5 K19j).
 - No new infrastructure without a failing requirement that names it.
 - Workspace isolation, explainable routing, approval boundaries and provider-adapter portability
   are preserved by construction — M16 adds a provider seam, it does not pierce an existing one.

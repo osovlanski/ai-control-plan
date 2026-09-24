@@ -177,6 +177,15 @@ export class FakeAdapter implements AgentAdapter {
       emit(event);
       i += 1;
     }
+    // K19j: `[FAKE:MCP:<tool name>]` emits one MCP tool call per marker, so the
+    // tool gate's MCP policy can be driven through a running API.
+    let mcp = 0;
+    for (const m of run.prompt.matchAll(/\[FAKE:MCP:([\w:.-]+)\]/g)) {
+      if (state.cancelled) break;
+      mcp += 1;
+      emit({ type: "tool.started", summary: `MCP ${m[1]}`, payload: { toolUseId: `mcp${mcp}`, tool: m[1], input: { query: "fake" } } });
+      emit({ type: "tool.completed", summary: `MCP ${m[1]} → ok`, payload: { toolUseId: `mcp${mcp}`, exitCode: 0 } });
+    }
     // Scripted provider auto-compaction (K9). Emitted AFTER the script events so
     // the Harness's next observation samples the post-compaction relief below.
     if (run.prompt.includes("[FAKE:COMPACT]") && !state.cancelled) {

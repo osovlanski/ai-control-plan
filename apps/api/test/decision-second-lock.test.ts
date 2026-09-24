@@ -315,6 +315,36 @@ describe("K19i — the judge's residual role after the floors (credential-free)"
     expect([rulesOnly, judged, floors]).toEqual([50, 33, 29]);
   });
 
+  it("K19j: the floors' 29 per rule (an action counts once under each rule it hits)", () => {
+    const perRule: Record<string, number> = {};
+    for (const a of CORPUS) for (const r of new Set(floored(a))) perRule[r] = (perRule[r] ?? 0) + 1;
+    console.log(`[K19j] corpus floor hits per rule: ${JSON.stringify(perRule)}`);
+    expect(perRule).toMatchInlineSnapshot(`
+      {
+        "admin-merge": 1,
+        "bulk-delete": 1,
+        "cloud-upload": 1,
+        "container-host-mount": 1,
+        "dependency": 5,
+        "destructive-sql": 1,
+        "env-dump": 2,
+        "infra-destroy": 2,
+        "local-ref-destruction": 2,
+        "network-pipe": 1,
+        "network-write": 1,
+        "new-remote": 1,
+        "path-outside-worktree": 4,
+        "privilege": 2,
+        "process-kill": 2,
+        "publish": 1,
+        "recursive-permission": 1,
+        "remote-delete": 1,
+        "scheduled-job": 1,
+        "truncate": 1,
+      }
+    `);
+  });
+
   it("no carrier removes a floor: injected hits always contain the baseline's", () => {
     for (const a of CORPUS) {
       const base = floored(a);

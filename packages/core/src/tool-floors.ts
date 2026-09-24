@@ -61,7 +61,8 @@ export type FloorRule =
   | "process-kill"
   | "dependency"
   | "container-host-mount"
-  | "scheduled-job";
+  | "scheduled-job"
+  | "mcp-mutating";
 
 /** One plain sentence per rule, written for the operator deciding the prompt. */
 export const FLOOR_REASONS: Record<Exclude<FloorRule, "opaque">, string> = {
@@ -91,6 +92,7 @@ export const FLOOR_REASONS: Record<Exclude<FloorRule, "opaque">, string> = {
   dependency: "Adds a dependency, installs globally, or downloads and runs a remote package.",
   "container-host-mount": "Starts a container with a host mount or host privileges.",
   "scheduled-job": "Installs a cron job or service that keeps running after the task.",
+  "mcp-mutating": "Calls an MCP tool the workspace declares as mutating; check what it changes.",
 };
 
 export interface FloorHit {
@@ -1128,6 +1130,40 @@ export function toolActionFromEvent(payload: unknown, summary: string | undefine
   return { toolName, commandText, paths, shell: shellText !== undefined };
 }
 
+/**
+ * K19j: what the workspace declares an MCP tool does, `server → tool → access`,
+ * from `decisions.mcpTools` in the workspace config and nowhere else. Like
+ * `repoAllowlist`, only the operator's declaration grants anything, and the
+ * default grants nothing: an undeclared server or tool stays `opaque`.
+ * `read-only` removes only the `opaque` hit, never another floor, so the call
+ * never gets `auto-approve` from the declaration alone; `mutating` prompts
+ * with a reason that names it.
+ */
+export type McpToolAccess = "read-only" | "mutating";
+export type McpToolPolicy = Readonly<Record<string, Readonly<Record<string, McpToolAccess>>>>;
+
+/**
+ * `mcp__<server>__<tool>` (Claude Code) or `mcp:<server>.<tool>` (Codex).
+ * Splits at the first separator; a name that splits wrongly finds no
+ * declaration and stays opaque.
+ */
+export function mcpToolName(name: string): { server: string; tool: string } | undefined {
+  const [rest, sep] = name.startsWith("mcp__") ? [name.slice(5), "__"] : name.startsWith("mcp:") ? [name.slice(4), "."] : [];
+  if (rest === undefined || sep === undefined) return undefined;
+  const i = rest.indexOf(sep);
+  if (i <= 0 || i + sep.length >= rest.length) return undefined;
+  return { server: rest.slice(0, i), tool: rest.slice(i + sep.length) };
+}
+
+/** Own keys only: a tool name is agent-supplied, so `__proto__` or `constructor` must not answer. */
+function mcpAccess(policy: McpToolPolicy | undefined, name: { server: string; tool: string }): McpToolAccess | undefined {
+  if (!policy || !Object.hasOwn(policy, name.server)) return undefined;
+  const tools = policy[name.server]!;
+  if (!Object.hasOwn(tools, name.tool)) return undefined;
+  const access = tools[name.tool];
+  return access === "read-only" || access === "mutating" ? access : undefined;
+}
+
 /** K19g's keyed floors, re-stated as rules. They still feed the judge comparisons unchanged. */
 const K19G_RULES: Record<string, Exclude<FloorRule, "opaque">> = {
   "path outside worktree": "path-outside-worktree",
@@ -1147,16 +1183,21 @@ const K19G_RULES: Record<string, Exclude<FloorRule, "opaque">> = {
  * a `command` field). When the caller does not say, a tool named like a shell
  * is taken as one.
  */
-export function toolGateFloorHits(input: ToolGateObservation & { shell?: boolean }): FloorHit[] {
+export function toolGateFloorHits(input: ToolGateObservation & { shell?: boolean; mcpTools?: McpToolPolicy }): FloorHit[] {
   const ctx: Ctx = { worktree: input.worktreePath, depth: 0, hits: [] };
   for (const label of Object.values(toolGateFloors(input))) {
     const rule = K19G_RULES[label];
     if (rule) hit(ctx, rule);
   }
   const shell = input.shell ?? SHELL_TOOLS.test(input.toolName);
+  const mcp = mcpToolName(input.toolName);
   if (shell) {
     if (input.commandText === undefined || input.commandText.trim() === "") opaque(ctx, "a shell tool with no command");
     else readShell(ctx, input.commandText);
+  } else if (mcp) {
+    const access = mcpAccess(input.mcpTools, mcp);
+    if (access === "mutating") hit(ctx, "mcp-mutating");
+    else if (access !== "read-only") opaque(ctx, "an MCP tool the workspace has not declared");
   } else if (!KNOWN_FILE_TOOLS.test(input.toolName) && !KNOWN_NO_EFFECT_TOOLS.test(input.toolName)) {
     opaque(ctx, "a tool whose input no floor understands");
   }
