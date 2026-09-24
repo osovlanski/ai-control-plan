@@ -62,6 +62,49 @@ export function assertInputTransition(from: SessionInputState, to: SessionInputS
   return to;
 }
 
+/**
+ * Explicit operator commands over a message id.
+ *
+ * Neither command adds an edge to the state machine above: `rejected` stays
+ * terminal, so a retry of a rejected message is a NEW row in the same retry
+ * chain (same client key, next generation), not a resurrection of a settled
+ * record. That keeps the terminal ledger immutable and auditable, which is the
+ * whole point of recording a rejection in the first place.
+ */
+export type SessionInputCommandCheck = { allowed: true } | { allowed: false; reason: string };
+
+/**
+ * Retry eligibility.
+ *
+ * `rejected` — nothing was delivered by definition, so a fresh attempt cannot
+ * duplicate anything.
+ * `accepted` + unknown delivery — retry means RECONCILE (receipt lookup or a
+ * declared-idempotent replay of the same id), never a blind second send.
+ * `accepted` with a live attempt — refused. This is exactly the ambiguous
+ * delivery the restart tests prove: the outcome is not yet known, and sending
+ * again on top of an unresolved attempt is how a double-delivery happens.
+ */
+export function canRetryInput(state: SessionInputState, deliveryUnknown: boolean): SessionInputCommandCheck {
+  if (state === "rejected") return { allowed: true };
+  if (state === "accepted") {
+    return deliveryUnknown ? { allowed: true } : { allowed: false, reason: "delivery_in_flight" };
+  }
+  if (state === "queued") return { allowed: false, reason: "not_dispatched" };
+  return { allowed: false, reason: "already_settled" };
+}
+
+/**
+ * Cancel eligibility. Only a message that was never dispatched can be cancelled:
+ * once an attempt was taken the provider may already hold the text, and a
+ * silent no-op would claim a recall the plane cannot perform. The caller is told
+ * so explicitly instead.
+ */
+export function canCancelInput(state: SessionInputState): SessionInputCommandCheck {
+  if (state === "queued") return { allowed: true };
+  if (state === "accepted") return { allowed: false, reason: "already_dispatched" };
+  return { allowed: false, reason: "already_settled" };
+}
+
 /** Normalized trace events, one per state change plus the unknown-delivery witness. */
 export const SESSION_INPUT_EVENT_TYPES = [
   "input.queued",
@@ -70,6 +113,11 @@ export const SESSION_INPUT_EVENT_TYPES = [
   "input.rejected",
   "input.expired",
   "input.delivery_unknown",
+  // The two explicit operator commands. They are deliberately NOT state events:
+  // a retry or a cancel is an intent, recorded even when it changes nothing, and
+  // any state change it causes still emits its own `input.*` event afterwards.
+  "input.retry_requested",
+  "input.cancelled",
 ] as const;
 
 export type SessionInputEventType = (typeof SESSION_INPUT_EVENT_TYPES)[number];

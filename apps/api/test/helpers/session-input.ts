@@ -126,3 +126,19 @@ export async function send(
   });
   return { statusCode: res.statusCode, body: res.statusCode === 404 ? {} : res.json() };
 }
+
+/** Drives one explicit command over a MESSAGE id, exactly as a client would. */
+export async function command(
+  ws: Workspace,
+  messageId: string,
+  action: "retry" | "cancel",
+  body: Record<string, unknown> = {},
+): Promise<{ statusCode: number; body: Record<string, unknown> }> {
+  const res = await ws.built.app.inject({
+    method: "POST",
+    url: `/api/inputs/${messageId}/${action}`,
+    headers: ws.headers,
+    payload: body,
+  });
+  return { statusCode: res.statusCode, body: res.statusCode === 404 ? {} : res.json() };
+}
