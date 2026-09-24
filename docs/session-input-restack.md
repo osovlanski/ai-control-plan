@@ -77,3 +77,23 @@ Local raw captures: `/tmp/session-input-core-*.log`; send-count capture:
 
 The owner requested a fresh rebase after M16 landed; these initial-baseline results
 are retained as history. Updated-main verification follows after the rebase.
+
+## Updated-main rebase — 2026-09-24
+
+Current base: `818ef1d8df76d28c1380b365b321ca56a19def27`. Remote main landed #52 and #55; #55 incorporates
+K19h–K19j, including the reviewed #53/#54 content. Read #55 before rebasing.
+
+All 18 classification rows were reverified and still hold. The contract remains
+byte-identical to `879723e`; all 31 files of `cd0b810` still match main. Newly
+merged M16 files outside additive config/exports/memory are byte-identical to main.
+Main’s entire memory file is retained as a prefix, followed only by the restack
+decision. Migration maximum is still 027, so ledger 028 and commands 029 remain
+correct. API 2.3 remains the additive successor to main’s 2.2.
+
+Conflicts: `docs/PROJECT_MEMORY.md` only, encountered twice while replaying the
+shared-contract and reconciliation commits. Kept every main M16 entry and only
+appended the final session-input decision. Config and exports merged automatically;
+no M16 logic, tests, plans or workflow changed.
+
+Fresh gates on this base: pending. Initial-baseline results above are not counted
+as verification of this new base.
