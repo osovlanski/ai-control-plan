@@ -30,9 +30,13 @@ Set the mode back to `false` (`harnessModes.single: false`, or `AGENT_PLANE_HARN
 
 **Rollback is not a kill.** The graceful path:
 
-1. Set the mode `false` in config.
-2. Let the **live process** drain in-flight Harness sessions to a terminal state on its own — new starts already route legacy the instant the flag flips (`Orchestrator.harnessRouting()` checks it per start).
-3. Only then restart.
+The flag takes effect only on restart. `loadConfig()` runs once at boot (`apps/api/src/index.ts`) and nothing reloads it, so editing `config.yaml` does not change how the live process routes. `Orchestrator.harnessRouting()` checks the flag on each start, but it reads the value loaded at boot.
+
+1. Stop starting new tasks. The live process still routes new single-mode starts to the Harness until it restarts.
+2. Let the live process drain its in-flight Harness sessions to a terminal state. This query returns 0 when they have drained: `SELECT count(*) FROM runs WHERE execution_request_id IS NOT NULL AND ended_at IS NULL;`
+3. Set the mode `false` in config.
+4. Restart. New starts route legacy from this point on.
+5. A scheduled dispatch reserved before the restart keeps the path it was reserved with (`dispatches.execution_path`), so a `harness` reservation still runs on the Harness. Cancel it or let it run.
 
 **Crash-during-rollback safety net.** If the process dies before every in-flight session drains, the **rollback-terminalisation policy** in `HarnessRecovery` is what makes the next boot safe: on `reconcileOnBoot`, any stranded session whose task's mode is disabled is driven to a terminal state (`FAILED`/`orphaned`, one `execution_results` row, the provider's `providerSessionRef` recorded on the recovery event for manual reconciliation) instead of being offered for resume or left parked awaiting an approval nobody will relay. Proven exhaustively over every reachable non-terminal session state by `apps/api/test/harness/mode-rollback.test.ts`, and enforced per-PR by the `test:recovery-chaos` CI step. A task with both a live legacy run and a live Harness session (an ambiguity the ownership predicate can't resolve) is quarantined the same way, independent of the mode flag, and never blocks the rest of the boot sweep from reconciling other tasks.
 

@@ -1,0 +1,208 @@
+{"id": "k20-001", "goal": "this is a test for checking the control panel tool. give me your honest opionion which ai assistant and model will you use for building plan for a pc game similar to GTA 3", "source": "operator-db", "ref": "AG-mt65evtp1"}
+{"id": "k20-002", "goal": "Reply with the single word: ready. Do not modify any files.", "source": "operator-db", "ref": "AG-mtpw0v9q1"}
+{"id": "k20-003", "goal": "hello there, as i remember i had a picture for the agentic os which is slighly different both from BE and FE can find this image and figure out if there is a progress for changes to that goal?", "source": "operator-db", "ref": "AG-mu35r74i1"}
+{"id": "k20-004", "goal": "Using the claude-mem memory search tools, find the most recent observation about the K19j MCP tool policy and state its title in one sentence. Then list the directory names under ~/.agent-plane. Do not modify any files.", "source": "operator-db", "ref": "AG-mufk50oq1"}
+{"id": "k20-005", "goal": "In the current working directory, create a file named parity.txt containing the single line parity-check. Then print the absolute path of the current working directory and the contents of parity.txt. Do not read or write any other path.", "source": "operator-db", "ref": "AG-mugvnmwk1"}
+{"id": "k20-006", "goal": "Use the Bash tool to run exactly this command: ls ~/.agent-plane/personal -- then report how many entries it printed. Do not modify any files.", "source": "operator-db", "ref": "AG-mugvnmwu2"}
+{"id": "k20-007", "goal": "Ship it", "source": "eval-scenario", "ref": "eval/scenarios/cross-provider-reroute.ts"}
+{"id": "k20-008", "goal": "Fix src/add.mjs so `pnpm test` passes (add(2, 3) should be 5, it currently subtracts).", "source": "eval-scenario", "ref": "eval/scenarios/happy-path.ts"}
+{"id": "k20-009", "goal": "Do the thing", "source": "eval-scenario", "ref": "eval/scenarios/adapter-error-mid-run.ts"}
+{"id": "k20-010", "goal": "Implement the parser", "source": "eval-scenario", "ref": "eval/scenarios/model-shadow.ts"}
+{"id": "k20-011", "goal": "long one", "source": "eval-scenario", "ref": "eval/scenarios/boot-crash-recovery.ts"}
+{"id": "k20-012", "goal": "Complete the quota continuation", "source": "eval-scenario", "ref": "eval/scenarios/quota-wait-and-resume.ts"}
+{"id": "k20-013", "goal": "Add a \"lint\" script to package.json that runs `node lint.mjs`, and remove the TODO marker from src/clean.mjs so lint.mjs passes.", "source": "eval-scenario", "ref": "eval/scenarios/replan-needed.ts"}
+{"id": "k20-014", "goal": "Finish the revision", "source": "eval-scenario", "ref": "eval/scenarios/context-pressure.ts"}
+{"id": "k20-015", "goal": "Burn the quota", "source": "eval-scenario", "ref": "eval/scenarios/hits-token-cap.ts"}
+{"id": "k20-016", "goal": "needs sign-off", "source": "eval-scenario", "ref": "eval/scenarios/needs-approval.ts"}
+{"id": "k20-017", "goal": "Fix the authentication refresh-token race", "source": "repo-task-goal", "ref": "apps/api/test/render.test.ts"}
+{"id": "k20-018", "goal": "observe me", "source": "repo-task-goal", "ref": "apps/api/test/context-endpoint.test.ts"}
+{"id": "k20-019", "goal": "personal secret work", "source": "repo-task-goal", "ref": "apps/api/test/workspace-isolation.test.ts"}
+{"id": "k20-020", "goal": "touch personal code", "source": "repo-task-goal", "ref": "apps/api/test/workspace-isolation.test.ts"}
+{"id": "k20-021", "goal": "legit work", "source": "repo-task-goal", "ref": "apps/api/test/workspace-isolation.test.ts"}
+{"id": "k20-022", "goal": "do the work", "source": "repo-task-goal", "ref": "apps/api/test/resource-slots.test.ts"}
+{"id": "k20-023", "goal": "needs a person", "source": "repo-task-goal", "ref": "apps/api/test/resource-slots.test.ts"}
+{"id": "k20-024", "goal": "implement the change", "source": "repo-task-goal", "ref": "apps/api/test/resource-slots.test.ts"}
+{"id": "k20-025", "goal": "upstream work", "source": "repo-task-goal", "ref": "apps/api/test/resource-slots.test.ts"}
+{"id": "k20-026", "goal": "SSE canary", "source": "repo-task-goal", "ref": "apps/api/test/auth.test.ts"}
+{"id": "k20-027", "goal": "wait for headroom", "source": "repo-task-goal", "ref": "apps/api/test/quota-probe.test.ts"}
+{"id": "k20-028", "goal": "needs headroom", "source": "repo-task-goal", "ref": "apps/api/test/quota-probe.test.ts"}
+{"id": "k20-029", "goal": "nightly retro", "source": "repo-task-goal", "ref": "apps/api/test/schedule-queue.test.ts"}
+{"id": "k20-030", "goal": "per-minute sweep", "source": "repo-task-goal", "ref": "apps/api/test/schedule-queue.test.ts"}
+{"id": "k20-031", "goal": "ordinary requirements parity", "source": "repo-task-goal", "ref": "apps/api/test/schedule-queue.test.ts"}
+{"id": "k20-032", "goal": "apia sweep", "source": "repo-task-goal", "ref": "apps/api/test/schedule-queue.test.ts"}
+{"id": "k20-033", "goal": "fold retro", "source": "repo-task-goal", "ref": "apps/api/test/schedule-queue.test.ts"}
+{"id": "k20-034", "goal": "per-minute fold sweep", "source": "repo-task-goal", "ref": "apps/api/test/schedule-queue.test.ts"}
+{"id": "k20-035", "goal": "lord howe sweep", "source": "repo-task-goal", "ref": "apps/api/test/schedule-queue.test.ts"}
+{"id": "k20-036", "goal": "lord howe fold", "source": "repo-task-goal", "ref": "apps/api/test/schedule-queue.test.ts"}
+{"id": "k20-037", "goal": "lord howe gap", "source": "repo-task-goal", "ref": "apps/api/test/schedule-queue.test.ts"}
+{"id": "k20-038", "goal": "Delete something", "source": "repo-task-goal", "ref": "apps/api/test/orchestrator.test.ts"}
+{"id": "k20-039", "goal": "Slow task", "source": "repo-task-goal", "ref": "apps/api/test/orchestrator.test.ts"}
+{"id": "k20-040", "goal": "Cancel me", "source": "repo-task-goal", "ref": "apps/api/test/orchestrator.test.ts"}
+{"id": "k20-041", "goal": "redaction test", "source": "repo-task-goal", "ref": "apps/api/test/orchestrator.test.ts"}
+{"id": "k20-042", "goal": "fix the bug", "source": "repo-task-goal", "ref": "apps/api/test/decision-service.test.ts"}
+{"id": "k20-043", "goal": "Implement the feature", "source": "repo-task-goal", "ref": "apps/api/test/parallel.test.ts"}
+{"id": "k20-044", "goal": "Fix the auth bug", "source": "repo-task-goal", "ref": "apps/api/test/parallel.test.ts"}
+{"id": "k20-045", "goal": "route anyway", "source": "repo-task-goal", "ref": "apps/api/test/artificial-analysis.test.ts"}
+{"id": "k20-046", "goal": "migrate the payments ledger on branch release/pci", "source": "repo-task-goal", "ref": "apps/api/test/artificial-analysis.test.ts"}
+{"id": "k20-047", "goal": "unchanged routing", "source": "repo-task-goal", "ref": "apps/api/test/artificial-analysis.test.ts"}
+{"id": "k20-048", "goal": "change it", "source": "repo-task-goal", "ref": "apps/api/test/project-verification-cutover.test.ts"}
+{"id": "k20-049", "goal": "refactor the billing secret rotation", "source": "repo-task-goal", "ref": "apps/api/test/model-catalog.test.ts"}
+{"id": "k20-050", "goal": "finish this", "source": "repo-task-goal", "ref": "apps/api/test/quota-scheduler.test.ts"}
+{"id": "k20-051", "goal": "bounded attempt", "source": "repo-task-goal", "ref": "apps/api/test/quota-scheduler.test.ts"}
+{"id": "k20-052", "goal": "route with quota", "source": "repo-task-goal", "ref": "apps/api/test/quota-scheduler.test.ts"}
+{"id": "k20-053", "goal": "claim boundary", "source": "repo-task-goal", "ref": "apps/api/test/quota-scheduler.test.ts"}
+{"id": "k20-054", "goal": "route transaction", "source": "repo-task-goal", "ref": "apps/api/test/quota-scheduler.test.ts"}
+{"id": "k20-055", "goal": "atomic claim", "source": "repo-task-goal", "ref": "apps/api/test/quota-scheduler.test.ts"}
+{"id": "k20-056", "goal": "cancel claim", "source": "repo-task-goal", "ref": "apps/api/test/quota-scheduler.test.ts"}
+{"id": "k20-057", "goal": "hand this over", "source": "repo-task-goal", "ref": "apps/api/test/characterization.test.ts"}
+{"id": "k20-058", "goal": "compare approaches", "source": "repo-task-goal", "ref": "apps/api/test/characterization.test.ts"}
+{"id": "k20-059", "goal": "a task routed a week ago", "source": "repo-task-goal", "ref": "apps/api/test/router-model.test.ts"}
+{"id": "k20-060", "goal": "Review this pull request", "source": "repo-task-goal", "ref": "apps/api/test/router-model.test.ts"}
+{"id": "k20-061", "goal": "review this", "source": "repo-task-goal", "ref": "apps/api/test/scheduler.test.ts"}
+{"id": "k20-062", "goal": "review earlier work", "source": "repo-task-goal", "ref": "apps/api/test/scheduler.test.ts"}
+{"id": "k20-063", "goal": "preserve me", "source": "repo-task-goal", "ref": "apps/api/test/scheduler.test.ts"}
+{"id": "k20-064", "goal": "continue carefully", "source": "repo-task-goal", "ref": "apps/api/test/scheduler.test.ts"}
+{"id": "k20-065", "goal": "run the reviewer", "source": "repo-task-goal", "ref": "apps/api/test/scheduler.test.ts"}
+{"id": "k20-066", "goal": "Ship the feature", "source": "repo-task-goal", "ref": "apps/api/test/failover.test.ts"}
+{"id": "k20-067", "goal": "Burn quota", "source": "repo-task-goal", "ref": "apps/api/test/failover.test.ts"}
+{"id": "k20-068", "goal": "Nowhere to go", "source": "repo-task-goal", "ref": "apps/api/test/failover.test.ts"}
+{"id": "k20-069", "goal": "Crashy task", "source": "repo-task-goal", "ref": "apps/api/test/failover.test.ts"}
+{"id": "k20-070", "goal": "No auto failover", "source": "repo-task-goal", "ref": "apps/api/test/failover.test.ts"}
+{"id": "k20-071", "goal": "Parked work", "source": "repo-task-goal", "ref": "apps/api/test/failover.test.ts"}
+{"id": "k20-072", "goal": "Long task", "source": "repo-task-goal", "ref": "apps/api/test/failover.test.ts"}
+{"id": "k20-073", "goal": "Edit the repo", "source": "repo-task-goal", "ref": "apps/api/test/failover.test.ts"}
+{"id": "k20-074", "goal": "will reject", "source": "repo-task-goal", "ref": "apps/api/test/harness/cutover.test.ts"}
+{"id": "k20-075", "goal": "after rollback", "source": "repo-task-goal", "ref": "apps/api/test/harness/mode-rollback.test.ts"}
+{"id": "k20-076", "goal": "Ship the widget", "source": "repo-task-goal", "ref": "apps/api/test/harness/handoff.test.ts"}
+{"id": "k20-077", "goal": "Review migration", "source": "repo-task-goal", "ref": "apps/web/e2e/shell.spec.ts"}
+{"id": "k20-078", "goal": "Check route ownership", "source": "repo-task-goal", "ref": "apps/web/e2e/shell.spec.ts"}
+{"id": "k20-079", "goal": "Implement the earlier parser milestone", "source": "repo-task-goal", "ref": "apps/web/e2e/demo-b.spec.ts"}
+{"id": "k20-080", "goal": "Inspect context evidence", "source": "repo-task-goal", "ref": "apps/web/e2e/operator-closure.spec.ts"}
+{"id": "k20-081", "goal": "Review deployment", "source": "repo-task-goal", "ref": "apps/web/e2e/review.spec.ts"}
+{"id": "k20-082", "goal": "Unstarted draft", "source": "repo-task-goal", "ref": "apps/web/e2e/review.spec.ts"}
+{"id": "k20-083", "goal": "Legacy approval", "source": "repo-task-goal", "ref": "apps/web/e2e/review.spec.ts"}
+{"id": "k20-084", "goal": "Read availability check", "source": "repo-task-goal", "ref": "apps/web/e2e/review.spec.ts"}
+{"id": "k20-085", "goal": "Publish the nightly digest", "source": "repo-task-goal", "ref": "apps/web/e2e/demo-a.spec.ts"}
+{"id": "k20-086", "goal": "Rotate the access logs", "source": "repo-task-goal", "ref": "apps/web/e2e/demo-a.spec.ts"}
+{"id": "k20-087", "goal": "Draft the quarterly summary", "source": "repo-task-goal", "ref": "apps/web/e2e/demo-a.spec.ts"}
+{"id": "k20-088", "goal": "Continue the migration", "source": "repo-task-goal", "ref": "apps/web/e2e/demo-a.spec.ts"}
+{"id": "k20-089", "goal": "e2e stream", "source": "repo-task-goal", "ref": "apps/web/e2e/auth.spec.ts"}
+{"id": "k20-090", "goal": "Refactor the billing reconciliation service", "source": "repo-task-goal", "ref": "apps/web/e2e/visual.spec.ts"}
+{"id": "k20-091", "goal": "Generate release notes for 2.4", "source": "repo-task-goal", "ref": "apps/web/e2e/visual.spec.ts"}
+{"id": "k20-092", "goal": "Continue the warehouse migration", "source": "repo-task-goal", "ref": "apps/web/e2e/visual.spec.ts"}
+{"id": "k20-093", "goal": "Review the deployment plan", "source": "repo-task-goal", "ref": "apps/web/e2e/visual.spec.ts"}
+{"id": "k20-094", "goal": "Harden the webhook signature check", "source": "repo-task-goal", "ref": "apps/web/e2e/visual.spec.ts"}
+{"id": "k20-095", "goal": "Index the design documents", "source": "repo-task-goal", "ref": "apps/web/e2e/visual.spec.ts"}
+{"id": "k20-096", "goal": "Review the proposed migration", "source": "repo-task-goal", "ref": "apps/web/e2e/standalone-shell.spec.ts"}
+{"id": "k20-097", "goal": "Recover the canonical read", "source": "repo-task-goal", "ref": "apps/web/e2e/standalone-shell.spec.ts"}
+{"id": "k20-098", "goal": "Reconcile streaming evidence", "source": "repo-task-goal", "ref": "apps/web/e2e/standalone-shell.spec.ts"}
+{"id": "k20-099", "goal": "Build the release candidate", "source": "repo-task-goal", "ref": "apps/web/e2e/demo-a5.spec.ts"}
+{"id": "k20-100", "goal": "Publish the release notes", "source": "repo-task-goal", "ref": "apps/web/e2e/demo-a5.spec.ts"}
+{"id": "k20-101", "goal": "Run the flaky integration gate", "source": "repo-task-goal", "ref": "apps/web/e2e/demo-a5.spec.ts"}
+{"id": "k20-102", "goal": "Ship if the gate is green", "source": "repo-task-goal", "ref": "apps/web/e2e/demo-a5.spec.ts"}
+{"id": "k20-103", "goal": "Post the nightly ops digest", "source": "repo-task-goal", "ref": "apps/web/e2e/demo-a5.spec.ts"}
+{"id": "k20-104", "goal": "Fix the failing auth test quickly", "source": "repo-task-goal", "ref": "packages/core/test/model-intelligence.test.ts"}
+{"id": "k20-105", "goal": "Write the module", "source": "repo-task-goal", "ref": "packages/core/test/model-intelligence.test.ts"}
+{"id": "k20-106", "goal": "Do it on the cheapest model", "source": "repo-task-goal", "ref": "packages/core/test/model-intelligence.test.ts"}
+{"id": "k20-107", "goal": "Ship the parser", "source": "repo-task-goal", "ref": "packages/core/test/model-intelligence.test.ts"}
+{"id": "k20-108", "goal": "Review this PR", "source": "repo-task-goal", "ref": "packages/core/test/model-intelligence.test.ts"}
+{"id": "k20-109", "goal": "Update the mailing address shown on the contact page", "source": "synthetic", "ref": null, "probe": "substring-trap"}
+{"id": "k20-110", "goal": "Summarise the latest release notes for the team", "source": "synthetic", "ref": null, "probe": "substring-trap"}
+{"id": "k20-111", "goal": "Why is the padding on the settings card uneven?", "source": "synthetic", "ref": null, "probe": "substring-trap"}
+{"id": "k20-112", "goal": "Check which contestants registered after Friday", "source": "synthetic", "ref": null, "probe": "substring-trap"}
+{"id": "k20-113", "goal": "Find the auditorium booking for next week", "source": "synthetic", "ref": null, "probe": "substring-trap"}
+{"id": "k20-114", "goal": "Give me the attestation status of the K8 egress test", "source": "synthetic", "ref": null, "probe": "substring-trap"}
+{"id": "k20-115", "goal": "Rebuild my understanding of how the scheduler wakes tasks", "source": "synthetic", "ref": null, "probe": "substring-trap"}
+{"id": "k20-116", "goal": "What does the protest log say about yesterday's outage?", "source": "synthetic", "ref": null, "probe": "substring-trap"}
+{"id": "k20-117", "goal": "Explain the difference between an addendum and an appendix", "source": "synthetic", "ref": null, "probe": "substring-trap"}
+{"id": "k20-118", "goal": "Is the greatest-common-divisor helper still used anywhere?", "source": "synthetic", "ref": null, "probe": "substring-trap"}
+{"id": "k20-119", "goal": "Read the router module and tell me how failover is decided. Do not modify any files.", "source": "synthetic", "ref": null, "probe": "read-only"}
+{"id": "k20-120", "goal": "List the migrations in apps/api/src/db/migrations. No changes.", "source": "synthetic", "ref": null, "probe": "read-only"}
+{"id": "k20-121", "goal": "Look at the failing CI job and describe the cause, read-only.", "source": "synthetic", "ref": null, "probe": "read-only"}
+{"id": "k20-122", "goal": "Inspect the worktree for uncommitted changes and report them without touching anything.", "source": "synthetic", "ref": null, "probe": "read-only"}
+{"id": "k20-123", "goal": "Tell me which tests cover the tool gate. Do not edit anything.", "source": "synthetic", "ref": null, "probe": "read-only"}
+{"id": "k20-124", "goal": "Check whether the fix for the lease sweeper is on main; do not modify files.", "source": "synthetic", "ref": null, "probe": "read-only"}
+{"id": "k20-125", "goal": "Show me the current routing weights, read-only please.", "source": "synthetic", "ref": null, "probe": "read-only"}
+{"id": "k20-126", "goal": "Count the decision records per site. No changes to the database.", "source": "synthetic", "ref": null, "probe": "read-only"}
+{"id": "k20-127", "goal": "Review the diff on this branch but do not change any code.", "source": "synthetic", "ref": null, "probe": "read-only"}
+{"id": "k20-128", "goal": "Explain why test_calc.py fails; do not fix it yet.", "source": "synthetic", "ref": null, "probe": "read-only"}
+{"id": "k20-129", "goal": "Publish version 2.3.0 of the core package to npm", "source": "synthetic", "ref": null, "probe": "high-stakes"}
+{"id": "k20-130", "goal": "Force-push the rebased branch over origin/main", "source": "synthetic", "ref": null, "probe": "high-stakes"}
+{"id": "k20-131", "goal": "Drop the staging analytics table and recreate it empty", "source": "synthetic", "ref": null, "probe": "high-stakes"}
+{"id": "k20-132", "goal": "Deploy the API to production after the tests pass", "source": "synthetic", "ref": null, "probe": "high-stakes"}
+{"id": "k20-133", "goal": "Run terraform destroy on the old preview environment", "source": "synthetic", "ref": null, "probe": "high-stakes"}
+{"id": "k20-134", "goal": "Merge PR 61 with admin override, the checks are flaky", "source": "synthetic", "ref": null, "probe": "high-stakes"}
+{"id": "k20-135", "goal": "Delete the release tag v1.9.0 and its GitHub release", "source": "synthetic", "ref": null, "probe": "high-stakes"}
+{"id": "k20-136", "goal": "Rotate the operator API credential and revoke the old one", "source": "synthetic", "ref": null, "probe": "high-stakes"}
+{"id": "k20-137", "goal": "Truncate the events table on the operator workspace to free space", "source": "synthetic", "ref": null, "probe": "high-stakes"}
+{"id": "k20-138", "goal": "Push the hotfix directly to main and tag it", "source": "synthetic", "ref": null, "probe": "high-stakes"}
+{"id": "k20-139", "goal": "Fix the off-by-one error in the pagination helper", "source": "synthetic", "ref": null, "probe": "coding"}
+{"id": "k20-140", "goal": "Implement a retry with backoff in the quota probe client", "source": "synthetic", "ref": null, "probe": "coding"}
+{"id": "k20-141", "goal": "Refactor the orchestrator settle path into smaller functions", "source": "synthetic", "ref": null, "probe": "coding"}
+{"id": "k20-142", "goal": "Add a unit test for the scratch sweep on boot", "source": "synthetic", "ref": null, "probe": "coding"}
+{"id": "k20-143", "goal": "Migrate the checkpoint table to store diff stats as JSON", "source": "synthetic", "ref": null, "probe": "coding"}
+{"id": "k20-144", "goal": "Rename the harness bridge methods to match the contract doc", "source": "synthetic", "ref": null, "probe": "coding"}
+{"id": "k20-145", "goal": "Write a migration that adds a classifier_version column to tasks", "source": "synthetic", "ref": null, "probe": "coding"}
+{"id": "k20-146", "goal": "Make the lease sweeper interval configurable", "source": "synthetic", "ref": null, "probe": "coding"}
+{"id": "k20-147", "goal": "Replace the three regex copies with one shared classifier function", "source": "synthetic", "ref": null, "probe": "coding"}
+{"id": "k20-148", "goal": "The web build fails on a missing import; repair it", "source": "synthetic", "ref": null, "probe": "coding"}
+{"id": "k20-149", "goal": "Port the floor-discovery job to read JSONL input", "source": "synthetic", "ref": null, "probe": "coding"}
+{"id": "k20-150", "goal": "Create a CLI command that prints the prompt rate per workspace", "source": "synthetic", "ref": null, "probe": "coding"}
+{"id": "k20-151", "goal": "Update the Codex adapter to the new SDK event names", "source": "synthetic", "ref": null, "probe": "coding"}
+{"id": "k20-152", "goal": "Remove the deprecated harnessSingleMode config key", "source": "synthetic", "ref": null, "probe": "coding"}
+{"id": "k20-153", "goal": "Bump better-sqlite3 and fix whatever breaks", "source": "synthetic", "ref": null, "probe": "coding"}
+{"id": "k20-154", "goal": "Review PR 60 and list correctness issues", "source": "synthetic", "ref": null, "probe": "review"}
+{"id": "k20-155", "goal": "Audit the approval service for race conditions", "source": "synthetic", "ref": null, "probe": "review"}
+{"id": "k20-156", "goal": "Critique the K20 proposal before I approve it", "source": "synthetic", "ref": null, "probe": "review"}
+{"id": "k20-157", "goal": "Look over the diff in this branch and point out risky changes", "source": "synthetic", "ref": null, "probe": "review"}
+{"id": "k20-158", "goal": "Do a security review of the credential rotation script", "source": "synthetic", "ref": null, "probe": "review"}
+{"id": "k20-159", "goal": "Go through the session-input contract and flag gaps against the code", "source": "synthetic", "ref": null, "probe": "review"}
+{"id": "k20-160", "goal": "Check this migration for data-loss risks before it merges", "source": "synthetic", "ref": null, "probe": "review"}
+{"id": "k20-161", "goal": "Give me feedback on the parity report's recommendation", "source": "synthetic", "ref": null, "probe": "review"}
+{"id": "k20-162", "goal": "Review the new floors for false positives on common git commands", "source": "synthetic", "ref": null, "probe": "review"}
+{"id": "k20-163", "goal": "Assess whether the recovery tests cover every session state", "source": "synthetic", "ref": null, "probe": "review"}
+{"id": "k20-164", "goal": "Research how other schedulers handle overlapping cron occurrences", "source": "synthetic", "ref": null, "probe": "research"}
+{"id": "k20-165", "goal": "Investigate why the first harness batch stalled for 70 seconds", "source": "synthetic", "ref": null, "probe": "research"}
+{"id": "k20-166", "goal": "Compare the Claude and Codex adapters' approval relay semantics", "source": "synthetic", "ref": null, "probe": "research"}
+{"id": "k20-167", "goal": "Explain how the K13 cohort key is built", "source": "synthetic", "ref": null, "probe": "research"}
+{"id": "k20-168", "goal": "Why does the legacy path resume provider sessions but the harness does not?", "source": "synthetic", "ref": null, "probe": "research"}
+{"id": "k20-169", "goal": "What are the trade-offs of storing task kind at intake versus at read time?", "source": "synthetic", "ref": null, "probe": "research"}
+{"id": "k20-170", "goal": "Find out which providers emit limit.approaching events", "source": "synthetic", "ref": null, "probe": "research"}
+{"id": "k20-171", "goal": "Survey prompt-injection defences for tool-approval classifiers", "source": "synthetic", "ref": null, "probe": "research"}
+{"id": "k20-172", "goal": "Summarise the evidence behind the K19i floors decision", "source": "synthetic", "ref": null, "probe": "research"}
+{"id": "k20-173", "goal": "How much does a nightly judge run cost on this account?", "source": "synthetic", "ref": null, "probe": "research"}
+{"id": "k20-174", "goal": "Reply with the single word: ready.", "source": "synthetic", "ref": null, "probe": "general"}
+{"id": "k20-175", "goal": "Hello, what can you do in this workspace?", "source": "synthetic", "ref": null, "probe": "general"}
+{"id": "k20-176", "goal": "Draft a short status update for the team about the harness flip", "source": "synthetic", "ref": null, "probe": "general"}
+{"id": "k20-177", "goal": "Write a haiku about quota limits", "source": "synthetic", "ref": null, "probe": "general"}
+{"id": "k20-178", "goal": "Translate the rollout runbook summary into Hebrew", "source": "synthetic", "ref": null, "probe": "general"}
+{"id": "k20-179", "goal": "Plan my week around the soak review on the 17th", "source": "synthetic", "ref": null, "probe": "general"}
+{"id": "k20-180", "goal": "Remind me what we decided about the MCP tool policy", "source": "synthetic", "ref": null, "probe": "general"}
+{"id": "k20-181", "goal": "Turn these meeting notes into a checklist", "source": "synthetic", "ref": null, "probe": "general"}
+{"id": "k20-182", "goal": "Pick a name for the new decision site", "source": "synthetic", "ref": null, "probe": "general"}
+{"id": "k20-183", "goal": "Tidy up my notes file in the scratch directory", "source": "synthetic", "ref": null, "probe": "general"}
+{"id": "k20-184", "goal": "Make a table of the open PRs and who owns each", "source": "synthetic", "ref": null, "probe": "general"}
+{"id": "k20-185", "goal": "Brainstorm three names for the operator console", "source": "synthetic", "ref": null, "probe": "general"}
+{"id": "k20-186", "goal": "Over the next two weeks, migrate all telemetry reads to the stored task kind", "source": "synthetic", "ref": null, "probe": "long-horizon"}
+{"id": "k20-187", "goal": "Build the K22 operator surface end to end, including the calibration panel", "source": "synthetic", "ref": null, "probe": "long-horizon"}
+{"id": "k20-188", "goal": "Rewrite the scheduler to support multi-workspace pools", "source": "synthetic", "ref": null, "probe": "long-horizon"}
+{"id": "k20-189", "goal": "Take the K20 classifier from proposal to shadow soak, with a report each day", "source": "synthetic", "ref": null, "probe": "long-horizon"}
+{"id": "k20-190", "goal": "Port the web UI to the new design system, page by page", "source": "synthetic", "ref": null, "probe": "long-horizon"}
+{"id": "k20-191", "goal": "In the ai-control-plan repo, run the test suite and report failures", "source": "synthetic", "ref": null, "probe": "needs-repo"}
+{"id": "k20-192", "goal": "On branch feat/x in this repository, resolve the merge conflict in server.ts", "source": "synthetic", "ref": null, "probe": "needs-repo"}
+{"id": "k20-193", "goal": "Open the repo's CHANGELOG and add an entry for 1.4.0", "source": "synthetic", "ref": null, "probe": "needs-repo"}
+{"id": "k20-194", "goal": "Bisect the regression in the scheduler tests on this repo", "source": "synthetic", "ref": null, "probe": "needs-repo"}
+{"id": "k20-195", "goal": "Squash the last three commits on the task branch into one", "source": "synthetic", "ref": null, "probe": "needs-repo"}
+{"id": "k20-196", "goal": "Make it better", "source": "synthetic", "ref": null, "probe": "ambiguous"}
+{"id": "k20-197", "goal": "Handle the thing from yesterday", "source": "synthetic", "ref": null, "probe": "ambiguous"}
+{"id": "k20-198", "goal": "Do the usual checks", "source": "synthetic", "ref": null, "probe": "ambiguous"}
+{"id": "k20-199", "goal": "Sort out the tests", "source": "synthetic", "ref": null, "probe": "ambiguous"}
+{"id": "k20-200", "goal": "Can you look at this?", "source": "synthetic", "ref": null, "probe": "ambiguous"}
+{"id": "k20-201", "goal": "Follow up on the review", "source": "synthetic", "ref": null, "probe": "ambiguous"}
+{"id": "k20-202", "goal": "Test whether the new floors fire on the corpus, then fix any that misfire", "source": "synthetic", "ref": null, "probe": "ambiguous"}
+{"id": "k20-203", "goal": "Explain and then fix the flaky scheduler test", "source": "synthetic", "ref": null, "probe": "ambiguous"}
+{"id": "k20-204", "goal": "Review the fix and add a test if one is missing", "source": "synthetic", "ref": null, "probe": "ambiguous"}
+{"id": "k20-205", "goal": "Research a better regex and implement it", "source": "synthetic", "ref": null, "probe": "ambiguous"}
+{"id": "k20-206", "goal": "תקן את הבאג בפונקציית החיבור", "source": "synthetic", "ref": null, "probe": "mixed-language"}
+{"id": "k20-207", "goal": "Explique pourquoi le test échoue", "source": "synthetic", "ref": null, "probe": "mixed-language"}
+{"id": "k20-208", "goal": "修复登录页面的错误", "source": "synthetic", "ref": null, "probe": "mixed-language"}
