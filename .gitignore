@@ -13,3 +13,4 @@ graphify-out/
 apps/web/test-results/
 apps/web/playwright-report/
 eval/out/
+worktrees/

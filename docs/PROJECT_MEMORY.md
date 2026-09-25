@@ -391,4 +391,7 @@ checks; this eighth one is structural, and K19c cannot be reviewed without it.
 - **`decisions.mcpTools` (workspace config only) declares each MCP tool `read-only` or `mutating`.** Undeclared stays `opaque`. `read-only` removes only the `opaque` hit, so path and other floors still apply and a declaration alone never yields `auto-approve`. `mutating` prompts as `mcp-mutating`. A bad value fails at load. Names are matched exactly, in both the Claude (`mcp__s__t`) and Codex (`mcp:s.t`) forms.
 - **Operator DB: 17 of 21 → 8 of 21** with claude-mem's `search`, `get_observations` and `smart_search` declared. The operator's own config does not declare them yet; that is the operator's call. The remaining 8 are `path-outside-worktree` on a repo-less task. The corpus stays at 29 of 50.
 - **The operator workspace has never recorded a gate decision.** Its DB has no `decision_records` table (pre-025 build), so §7.1(1), (2) and (7) cannot start until it runs this build.
-- **K19h and K19i are not on `main`.** #53 and #54 were squash-merged into their stacked bases (2026-09-24). The K19j PR's first commit applies `a6f5cc1..96bd525` to `main` to land them; check `plans/progress.md` stream B.
+
+## 2026-09-24 — Merge policy for stacked PRs (SHIPPED)
+
+Stacked PRs merge with merge commits only, never squash: squashing #53/#54 into their stacked bases re-wrote history and forced #55 to re-land K19h/K19i as a range diff. #55 itself was squash-merged (`818ef1d`, one parent), so no stacked commit SHA is an ancestor of `main`; content proof is by tree equality. Agents open PRs but never merge them; the owner merges.

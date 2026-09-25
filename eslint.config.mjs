@@ -11,6 +11,8 @@ export default tseslint.config(
       // Fixture files are sample workspaces the eval scenarios operate on —
       // data for the agent under test, not code in this codebase.
       "eval/fixtures/**",
+      // Untracked agent worktrees are other checkouts, not this tree's code.
+      "worktrees/**",
     ],
   },
   js.configs.recommended,
