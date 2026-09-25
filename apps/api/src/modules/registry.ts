@@ -47,11 +47,7 @@ export class Registry {
     for (const [id, cfg] of Object.entries(this.config.assistants)) {
       this.adapters.set(
         id,
-        createAdapter(id as AssistantId, cfg.provider, cfg.options ?? {}, {
-          // Streaming-input launches exist ONLY to carry session-addressed
-          // input, so they follow that flag exactly: off by default.
-          liveInput: this.config.sessionInput.enabled,
-        }),
+        createAdapter(id as AssistantId, cfg.provider, cfg.options ?? {}, this.config.sessionInput.enabled),
       );
       upsert.run(id, cfg.provider, cfg.enabled === false ? 0 : 1);
     }
@@ -191,13 +187,13 @@ function createAdapter(
   id: AssistantId,
   provider: string,
   options: Record<string, unknown> = {},
-  runtime: { liveInput?: boolean } = {},
+  sessionInputEnabled = false,
 ): AgentAdapter {
   switch (provider) {
     case "anthropic":
-      return new ClaudeAdapter(id, undefined, { liveInput: runtime.liveInput });
+      return new ClaudeAdapter(id, undefined, { liveInput: sessionInputEnabled });
     case "openai":
-      return new CodexAdapter(id);
+      return new CodexAdapter(id, { appServerInput: sessionInputEnabled && options.appServerInput === true });
     case "openrouter":
       return new OpenRouterCodexAdapter(id, options as OpenRouterOptions);
     case "cursor":

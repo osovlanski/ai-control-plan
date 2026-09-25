@@ -53,7 +53,7 @@ import { RepositoryIdentityRegistry } from "./repo/identity-registry.js";
 import { renderHandoffMd } from "./render/handoff.js";
 import { renderProgressMd } from "./render/progress.js";
 import { registerAuth, type SessionMap } from "./auth/index.js";
-import { ClaudeAdapter, ClaudeCodeSessionInputAdapter, FakeSessionInputAdapter } from "@agent-plane/adapters";
+import { ClaudeAdapter, ClaudeCodeSessionInputAdapter, CodexAdapter, FakeSessionInputAdapter } from "@agent-plane/adapters";
 import { CredentialStore, credentialPath } from "./auth/credential-file.js";
 
 export interface ServerDeps {
@@ -961,6 +961,10 @@ export function buildServer(deps: ServerDeps): BuiltServer {
       const row = db.prepare("SELECT provider FROM assistants WHERE id = ?").get(assistantId) as
         | { provider: string }
         | undefined;
+      if (row?.provider === "openai") {
+        const owner = registry.adapter(assistantId);
+        return owner instanceof CodexAdapter ? owner.sessionInput : undefined;
+      }
       if (row?.provider === "anthropic") {
         let adapter = lives.get(assistantId);
         if (!adapter) {
@@ -1039,6 +1043,29 @@ export function buildServer(deps: ServerDeps): BuiltServer {
       async (req, reply) => {
         if (!inputs.session(req.params.sessionId)) return reply.status(404).send({ error: "not found" });
         return inputs.capability(req.params.sessionId);
+      },
+    );
+
+    // Explicit session authorization for Codex. Workspace enablement alone grants nothing.
+    app.post<{ Params: { sessionId: string }; Body: { enabled?: boolean } }>(
+      "/api/sessions/:sessionId/input-enablement", write,
+      async (req, reply) => {
+        const session = inputs.session(req.params.sessionId);
+        if (!session) return reply.status(404).send({ error: "not found" });
+        if (typeof req.body?.enabled !== "boolean") return reply.status(400).send({ error: "enabled must be a boolean" });
+        const owner = registry.adapter(session.assistantId);
+        const adapter = owner instanceof CodexAdapter ? owner.sessionInput : undefined;
+        if (!adapter) return reply.status(409).send({ reason: "adapter_input_unsupported" });
+        if (!req.body.enabled) adapter.disable(session.sessionId);
+        else {
+          if (session.sessionState !== "RUNNING" || session.approvalPending) return reply.status(409).send({ reason: "session_not_running" });
+          const probe = await adapter.enable({
+            sessionId: session.sessionId, assistantId: session.assistantId,
+            providerSessionRef: session.providerSessionRef ?? undefined,
+          });
+          if (!probe.available) return reply.status(409).send(probe);
+        }
+        return inputs.capability(session.sessionId);
       },
     );
 

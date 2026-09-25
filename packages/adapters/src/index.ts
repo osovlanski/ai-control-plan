@@ -17,3 +17,4 @@ export {
   type ClaudeLiveSessionLookup,
   type ClaudeSessionInputOptions,
 } from "./claude-session-input.js";
+export { CodexSessionInputAdapter } from "./codex-session-input.js";

@@ -409,3 +409,11 @@ Live provider input branches share `feat/agentic-os-session-input-live-contract`
 ## 2026-09-24 — session-input restack boundary (PROPOSED)
 
 Owner decision: main’s Shell survives. `feat/session-input-core` supersedes the core portion of #50; its composer is deferred to a separate port. Claude #47 and Codex #51 remain sibling adapters over this shared contract; #48 follows the composer port. No real adapter is registered by the core, and input defaults off. Migration slots 025–027 belong to main’s decision service; input uses 028 and 029. API 2.3 is additive over main’s 2.2. Session opt-in grants bind kernel session, assistant and provider session and are revoked on restart.
+
+## 2026-09-22 — Codex app-server ownership (BLOCKED)
+
+The bounded real app-server spike cannot attach to the actual SDK AgentAdapter run: SDK-bundled CLI 0.154.0 returns `already has an active writer` on resume, then `thread not found` on steer while the SDK tool is still executing. A restart reads history but does not attach. Exact metadata and reproducible probe: `docs/codex-session-input-app-server-spike.md`. No Codex input adapter is registered. Next work requires explicitly scoping an app-server-owned AgentAdapter execution transport, not a second unrelated provider thread. A future steer response alone has at most a transport ack ceiling; caller-ID receipts/idempotency remain unproven, so ambiguous sends require manual recovery.
+
+## 2026-09-22 — Codex transport-only session input
+
+The SDK attachment blocker above is preserved as historical evidence. The Codex provider branch now supplies an opt-in app-server-owned execution transport and `CodexSessionInputAdapter`, with the unchanged shared interface. Workspace flag, assistant `options.appServerInput`, and an exact-session enablement command are all required. Defaults retain SDK execution. Same-owner live CLI 0.154.0 steering succeeded and its text appeared in history/output, but the stored item had no caller message ID. Ack ceiling remains `transport`; no idempotent replay or receipt lookup is claimed. Unknown attempts require manual recovery. Evidence, limits, commands and validation: `docs/codex-session-input-adapter.md`.
