@@ -48,6 +48,7 @@ import {
 } from "../repo/git.js";
 import { renderCommittedHandoff, renderHandoffPrompt } from "../render/handoff.js";
 import { renderTaskPrompt } from "../render/prompt.js";
+import { ensureScratch, removeScratch, sweepScratch } from "../repo/scratch.js";
 import type { CheckpointReason, CheckpointService } from "./checkpoint.js";
 import type { HarnessBridge } from "./harness/control-plane-bridge.js";
 import { deriveEnvelopeUpdate } from "./harness/envelope-derivation.js";
@@ -384,7 +385,17 @@ export class Orchestrator {
         .run(new Date().toISOString(), row.id);
       reconciled += 1;
     }
+    // K19k: scratch left by a task that went terminal while the plane was down.
+    sweepScratch(this.config.dir, (taskId) => {
+      const row = this.tasks.get(taskId);
+      return row !== undefined && !isTerminal(row.state);
+    });
     return reconciled;
+  }
+
+  /** K19k: a terminal task never runs again, so its scratch directory goes. */
+  releaseScratch(taskId: string): void {
+    removeScratch(this.config.dir, taskId);
   }
 
   private runsOfTask(taskId: string): ActiveRun[] {
@@ -419,6 +430,7 @@ export class Orchestrator {
       const saved = this.db.prepare('SELECT request_json FROM execution_requests WHERE id = ? AND superseded = 0').get(options.dispatchId) as { request_json: string | null } | undefined;
       if (saved?.request_json) {
         const request = JSON.parse(saved.request_json) as ExecutionRequest;
+        if (request.context.scratchPath) ensureScratch(this.config.dir, taskId);
         request.runSpec.prompt = this.dispatchPrompt(request, options);
         new SessionStore(this.db).recordRequest(request); // fingerprint witnesses semantic replay
         return this.executeDispatch(request, options);
@@ -432,7 +444,10 @@ export class Orchestrator {
     // Repo tasks run in an isolated worktree on branch task/<id>. A handoff
     // reuses the existing tree so the next assistant inherits the work; a
     // parallel competitor brings its own so two assistants never share one.
-    let workdir = options.worktree?.worktreePath ?? row.worktree_path ?? this.config.dir;
+    // K19k: a task with no repository runs in its own kernel-owned scratch
+    // directory, never in the workspace directory beside the DB and credentials.
+    const scratchPath = !envelope.repository && !options.worktree && !row.worktree_path ? ensureScratch(this.config.dir, taskId) : undefined;
+    let workdir = options.worktree?.worktreePath ?? row.worktree_path ?? scratchPath ?? this.config.dir;
     if (envelope.repository && !options.worktree && !row.worktree_path) {
       const worktree = await createTaskWorktree(
         envelope.repository.path,
@@ -482,7 +497,7 @@ export class Orchestrator {
       const project = envelope.repository && this.projectVerification ? this.projectVerification(workdir) : undefined;
       const request = buildExecutionRequest({ taskId, dispatchId: options.dispatchId, assistantId, attempt, prompt, workdir, model: this.requestedModel(taskId, assistantId, options.routingDecisionRef),
         worktree: envelope.repository ? { repoPath: envelope.repository.path, branch: taskRow.branch ?? envelope.repository.branch, worktreePath: workdir, baseRef: taskRow.base_ref ?? 'HEAD' } : undefined,
-        target: executionTarget, approvalMode: this.config.policy.approvalMode, maxRuntimeMs: this.maxRuntimeMs,
+        scratchPath, target: executionTarget, approvalMode: this.config.policy.approvalMode, maxRuntimeMs: this.maxRuntimeMs,
         routingDecisionRef: options.routingDecisionRef!, verificationPlan: project?.plan });
       this.db.transaction(() => {
         const d = this.db.prepare('SELECT phase, origin FROM dispatches WHERE dispatch_id = ?').get(options.dispatchId) as { phase: string; origin: string };
@@ -543,6 +558,7 @@ export class Orchestrator {
                 baseRef: taskRow.base_ref ?? "HEAD",
               }
             : undefined,
+          scratchPath,
           target: executionTarget,
           approvalMode: this.config.policy.approvalMode,
           maxRuntimeMs: this.maxRuntimeMs,

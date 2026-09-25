@@ -1240,7 +1240,9 @@ class RunContext {
       toolsAllow: policy.tools.allow,
       toolsDeny: policy.tools.deny,
       approvalMode: policy.approval.mode,
-      worktreePath: this.request.context.worktree?.worktreePath,
+      // K19k: a repo-less task's scratch directory is its worktree for the
+      // floors; paths outside it still hit path-outside-worktree.
+      worktreePath: this.request.context.worktree?.worktreePath ?? this.request.context.scratchPath,
       repoPath: this.request.context.worktree?.repoPath,
       sessionId: this.sessionId,
     };

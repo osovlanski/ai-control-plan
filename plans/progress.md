@@ -83,6 +83,7 @@ the default provider is `rules`, `applied` is closed, nothing is activated.
 | K19f–K19h | lexer rejected, K19g floors, second-lock decision and survey (branches `claude/k19f-command-lexer`, `claude/k19h-second-lock`) |
 | K19i | **floors decide the gate; the judge moves to offline floor discovery**; an unregistered configured provider fails at startup |
 | K19j | a declared MCP tool policy (`decisions.mcpTools`); §7.2 leaves tool-gate activation (owner decision); activation-readiness table |
+| K19k | a kernel-owned scratch directory for a task with no repository; the gate treats it as the worktree |
 
 - **K19i results (2026-09-23/24), branch `claude/k19i-floors-decide`:**
   - **Gate:** reads rules and floors only. No judge call on the hot path.
@@ -116,6 +117,32 @@ the default provider is `rules`, `applied` is closed, nothing is activated.
     attestations FAIL. See plan §5 K19j. Nothing is activated.
   - **Owner decision:** §7.2 is a nightly quality metric for floor discovery, not a tool-gate
     activation blocker.
+
+- **Operator workspace readiness (2026-09-24), shadow only:**
+  - **Backup first:** `agent-plane.db.backup-20260924T131553Z` beside the DB, with a `.sha256`
+    file; the config was backed up the same way.
+  - **Migrations 025–027 applied** by booting `main` (`818ef1d`) on the operator workspace.
+    `decision_records` exists.
+  - **`decisions.mcpTools`** now declares claude-mem's `get_observations`, `smart_search` and
+    `search` `read-only` in the operator config.
+  - **The operator config runs the legacy path** (no `execution.harnessModes.single`), and the
+    legacy path has no gate. A real task there wrote **0 rows**. The same task under
+    `AGENT_PLANE_HARNESS_SINGLE_MODE=1` (that process only) wrote **7 shadow rows, 4 prompt
+    (0.571)**: both `ls ~/.agent-plane` calls prompted on `path-outside-worktree`; the declared
+    `search` and a `ToolSearch` auto-approved. The soak for §7.1(1), (2) and (7) needs
+    `execution.harnessModes.single: true` in the operator config first. That is the owner's call.
+
+- **K19k results (2026-09-24), branch `claude/k19k-scratch-worktree`:**
+  - A task with no repository runs in `<workspace>/scratch/<taskId>` (0700), not in the workspace
+    directory beside the DB and credentials. The kernel removes it when the task is terminal, and
+    a boot sweep removes any left behind. The gate treats it as the worktree.
+  - **Operator DB replay: 8 of 21, unchanged.** Every one of the 8 names a path under `~`, which
+    is outside any scratch directory too.
+  - **Live, same task before and after: 4 of 7 → 4 of 9 rows prompt.** Both runs listed
+    `~/.agent-plane` and both prompted. K19k removed no prompt from this task.
+  - What it does remove: a file tool reading the task's own files by absolute path (pinned in
+    `scratch-worktree.test.ts`).
+  - K19h corpus: 29 of 50, unchanged. No migration.
 
 - **(Superseded for the tool gate by K19j.) §7.2 still FAILS, and that is the blocker on activation.** 10 of 51 fixtures
   soften a judged answer, down from 26–27 before scoping. **9 of the 10 carry the

@@ -675,6 +675,9 @@ export class Scheduler {
     // transition may be inside a transaction, so both halves run on a microtask,
     // which fires only after the (synchronous) enclosing transaction committed.
     this.releaseSoon(taskId, 'task terminal');
+    queueMicrotask(() => {
+      try { this.d.orchestrator.releaseScratch(taskId); } catch (err) { this.d.onError?.(err); }
+    });
     if (!this.enabled) return;
     const waiters = (this.d.db.prepare("SELECT task_id, generation, depends_on FROM wait_conditions WHERE kind = 'dependency' AND state = 'active'")
       .all() as { task_id: string; generation: number; depends_on: string }[])

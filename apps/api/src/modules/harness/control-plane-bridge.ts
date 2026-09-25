@@ -39,6 +39,8 @@ export interface BridgeStartInput {
   prompt: string;
   workdir: string;
   worktree?: { repoPath: string; branch: string; worktreePath: string; baseRef: string };
+  /** K19k: the kernel-owned scratch directory of a task with no repository. */
+  scratchPath?: string;
   /** Stable Control Plane identity; paths remain authoritative for placement. */
   target?: ExecutionTarget;
   approvalMode: ApprovalMode;
@@ -85,6 +87,7 @@ export function buildExecutionRequest(input: BridgeStartInput): ExecutionRequest
     context: {
       ...(input.target ? { target: input.target } : {}),
       ...(input.worktree ? { worktree: input.worktree } : {}),
+      ...(input.scratchPath ? { scratchPath: input.scratchPath } : {}),
     },
     // A persisted Control Plane plan is canonical; callers cannot supply a
     // different executable check list alongside it.
