@@ -11,6 +11,7 @@
     "model:shadow-report": "tsx src/bin/model-shadow-report.ts",
     "decision:injection-frequency": "tsx src/bin/decision-injection-frequency.ts",
     "decision:floor-discovery": "tsx src/bin/decision-floor-discovery.ts",
+    "soak:check": "tsx src/bin/tool-gate-soak-check.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:harness-on": "vitest run",
