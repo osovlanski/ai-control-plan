@@ -1,4 +1,4 @@
-import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
+import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import fastifyStatic from "@fastify/static";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -38,12 +38,22 @@ import { createArtificialAnalysisSource } from "./modules/artificial-analysis.js
 import { QuotaProjection } from "./modules/quota.js";
 import { readTaskContext } from "./modules/context.js";
 import { TaskStore } from "./modules/tasks.js";
+import {
+  SessionInputCommandRejectedError,
+  SessionInputConflictError,
+  SessionInputInvalidError,
+  SessionInputService,
+  SessionInputUnknownSessionError,
+  type SessionInputAdapterResolver,
+  type SessionInputRow,
+} from "./modules/session-input.js";
 import { TelemetryService } from "./modules/telemetry.js";
 import { EventRetention } from "./modules/retention.js";
 import { RepositoryIdentityRegistry } from "./repo/identity-registry.js";
 import { renderHandoffMd } from "./render/handoff.js";
 import { renderProgressMd } from "./render/progress.js";
 import { registerAuth, type SessionMap } from "./auth/index.js";
+import { FakeSessionInputAdapter } from "@agent-plane/adapters";
 import { CredentialStore, credentialPath } from "./auth/credential-file.js";
 
 export interface ServerDeps {
@@ -63,6 +73,12 @@ export interface ServerDeps {
   modelCatalogSources?: CatalogSource[];
   /** Transport handed to those sources. Test/demo only. */
   modelCatalogFetch?: typeof globalThis.fetch;
+  /**
+   * Overrides the session-input delivery adapters. Test/demo only — the default
+   * resolver hands the deterministic fake adapter to `provider: fake`
+   * assistants and NOTHING to every real provider (docs/contracts/session-input.md).
+   */
+  sessionInputAdapters?: SessionInputAdapterResolver;
   registerExtraRoutes?: (app: FastifyInstance) => void;
   /** M16 decision providers beyond rules. Test/scratch only — production registers `decisionProviders()` (K19d: the model judge). */
   decisionProviders?: DecisionProvider[];
@@ -80,6 +96,14 @@ export interface BuiltServer {
   scheduler: Scheduler;
   quotaProbes: QuotaProbeService;
   modelCatalog: ModelCatalogService;
+  /** Present only when `sessionInput.enabled` is true. */
+  sessionInputs?: SessionInputService;
+  /**
+   * Resolves once the scheduler-owned redelivery pump has drained everything the
+   * kernel has announced so far. Present only when `sessionInput.enabled` is
+   * true; it exists so a caller can await the pump instead of racing it.
+   */
+  sessionInputRedelivery?: () => Promise<unknown>;
 }
 
 export function buildServer(deps: ServerDeps): BuiltServer {
@@ -200,6 +224,9 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     failover: config.failover,
     sync: config.sync,
     scheduler: { enabled: scheduler.enabled },
+    // Advertised so a client can tell "capability off" from "request failed"
+    // without probing a route that does not exist.
+    sessionInput: { enabled: config.sessionInput.enabled },
   }));
 
   // ---- Assistants / registry ----
@@ -914,6 +941,162 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   }, 60_000);
   leaseSweep.unref();
   app.addHook("onClose", async () => { clearInterval(leaseSweep); scheduler.stop(); });
+  // ---- Durable session-addressed conversational input (default OFF) ----
+  //
+  // The whole capability is behind `sessionInput.enabled`. While it is false
+  // NOTHING below is registered: the routes 404 exactly as they did before this
+  // slice, no ledger row is ever written, and the Shell composer keeps saying
+  // truthfully that session-addressed delivery is unavailable.
+  let sessionInputs: SessionInputService | undefined;
+  let sessionInputRedelivery: (() => Promise<unknown>) | undefined;
+  if (config.sessionInput.enabled) {
+    const fakes = new Map<string, FakeSessionInputAdapter>();
+    const resolve: SessionInputAdapterResolver = deps.sessionInputAdapters ?? ((assistantId) => {
+      // Real providers declare no session-input capability in this slice. A
+      // typed `AgentAdapter.send` is NOT an acknowledgement contract, so it is
+      // deliberately not reused here.
+      const row = db.prepare("SELECT provider FROM assistants WHERE id = ?").get(assistantId) as
+        | { provider: string }
+        | undefined;
+      if (row?.provider !== "fake") return undefined;
+      let adapter = fakes.get(assistantId);
+      if (!adapter) {
+        adapter = new FakeSessionInputAdapter();
+        fakes.set(assistantId, adapter);
+      }
+      return adapter;
+    });
+    sessionInputs = new SessionInputService(db, { workspace: config.workspace, adapters: resolve, now });
+    // A previous incarnation's in-flight attempts are unknown outcomes, not
+    // deliveries and not failures. Fence them before serving anything.
+    sessionInputs.reconcileOpenAttempts();
+    const inputs = sessionInputs;
+
+    app.post<{
+      Params: { sessionId: string };
+      Body: { clientMessageId?: string; text?: string; kind?: string; expiresAt?: string };
+    }>("/api/sessions/:sessionId/inputs", write, async (req, reply) => {
+      const body = req.body ?? {};
+      const actor = `${req.cred?.kind ?? "unknown"}:${req.cred?.kid ?? "unknown"}`;
+      let messageId: string;
+      try {
+        const { row } = inputs.submit({
+          sessionId: req.params.sessionId,
+          clientMessageId: String(body.clientMessageId ?? ""),
+          text: String(body.text ?? ""),
+          kind: body.kind,
+          expiresAt: body.expiresAt,
+          actor,
+        });
+        messageId = row.id;
+      } catch (err) {
+        if (err instanceof SessionInputUnknownSessionError) return reply.status(404).send({ error: "not found" });
+        if (err instanceof SessionInputConflictError) return reply.status(409).send({ error: message(err) });
+        if (err instanceof SessionInputInvalidError) return reply.status(400).send({ error: message(err) });
+        throw err;
+      }
+      // The record is already durable; a dispatch fault must never turn a
+      // persisted input into a failed request.
+      try {
+        await inputs.dispatch(messageId);
+      } catch (err) {
+        app.log.error(err);
+      }
+      const row = inputs.get(messageId)!;
+      // 202 means persisted — never "the provider has it". A message refused on
+      // arrival is reported as such rather than dressed up as accepted work.
+      return reply.status(row.state === "rejected" || row.state === "expired" ? 422 : 202).send(inputView(row, inputs));
+    });
+
+    app.get<{ Params: { sessionId: string }; Querystring: { after?: string; limit?: string } }>(
+      "/api/sessions/:sessionId/inputs", read.sessions,
+      (req, reply) => {
+        if (!inputs.session(req.params.sessionId)) return reply.status(404).send({ error: "not found" });
+        const limit = req.query.limit ? Number(req.query.limit) : undefined;
+        const rows = inputs.list(req.params.sessionId, { after: req.query.after, limit });
+        return { inputs: rows.map((row) => inputView(row, inputs)), nextCursor: rows.at(-1)?.id ?? null };
+      },
+    );
+
+    // Probe the adapter for this exact session, rather than inferring liveness from configuration.
+    app.get<{ Params: { sessionId: string } }>(
+      "/api/sessions/:sessionId/input-capability", read.sessions,
+      async (req, reply) => {
+        if (!inputs.session(req.params.sessionId)) return reply.status(404).send({ error: "not found" });
+        return inputs.capability(req.params.sessionId);
+      },
+    );
+
+    // Resolves a lost response: the client knows its own message id from the
+    // 202 it never received only via this read plus its client key listing.
+    app.get<{ Params: { id: string } }>("/api/inputs/:id", read.sessions, (req, reply) => {
+      const row = inputs.get(req.params.id);
+      if (!row) return reply.status(404).send({ error: "not found" });
+      return inputView(row, inputs);
+    });
+
+    // ---- Explicit commands over a message id ----
+    //
+    // Addressed by MESSAGE id, not session id, and authorized exactly like the
+    // send path: a record outside this workspace is invisible, so it answers
+    // 404 rather than revealing that it exists. A command the record's own
+    // state forbids answers 409 with a machine-readable reason — never a
+    // silent no-op, because "nothing happened" and "we refused" are different
+    // facts to an operator deciding what to do next.
+    const command = (
+      run: (id: string, actor: string, expectedVersion?: number) => Promise<SessionInputRow | undefined>,
+    ) =>
+      async (
+        req: FastifyRequest<{ Params: { id: string }; Body?: { expectedVersion?: number } }>,
+        reply: FastifyReply,
+      ) => {
+        const actor = `${req.cred?.kind ?? "unknown"}:${req.cred?.kid ?? "unknown"}`;
+        try {
+          const row = await run(req.params.id, actor, req.body?.expectedVersion);
+          if (!row) return reply.status(404).send({ error: "not found" });
+          return reply.status(200).send(inputView(row, inputs));
+        } catch (err) {
+          if (err instanceof SessionInputCommandRejectedError) {
+            return reply.status(409).send({ error: message(err), reason: err.reason });
+          }
+          throw err;
+        }
+      };
+
+    app.post<{ Params: { id: string }; Body?: { expectedVersion?: number } }>(
+      "/api/inputs/:id/retry", write,
+      command((id, actor, expectedVersion) => inputs.retry(id, actor, expectedVersion)),
+    );
+
+    app.post<{ Params: { id: string }; Body?: { expectedVersion?: number } }>(
+      "/api/inputs/:id/cancel", write,
+      command(async (id, actor, expectedVersion) => inputs.cancel(id, actor, expectedVersion)),
+    );
+
+    // ---- Scheduler-owned redelivery ----
+    //
+    // The kernel already announces every task-state change on the task bus;
+    // that is the signal, and this subscribes to it rather than inventing a
+    // second one or polling. A message queued behind a quota pause or a
+    // pending approval therefore resumes on its own when the condition clears,
+    // with no client action.
+    //
+    // Work is chained rather than started inline for two reasons: a publish can
+    // happen inside a SQLite transaction, and serializing the pump means two
+    // announcements can never dispatch the same message twice.
+    let pump: Promise<unknown> = Promise.resolve();
+    sessionInputRedelivery = () => pump;
+    const unwatch = bus.subscribeAll((taskId, payload) => {
+      if (payload.kind !== "state") return;
+      pump = pump.then(() =>
+        inputs.redeliverForTask(taskId).catch((err) => {
+          app.log.error(err, "session-input redelivery failed");
+        }),
+      );
+    });
+    app.addHook("onClose", async () => unwatch());
+  }
+
   deps.registerExtraRoutes?.(app);
   app.setErrorHandler((error, _req, reply) => {
     const statusCode = error && typeof error === "object" && "statusCode" in error &&
@@ -930,7 +1113,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     });
   }
 
-  return { app, registry, orchestrator, tasks, bus, checkpoints, cooldowns, telemetry, scheduler, quotaProbes: probes, modelCatalog };
+  return { app, registry, orchestrator, tasks, bus, checkpoints, cooldowns, telemetry, scheduler, quotaProbes: probes, modelCatalog, sessionInputs, sessionInputRedelivery };
 }
 
 function sseHeaders(reply: FastifyReply): void {
@@ -999,6 +1182,34 @@ function sessionSummary(r: Record<string, unknown>): Record<string, unknown> {
     target: targetOf(r),
     startedAt: r.started_at,
     endedAt: r.ended_at,
+  };
+}
+
+/**
+ * The canonical wire view of one durable input: the message, every attempt and
+ * every normalized trace event. `deliveryUnknown` is surfaced explicitly — a
+ * client must never render an unknown outcome as "sent".
+ */
+function inputView(row: SessionInputRow, service: SessionInputService): Record<string, unknown> {
+  return {
+    id: row.id,
+    sessionId: row.sessionId,
+    taskId: row.taskId,
+    clientMessageId: row.clientMessageId,
+    kind: row.kind,
+    text: row.text,
+    state: row.state,
+    reason: row.reason,
+    deliveryUnknown: row.deliveryUnknown,
+    version: row.version,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    expiresAt: row.expiresAt,
+    providerReceipt: row.providerReceipt,
+    generation: row.generation,
+    retryOf: row.retryOf,
+    attempts: service.attempts(row.id),
+    events: service.events(row.id),
   };
 }
 

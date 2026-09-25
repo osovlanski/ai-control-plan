@@ -7,7 +7,9 @@
 // working; the new capability gates the new endpoint only.
 // `NORMALIZED_EVENT_VERSION` stays 1.0 — a decision record is not a
 // normalized event and does not change that contract.
-export const CONTROL_PLANE_API_VERSION = "2.2";
+// 2.3 (additive): default-off session input, receipt/capability reads under
+// `sessions.read`, and input commands under `commands.write`.
+export const CONTROL_PLANE_API_VERSION = "2.3";
 export const NORMALIZED_EVENT_VERSION = "1.0";
 
 export const OBSERVABILITY_CAPABILITIES = [

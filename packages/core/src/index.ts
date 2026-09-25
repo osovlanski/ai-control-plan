@@ -1,6 +1,7 @@
 export * from "./ids.js";
 export * from "./state-machine.js";
 export * from "./session-state.js";
+export * from "./session-input.js";
 export * from "./task.js";
 export * from "./events.js";
 export * from "./capabilities.js";
@@ -18,3 +19,4 @@ export * from "./decision.js";
 export * from "./tool-floors.js";
 
 export * from "./scheduler.js";
+export * from "./session-input-opt-in.js";

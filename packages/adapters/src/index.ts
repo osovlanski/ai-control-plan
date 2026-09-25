@@ -5,3 +5,8 @@ export { CursorAdapter, CursorSchemaError, mapCursorLine, calibrateFromSamples, 
 export { BedrockAdapter, parseAgentOutput, type BedrockOptions } from "./bedrock.js";
 export { FakeAdapter, type FakeScript, type FakeOptions } from "./fake.js";
 export { EventQueue } from "./event-queue.js";
+export {
+  FakeSessionInputAdapter,
+  type FakeInputFault,
+  type FakeSessionInputOptions,
+} from "./fake-session-input.js";

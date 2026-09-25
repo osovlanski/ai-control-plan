@@ -1,7 +1,9 @@
 # Durable session-addressed conversational input
 
-2026-09-18 · Proposed next vertical slice. Source audit complete; no API, schema or
-provider text-delivery capability is implemented by this document.
+2026-09-18 design, with implementation status below. Restacked on main on
+2026-09-24: default-off backend and fake adapter only; follow-up composer deferred.
+The original design sections remain proposals except where the status sections
+explicitly record implementation.
 
 ## Existing boundary and decision
 
@@ -143,3 +145,158 @@ before claiming every user intent has durable retry semantics.
 
 Review outcome for this pass: boundary is explicit and consistent with current
 source; backend implementation and stakeholder acceptance remain deferred.
+
+## Implementation status — 2026-09-20
+
+The first vertical slice of §"Smallest implementation and review gate" is
+implemented on `feat/agentic-os-session-input`, behind `sessionInput.enabled`,
+which defaults to **false**. While the flag is false the routes below are not
+registered at all, no ledger row is ever written, and the Shell composer keeps
+its pre-slice disabled wording. Migration `028_session_input.sql` applies
+unconditionally so enabling the flag later needs no schema step.
+
+Implemented and covered by tests:
+
+* `POST /api/sessions/:sessionId/inputs`, `GET /api/sessions/:sessionId/inputs`
+  and `GET /api/inputs/:id`. These names are now valid routes **when the flag is
+  on**; they remain absent otherwise. 202 means kernel persistence only; a
+  message refused on arrival answers 422 carrying its persisted record.
+* `session_inputs`, `session_input_attempts`, `session_input_events` with the
+  unique `(workspace, session_id, client_message_id, generation)` key, the payload
+  fingerprint, per-attempt lease epoch and capability version, and the
+  normalized `input.*` events written in the state-change transaction.
+* The five-state machine, with `accepted -> expired` deliberately absent.
+* The session-condition policy for all eight conditions in §"Session-state
+  behavior". Seven are derived from kernel records; `compacting` is policy-only,
+  because the kernel has no compaction record yet (K10 is unimplemented).
+  Inventing one would be a false audit.
+* Capability negotiation (`kinds`, `ackLevel`, `idempotentSend`,
+  `receiptLookup`, `liveDelivery`). `delivered` requires a provider-level
+  acknowledgement; a transport-only adapter leaves the message `accepted` with
+  explicit unknown delivery.
+* Restart fencing by lease epoch, and unknown-outcome reconciliation by receipt
+  lookup, by declared-idempotent replay of the same message id, or — with
+  neither — by refusing to send again and requiring explicit recovery.
+* One deterministic adapter, `FakeSessionInputAdapter`. Every real provider
+  resolves to no input capability and is rejected before dispatch.
+
+Still deferred, and still only proposed text above:
+
+* Any live provider adapter and its actual acknowledgement evidence.
+* Retention/deletion policy for inputs and receipts, and the goal-creation
+  idempotency key noted above.
+* Operator/Shell delivery cards and the follow-up composer (separate port).
+
+## Commands and redelivery — 2026-09-20
+
+The second slice closes the two operational gaps above. Both are behind the same
+`sessionInput.enabled` flag, which still defaults to **false**, and both still
+use `FakeSessionInputAdapter` only. Migration `029_session_input_commands.sql`
+applies unconditionally, like 028.
+
+### Retry and cancel over a message id
+
+`POST /api/inputs/:id/retry` and `POST /api/inputs/:id/cancel`, addressed by
+MESSAGE id rather than session id, both accepting an optional
+`expectedVersion`. Authorization is re-evaluated per command exactly as on the
+send path: a record outside the caller's workspace answers 404 rather than
+revealing that it exists. A command the record's own state forbids answers 409
+with a machine-readable `reason` — never a silent no-op, because "nothing
+happened" and "we refused, here is why" are different facts to an operator.
+
+Retry is legal from exactly two places, and the difference is the safety
+argument:
+
+| From | What retry means | Why it is safe |
+| --- | --- | --- |
+| `accepted` + unknown delivery | Reconcile: receipt lookup, or a declared-idempotent replay of the SAME message id | Never a second send; identical to the recovery path the ambiguous-delivery tests prove |
+| `rejected` | A successor row in the same retry chain | The refusal was definitive, so nothing was delivered and a fresh attempt cannot duplicate anything |
+
+Every other state is refused: `accepted` with a live attempt as
+`delivery_in_flight` (exactly the ambiguous-delivery case — sending on top of an
+unresolved attempt is the double-delivery bug), `queued` as `not_dispatched`,
+and `delivered`/`expired` as `already_settled`.
+
+A retry of a rejection does **not** reopen the terminal record. `rejected` stays
+terminal exactly as the state machine proved it: the settled row keeps its
+identity, its reason and its trace, and a successor row inherits the client
+message id, the payload fingerprint and the text — copied in SQL so the
+inherited identity cannot drift — under the next `generation`. The chain is
+still one logical message to its client: a resubmit of that client key resolves
+to the newest generation, which is its live incarnation. The uniqueness key is
+also the fence: two concurrent retries of one row compute the same next
+generation, so exactly one creates it and the other adopts the winner.
+
+Cancel is legal only from `queued`, and settles the message `rejected` with
+reason `cancelled_by_actor` — an edge the state machine already had. A cancel of
+an already-dispatched message is refused with `already_dispatched` rather than
+silently ignored: the provider may already hold the text, and the plane cannot
+recall it. A cancel that loses a race to a dispatch is reported as what is now
+true, not as the race.
+
+Both commands emit their own normalized trace event — `input.retry_requested`
+and `input.cancelled` — distinct from the send's events. They are intents,
+recorded even when they change no state; any state change they cause still emits
+its own `input.*` event afterwards.
+
+### Scheduler-owned redelivery
+
+A message queued behind a quota pause or a pending approval resumes on its own
+when the condition clears, with no client action. The driver is the kernel's
+existing task-state announcement — the `{kind: "state"}` frame the orchestrator,
+the scheduler and the harness event recorder already publish on the task bus.
+The session-input module owns no timer and does no polling, as the contract's
+quota rule requires. The bus gained one in-process fan-out subscription
+(`subscribeAll`) because a redelivery consumer cannot know in advance which task
+ids to subscribe to; the signal itself is unchanged.
+
+Scope is deliberately narrow: only messages queued with reason `quota_paused` or
+`approval_pending` are reconsidered. `context_barrier` is **not** in scope —
+compaction remains policy-only until the kernel has a compaction record (K10).
+
+A redelivery is an ordinary dispatch, so it inherits every guarantee already
+proven: the same idempotency, the same lease-epoch fencing, the same
+ambiguous-delivery rules. The pump is serialized and runs off the publish stack,
+so two announcements can never dispatch one message twice, and a publish inside
+a SQLite transaction cannot re-enter the database. Losing a race to a concurrent
+client command is the fence working, not a pump failure.
+
+The hard case this slice adds is proven end to end: while an automatic
+redelivery is parked inside the adapter with the provider already holding the
+text, a client retry for the same message is refused with `delivery_in_flight`;
+one attempt exists, the provider holds the message once, and only after a
+restart fences the dead owner's attempt into a known-unknown does a retry become
+legal — and it then reconciles rather than re-sends.
+
+## Provider-neutral live-input prerequisite — 2026-09-22
+
+The shared prerequisite is extracted from the Claude adapter work onto
+`f48ff484f53669da260537885d6d9edf2459db3e`. It adds the existing optional
+`probeTarget`, `SessionInputAvailability`, `SessionInputUnresolvedError`, and
+`GET /api/sessions/:sessionId/input-capability` unchanged in meaning. The service
+resolves the configured adapter and probes the exact session. No real provider
+is wired by this prerequisite; unsupported providers remain unavailable.
+
+A lookup exception preserves unknown delivery with `manual_recovery_required`;
+only a definitive rejection settles it rejected. Settling any terminal state
+clears `delivery_unknown`, matching the existing SQLite constraint. A lookup
+returning `null` still asserts definitive absence; adapters must throw
+`SessionInputUnresolvedError` when they cannot establish that fact. There is no
+new retry permission and no new acknowledgement level.
+
+`SessionInputOptInGate` is an additive, reusable gate for providers requiring
+explicit session enablement. It starts empty, binds the kernel session ID,
+assistant ID and verified provider session reference, and rechecks the provider
+probe before sending. A new process has no grants; enabling the workspace flag
+alone does not grant any session. Revocation prevents new delivery but allows
+receipt lookup to settle prior ambiguity. The gate does not grant a stronger
+acknowledgement than its wrapped adapter. Codex must use this gate if its live
+transport is proven. Claude retains its existing workspace-level opt-in and
+provider-specific behavior; this prerequisite does not wrap Claude or introduce
+a session-enable API.
+
+The shared core exports were already wildcard exports; provider process
+handling, transcript parsing, receipt production and live-adapter registration
+remain on the provider branches. Shared regression tests use only deterministic
+adapters, covering probing, disabled routes, unknown lookup without resend,
+terminal settlement, identity-bound enablement and revocation.
