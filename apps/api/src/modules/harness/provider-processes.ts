@@ -9,19 +9,27 @@
  *
  * Identity across a crash: at boot the kernel stamps `AGENT_PLANE_INCARNATION`
  * (`<workspace key>:<api pid>`) into its own environment. Every provider it
- * spawns inherits it, and so do their descendants. The boot reap kills every
- * process carrying this workspace's key whose owning API pid is no longer a
- * live node process. ponytail: the reap reads `/proc`, so it is Linux-only; on
- * other platforms it logs that it skipped. Add a `ps eww` reader if a macOS
- * host ever runs unattended.
+ * spawns inherits it, and so do their descendants — including a daemon a
+ * provider's hook starts and detaches, which must outlive the provider. So the
+ * tag alone does not make a process a stray. The adapter starts each provider
+ * as the leader of its own process group, and the tracker records that pid
+ * durably (`<workspace>/provider-groups/<api pid>`) when it is spawned. The
+ * boot reap kills a process only if it carries a dead incarnation's tag AND
+ * is one of that incarnation's recorded providers or still in one's process
+ * group. A daemon that detached (setsid) has left the group and survives.
+ * ponytail: the reap reads `/proc`, so it is Linux-only; on other platforms it
+ * logs that it skipped. Add a `ps eww` reader if a macOS host ever runs
+ * unattended.
  */
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import type { ProviderProcess } from "@agent-plane/core";
 
 export const INCARNATION_ENV = "AGENT_PLANE_INCARNATION";
+/** Under the workspace dir: one file per API pid, one provider group leader pid per line. */
+export const PROVIDER_GROUPS_DIR = "provider-groups";
 /** SIGTERM → SIGKILL grace. The Claude CLI flushes its transcript on SIGTERM well inside this. */
 export const DEFAULT_TERMINATE_GRACE_MS = 5_000;
 
@@ -110,10 +118,21 @@ export class ProviderProcessTracker {
   constructor(
     private readonly graceMs = DEFAULT_TERMINATE_GRACE_MS,
     private readonly log?: ProcessLog,
+    /** Where the next boot's reap finds the provider groups this incarnation spawned. None = not recorded. */
+    private readonly workspaceDir?: string,
   ) {}
 
   track(sessionId: string, proc: ProviderProcess): void {
     this.bySession.set(sessionId, proc);
+    if (!this.workspaceDir) return;
+    try {
+      const dir = join(this.workspaceDir, PROVIDER_GROUPS_DIR);
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
+      appendFileSync(join(dir, String(process.pid)), `${proc.pid}\n`);
+    } catch (err) {
+      // The run goes on; only a crash-time reap of this provider is lost.
+      this.log?.("provider group not recorded", { sessionId, providerPid: proc.pid, error: String(err) });
+    }
   }
 
   get(sessionId: string): ProviderProcess | undefined {
@@ -183,10 +202,24 @@ function ownerAlive(pid: number, procRoot: string): boolean {
   }
 }
 
+/** Process group id from `/proc/<pid>/stat` (field 5), or undefined if it cannot be read. */
+function processGroup(pid: string, procRoot: string): number | undefined {
+  try {
+    const stat = readFileSync(join(procRoot, pid, "stat"), "utf8");
+    const pgid = Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[2]);
+    return Number.isInteger(pgid) ? pgid : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
- * Boot reap: terminate every process tree stamped with this workspace's key by
- * an incarnation that is no longer alive. Never touches this process or its
- * ancestors, and never touches another workspace's providers.
+ * Boot reap: terminate the provider process trees a dead incarnation of this
+ * workspace recorded and left behind. A process is a stray only if it carries
+ * that incarnation's tag AND it is a recorded provider or is still in one's
+ * process group. Never touches this process or its ancestors, another
+ * workspace's providers, or a tagged daemon that detached from its provider.
+ * A dead incarnation's record is removed once it has been reaped.
  */
 export async function reapStrayProviders(
   workspaceDir: string,
@@ -197,22 +230,29 @@ export async function reapStrayProviders(
     opts.log?.("stray provider reap skipped: no /proc on this platform", { workspaceDir });
     return [];
   }
+  const groupsDir = join(workspaceDir, PROVIDER_GROUPS_DIR);
+  const dead = new Map<number, Set<number>>();
+  for (const file of existsSync(groupsDir) ? readdirSync(groupsDir) : []) {
+    const owner = Number(file);
+    if (!/^\d+$/.test(file) || owner === process.pid || ownerAlive(owner, procRoot)) continue;
+    const groups = readFileSync(join(groupsDir, file), "utf8").split("\n").filter(Boolean).map(Number);
+    dead.set(owner, new Set(groups));
+  }
+  if (dead.size === 0) return [];
   const key = `${workspaceKey(workspaceDir)}:`;
-  const current = process.env[INCARNATION_ENV];
   const protectedPids = ancestors();
   const strays: number[] = [];
-  const owners = new Map<number, boolean>();
   for (const entry of readdirSync(procRoot)) {
     if (!/^\d+$/.test(entry) || protectedPids.has(Number(entry))) continue;
     const tag = readEnvVar(entry, INCARNATION_ENV, procRoot);
-    if (!tag || !tag.startsWith(key) || tag === current) continue;
-    const owner = Number(tag.slice(key.length));
-    if (!owners.has(owner)) owners.set(owner, ownerAlive(owner, procRoot));
-    if (owners.get(owner)) continue;
-    strays.push(Number(entry));
+    if (!tag?.startsWith(key)) continue;
+    const groups = dead.get(Number(tag.slice(key.length)));
+    if (!groups) continue;
+    const pgid = processGroup(entry, procRoot);
+    if (groups.has(Number(entry)) || (pgid !== undefined && groups.has(pgid))) strays.push(Number(entry));
   }
-  if (strays.length === 0) return [];
-  const outcome = await terminatePids(strays, opts.graceMs ?? DEFAULT_TERMINATE_GRACE_MS);
-  opts.log?.("reaped stray provider processes from a dead incarnation", { workspaceDir, pids: strays, outcome });
+  const outcome = strays.length ? await terminatePids(strays, opts.graceMs ?? DEFAULT_TERMINATE_GRACE_MS) : "gone";
+  for (const owner of dead.keys()) rmSync(join(groupsDir, String(owner)), { force: true });
+  if (strays.length) opts.log?.("reaped stray provider processes from a dead incarnation", { workspaceDir, pids: strays, outcome });
   return strays;
 }

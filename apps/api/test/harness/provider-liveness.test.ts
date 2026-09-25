@@ -8,7 +8,7 @@
  * `/proc`.
  */
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -26,6 +26,7 @@ import { ApprovalService } from "../../src/modules/harness/approval-service.js";
 import { EventRecorder } from "../../src/modules/harness/event-recorder.js";
 import {
   INCARNATION_ENV,
+  PROVIDER_GROUPS_DIR,
   ProviderProcessTracker,
   markIncarnation,
   processAlive,
@@ -278,24 +279,73 @@ describe.skipIf(!onLinux)("F2: boot reap", () => {
     else process.env[INCARNATION_ENV] = savedTag;
   });
 
-  it("kills this workspace's strays from a dead incarnation, and nothing else", async () => {
+  /** What a dead incarnation left on disk: the provider groups it recorded at spawn. */
+  const recordGroups = (workspace: string, owner: string, pids: number[]) => {
+    mkdirSync(join(workspace, PROVIDER_GROUPS_DIR), { recursive: true });
+    writeFileSync(join(workspace, PROVIDER_GROUPS_DIR, owner), pids.map((p) => `${p}\n`).join(""));
+  };
+  const deadPid = () => spawnSync("sh", ["-c", "echo $$"], { encoding: "utf8" }).stdout.trim();
+  const pgidOf = (pid: number) => Number(readFileSync(`/proc/${pid}/stat`, "utf8").split(") ")[1]!.split(" ")[2]);
+
+  it("kills this workspace's recorded strays from a dead incarnation, and nothing else", async () => {
     const workspace = join(dir, "ws");
     const other = join(dir, "other-ws");
     const current = markIncarnation(workspace);
-    const deadOwner = spawnSync("sh", ["-c", "echo $$"], { encoding: "utf8" }).stdout.trim();
+    const deadOwner = deadPid();
     const tagged = (tag: string) =>
-      track(spawn("sleep", ["1000"], { stdio: "ignore", env: { ...process.env, [INCARNATION_ENV]: tag } }));
+      track(spawn("sleep", ["1000"], { stdio: "ignore", detached: true, env: { ...process.env, [INCARNATION_ENV]: tag } }));
 
     const stray = tagged(`${workspaceKey(workspace)}:${deadOwner}`);
     const otherWorkspace = tagged(`${workspaceKey(other)}:${deadOwner}`);
     const live = tagged(current);
     await until(() => [stray, otherWorkspace, live].every((c) => c.pid !== undefined));
     await sleep(50); // let exec land so /proc/<pid>/environ is the child's
+    recordGroups(workspace, deadOwner, [stray.pid!]);
+    recordGroups(other, deadOwner, [otherWorkspace.pid!]);
+    recordGroups(workspace, String(process.pid), [live.pid!]);
 
     const reaped = await reapStrayProviders(workspace, { graceMs: 200 });
     expect(reaped).toEqual([stray.pid]);
     await until(() => stray.signalCode !== null || stray.exitCode !== null);
     expect(processAlive(otherWorkspace.pid!)).toBe(true);
     expect(processAlive(live.pid!)).toBe(true);
+    expect(existsSync(join(workspace, PROVIDER_GROUPS_DIR, deadOwner))).toBe(false);
+    expect(existsSync(join(workspace, PROVIDER_GROUPS_DIR, String(process.pid)))).toBe(true);
+  }, 10_000);
+
+  it("a tagged daemon that detached from its provider survives a restart; the provider's group is still reaped", async () => {
+    const workspace = join(dir, "ws");
+    markIncarnation(workspace);
+    const tag = `${workspaceKey(workspace)}:${deadPid()}`;
+    const pids = join(dir, "pids");
+    // A provider, spawned as the kernel spawns one (own group): its hook starts a
+    // daemon that detaches (setsid), and it runs a tool child that stays in its group.
+    const provider = track(spawn("sh", ["-c", `setsid sleep 1000 & echo $! > ${pids}.daemon; sleep 1000 & echo $! > ${pids}.tool; wait`],
+      { stdio: "ignore", detached: true, env: { ...process.env, [INCARNATION_ENV]: tag } }));
+    // A second provider that already exited and left a tool child in its group, reparented to init.
+    const exited = track(spawn("sh", ["-c", `sleep 1000 & echo $! > ${pids}.orphan`],
+      { stdio: "ignore", detached: true, env: { ...process.env, [INCARNATION_ENV]: tag } }));
+    // A tagged process in no recorded group: the tag alone must not condemn it.
+    const unrecorded = track(spawn("sleep", ["1000"], { stdio: "ignore", detached: true, env: { ...process.env, [INCARNATION_ENV]: tag } }));
+    const read = (f: string) => (existsSync(f) ? Number(readFileSync(f, "utf8").trim()) || undefined : undefined);
+    await until(() => [".daemon", ".tool", ".orphan"].every((f) => read(pids + f) !== undefined) && exited.exitCode !== null);
+    await sleep(50);
+    const daemon = read(pids + ".daemon")!;
+    const tool = read(pids + ".tool")!;
+    const orphan = read(pids + ".orphan")!;
+    expect(pgidOf(daemon)).toBe(daemon); // it really left the provider's group
+    expect(pgidOf(tool)).toBe(provider.pid);
+    expect(pgidOf(orphan)).toBe(exited.pid);
+    recordGroups(workspace, tag.split(":")[1]!, [provider.pid!, exited.pid!]);
+
+    try {
+      const reaped = await reapStrayProviders(workspace, { graceMs: 200 });
+      expect(reaped.sort((a, b) => a - b)).toEqual([provider.pid!, tool, orphan].sort((a, b) => a - b));
+      await until(() => ![provider.pid!, tool, orphan].some(processAlive));
+      expect(processAlive(daemon)).toBe(true);
+      expect(processAlive(unrecorded.pid!)).toBe(true);
+    } finally {
+      for (const pid of [daemon, tool, orphan]) if (processAlive(pid)) process.kill(pid, "SIGKILL");
+    }
   }, 10_000);
 });

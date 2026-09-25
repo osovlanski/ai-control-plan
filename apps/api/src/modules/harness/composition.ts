@@ -99,7 +99,7 @@ export function buildHarnessComposition(deps: HarnessCompositionDeps): HarnessCo
   // F2: stamp this incarnation before any provider can be spawned, so a later
   // boot can tell this process's strays from a live sibling's.
   markIncarnation(config.dir);
-  const processes = new ProviderProcessTracker(undefined, deps.onInfo);
+  const processes = new ProviderProcessTracker(undefined, deps.onInfo, config.dir);
   const harnessRecovery = new HarnessRecovery({
     store: sessionStore,
     approvals,

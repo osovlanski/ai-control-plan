@@ -508,6 +508,9 @@ export class ClaudeAdapter implements AgentAdapter {
       signal: options.signal,
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
+      // Its own process group, so a crash-time reap can find exactly this
+      // provider's tree and leave a daemon its hooks detached (F2).
+      detached: process.platform !== "win32",
     });
     const proc = { child, spawnedAt: new Date().toISOString(), stderrTail: "" };
     child.stderr?.setEncoding("utf8");
