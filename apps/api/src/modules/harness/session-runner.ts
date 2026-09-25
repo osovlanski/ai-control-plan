@@ -33,6 +33,7 @@ import type {
   ProviderSessionRef,
   RerouteRequest,
   RunHandle,
+  ProviderProcess,
   RunSpec,
   TerminalSessionState,
   ToolGateVerdict,
@@ -41,6 +42,7 @@ import type {
 import { DEFAULT_CONTEXT_POLICY, buildContextObservation, evaluationResult, newExecutionSessionId, outcomeOf, redactValue, toolActionFromEvent } from "@agent-plane/core";
 import { evaluateContextGuard } from "./context-guard.js";
 import type { SessionStore } from "./session-store.js";
+import type { ProviderProcessTracker } from "./provider-processes.js";
 import type { EventRecorder } from "./event-recorder.js";
 import type { ApprovalService } from "./approval-service.js";
 import type { HandoffService } from "./handoff.js";
@@ -130,6 +132,29 @@ export interface RunnerDeps {
     mode: "shadow" | "applied";
     evaluate(input: ToolGateInput): Promise<ToolGateVerdict>;
   };
+  /**
+   * F1/F2. Kernel-side ownership of the provider process: the tick renews the
+   * lease on its liveness (not on the first provider event), and a fenced
+   * session's process tree is terminated. Absent ⇒ the runner itself is the
+   * liveness signal and nothing is signalled.
+   */
+  processes?: ProviderProcessTracker;
+  /** Spawn → first-event timing and silence reports, per session. */
+  log?: (message: string, fields: Record<string, unknown>) => void;
+}
+
+/** How often a session still waiting for its first provider event is reported. */
+const SILENCE_REPORT_MS = 30_000;
+
+/**
+ * The runner lost its fencing lease: another owner (recovery) holds the session
+ * now and will write its result. The provider tree has already been terminated.
+ */
+export class SessionFencedError extends Error {
+  constructor(sessionId: string, reason: string) {
+    super(`session ${sessionId} fenced (${reason}); its provider was terminated and recovery owns the result`);
+    this.name = "SessionFencedError";
+  }
 }
 
 export interface ToolGateInput {
@@ -212,6 +237,10 @@ export class SessionRunner {
       try {
         return await ctx.execute();
       } finally {
+        // F2: no provider tree outlives the run that spawned it — however the
+        // run ended (terminal, fenced, CAS refused, thrown). Idempotent: an
+        // already-exited provider reports "gone".
+        await this.deps.processes?.terminate(sessionId, "run ended");
         store.releaseLease(sessionId, lease);
       }
     })();
@@ -265,6 +294,13 @@ class RunContext {
   private isolationVerified = false;
   /** The effective spec adapter.start received (secretEnv stripped) — for the isolation probe. */
   private effectiveSpec: RunSpec | undefined;
+  /** F1: the provider process, once the adapter reports one. */
+  private proc: ProviderProcess | undefined;
+  private launchAtMs = 0;
+  private lastSilenceReportMs = 0;
+  private procExitReported = false;
+  /** F2: set once the lease is refused; the run unwinds and recovery owns the result. */
+  private fencedReason: string | undefined;
 
   constructor(
     private sessionId: string,
@@ -311,10 +347,20 @@ class RunContext {
     this.transition("PREPARED", "STARTING"); // durable start intent (§9)
     const adapter = this.d.registry.adapter(this.request.assistantId);
 
-    let handle: RunHandle;
+    // Heartbeat from session start (F1): hard/idle timeouts and the durable
+    // cancel intent must be observed even while `adapter.events()` is stalled,
+    // and the fencing lease is renewed on the provider process's liveness —
+    // including in STARTING, before the provider's first event. A trip aborts
+    // the provider stream, which ends the loop below with `this.tickPlan` set.
+    let handle: RunHandle | undefined;
+    this.launchAtMs = this.runner.clock();
+    const heartbeat = setInterval(() => {
+      void this.onTick(adapter, handle);
+    }, this.runner.pollMs * 5);
     try {
       handle = await this.startProvider(adapter);
     } catch (err) {
+      clearInterval(heartbeat);
       return this.finalizeFailure(
         "FAILED",
         normalizeStartError(err),
@@ -323,8 +369,10 @@ class RunContext {
     }
     // Cancellation can commit while adapter.start is unresolved and bumps the
     // session version. Deliver it to the eventual handle before ackHandle CAS.
+    this.observeProcess(adapter, handle);
     const afterStart = this.d.store.get(this.sessionId)!;
     if (afterStart.cancelRequested) {
+      clearInterval(heartbeat);
       await safeCancel(adapter, handle);
       this.version = this.d.store.get(this.sessionId)!.version;
       const checkpoint = await this.attemptCheckpoint("cancel");
@@ -362,6 +410,7 @@ class RunContext {
         }
       }
       if (!verified) {
+        clearInterval(heartbeat);
         await safeCancel(adapter, handle);
         const cp = await this.attemptCheckpoint("cancel");
         return this.finalize("STARTING", "FAILED", {
@@ -380,13 +429,6 @@ class RunContext {
 
     let firstEvent = true;
     let terminalPlan: TerminalPlan | undefined;
-    // Heartbeat: hard/idle timeouts and the durable cancel intent must be
-    // observed even while `adapter.events()` is stalled, and the fencing lease
-    // must keep being renewed (§9). A trip aborts the provider stream, which
-    // ends the loop below with `this.tickPlan` set.
-    const heartbeat = setInterval(() => {
-      void this.onTick(adapter, handle);
-    }, this.runner.pollMs * 5);
     const iter = adapter.events(handle)[Symbol.asyncIterator]();
     try {
       for (;;) {
@@ -401,6 +443,7 @@ class RunContext {
         if (firstEvent) {
           this.transition("STARTING", "RUNNING", { providerStartAcked: true });
           firstEvent = false;
+          this.reportFirstEvent(adapter, handle);
         }
         this.observe(event);
         const gate = await this.evaluateToolGate(event, adapter);
@@ -464,6 +507,7 @@ class RunContext {
       clearInterval(heartbeat);
       void iter.return?.(undefined); // release a still-open iterator
     }
+    if (this.fencedReason) throw new SessionFencedError(this.sessionId, this.fencedReason);
     terminalPlan ??= this.tickPlan;
     if (firstEvent && !terminalPlan) {
       // Stream never produced an event — treat provider start as unknown/failed.
@@ -606,8 +650,8 @@ class RunContext {
    * where the clocks are paused, §5). Renews the lease and evaluates the
    * time-based guards; a trip records `tickPlan` and aborts the provider stream.
    */
-  private async onTick(adapter: AgentAdapter, handle: RunHandle): Promise<void> {
-    if (this.ticking || this.tickPlan) return;
+  private async onTick(adapter: AgentAdapter, handle: RunHandle | undefined): Promise<void> {
+    if (this.ticking || this.tickPlan || this.fencedReason) return;
     // The heartbeat is detached from execute()'s own lifecycle (§9's fencing
     // requires it to keep firing even while a provider stream is stalled), so
     // a tick can still be in flight after whoever owns the store has closed
@@ -618,8 +662,31 @@ class RunContext {
     this.ticking = true;
     try {
       const session = this.d.store.get(this.sessionId);
-      if (!session || session.state !== "RUNNING") return;
-      this.d.store.renewLease(this.sessionId, this.lease);
+      if (!session) return;
+      // F2: someone else (recovery) owns the session now. Checked before the
+      // liveness gate below, so a runner whose provider died and whose adapter
+      // never ends the stream still unwinds instead of hanging.
+      if (session.leaseToken !== this.lease) {
+        await this.fence(adapter, handle, "lease taken over");
+        return;
+      }
+      if (session.state !== "RUNNING" && session.state !== "STARTING") return;
+      if (handle) this.observeProcess(adapter, handle);
+      // F1: the lease rides the provider process's liveness. A process the
+      // kernel sees exit stops renewing; the stream's end settles the session,
+      // and if the adapter never ends it, the sweeper does.
+      if (this.proc && !this.proc.alive()) {
+        if (!this.procExitReported) {
+          this.procExitReported = true;
+          this.d.log?.("provider process exited; lease renewal stopped", { sessionId: this.sessionId, pid: this.proc.pid, state: session.state });
+        }
+        return;
+      }
+      if (!this.d.store.renewLease(this.sessionId, this.lease)) {
+        await this.fence(adapter, handle, "lease renewal refused");
+        return;
+      }
+      if (session.state === "STARTING") this.reportSilence();
 
       if (session.cancelRequested) {
         this.cancelBy = "plane";
@@ -635,11 +702,54 @@ class RunContext {
       }
       if (this.tickPlan) {
         this.abort.resolve();
-        await safeCancel(adapter, handle);
+        if (handle) await safeCancel(adapter, handle);
       }
     } finally {
       this.ticking = false;
     }
+  }
+
+  /** F2: stop driving a session this runner no longer owns, and take its provider tree down. */
+  private async fence(adapter: AgentAdapter, handle: RunHandle | undefined, reason: string): Promise<void> {
+    if (this.fencedReason) return;
+    this.fencedReason = reason;
+    this.d.log?.("session fenced", { sessionId: this.sessionId, reason, pid: this.proc?.pid });
+    this.abort.resolve();
+    if (handle) await safeCancel(adapter, handle);
+    await this.d.processes?.terminate(this.sessionId, `fenced: ${reason}`);
+  }
+
+  /** Pick up the adapter's process once it exists; register it with the kernel tracker. */
+  private observeProcess(adapter: AgentAdapter, handle: RunHandle): void {
+    if (this.proc) return;
+    const proc = adapter.providerProcess?.(handle);
+    if (!proc) return;
+    this.proc = proc;
+    this.d.processes?.track(this.sessionId, proc);
+    this.d.log?.("provider spawned", { sessionId: this.sessionId, pid: proc.pid, spawnedAt: proc.spawnedAt,
+      launchToSpawnMs: Date.parse(proc.spawnedAt) - this.launchAtMs });
+  }
+
+  private reportFirstEvent(adapter: AgentAdapter, handle: RunHandle): void {
+    this.observeProcess(adapter, handle);
+    const now = this.runner.clock();
+    this.d.log?.("provider first event", {
+      sessionId: this.sessionId,
+      pid: this.proc?.pid,
+      spawnedAt: this.proc?.spawnedAt,
+      firstEventAt: new Date(now).toISOString(),
+      spawnToFirstEventMs: this.proc ? now - Date.parse(this.proc.spawnedAt) : undefined,
+      launchToFirstEventMs: now - this.launchAtMs,
+    });
+  }
+
+  private reportSilence(): void {
+    const now = this.runner.clock();
+    if (now - this.lastSilenceReportMs < SILENCE_REPORT_MS || now - this.launchAtMs < SILENCE_REPORT_MS) return;
+    this.lastSilenceReportMs = now;
+    this.d.log?.("provider silent: no first event yet", {
+      sessionId: this.sessionId, pid: this.proc?.pid, alive: this.proc?.alive(), silentMs: now - this.launchAtMs,
+    });
   }
 
   private async verifyThenComplete(): Promise<ExecutionResult> {
