@@ -325,7 +325,9 @@ describe("session input — behaviour in each kernel lifecycle condition", () =>
 
   it("rejects input for an assistant whose adapter declares no input capability", async () => {
     const ws = track(boot(home));
-    const { sessionId } = seedSession(ws.db, { assistantId: "real-a" });
+    // Codex, not Claude: the live adapter added for Claude Code is deliberately
+    // the ONLY real one, so every other provider still has no capability at all.
+    const { sessionId } = seedSession(ws.db, { assistantId: "codex-a" });
     const res = await send(ws, sessionId, { clientMessageId: "c1", text: "hi" });
     expect(res.statusCode).toBe(422);
     expect(res.body).toMatchObject({ state: "rejected", reason: "adapter_input_unsupported" });

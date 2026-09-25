@@ -45,7 +45,14 @@ export class Registry {
        ON CONFLICT(id) DO UPDATE SET provider = excluded.provider, enabled = excluded.enabled`,
     );
     for (const [id, cfg] of Object.entries(this.config.assistants)) {
-      this.adapters.set(id, createAdapter(id as AssistantId, cfg.provider, cfg.options ?? {}));
+      this.adapters.set(
+        id,
+        createAdapter(id as AssistantId, cfg.provider, cfg.options ?? {}, {
+          // Streaming-input launches exist ONLY to carry session-addressed
+          // input, so they follow that flag exactly: off by default.
+          liveInput: this.config.sessionInput.enabled,
+        }),
+      );
       upsert.run(id, cfg.provider, cfg.enabled === false ? 0 : 1);
     }
     // Config removals: disable rows for assistants no longer configured.
@@ -184,10 +191,11 @@ function createAdapter(
   id: AssistantId,
   provider: string,
   options: Record<string, unknown> = {},
+  runtime: { liveInput?: boolean } = {},
 ): AgentAdapter {
   switch (provider) {
     case "anthropic":
-      return new ClaudeAdapter(id);
+      return new ClaudeAdapter(id, undefined, { liveInput: runtime.liveInput });
     case "openai":
       return new CodexAdapter(id);
     case "openrouter":
