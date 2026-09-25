@@ -176,6 +176,131 @@ Open items carried out of K19c, none of them K19d's job:
 - **Shares no files with stream A**; the two run concurrently.
 - **PR #49 is green** on `a6a006f` and carries K17–K19e.
 
+#### Harness flip on the operator workspace (2026-09-25)
+
+The owner said "flip" after #59 and #60 merged with merge commits.
+
+- **Build:** `main` at `fb626d8` (the #60 merge), run from a detached worktree with
+  `pnpm --filter @agent-plane/api start`. Neither boot described below had an `AGENT_PLANE_*`
+  variable in its environment (checked in `/proc/<pid>/environ`).
+- **Flip time:** `2026-09-25T21:12:33.775Z`, the boot that first read the new config. That
+  process was started from inside an agent session and inherited its `CLAUDE_CODE_*`,
+  `CLAUDECODE` and `CLAUDE_EFFORT` variables, which every provider would inherit in turn.
+- **Soak T0:** `2026-09-25T21:31:57.293Z`. At this time the API was restarted, with no config
+  change, from a clean login environment (`env -i HOME USER LOGNAME SHELL LANG TERM bash -lc`).
+  The process environment then held no `CLAUDE*`, `CODEX*`, `ANTHROPIC*` or `AGENT_PLANE_*`
+  variable.
+- **Restarting the operator API later:** start it the same way, from a plain login shell and not
+  from inside an agent session.
+- **Backups**, beside the DB in `~/.agent-plane/personal/`:
+  - `config.yaml.pre-flip`, sha256 `62ad7317…e8ca34`, recorded in `config.yaml.pre-flip.sha256`.
+  - `agent-plane.db.pre-flip-20260925T211155Z`, taken with SQLite's online backup, sha256
+    `53a799c4…3ff9d6` in its `.sha256` file. `integrity_check` returned `ok`.
+- **Change:** `execution.harnessModes.single: true` appended to `config.yaml`. The new sha256 is
+  `d664e5d7…f3cd2`. No other key changed.
+- **Schema:** none from the flip. The DB was already at migration 029 before this boot.
+
+**Verification, with no env override:**
+
+| Check | Result |
+|---|---|
+| A new task's run has `execution_request_id` set | **PASS.** `AG-muhgmqjh1` → `erq_AG-muhgmqjh1_1`, and `AG-muhgmr4g2` → `erq_AG-muhgmr4g2_1`. Both have `harness_major = 1` and reached `AWAITING_APPROVAL` through the durable `approvals` table. |
+| Gate rows are written in normal use | **PASS.** Five shadow `tool-gate` rows between 21:16:03Z and 21:16:08Z: 3 `post-start` and 2 `pre-exec`. |
+| The claude-mem MCP call auto-approves as declared | **PASS, for the gate's outcome.** The `pre-exec` row for `mcp__plugin_claude-mem_mcp-search__search` says `auto-approve`, "no floor fired; approvalMode decides". The gate is in shadow, so the provider still asked, and the request stayed `pending`. |
+
+- Both tasks were cancelled without sending any answer. Both runs ended `CANCELLED` within 7 s,
+  their provider processes exited, and no process carrying `AGENT_PLANE_INCARNATION` was left.
+- **Finding, not fixed:** after the cancel, both `approvals` rows still read `pending`. A client
+  that polls approval state sees a live request on a dead session.
+- **Observation:** each run logged `quota: checkpoint — provider limit approaching` within 5 s of
+  `run.started`. This is parity report Q2, now seen live.
+
+**Rollback** (from `plans/harness-parity-report.md` §4, filled in for this flip):
+
+1. Stop starting new tasks.
+2. Wait for live harness sessions to drain. Repeat this query until it returns 0:
+   `SELECT count(*) FROM runs WHERE execution_request_id IS NOT NULL AND ended_at IS NULL;`
+3. Run `cp ~/.agent-plane/personal/config.yaml.pre-flip ~/.agent-plane/personal/config.yaml`.
+   Check that `sha256sum` prints `62ad7317…e8ca34`.
+4. Restart the API. Config is read only at boot. If step 2 was skipped, boot recovery marks each
+   stranded session `FAILED/orphaned` and keeps its checkpoint.
+5. Check that `GET /api/health` answers when called with the bearer credential. Start one no-repo
+   task, and check that its run has `execution_request_id IS NULL`.
+6. A dispatch reserved on the harness path still runs on harness (R3). List those dispatches with
+   `SELECT dispatch_id, task_id FROM dispatches WHERE execution_path='harness' AND phase IN ('reserved','start_attempted');`
+   Then cancel them or let them run.
+7. Keep the DB backup unless the owner decides to discard everything written after the flip. The
+   config rollback does not need it, because the flip changed no schema.
+
+#### Tool-gate shadow soak: §7.1(1), (2) and (7)
+
+The soak starts at T0. `decision_records` rows written before T0 do not count:
+- 34 came from parity runs that used `AGENT_PLANE_HARNESS_SINGLE_MODE=1`.
+- 5 came from the flip's verification tasks, described above.
+
+**Daily check:** run `pnpm soak:check` from any checkout of this branch or of `main` after it
+merges.
+- It opens the workspace DB read-only and without migrating it. It prints the three
+  preconditions and the prompt rate by hook, then the prompts grouped by `gate_reason`.
+- It writes nothing, and it never records a reading.
+- Options: `--since <ISO>` overrides T0, `--read-through <ISO>` is the time through which your
+  reading is recorded, and `--db <path>` reads another DB.
+
+**Definitions.**
+- *Rules-allowed* means `gate_outcome IN ('auto-approve','prompt')`.
+  - `block` is a rules deny, where the gate agrees with rules.
+  - `unchanged` means a read-only workspace.
+- *Disagreement* means `gate_outcome = 'prompt'`: rules would allow the call, and a floor would
+  prompt.
+- `post-start` fires once on every tool call. `pre-exec` fires only when the provider itself asks
+  for approval.
+  - The §7.1(7) headline is the `post-start` rate, which is the share of all calls the gate would
+    prompt on.
+  - The `pre-exec` rate is the share of provider prompts the gate agrees with.
+
+| # | What it needs | Minimum | Verdict rule in `soak:check` |
+|---|---|---|---|
+| 1 | Shadow `tool-gate` rows from normal use | ≥ 500 rows since T0, or ≥ 14 days since T0 with at least one row. At the post-flip pace this is likely the 14 days: **earliest 2026-10-09T21:31:57Z**. | PASS if either holds |
+| 2 | Every disagreement read by a human, with the reading recorded here | (1), plus every `prompt` row since T0 read | PASS if (1) holds and no prompt row is newer than `--read-through` |
+| 7 | The prompt rate measured over the soak and read by the operator, with the reading recorded here | (1), plus a reading that covers the last row | PASS if (1) holds and the last row is not newer than `--read-through` |
+
+Record a reading here as one line with its date, its `--read-through` time, and what was
+concluded for each floor reason.
+
+**The SQL.** This is copied verbatim from `SOAK_SQL` in `apps/api/src/modules/decision.ts`.
+`:since` is T0.
+
+```sql
+-- §7.1(1) volume
+SELECT COUNT(*) AS n, MIN(created_at) AS first, MAX(created_at) AS last
+  FROM decision_records
+ WHERE site = 'tool-gate' AND mode = 'shadow' AND created_at >= :since;
+
+-- §7.1(2) disagreements to read
+SELECT id, task_id, gate_hook, gate_reason, created_at
+  FROM decision_records
+ WHERE site = 'tool-gate' AND mode = 'shadow' AND created_at >= :since
+   AND gate_outcome = 'prompt'
+ ORDER BY id;
+
+-- §7.1(7) prompt rate, per hook
+SELECT gate_hook, COUNT(*) AS calls, SUM(gate_outcome = 'prompt') AS prompts
+  FROM decision_records
+ WHERE site = 'tool-gate' AND mode = 'shadow' AND created_at >= :since
+   AND gate_outcome IN ('auto-approve', 'prompt')
+ GROUP BY gate_hook
+ ORDER BY gate_hook;
+
+-- prompts grouped by floor reason
+SELECT gate_hook, gate_reason, COUNT(*) AS prompts
+  FROM decision_records
+ WHERE site = 'tool-gate' AND mode = 'shadow' AND created_at >= :since
+   AND gate_outcome = 'prompt'
+ GROUP BY gate_hook, gate_reason
+ ORDER BY prompts DESC, gate_hook, gate_reason;
+```
+
+
 ### C — Remote deployment (Vercel / Railway frontend split)
 
 - [`docs/adr/agentic-os-deployment.md`](../docs/adr/agentic-os-deployment.md) —

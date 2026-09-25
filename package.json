@@ -19,6 +19,7 @@
     "demo:a5": "pnpm --filter @agent-plane/web demo:a5",
     "demo:b": "pnpm --filter @agent-plane/web demo:b",
     "model:shadow-report": "pnpm --filter @agent-plane/api model:shadow-report",
+    "soak:check": "pnpm --silent --filter @agent-plane/api soak:check",
     "eval": "pnpm --filter @agent-plane/eval eval",
     "eval:promote": "pnpm --filter @agent-plane/eval promote",
     "build": "pnpm -r --if-present build"

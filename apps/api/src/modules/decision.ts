@@ -212,6 +212,81 @@ export function toolGatePromptRates(db: Db, opts: { limit?: number } = {}): Tool
 }
 
 /**
+ * The tool gate's shadow-soak queries for §7.1(1), (2) and (7). `plans/progress.md`
+ * quotes them verbatim, so a change here is a change there. Every one reads only
+ * shadow `tool-gate` rows written at or after `:since`, the soak's T0.
+ * "Rules-allowed" is `auto-approve` or `prompt`: `block` is a rules deny and
+ * `unchanged` a read-only workspace, neither of which the gate adds a prompt to.
+ */
+export const SOAK_SQL = {
+  volume: `SELECT COUNT(*) AS n, MIN(created_at) AS first, MAX(created_at) AS last
+  FROM decision_records
+ WHERE site = 'tool-gate' AND mode = 'shadow' AND created_at >= :since`,
+  disagreements: `SELECT id, task_id, gate_hook, gate_reason, created_at
+  FROM decision_records
+ WHERE site = 'tool-gate' AND mode = 'shadow' AND created_at >= :since
+   AND gate_outcome = 'prompt'
+ ORDER BY id`,
+  promptRate: `SELECT gate_hook, COUNT(*) AS calls, SUM(gate_outcome = 'prompt') AS prompts
+  FROM decision_records
+ WHERE site = 'tool-gate' AND mode = 'shadow' AND created_at >= :since
+   AND gate_outcome IN ('auto-approve', 'prompt')
+ GROUP BY gate_hook
+ ORDER BY gate_hook`,
+  byReason: `SELECT gate_hook, gate_reason, COUNT(*) AS prompts
+  FROM decision_records
+ WHERE site = 'tool-gate' AND mode = 'shadow' AND created_at >= :since
+   AND gate_outcome = 'prompt'
+ GROUP BY gate_hook, gate_reason
+ ORDER BY prompts DESC, gate_hook, gate_reason`,
+} as const;
+
+export interface SoakCheck {
+  since: string;
+  now: string;
+  readThrough: string | null;
+  volume: { n: number; first: string | null; last: string | null; days: number; pass: boolean };
+  disagreements: { n: number; unread: number; pass: boolean };
+  promptRate: {
+    byHook: Array<{ hook: string | null; calls: number; prompts: number; rate: number | null }>;
+    byReason: Array<{ hook: string | null; reason: string | null; prompts: number }>;
+    pass: boolean;
+  };
+}
+
+/**
+ * §7.1(1): ≥ 500 rows, or ≥ 14 days since T0 with at least one row.
+ * §7.1(2): (1) holds and every disagreement is at or before `readThrough`,
+ * the time through which the operator's reading is recorded.
+ * §7.1(7): (1) holds and the reading covers the last row, so the rate read is
+ * the rate measured. A reading is recorded by hand in `plans/progress.md`;
+ * nothing here writes one. Timestamps are ISO strings, compared as such.
+ */
+export function toolGateSoakCheck(db: Db, opts: { since: string; now: string; readThrough?: string }): SoakCheck {
+  const since = opts.since;
+  const readThrough = opts.readThrough ?? null;
+  const v = db.prepare(SOAK_SQL.volume).get({ since }) as { n: number; first: string | null; last: string | null };
+  const days = (Date.parse(opts.now) - Date.parse(since)) / 86_400_000;
+  const volumePass = v.n >= 500 || (days >= 14 && v.n > 0);
+  const dis = db.prepare(SOAK_SQL.disagreements).all({ since }) as Array<{ created_at: string }>;
+  const unread = dis.filter((d) => readThrough === null || d.created_at > readThrough).length;
+  const byHook = (db.prepare(SOAK_SQL.promptRate).all({ since }) as Array<{ gate_hook: string | null; calls: number; prompts: number }>).map(
+    (r) => ({ hook: r.gate_hook, calls: r.calls, prompts: r.prompts, rate: r.calls ? r.prompts / r.calls : null }),
+  );
+  const byReason = (db.prepare(SOAK_SQL.byReason).all({ since }) as Array<{ gate_hook: string | null; gate_reason: string | null; prompts: number }>).map(
+    (r) => ({ hook: r.gate_hook, reason: r.gate_reason, prompts: r.prompts }),
+  );
+  return {
+    since,
+    now: opts.now,
+    readThrough,
+    volume: { ...v, days, pass: volumePass },
+    disagreements: { n: dis.length, unread, pass: volumePass && unread === 0 },
+    promptRate: { byHook, byReason, pass: volumePass && readThrough !== null && v.last !== null && v.last <= readThrough },
+  };
+}
+
+/**
  * Every `DecisionProvider` this build has BEYOND `RulesDecisionProvider`,
  * which `DecisionService` always registers itself (I-D6).
  *
