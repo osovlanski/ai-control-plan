@@ -1046,6 +1046,29 @@ export function buildServer(deps: ServerDeps): BuiltServer {
       },
     );
 
+    // Explicit session authorization for Codex. Workspace enablement alone grants nothing.
+    app.post<{ Params: { sessionId: string }; Body: { enabled?: boolean } }>(
+      "/api/sessions/:sessionId/input-enablement", write,
+      async (req, reply) => {
+        const session = inputs.session(req.params.sessionId);
+        if (!session) return reply.status(404).send({ error: "not found" });
+        if (typeof req.body?.enabled !== "boolean") return reply.status(400).send({ error: "enabled must be a boolean" });
+        const owner = registry.adapter(session.assistantId);
+        const adapter = owner instanceof CodexAdapter ? owner.sessionInput : undefined;
+        if (!adapter) return reply.status(409).send({ reason: "adapter_input_unsupported" });
+        if (!req.body.enabled) adapter.disable(session.sessionId);
+        else {
+          if (session.sessionState !== "RUNNING" || session.approvalPending) return reply.status(409).send({ reason: "session_not_running" });
+          const probe = await adapter.enable({
+            sessionId: session.sessionId, assistantId: session.assistantId,
+            providerSessionRef: session.providerSessionRef ?? undefined,
+          });
+          if (!probe.available) return reply.status(409).send(probe);
+        }
+        return inputs.capability(session.sessionId);
+      },
+    );
+
     // Resolves a lost response: the client knows its own message id from the
     // 202 it never received only via this read plus its client key listing.
     app.get<{ Params: { id: string } }>("/api/inputs/:id", read.sessions, (req, reply) => {
