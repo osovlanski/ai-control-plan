@@ -129,7 +129,7 @@ export class ProviderProcessTracker {
     this.bySession.delete(sessionId);
     const done = terminateProcessTree(proc.pid, this.graceMs)
       .then((outcome) => {
-        this.log?.("provider process terminated", { sessionId, pid: proc.pid, reason, outcome });
+        this.log?.("provider process terminated", { sessionId, providerPid: proc.pid, reason, outcome });
         return outcome;
       })
       .finally(() => this.inflight.delete(sessionId));

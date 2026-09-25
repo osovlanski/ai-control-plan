@@ -678,7 +678,7 @@ class RunContext {
       if (this.proc && !this.proc.alive()) {
         if (!this.procExitReported) {
           this.procExitReported = true;
-          this.d.log?.("provider process exited; lease renewal stopped", { sessionId: this.sessionId, pid: this.proc.pid, state: session.state });
+          this.d.log?.("provider process exited; lease renewal stopped", { sessionId: this.sessionId, providerPid: this.proc.pid, state: session.state });
         }
         return;
       }
@@ -713,7 +713,7 @@ class RunContext {
   private async fence(adapter: AgentAdapter, handle: RunHandle | undefined, reason: string): Promise<void> {
     if (this.fencedReason) return;
     this.fencedReason = reason;
-    this.d.log?.("session fenced", { sessionId: this.sessionId, reason, pid: this.proc?.pid });
+    this.d.log?.("session fenced", { sessionId: this.sessionId, reason, providerPid: this.proc?.pid });
     this.abort.resolve();
     if (handle) await safeCancel(adapter, handle);
     await this.d.processes?.terminate(this.sessionId, `fenced: ${reason}`);
@@ -726,7 +726,7 @@ class RunContext {
     if (!proc) return;
     this.proc = proc;
     this.d.processes?.track(this.sessionId, proc);
-    this.d.log?.("provider spawned", { sessionId: this.sessionId, pid: proc.pid, spawnedAt: proc.spawnedAt,
+    this.d.log?.("provider spawned", { sessionId: this.sessionId, providerPid: proc.pid, spawnedAt: proc.spawnedAt,
       launchToSpawnMs: Date.parse(proc.spawnedAt) - this.launchAtMs });
   }
 
@@ -735,7 +735,7 @@ class RunContext {
     const now = this.runner.clock();
     this.d.log?.("provider first event", {
       sessionId: this.sessionId,
-      pid: this.proc?.pid,
+      providerPid: this.proc?.pid,
       spawnedAt: this.proc?.spawnedAt,
       firstEventAt: new Date(now).toISOString(),
       spawnToFirstEventMs: this.proc ? now - Date.parse(this.proc.spawnedAt) : undefined,
@@ -748,7 +748,7 @@ class RunContext {
     if (now - this.lastSilenceReportMs < SILENCE_REPORT_MS || now - this.launchAtMs < SILENCE_REPORT_MS) return;
     this.lastSilenceReportMs = now;
     this.d.log?.("provider silent: no first event yet", {
-      sessionId: this.sessionId, pid: this.proc?.pid, alive: this.proc?.alive(), silentMs: now - this.launchAtMs,
+      sessionId: this.sessionId, providerPid: this.proc?.pid, alive: this.proc?.alive(), silentMs: now - this.launchAtMs,
     });
   }
 
