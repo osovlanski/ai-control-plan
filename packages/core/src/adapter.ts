@@ -36,7 +36,22 @@ export interface AgentAdapter {
    */
   observeContext?(handle: RunHandle): Promise<AdapterContextSample | null>;
 
+  /**
+   * The local OS process behind a run, once spawned. The kernel reads its
+   * liveness to renew a session's lease before the first provider event, and
+   * signals its tree when the session is fenced or orphaned. Undefined =
+   * not spawned yet, already reaped, or an adapter with no local process.
+   */
+  providerProcess?(handle: RunHandle): ProviderProcess | undefined;
+
   cancel(handle: RunHandle): Promise<void>;
+}
+
+export interface ProviderProcess {
+  pid: number;
+  /** ISO time the adapter spawned it. */
+  spawnedAt: string;
+  alive(): boolean;
 }
 
 export interface RunSpec {

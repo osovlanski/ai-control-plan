@@ -31,6 +31,7 @@ import { randomUUID } from "node:crypto";
 import { SessionCasConflictError, type SessionStore } from "./session-store.js";
 import type { ApprovalService } from "./approval-service.js";
 import type { RunnerCheckpoints } from "./session-runner.js";
+import type { ProviderProcessTracker } from "./provider-processes.js";
 import { VerificationStoreConflictError, type StoredVerificationRun, type VerificationStore } from "./verification-store.js";
 
 export interface RecoveryRegistry {
@@ -62,6 +63,10 @@ export interface RecoveryDeps {
    * `mode` join, and **fail-closed**: a missing/corrupt binding returns true.
    */
   shouldTerminalizeOnRecovery?: (sessionId: string) => boolean;
+  /** F2: provider processes this incarnation spawned; a taken-over session's tree is terminated. */
+  processes?: ProviderProcessTracker;
+  /** F2: boot reap of provider processes a dead incarnation left behind. Runs before any session is decided. */
+  reapStrays?: () => Promise<unknown>;
 }
 
 export type RecoveryAction =
@@ -92,6 +97,7 @@ export class HarnessRecovery {
 
   /** Boot: void all leases, then decide every live session's fate (§9). */
   async reconcileOnBoot(): Promise<SessionRecoveryOutcome[]> {
+    await this.deps.reapStrays?.();
     this.deps.store.voidAllLeases();
     const out: SessionRecoveryOutcome[] = [];
     for (const s of this.deps.store.liveSessions()) {
@@ -126,6 +132,9 @@ export class HarnessRecovery {
     const lease = this.deps.store.acquireLease(sessionId);
     if (!lease) return { sessionId, action: "skipped", detail: "leased by a live runner" };
     this.deps.store.appendRecoveryEvent(sessionId, "lease_taken_over");
+    // F2: a lease that expired under this incarnation means its runner stopped
+    // renewing; whatever provider tree it spawned must not outlive the takeover.
+    await this.deps.processes?.terminate(sessionId, "orphaned: lease taken over by recovery");
 
     try {
       return await this.decide(sessionId, s0, lease);

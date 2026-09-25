@@ -155,6 +155,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     onQuotaObserved: () => orchestrator.scheduler?.quotaObserved(),
     decisionProviders: deps.decisionProviders,
     onWarning: (message) => app.log.warn(message),
+    onInfo: (message, fields) => app.log.info(fields, message),
   });
   const harnessRecovery = composed.harnessRecovery;
   const harnessBridge: HarnessBridge | undefined = deps.orchestrator ? undefined : composed.harnessBridge;

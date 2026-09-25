@@ -1,14 +1,16 @@
+import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { query, type PermissionResult, type Query, type SDKMessage, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
+import { query, type PermissionResult, type Query, type SDKMessage, type SDKUserMessage, type SpawnedProcess, type SpawnOptions } from "@anthropic-ai/claude-agent-sdk";
 import type {
   AdapterContextSample,
   AgentAdapter,
   AssistantId,
   CapabilityManifest,
   NormalizedEvent,
+  ProviderProcess,
   ProviderSessionRef,
   RunHandle,
   RunId,
@@ -30,7 +32,12 @@ interface ClaudeRunState {
   advertisedMaxTokens?: number;
   /** Present only in live-input mode (see `ClaudeAdapterOptions.liveInput`). */
   live?: LiveInputChannel;
+  /** The CLI process this adapter spawned for the run (kernel liveness, F1/F2). */
+  process?: { child: ChildProcess; spawnedAt: string; stderrTail: string };
 }
+
+/** Bounded stderr tail kept for provider error events (the SDK keeps its own only for its default spawn). */
+const STDERR_TAIL_CHARS = 2_048;
 
 /**
  * The stdin side of a live-input run. Only built when `liveInput` is on, so a
@@ -159,6 +166,7 @@ export class ClaudeAdapter implements AgentAdapter {
         model: run.model?.id,
         resume: resumeRef,
         abortController: state.abort,
+        spawnClaudeCodeProcess: (options) => this.spawnProvider(options, state),
         permissionMode: run.permissionPolicy.mode === "auto-approve" ? "bypassPermissions" : "default",
         allowDangerouslySkipPermissions: run.permissionPolicy.mode === "auto-approve" ? true : undefined,
         canUseTool:
@@ -187,7 +195,8 @@ export class ClaudeAdapter implements AgentAdapter {
       }
       state.queue.end();
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      const tail = state.process?.stderrTail.trim();
+      const message = (err instanceof Error ? err.message : String(err)) + (tail ? ` — stderr: ${tail}` : "");
       if (classifyLimit(message)) {
         emit({ type: "limit.hit", summary: `Provider limit: ${message}`, raw: { message } });
       }
@@ -486,6 +495,35 @@ export class ClaudeAdapter implements AgentAdapter {
     } catch {
       return null;
     }
+  }
+
+  /**
+   * Same launch as the SDK's default local spawn (stdio pipes, the SDK's env and
+   * forwarded abort signal), done here so the kernel can see the pid (F1/F2).
+   */
+  private spawnProvider(options: SpawnOptions, state: ClaudeRunState): SpawnedProcess {
+    const child = spawn(options.command, options.args, {
+      cwd: options.cwd,
+      env: options.env,
+      signal: options.signal,
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    const proc = { child, spawnedAt: new Date().toISOString(), stderrTail: "" };
+    child.stderr?.setEncoding("utf8");
+    child.stderr?.on("data", (chunk: string) => {
+      proc.stderrTail = (proc.stderrTail + chunk).slice(-STDERR_TAIL_CHARS);
+    });
+    child.on("error", () => {}); // surfaced by the SDK through the stream; never an unhandled 'error'
+    state.process = proc;
+    return child as unknown as SpawnedProcess;
+  }
+
+  providerProcess(handle: RunHandle): ProviderProcess | undefined {
+    const child = this.runs.get(handle.runId)?.process;
+    if (!child?.child.pid) return undefined;
+    const c = child.child;
+    return { pid: c.pid!, spawnedAt: child.spawnedAt, alive: () => c.exitCode === null && c.signalCode === null };
   }
 
   async cancel(handle: RunHandle): Promise<void> {

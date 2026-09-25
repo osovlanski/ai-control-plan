@@ -23,6 +23,7 @@ import { HarnessBridge } from "./control-plane-bridge.js";
 import { deriveEnvelopeUpdate } from "./envelope-derivation.js";
 import { EventRecorder } from "./event-recorder.js";
 import { snapshotQuota } from "./quota-snapshot.js";
+import { ProviderProcessTracker, markIncarnation, reapStrayProviders } from "./provider-processes.js";
 import { HarnessRecovery } from "./recovery.js";
 import { SessionRunner, type RunnerDeps } from "./session-runner.js";
 import { SessionStore } from "./session-store.js";
@@ -59,6 +60,8 @@ export interface HarnessCompositionDeps {
   decisionProviders?: DecisionProvider[];
   /** Where an I-D8 activation refusal is said out loud. */
   onWarning?: (message: string) => void;
+  /** Structured info log: provider spawn/first-event timing, fences, reaps (F1/F2). */
+  onInfo?: (message: string, fields: Record<string, unknown>) => void;
 }
 
 export interface HarnessComposition {
@@ -93,6 +96,10 @@ export function buildHarnessComposition(deps: HarnessCompositionDeps): HarnessCo
   const sessionStore = new SessionStore(db);
   const approvals = new ApprovalService(db);
   const verificationStore = new VerificationStore(db);
+  // F2: stamp this incarnation before any provider can be spawned, so a later
+  // boot can tell this process's strays from a live sibling's.
+  markIncarnation(config.dir);
+  const processes = new ProviderProcessTracker(undefined, deps.onInfo);
   const harnessRecovery = new HarnessRecovery({
     store: sessionStore,
     approvals,
@@ -100,6 +107,8 @@ export function buildHarnessComposition(deps: HarnessCompositionDeps): HarnessCo
     registry, // Registry is structurally a { adapter, manifest } facade
     verification: verificationStore,
     shouldTerminalizeOnRecovery: (sessionId) => shouldTerminalizeOnRecovery(db, config, sessionId),
+    processes,
+    reapStrays: () => reapStrayProviders(config.dir, { log: deps.onInfo }),
   });
 
   const sessionTaskCache = new Map<string, string>();
@@ -256,6 +265,8 @@ export function buildHarnessComposition(deps: HarnessCompositionDeps): HarnessCo
     softThresholdPct: config.failover.softThresholdPct,
     handoff: new HandoffService(db),
     toolGate,
+    processes,
+    log: deps.onInfo,
   });
   const harnessBridge = new HarnessBridge({ runner, store: sessionStore, approvals, db, onError });
 
