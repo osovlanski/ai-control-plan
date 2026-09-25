@@ -169,6 +169,38 @@ describe("Orchestrator characterization", () => {
     expect(ckpt?.reason).toBe("cancel");
   });
 
+  it("[intentional] a decision after cancel is refused and, on Harness, the approval is settled", async () => {
+    const env = tasks.create({ goal: "long one [FAKE:APPROVAL]" });
+    tasks.transition(env.taskId, "ROUTING");
+    await orchestrator.startTask(env.taskId, A);
+    const requestId = await waitForApproval(env.taskId);
+
+    await orchestrator.cancelTask(env.taskId);
+    await orchestrator.waitForSettled(env.taskId);
+    await expect(orchestrator.respondApproval(env.taskId, requestId, true)).rejects.toThrow();
+
+    const rows = db
+      .prepare(
+        "SELECT a.state, a.decision, a.settled_reason FROM approvals a JOIN runs r ON r.id = a.session_id WHERE r.task_id = ?",
+      )
+      .all(env.taskId);
+    if (config.execution.harnessModes.single) {
+      // Harness: the durable row is closed with the task, and the timeline says why.
+      expect(rows).toEqual([{ state: "expired", decision: null, settled_reason: "cancelled_with_task" }]);
+      const settled = db
+        .prepare(
+          "SELECT e.payload FROM events e JOIN runs r ON r.id = e.run_id WHERE r.task_id = ? AND e.type = 'approval.settled'",
+        )
+        .all(env.taskId) as Array<{ payload: string }>;
+      expect(settled.map((e) => JSON.parse(e.payload))).toEqual([
+        { requestId, reason: "cancelled_with_task", terminalState: "CANCELLED" },
+      ]);
+    } else {
+      // Legacy: approvals live in the adapter and die with the run; nothing durable is left pending.
+      expect(rows).toEqual([]);
+    }
+  });
+
   it("[intentional] manual handoff mid-run starts a fresh run on the requested assistant", async () => {
     // Keep A busy on an approval so the task is still RUNNING when we hand off.
     const env = tasks.create({ goal: "hand this over [FAKE:APPROVAL]" });

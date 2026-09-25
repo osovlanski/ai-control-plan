@@ -21,6 +21,8 @@ export const EVENT_TYPES = [
   "file.changed",
   "test.result",
   "approval.requested",
+  // A pending approval closed because its session ended: never answerable again.
+  "approval.settled",
   "usage.updated",
   "limit.approaching",
   "limit.hit",
@@ -209,6 +211,16 @@ export interface ApprovalRequestedPayload {
   input?: unknown;
 }
 
+/** Payload for `approval.settled` — a pending approval closed by its session's terminal state. */
+export interface ApprovalSettledPayload {
+  requestId: string;
+  reason: ApprovalSettledReason;
+  terminalState: string;
+}
+
+/** `cancelled_with_task` for a CANCELLED session; `ended_with_session` for any other terminal state. */
+export type ApprovalSettledReason = "cancelled_with_task" | "ended_with_session";
+
 export interface ErrorEventPayload {
   message?: string;
   kind?: string;
@@ -282,6 +294,7 @@ export interface EventPayloads {
   "file.changed": FileChangedPayload;
   "test.result": TestResultPayload;
   "approval.requested": ApprovalRequestedPayload;
+  "approval.settled": ApprovalSettledPayload;
   "usage.updated": UsagePayload;
   "limit.approaching": UsagePayload;
   "limit.hit": UsagePayload;

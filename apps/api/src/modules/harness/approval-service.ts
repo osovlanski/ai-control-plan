@@ -5,7 +5,7 @@
  * AWAITING_APPROVAL are committed together by the SessionRunner (this service
  * only owns the `approvals` row). Answer lifecycle:
  *   pending → answered → delivering → delivered
- *   pending → expired
+ *   pending → expired    (deadline, or settled with a reason when the session ends)
  *   delivering → delivery_unknown   (crash after send() before the delivered CAS)
  *
  * Idempotency vs conflict: resubmitting the IDENTICAL answer is a no-op that
@@ -35,6 +35,8 @@ export interface ApprovalRow {
   answeredAt: string | null;
   deliveredAt: string | null;
   deliveryNote: string | null;
+  /** Why a pending row was closed by its session's end; null for a deadline expiry. */
+  settledReason: string | null;
 }
 
 export class ApprovalConflictError extends Error {
@@ -68,6 +70,7 @@ interface RawRow {
   answered_at: string | null;
   delivered_at: string | null;
   delivery_note: string | null;
+  settled_reason: string | null;
 }
 
 export class ApprovalService {
@@ -107,7 +110,8 @@ export class ApprovalService {
   ): AnswerResult {
     const row = this.require(sessionId, providerRequestId);
     if (row.state === "expired") {
-      throw new Error(`approval ${providerRequestId} has expired and cannot be answered`);
+      const why = row.settledReason ? ` (${row.settledReason})` : "";
+      throw new Error(`approval ${providerRequestId} has expired${why} and cannot be answered`);
     }
     if (row.decision !== null) {
       if (row.decision !== decision) {
@@ -223,5 +227,6 @@ function toRow(r: RawRow): ApprovalRow {
     answeredAt: r.answered_at,
     deliveredAt: r.delivered_at,
     deliveryNote: r.delivery_note,
+    settledReason: r.settled_reason ?? null,
   };
 }
