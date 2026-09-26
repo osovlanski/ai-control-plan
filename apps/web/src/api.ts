@@ -4,6 +4,35 @@ export interface Workspace {
   assistants: string[];
   repoAllowlist: string[];
   failover: { auto: boolean; softThresholdPct: number; triggers: string[] };
+  /** Absent on a plane that predates the session-input contract — treat as off. */
+  sessionInput?: { enabled: boolean };
+}
+
+/** One durable session-addressed input, exactly as the plane records it. */
+export interface SessionInput {
+  id: string;
+  sessionId: string;
+  taskId: string;
+  clientMessageId: string;
+  text: string;
+  state: "queued" | "accepted" | "delivered" | "rejected" | "expired";
+  reason: string | null;
+  /** An attempt was made and its outcome is unknown. Never render this as sent. */
+  deliveryUnknown: boolean;
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+  providerReceipt: { reference: string; ackLevel: string; at: string } | null;
+  /** Incarnation of `clientMessageId`; an explicit retry of a rejection adds one. */
+  generation?: number;
+  /** The settled record this one retries, when it is not the first incarnation. */
+  retryOf?: string | null;
+  /**
+   * Dispatch attempts, oldest first. Present on the single-record and operator
+   * reads; the `diagnostic` is the bounded reason an attempt ended the way it
+   * did, which is the cause behind an unresolved row's verdict.
+   */
+  attempts?: Array<{ ordinal: number; adapter: string; outcome: string; diagnostic: string | null; startedAt: string }>;
 }
 
 export interface Assistant {
@@ -273,8 +302,45 @@ async function req<T>(url: string, init?: RequestInit): Promise<T> {
   return (await res.json()) as T;
 }
 
+/**
+ * Submits one durable input. A 422 is NOT a transport failure: it carries the
+ * persisted record of a message the plane refused, which the caller must show
+ * rather than retry.
+ */
+async function submitSessionInput(sessionId: string, body: { clientMessageId: string; text: string }): Promise<SessionInput> {
+  const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/inputs`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (res.status === 401) { emitAuthExpired(); throw new AuthExpiredError(); }
+  if (res.status !== 202 && res.status !== 422) {
+    const failure: unknown = await res.json().catch(() => ({}));
+    throw new Error((failure as { error?: string }).error ?? `HTTP ${res.status}`);
+  }
+  return (await res.json()) as SessionInput;
+}
+
 export const api = {
   workspace: () => req<Workspace>("/api/workspace"),
+  /** The client generates `clientMessageId` BEFORE the first attempt and reuses it. */
+  sendSessionInput: submitSessionInput,
+  // Explicit commands over the MESSAGE id. The plane answers 409 with a reason
+  // when the record's own state forbids the command; that reason is shown as-is
+  // rather than retried, because it is a fact about the record, not a blip.
+  retrySessionInput: (messageId: string, expectedVersion?: number) =>
+    req<SessionInput>(`/api/inputs/${encodeURIComponent(messageId)}/retry`, {
+      method: "POST", body: JSON.stringify({ expectedVersion }),
+    }),
+  cancelSessionInput: (messageId: string, expectedVersion?: number) =>
+    req<SessionInput>(`/api/inputs/${encodeURIComponent(messageId)}/cancel`, {
+      method: "POST", body: JSON.stringify({ expectedVersion }),
+    }),
+  sessionInputs: (sessionId: string) =>
+    req<{ inputs: SessionInput[]; nextCursor: string | null }>(`/api/sessions/${encodeURIComponent(sessionId)}/inputs`),
+  /** Every message this workspace cannot account for, across sessions. */
+  unresolvedInputs: () => req<{ inputs: SessionInput[] }>("/api/inputs/unresolved"),
   assistants: () => req<Assistant[]>("/api/assistants"),
   changes: () => req<CapabilityChange[]>("/api/assistants/changes"),
   syncAssistant: (id: string) => req<unknown>(`/api/assistants/${id}/sync`, { method: "POST" }),

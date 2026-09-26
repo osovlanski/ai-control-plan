@@ -62,9 +62,21 @@ Reconciliation of an unknown outcome, in order:
 
 **Adapter seam.** `SessionInputAdapter` is deliberately not `AgentAdapter.send`:
 that method has no idempotency, receipt or acknowledgement contract, and a typed
-`send` is not acceptance evidence. `FakeSessionInputAdapter` is the only
-implementation in this slice; every real provider resolves to no capability and
-is rejected before dispatch.
+`send` is not acceptance evidence. `FakeSessionInputAdapter` was the only
+implementation in the original slice; the live Claude Code adapter has since
+landed on the same seam, and every other real provider still resolves to no
+capability and is rejected before dispatch.
+
+**Where a person sees it.** Delivery state only the plane can see is not state
+anyone can act on. Two flag-gated surfaces read it and hold none of their own:
+the Shell transcript renders each follow-up from the session's input ledger, and
+Traces renders `GET /api/inputs/unresolved` — every message in the workspace
+whose delivery cannot be accounted for, across sessions. `delivery_unknown = 1`
+is that whole set by construction, so `manual_recovery_required` is a
+distinction on the row rather than a second query. Both surfaces name manual
+recovery as itself instead of softening it into "unconfirmed", and offer only
+the commands `canRetryInput` / `canCancelInput` already accept, so no button
+returns a 409.
 
 **Traces.** `session_input_events` is its own ledger, for the same reason
 `scheduler_events` is: these events exist before and independently of provider
@@ -76,9 +88,13 @@ message, attempt, session, task and workspace ids, the actor and a safe reason.
 The counts below describe the original slice, including its composer. Fresh
 backend-only restack evidence is recorded in [session-input-restack.md](session-input-restack.md).
 
-`pnpm lint`, `pnpm typecheck`, `pnpm build`, `pnpm test` (941 API + 56 web),
-`pnpm test:harness-on`, `pnpm test:recovery-chaos` and the Chromium E2E project
-are green, plus a clean-checkout install/build/test verification.
+For the original slice: `pnpm lint`, `pnpm typecheck`, `pnpm build`, `pnpm test`
+(941 API + 56 web), `pnpm test:harness-on`, `pnpm test:recovery-chaos` and the
+Chromium E2E project, plus a clean-checkout install/build/test verification.
+
+The delivery-state surfaces were first validated on the pre-restack branch
+(2026-09-20). Their port onto main records its own gate in the PR that
+superseded #48.
 
 The two correctness cases are in `apps/api/test/session-input-recovery.test.ts`.
 The restart is simulated deterministically in-process: the server instance and
@@ -88,6 +104,12 @@ real provider would. No child process is forked.
 
 ## Not in this slice
 
-No live provider adapter, no default-on flag, no Sirius/NanoClaw work, no
-deployment change, no Shell/Operator delivery cards and no follow-up composer. `compacting` is a policy arm only — the kernel has no
-compaction record until K10 exists.
+No default-on flag, no Sirius/NanoClaw work and no deployment change.
+`compacting` is a policy arm only — the kernel has no compaction record until
+K10 exists.
+
+Landed on top of this slice: the live Claude Code and Codex adapters (#47, #51),
+and the follow-up composer and delivery-state surfaces above (ported onto main's
+Shell from #48). Their visual evidence is
+[3 captures](ui/assets/session-input-delivery/README.md). Still absent: delivery
+evidence for a provider's own turns, and attachments.

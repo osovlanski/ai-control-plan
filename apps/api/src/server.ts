@@ -1071,6 +1071,17 @@ export function buildServer(deps: ServerDeps): BuiltServer {
       },
     );
 
+    // The operator read: every message this plane cannot account for, across
+    // sessions. Registered BEFORE `/api/inputs/:id` and static, so `unresolved`
+    // is never mistaken for a message id. It exposes no new fact — the same
+    // rows the per-session listing already serves — it just makes them findable
+    // without knowing which session to look in.
+    app.get<{ Querystring: { limit?: string } }>("/api/inputs/unresolved", read.sessions, (req) => {
+      const limit = req.query.limit ? Number(req.query.limit) : undefined;
+      const rows = inputs.unresolved(Number.isFinite(limit) ? limit : undefined);
+      return { inputs: rows.map((row) => inputView(row, inputs)) };
+    });
+
     // Resolves a lost response: the client knows its own message id from the
     // 202 it never received only via this read plus its client key listing.
     app.get<{ Params: { id: string } }>("/api/inputs/:id", read.sessions, (req, reply) => {
