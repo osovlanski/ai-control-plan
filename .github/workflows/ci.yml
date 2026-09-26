@@ -2,7 +2,15 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, spike/codex-session-input-correlated-receipts]
+    paths:
+      - ".github/workflows/ci.yml"
+      - "apps/api/**"
+      - "packages/adapters/**"
+      - "packages/core/**"
+      - "docs/codex-session-input-correlated-receipts.md"
+      - "docs/session-input-stack-normalization.md"
+      - "docs/evidence/codex-correlated-**"
   pull_request:
 
 jobs:
