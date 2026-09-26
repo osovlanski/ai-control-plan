@@ -1,9 +1,9 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { query, type PermissionResult, type Query, type SDKMessage, type SDKUserMessage, type SpawnedProcess, type SpawnOptions } from "@anthropic-ai/claude-agent-sdk";
+import { query, type McpServerConfig, type Options, type PermissionResult, type Query, type SDKMessage, type SDKUserMessage, type SpawnedProcess, type SpawnOptions } from "@anthropic-ai/claude-agent-sdk";
 import type {
   AdapterContextSample,
   AgentAdapter,
@@ -167,6 +167,9 @@ export class ClaudeAdapter implements AgentAdapter {
         resume: resumeRef,
         abortController: state.abort,
         spawnClaudeCodeProcess: (options) => this.spawnProvider(options, state),
+        ...(this.options.profile
+          ? { settings: profileSettings(this.options.profile), strictMcpConfig: true, mcpServers: this.options.profile.mcpServers }
+          : {}),
         permissionMode: run.permissionPolicy.mode === "auto-approve" ? "bypassPermissions" : "default",
         allowDangerouslySkipPermissions: run.permissionPolicy.mode === "auto-approve" ? true : undefined,
         canUseTool:
@@ -545,6 +548,53 @@ export interface ClaudeAdapterOptions {
    * true; with it off the launch path is identical to what it has always been.
    */
   liveInput?: boolean;
+  /**
+   * A curated launch (`execution.providerProfile`): the user's own config still
+   * loads (auth, hooks, settings), but only the listed plugins stay on and only
+   * the listed MCP servers connect. Plugins are turned off through `--settings`
+   * flag-level settings, which outrank user and project settings; the user's
+   * files are read, never written.
+   */
+  profile?: ClaudeLaunchProfile;
+}
+
+export interface ClaudeLaunchProfile {
+  /** Plugin ids (`name@marketplace`) to keep; every other plugin the user enables is turned off. */
+  plugins: string[];
+  /**
+   * The ONLY MCP servers the provider connects (`--strict-mcp-config`): user,
+   * project, plugin and claude.ai connector servers are all ignored. Naming an
+   * entry after a plugin server (`plugin:claude-mem:mcp-search`) keeps its tool
+   * names, so tool policy that names them still matches.
+   */
+  mcpServers: Record<string, McpServerConfig>;
+}
+
+/**
+ * The flag-level settings a profile launches with. Exported for tests.
+ * (`allowedMcpServers` cannot carry the MCP list: from flag settings the CLI
+ * treats it as allowing nothing, whatever the names — hence strict config.)
+ */
+export function profileSettings(profile: ClaudeLaunchProfile, userSettingsPath = claudeUserSettingsPath()): NonNullable<Options["settings"]> {
+  const keep = new Set(profile.plugins);
+  const enabledPlugins: Record<string, boolean> = {};
+  for (const id of userEnabledPlugins(userSettingsPath)) if (!keep.has(id)) enabledPlugins[id] = false;
+  for (const id of keep) enabledPlugins[id] = true;
+  return { enabledPlugins, disableClaudeAiConnectors: true };
+}
+
+function claudeUserSettingsPath(): string {
+  return join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude"), "settings.json");
+}
+
+/** Plugin ids the user's settings enable. Unreadable settings enable nothing we must turn off. */
+function userEnabledPlugins(path: string): string[] {
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as { enabledPlugins?: Record<string, unknown> };
+    return Object.entries(parsed.enabledPlugins ?? {}).filter(([, v]) => v !== false).map(([k]) => k);
+  } catch {
+    return [];
+  }
 }
 
 /** One user turn on the wire. `uuid` is what the CLI stamps into its transcript. */

@@ -132,6 +132,42 @@ describe("workspace config", () => {
     }
   });
 
+  describe("launch profile keys (opt-in, defaults unchanged)", () => {
+    it("are absent by default", () => {
+      const { execution } = loadConfig(env());
+      expect(execution.maxConcurrentProviderStarts).toBeUndefined();
+      expect(execution.providerProfile).toBeUndefined();
+    });
+
+    it("resolve when set", () => {
+      writeCfg(`execution:
+  maxConcurrentProviderStarts: 2
+  providerProfile:
+    plugins: [claude-mem@thedotmack]
+    mcpServers:
+      "plugin:claude-mem:mcp-search": { type: stdio, command: node, args: [server.cjs] }
+`);
+      const { execution } = loadConfig(env());
+      expect(execution.maxConcurrentProviderStarts).toBe(2);
+      expect(execution.providerProfile).toEqual({
+        plugins: ["claude-mem@thedotmack"],
+        mcpServers: { "plugin:claude-mem:mcp-search": { type: "stdio", command: "node", args: ["server.cjs"] } },
+      });
+    });
+
+    for (const [name, yaml] of [
+      ["cap 0", "execution:\n  maxConcurrentProviderStarts: 0\n"],
+      ["cap 1.5", "execution:\n  maxConcurrentProviderStarts: 1.5\n"],
+      ["plugins not a list", "execution:\n  providerProfile:\n    plugins: claude-mem\n"],
+      ["mcpServers as a list", "execution:\n  providerProfile:\n    mcpServers: [claude-mem]\n"],
+    ] as const) {
+      it(`rejects ${name}`, () => {
+        writeCfg(yaml);
+        expect(() => loadConfig(env())).toThrow(/maxConcurrentProviderStarts|providerProfile/);
+      });
+    }
+  });
+
   it("a legacy harnessSingleMode file emits exactly one deprecation warning and never touches stdout", () => {
     writeCfg("execution:\n  harnessSingleMode: true\n");
     const spy = vi.spyOn(process.stdout, "write").mockReturnValue(true);

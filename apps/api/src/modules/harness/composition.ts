@@ -263,6 +263,7 @@ export function buildHarnessComposition(deps: HarnessCompositionDeps): HarnessCo
     authority,
     verificationCoordinator: new VerificationCoordinator(verificationStore, checkpoints, authority),
     softThresholdPct: config.failover.softThresholdPct,
+    ...(config.execution.maxConcurrentProviderStarts ? { maxConcurrentProviderStarts: config.execution.maxConcurrentProviderStarts } : {}),
     handoff: new HandoffService(db),
     toolGate,
     processes,
