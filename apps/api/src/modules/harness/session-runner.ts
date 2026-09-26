@@ -16,6 +16,7 @@
  * that cutover (and the legacy runs.state vocabulary rewrite) is deferred. The
  * verification stage here is the minimal command runner; Phase 5 hardens it.
  */
+import { StartSlots } from "./start-slots.js";
 import type {
   AdapterContextSample,
   AgentAdapter,
@@ -100,6 +101,8 @@ export interface RunnerDeps {
   runnerId?: string;
   /** Poll interval while a session is AWAITING_APPROVAL. */
   approvalPollMs?: number;
+  /** `execution.maxConcurrentProviderStarts`; unset = unlimited (no queue, no trace event). */
+  maxConcurrentProviderStarts?: number;
   /** Resolves the request's secret REFERENCES at the launch boundary (§3). */
   secretResolver?: SecretResolver;
   /**
@@ -180,7 +183,10 @@ export class SessionRunner {
   private readonly runnerId: string;
   private readonly approvalPollMs: number;
 
+  readonly starts: StartSlots;
+
   constructor(private deps: RunnerDeps) {
+    this.starts = new StartSlots(deps.maxConcurrentProviderStarts ?? Infinity);
     this.now = deps.now ?? (() => new Date());
     this.softThresholdPct = deps.softThresholdPct ?? 80;
     this.runnerId = deps.runnerId ?? `runner_${newExecutionSessionId()}`;
@@ -240,6 +246,7 @@ export class SessionRunner {
         // F2: no provider tree outlives the run that spawned it — however the
         // run ended (terminal, fenced, CAS refused, thrown). Idempotent: an
         // already-exited provider reports "gone".
+        ctx.releaseStartSlot();
         await this.deps.processes?.terminate(sessionId, "run ended");
         store.releaseLease(sessionId, lease);
       }
@@ -297,6 +304,7 @@ class RunContext {
   /** F1: the provider process, once the adapter reports one. */
   private proc: ProviderProcess | undefined;
   private launchAtMs = 0;
+  private releaseStart: (() => void) | null = null;
   private lastSilenceReportMs = 0;
   private procExitReported = false;
   /** F2: set once the lease is refused; the run unwinds and recovery owns the result. */
@@ -357,6 +365,23 @@ class RunContext {
     const heartbeat = setInterval(() => {
       void this.onTick(adapter, handle);
     }, this.runner.pollMs * 5);
+    if (this.runner.starts.limited) {
+      const queuedAtMs = this.runner.clock();
+      this.releaseStart = await this.runner.starts.acquire(this.abort.promise);
+      if (!this.releaseStart) {
+        // Cancelled, timed out or fenced while waiting: nothing was spawned.
+        clearInterval(heartbeat);
+        if (this.fencedReason) throw new SessionFencedError(this.sessionId, this.fencedReason);
+        return this.finalizeBeforeStream(adapter, undefined, this.tickPlan!);
+      }
+      const waitMs = this.runner.clock() - queuedAtMs;
+      this.recordEvents([{
+        runId: this.sessionId as never, ts: this.iso(), type: "phase",
+        summary: `provider start slot after ${waitMs} ms in queue (maxConcurrentProviderStarts ${this.runner.starts.cap})`,
+        payload: { note: "provider_start_queue", waitMs, cap: this.runner.starts.cap },
+      }]);
+      this.launchAtMs = this.runner.clock(); // silence is measured from the spawn, not the queue
+    }
     try {
       handle = await this.startProvider(adapter);
     } catch (err) {
@@ -442,6 +467,7 @@ class RunContext {
         const event = step.value;
         if (firstEvent) {
           this.transition("STARTING", "RUNNING", { providerStartAcked: true });
+          this.releaseStartSlot();
           firstEvent = false;
           this.reportFirstEvent(adapter, handle);
         }
@@ -517,22 +543,7 @@ class RunContext {
         "STARTING",
       );
     }
-    if (firstEvent && terminalPlan) {
-      // A tick tripped before the stream began — the session is still STARTING.
-      await safeCancel(adapter, handle);
-      const to: TerminalSessionState =
-        terminalPlan.kind === "cancel"
-          ? "CANCELLED"
-          : terminalPlan.kind === "fail" && terminalPlan.failure.kind === "timeout"
-            ? "TIMED_OUT"
-            : "FAILED";
-      const cp = await this.attemptCheckpoint("cancel");
-      return this.finalize("STARTING", to, {
-        failure: terminalPlan.kind === "fail" ? terminalPlan.failure : undefined,
-        cancellation: terminalPlan.kind === "cancel" ? { requestedBy: terminalPlan.by, at: this.iso() } : undefined,
-        checkpoint: cp,
-      });
-    }
+    if (firstEvent && terminalPlan) return this.finalizeBeforeStream(adapter, handle, terminalPlan);
 
     // --- decide the terminal state ---------------------------------
     if (!terminalPlan) {
@@ -741,6 +752,32 @@ class RunContext {
       spawnToFirstEventMs: this.proc ? now - Date.parse(this.proc.spawnedAt) : undefined,
       launchToFirstEventMs: now - this.launchAtMs,
     });
+  }
+
+  /** A tick tripped before the stream began — the session is still STARTING. */
+  private async finalizeBeforeStream(
+    adapter: AgentAdapter,
+    handle: RunHandle | undefined,
+    terminalPlan: TerminalPlan,
+  ): Promise<ExecutionResult> {
+    if (handle) await safeCancel(adapter, handle);
+    const to: TerminalSessionState =
+      terminalPlan.kind === "cancel"
+        ? "CANCELLED"
+        : terminalPlan.kind === "fail" && terminalPlan.failure.kind === "timeout"
+          ? "TIMED_OUT"
+          : "FAILED";
+    const cp = await this.attemptCheckpoint("cancel");
+    return this.finalize("STARTING", to, {
+      failure: terminalPlan.kind === "fail" ? terminalPlan.failure : undefined,
+      cancellation: terminalPlan.kind === "cancel" ? { requestedBy: terminalPlan.by, at: this.iso() } : undefined,
+      checkpoint: cp,
+    });
+  }
+
+  releaseStartSlot(): void {
+    this.releaseStart?.();
+    this.releaseStart = null;
   }
 
   private reportSilence(): void {

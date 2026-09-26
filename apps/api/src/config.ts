@@ -158,12 +158,27 @@ export interface WorkspaceConfig {
      * this and `harnessModes` is a config error.
      */
     harnessSingleMode?: boolean;
+    /**
+     * Cap on kernel-started providers between spawn and their first event
+     * (Harness path). Starts over the cap wait FIFO; the wait is a `phase`
+     * trace event. Unset = unlimited, as before.
+     */
+    maxConcurrentProviderStarts?: number;
+    /**
+     * Opt-in curated launch for Claude providers: only these plugins stay on and
+     * only these MCP servers (full stdio/http configs, keyed by server name)
+     * connect; claude.ai connectors are off. Unset = the provider's full user
+     * config, as before.
+     */
+    providerProfile?: { plugins?: string[]; mcpServers?: Record<string, Record<string, unknown>> };
   };
 }
 
 /** The resolved execution block — always canonical `harnessModes`, never the deprecated key. */
 export interface ResolvedExecutionConfig {
   harnessModes: { single: boolean };
+  maxConcurrentProviderStarts?: number;
+  providerProfile?: { plugins: string[]; mcpServers: Record<string, Record<string, unknown>> };
 }
 
 /** The resolved model block — always present, always fail-closed by default. */
@@ -406,7 +421,33 @@ function resolveExecution(
     }
   }
 
-  return { harnessModes: { single } };
+  const cap = fileExecution?.maxConcurrentProviderStarts;
+  if (cap !== undefined && (!Number.isInteger(cap) || cap < 1)) {
+    throw new Error(`${configPath}: execution.maxConcurrentProviderStarts must be a positive integer, got ${JSON.stringify(cap)}`);
+  }
+  const profile = fileExecution?.providerProfile;
+  let providerProfile: ResolvedExecutionConfig["providerProfile"];
+  if (profile !== undefined) {
+    if (typeof profile !== "object" || profile === null || Array.isArray(profile)) {
+      throw new Error(`${configPath}: execution.providerProfile must be a mapping`);
+    }
+    const plugins = profile.plugins ?? [];
+    if (!Array.isArray(plugins) || !plugins.every((x) => typeof x === "string" && x.length > 0)) {
+      throw new Error(`${configPath}: execution.providerProfile.plugins must be a list of plugin ids`);
+    }
+    const servers = profile.mcpServers ?? {};
+    if (typeof servers !== "object" || servers === null || Array.isArray(servers)
+      || !Object.values(servers).every((v) => typeof v === "object" && v !== null && !Array.isArray(v))) {
+      throw new Error(`${configPath}: execution.providerProfile.mcpServers must map server names to server configs`);
+    }
+    providerProfile = { plugins, mcpServers: servers };
+  }
+
+  return {
+    harnessModes: { single },
+    ...(cap !== undefined ? { maxConcurrentProviderStarts: cap } : {}),
+    ...(providerProfile ? { providerProfile } : {}),
+  };
 }
 
 /**
@@ -601,6 +642,10 @@ function renderDefaultConfig(workspace: string): string {
     [
       "# execution.harnessModes: per-mode Execution Harness routing. Only `single` has parity today; default off.",
       "# The deprecated `execution.harnessSingleMode: <bool>` is still accepted for one release and maps to harnessModes.single.",
+      "# execution.maxConcurrentProviderStarts: <n> caps providers between spawn and first event (Harness path); others queue",
+      "#   FIFO and the wait is a `phase` trace event. Unset = unlimited.",
+      "# execution.providerProfile: { plugins: [<id@marketplace>], mcpServers: { <name>: <server config> } } launches Claude",
+      "#   with only those plugins and exactly those MCP servers (strict), claude.ai connectors off. Unset = full user config.",
       "execution:",
     ].join("\n"),
   )

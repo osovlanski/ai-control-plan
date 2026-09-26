@@ -1233,3 +1233,84 @@ function defaultBody(): FakeScript["events"] {
 
 // Silence "unused" for the NormalizedEvent/RunId/RunHandle imports kept for clarity.
 export type _Keep = NormalizedEvent | RunId | RunHandle;
+
+describe("execution.maxConcurrentProviderStarts", () => {
+  /** Holds each run before its first event until `open(runId)`; counts starts. */
+  function gatedAdapter() {
+    const gates = new Map<string, () => void>();
+    let n = 0;
+    const adapter: AgentAdapter = {
+      id: "a1" as AssistantId,
+      describe: async () => MANIFEST,
+      start: async () => {
+        startCount += 1;
+        return { runId: `g${++n}`, assistantId: "a1" as AssistantId };
+      },
+      resume: async () => ({ runId: "never", assistantId: "a1" as AssistantId }),
+      events: async function* (handle) {
+        await new Promise<void>((r) => gates.set(handle.runId as string, r));
+        const ts = new Date().toISOString();
+        yield { runId: handle.runId as RunId, ts, type: "run.started", summary: "started" };
+        yield { runId: handle.runId as RunId, ts, type: "run.ended", summary: "done", payload: { ok: true } };
+      },
+      cancel: async () => {},
+    };
+    return { adapter, open: (runId: string) => gates.get(runId)?.(), opened: (runId: string) => gates.has(runId) };
+  }
+  const queueEvents = (sid: string) =>
+    events(sid).filter((e) => e.type === "phase" && e.payload?.includes("provider_start_queue")).map((e) => JSON.parse(e.payload!));
+  const second = (): Partial<ExecutionRequest> => ({ executionRequestId: "erq_2" });
+
+  it("queues a start over the cap until the running one's first event, and traces the wait", async () => {
+    const g = gatedAdapter();
+    const runner = new SessionRunner(deps(g.adapter, { maxConcurrentProviderStarts: 1 }));
+    const a = runner.run(request());
+    await waitFor(() => g.opened("g1"));
+    const b = runner.run(request(second()));
+    await new Promise((r) => setTimeout(r, 60));
+    expect(startCount).toBe(1); // b is queued: nothing spawned for it yet
+    expect(store.forRequest("erq_2")!.state).toBe("STARTING");
+
+    g.open("g1");
+    await waitFor(() => g.opened("g2"));
+    expect(startCount).toBe(2);
+    g.open("g2");
+    await Promise.all([a, b]);
+
+    const sidB = store.forRequest("erq_2")!.sessionId as string;
+    const [waitA] = queueEvents(sessionOf());
+    expect(waitA).toMatchObject({ note: "provider_start_queue", cap: 1 });
+    expect(waitA.waitMs).toBeLessThan(50); // uncontended: wall clock, so not exactly 0
+    const [waitB] = queueEvents(sidB);
+    expect(waitB).toMatchObject({ cap: 1 });
+    expect(waitB.waitMs).toBeGreaterThanOrEqual(50);
+  });
+
+  it("a session cancelled while queued ends CANCELLED without spawning", async () => {
+    const g = gatedAdapter();
+    const runner = new SessionRunner(deps(g.adapter, { maxConcurrentProviderStarts: 1, approvalPollMs: 5 }));
+    const a = runner.run(request());
+    await waitFor(() => g.opened("g1"));
+    const b = runner.run(request(second()));
+    await waitFor(() => store.forRequest("erq_2")?.state === "STARTING");
+    store.requestCancel(store.forRequest("erq_2")!.sessionId as string);
+    const resultB = await b;
+    expect(resultB.terminalState).toBe("CANCELLED");
+    expect(startCount).toBe(1);
+
+    g.open("g1");
+    expect((await a).terminalState).toBe("COMPLETED");
+  });
+
+  it("unset: no queue and no trace event (unchanged default)", async () => {
+    const g = gatedAdapter();
+    const runner = new SessionRunner(deps(g.adapter));
+    const a = runner.run(request());
+    const b = runner.run(request(second()));
+    await waitFor(() => g.opened("g1") && g.opened("g2"));
+    g.open("g1");
+    g.open("g2");
+    await Promise.all([a, b]);
+    expect(queueEvents(sessionOf())).toEqual([]);
+  });
+});

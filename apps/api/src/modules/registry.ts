@@ -10,6 +10,7 @@ import {
   type CursorOptions,
   type FakeOptions,
   type OpenRouterOptions,
+  type ClaudeLaunchProfile,
 } from "@agent-plane/adapters";
 import type { ResolvedConfig } from "../config.js";
 import type { Db } from "../db/index.js";
@@ -47,7 +48,9 @@ export class Registry {
     for (const [id, cfg] of Object.entries(this.config.assistants)) {
       this.adapters.set(
         id,
-        createAdapter(id as AssistantId, cfg.provider, cfg.options ?? {}, this.config.sessionInput.enabled),
+        createAdapter(id as AssistantId, cfg.provider, cfg.options ?? {}, this.config.sessionInput.enabled,
+          // server configs are checked by the CLI at launch; config only checks their shape
+          this.config.execution.providerProfile as ClaudeLaunchProfile | undefined),
       );
       upsert.run(id, cfg.provider, cfg.enabled === false ? 0 : 1);
     }
@@ -188,10 +191,11 @@ function createAdapter(
   provider: string,
   options: Record<string, unknown> = {},
   sessionInputEnabled = false,
+  profile?: ClaudeLaunchProfile,
 ): AgentAdapter {
   switch (provider) {
     case "anthropic":
-      return new ClaudeAdapter(id, undefined, { liveInput: sessionInputEnabled });
+      return new ClaudeAdapter(id, undefined, { liveInput: sessionInputEnabled, ...(profile ? { profile } : {}) });
     case "openai":
       return new CodexAdapter(id, { appServerInput: sessionInputEnabled && options.appServerInput === true });
     case "openrouter":
