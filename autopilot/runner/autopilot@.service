@@ -1,0 +1,12 @@
+[Unit]
+Description=Agentic OS autopilot lane %i (one backlog item per run)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=AUTOPILOT_LANE=%i
+EnvironmentFile=-%h/.config/autopilot/env
+ExecStart=%h/workspace/personal/autopilot/ai-control-plan/autopilot/runner/autopilot-run.sh
+TimeoutStartSec=4h
+Nice=5

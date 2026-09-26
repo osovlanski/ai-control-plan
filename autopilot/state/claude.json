@@ -1,0 +1,11 @@
+{
+  "lane": "claude",
+  "updated_at": null,
+  "paused": false,
+  "blocked_until": null,
+  "blocked_reason": null,
+  "current": null,
+  "last_run": null,
+  "items": {},
+  "log": []
+}

@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Autopilot Watch</title>
+<meta name="robots" content="noindex">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+:root{
+  --bg:#f4f5fa;--panel:#ffffff;--line:#dfe2ee;--text:#171b2b;--muted:#5d647c;--accent:#5b55e0;--accent-soft:#e9e8fd;
+  --ok:#14945f;--ok-soft:#dcf5ea;--warn:#a86a00;--warn-soft:#fdf0d6;--bad:#c73c3c;--bad-soft:#fbe3e3;--idle:#7a8198;--idle-soft:#eceef4;
+  --sans:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif;--mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+  color-scheme:light;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --bg:#0e1220;--panel:#161b2c;--line:#262d44;--text:#e6e9f4;--muted:#8d95ae;--accent:#9d99ff;--accent-soft:#25244a;
+  --ok:#43d19a;--ok-soft:#133528;--warn:#f2b64d;--warn-soft:#3a2d12;--bad:#f07575;--bad-soft:#3d1c20;--idle:#8d95ae;--idle-soft:#20263a;color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#0e1220;--panel:#161b2c;--line:#262d44;--text:#e6e9f4;--muted:#8d95ae;--accent:#9d99ff;--accent-soft:#25244a;
+  --ok:#43d19a;--ok-soft:#133528;--warn:#f2b64d;--warn-soft:#3a2d12;--bad:#f07575;--bad-soft:#3d1c20;--idle:#8d95ae;--idle-soft:#20263a;color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 var(--sans)}
+.wrap{max-width:1080px;margin:0 auto;padding:28px 16px 48px;display:grid;gap:22px}
+header{display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;gap:12px}
+h1{font-size:26px;font-weight:600;margin:0;letter-spacing:-.01em;text-wrap:balance}
+.sub{color:var(--muted);margin:4px 0 0;font-size:14px}
+.eyebrow{font:500 11px/1 var(--mono);letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+.fresh{font:12px var(--mono);color:var(--muted);display:flex;gap:10px;align-items:center}
+button{font:500 13px var(--sans);color:var(--text);background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:6px 12px;cursor:pointer}
+button:hover{border-color:var(--accent)}button:focus-visible,a:focus-visible,summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+a{color:var(--accent)}
+.progress{display:grid;gap:8px}
+.bar{height:10px;border-radius:5px;background:var(--idle-soft);display:flex;overflow:hidden}
+.bar span{display:block;height:100%}
+.legend{display:flex;flex-wrap:wrap;gap:14px;font-size:13px;color:var(--muted)}
+.legend b{color:var(--text);font-variant-numeric:tabular-nums;font-weight:600}
+.lanes{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px}
+.lane{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px;display:grid;gap:10px}
+.lane h2{margin:0;font-size:16px;font-weight:600;display:flex;align-items:center;justify-content:space-between;gap:8px}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;font-size:13px}
+.kv dt{color:var(--muted)}.kv dd{margin:0;font-family:var(--mono);font-size:12.5px;overflow-wrap:anywhere}
+.chip{display:inline-flex;align-items:center;gap:6px;font:500 12px/1 var(--mono);padding:4px 8px;border-radius:999px;white-space:nowrap}
+.chip::before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor}
+.s-merged{color:var(--ok);background:var(--ok-soft)}.s-in_progress,.s-running{color:var(--accent);background:var(--accent-soft)}
+.s-pr_open,.s-blocked,.s-paused{color:var(--warn);background:var(--warn-soft)}.s-failed{color:var(--bad);background:var(--bad-soft)}
+.s-queued,.s-waiting,.s-skipped,.s-owner{color:var(--idle);background:var(--idle-soft)}
+section.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+section.card>summary,section.card>h2{list-style:none;margin:0;padding:14px 16px;font-size:15px;font-weight:600;display:flex;justify-content:space-between;align-items:center;cursor:pointer}
+section.card>h2{cursor:default}
+details>summary::-webkit-details-marker{display:none}
+details>summary::after{content:"▾";color:var(--muted);font-size:12px;transition:transform .15s}
+details:not([open])>summary::after{transform:rotate(-90deg)}
+.table{overflow-x:auto;border-top:1px solid var(--line)}
+table{width:100%;border-collapse:collapse;font-size:13.5px}
+th,td{text-align:left;padding:9px 16px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font:500 11px var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+td.id{font-family:var(--mono);font-size:12.5px;white-space:nowrap}
+td .note{color:var(--muted);font-size:12.5px;margin-top:2px}
+tr:last-child td{border-bottom:0}
+.feed{list-style:none;margin:0;padding:0;border-top:1px solid var(--line)}
+.feed li{display:grid;grid-template-columns:150px 64px 1fr;gap:12px;padding:8px 16px;border-bottom:1px solid var(--line);font-size:13px}
+.feed time,.feed .who{font:12px var(--mono);color:var(--muted)}
+@media (max-width:560px){.feed li{grid-template-columns:1fr}th:nth-child(3),td:nth-child(3){display:none}}
+.err{color:var(--bad);background:var(--bad-soft);padding:10px 14px;border-radius:8px;font-size:13px}
+.empty{padding:14px 16px;color:var(--muted);font-size:13px;border-top:1px solid var(--line)}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <header>
+    <div>
+      <div class="eyebrow">Agentic OS · v4 daily-driver week</div>
+      <h1>Autopilot Watch</h1>
+      <p class="sub">Unattended lanes working through the backlog. Read-only — nothing here can start, stop or merge anything.</p>
+    </div>
+    <div class="fresh"><span id="fresh">loading…</span><button id="refresh" type="button">Refresh</button></div>
+  </header>
+
+  <div id="error" class="err" hidden></div>
+
+  <div class="progress" aria-label="Backlog progress">
+    <div class="bar" id="bar"></div>
+    <div class="legend" id="legend"></div>
+  </div>
+
+  <div class="lanes" id="lanes"></div>
+
+  <details class="card" open id="backlog-card"><summary>Backlog <span class="eyebrow" id="backlog-count"></span></summary>
+    <div class="table"><table><thead><tr><th>Item</th><th>Title</th><th>Lane</th><th>State</th></tr></thead><tbody id="backlog"></tbody></table></div>
+  </details>
+
+  <details class="card" open><summary>Open pull requests · ai-control-plan</summary><div id="prs"></div></details>
+
+  <details class="card" open><summary>Activity</summary><ul class="feed" id="feed"></ul></details>
+
+  <p class="sub">Source: <a href="https://github.com/osovlanski/ai-control-plan/tree/autopilot/integration/autopilot" target="_blank" rel="noopener">autopilot/ on the integration branch</a> · plan <a href="https://github.com/osovlanski/ai-control-plan/blob/autopilot/integration/plans/agentic-os-v4-daily-driver.md" target="_blank" rel="noopener">agentic-os-v4-daily-driver.md</a> · <span id="issue-link"></span></p>
+</div>
+
+<script>
+const RAW = "https://raw.githubusercontent.com/osovlanski/ai-control-plan/autopilot/integration/autopilot/";
+const API = "https://api.github.com/repos/osovlanski/ai-control-plan/pulls?state=open&per_page=30";
+const LANES = ["claude", "codex"];
+const ORDER = ["merged", "pr_open", "in_progress", "failed", "queued"];
+const COLORS = { merged: "var(--ok)", pr_open: "var(--warn)", in_progress: "var(--accent)", failed: "var(--bad)", queued: "var(--idle-soft)" };
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const chip = s => `<span class="chip s-${esc(s)}">${esc(String(s).replace("_", " "))}</span>`;
+function ago(iso) {
+  if (!iso) return "never";
+  const s = (Date.now() - Date.parse(iso)) / 1000;
+  if (s < 0) return "in " + dur(-s);
+  return dur(s) + " ago";
+}
+function dur(s) { s = Math.round(s); if (s < 90) return s + "s"; const m = Math.round(s / 60); if (m < 90) return m + "m"; const h = Math.floor(m / 60); return h < 48 ? h + "h " + (m % 60) + "m" : Math.round(h / 24) + "d"; }
+const local = iso => iso ? new Date(iso).toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" }) : "—";
+
+async function getJson(url) {
+  const r = await fetch(url + (url.includes("?") ? "&" : "?") + "t=" + Math.floor(Date.now() / 60000), { cache: "no-store" });
+  if (!r.ok) throw new Error(url.replace(RAW, "") + " → HTTP " + r.status);
+  return r.json();
+}
+
+async function load() {
+  $("fresh").textContent = "refreshing…";
+  try {
+    const [backlog, ...states] = await Promise.all([getJson(RAW + "backlog.json"), ...LANES.map(l => getJson(RAW + "state/" + l + ".json"))]);
+    render(backlog, states);
+    $("error").hidden = true;
+  } catch (e) {
+    $("error").textContent = "Could not read the autopilot state: " + e.message + ". The integration branch may not be pushed yet.";
+    $("error").hidden = false;
+  }
+  loadPrs();
+  $("fresh").textContent = "updated " + new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+function render(backlog, states) {
+  const itemState = {};
+  states.forEach(s => Object.assign(itemState, s.items || {}));
+  const items = backlog.items;
+  const stateOf = it => it.lane === "owner" ? "owner" : (itemState[it.id]?.state || "queued");
+
+  const counts = {}; items.filter(i => i.lane !== "owner").forEach(i => { const s = stateOf(i); counts[s] = (counts[s] || 0) + 1; });
+  const total = items.filter(i => i.lane !== "owner").length;
+  $("bar").innerHTML = ORDER.filter(s => counts[s]).map(s => `<span style="width:${counts[s] / total * 100}%;background:${COLORS[s]}" title="${s}: ${counts[s]}"></span>`).join("");
+  $("legend").innerHTML = `<span><b>${counts.merged || 0}</b> of <b>${total}</b> merged into integration</span>` +
+    ORDER.slice(1).filter(s => counts[s]).map(s => `<span>${chip(s)} <b>${counts[s]}</b></span>`).join("");
+
+  $("lanes").innerHTML = states.map(s => {
+    const blocked = s.blocked_until && Date.parse(s.blocked_until) > Date.now();
+    const status = s.paused ? "paused" : blocked ? "blocked" : s.current ? "running" : "waiting";
+    const cur = s.current ? items.find(i => i.id === s.current) : null;
+    const lastMsg = (s.log || []).at(-1);
+    return `<article class="lane"><h2>${esc(s.lane)} lane ${chip(status)}</h2><dl class="kv">
+      <dt>Working on</dt><dd>${cur ? esc(cur.id + " · " + cur.title) : "—"}</dd>
+      <dt>Limit window</dt><dd>${blocked ? "until " + esc(local(s.blocked_until)) + " (" + ago(s.blocked_until) + ")" : "clear"}</dd>
+      ${blocked ? `<dt>Reason</dt><dd>${esc(s.blocked_reason)}</dd>` : ""}
+      <dt>Last run</dt><dd>${esc(ago(s.last_run))}</dd>
+      <dt>Last event</dt><dd>${lastMsg ? esc(lastMsg.msg) : "—"}</dd></dl></article>`;
+  }).join("");
+
+  $("backlog-count").textContent = items.length + " items";
+  $("backlog").innerHTML = items.map(it => {
+    const st = itemState[it.id] || {};
+    const pr = st.pr ? ` · <a href="https://github.com/${esc(backlog.repos[it.repo])}/pull/${esc(st.pr)}" target="_blank" rel="noopener">PR #${esc(st.pr)}</a>` : "";
+    const note = [st.verdict && "verdict " + st.verdict, st.note, st.attempts > 1 && "attempt " + st.attempts].filter(Boolean).join(" · ");
+    return `<tr><td class="id">${esc(it.id)}</td><td>${esc(it.title)}<div class="note">${esc(it.repo)}${pr}${note ? " · " + esc(note) : ""}</div></td><td>${esc(it.lane)}</td><td>${chip(stateOf(it))}</td></tr>`;
+  }).join("");
+
+  const feed = states.flatMap(s => (s.log || []).map(e => ({ ...e, lane: s.lane }))).sort((a, b) => b.at.localeCompare(a.at)).slice(0, 40);
+  $("feed").innerHTML = feed.length ? feed.map(e => `<li><time datetime="${esc(e.at)}">${esc(local(e.at))}</time><span class="who">${esc(e.lane)}</span><span>${esc(e.msg)}</span></li>`).join("")
+    : `<li><span></span><span></span><span class="sub">No activity yet — the first lane run will appear here.</span></li>`;
+
+  if (backlog.trackingIssue) $("issue-link").innerHTML = `<a href="https://github.com/${esc(backlog.trackingIssue.repo)}/issues/${esc(backlog.trackingIssue.number)}" target="_blank" rel="noopener">tracking issue #${esc(backlog.trackingIssue.number)}</a>`;
+}
+
+async function loadPrs() {
+  try {
+    const prs = (await getJson(API)).filter(p => p.base.ref === "autopilot/integration" || p.head.ref.startsWith("autopilot/"));
+    $("prs").innerHTML = prs.length ? `<div class="table"><table><tbody>${prs.map(p => `<tr><td class="id">#${p.number}</td><td><a href="${esc(p.html_url)}" target="_blank" rel="noopener">${esc(p.title)}</a><div class="note">${esc(p.head.ref)} → ${esc(p.base.ref)} · opened ${esc(ago(p.created_at))}</div></td></tr>`).join("")}</tbody></table></div>`
+      : `<div class="empty">No open autopilot PRs. Merged slices show in the backlog above. Cockpit PRs are private and appear only on GitHub.</div>`;
+  } catch (e) {
+    $("prs").innerHTML = `<div class="empty">GitHub API unavailable (${esc(e.message)}); lane state above still updates.</div>`;
+  }
+}
+
+$("refresh").addEventListener("click", load);
+load();
+setInterval(load, 5 * 60 * 1000);
+</script>
+</body>
+</html>

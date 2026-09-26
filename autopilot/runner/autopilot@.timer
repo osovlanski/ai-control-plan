@@ -1,0 +1,11 @@
+[Unit]
+Description=Hourly autopilot lane %i
+
+[Timer]
+OnBootSec=5min
+OnUnitInactiveSec=55min
+RandomizedDelaySec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

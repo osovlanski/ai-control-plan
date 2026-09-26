@@ -1,0 +1,242 @@
+{
+  "version": 1,
+  "plan": "plans/agentic-os-v4-daily-driver.md",
+  "repos": {
+    "acp": "osovlanski/ai-control-plan",
+    "cockpit": "osovlanski/cockpit"
+  },
+  "integrationBranch": "autopilot/integration",
+  "items": [
+    {
+      "id": "T-A1",
+      "lane": "claude",
+      "repo": "acp",
+      "title": "Mission titles at intake + UI everywhere",
+      "deps": [],
+      "acceptance": "Add nullable tasks.title (migration 031), computed deterministically at intake from the goal (first sentence, whitespace-collapsed, <=60 chars, ellipsis). Expose in task contract (additive, bump API minor). Show title in Overview register, orbital labels, inspector, mission shell; full goal in an expandable block. Backfill: compute on read for old rows (no write). Tests for the title function incl. unicode and Hebrew."
+    },
+    {
+      "id": "T-A2",
+      "lane": "codex",
+      "repo": "cockpit",
+      "title": "Bridge contract: versioned read-only /api/bridge/*",
+      "deps": [],
+      "acceptance": "Add GET /api/bridge/meta {bridgeVersion:'1.0', capabilities[]} and read-only endpoints for memory graph, garden findings, installed inventory (skills/agents/MCP/plugins/hooks per assistant), usage aggregates, schedules and recent logs. Loopback only, no mutation, redaction applied. Doc in docs/specs/bridge-v1.md. Tests."
+    },
+    {
+      "id": "T-A3",
+      "lane": "claude",
+      "repo": "acp",
+      "title": "cockpit-bridge module in the API",
+      "deps": [
+        "T-A2"
+      ],
+      "acceptance": "New apps/api/src/modules/cockpit-bridge.ts: config cockpit.url (loopback-only, validated like the API host), GET bridge meta at boot + on demand, capability-gated read-only proxy endpoints under /api/workspace/cockpit/*. Unavailable cockpit => explicit 'unavailable' state, never an error page. Tests with a stub server."
+    },
+    {
+      "id": "T-C1",
+      "lane": "codex",
+      "repo": "acp",
+      "title": "K20 step 1: single classifyTaskV1 + golden test",
+      "deps": [],
+      "acceptance": "Exactly plans/k20-task-classifier-proposal.md \u00a73 item 1: one classifyTaskV1 in packages/core, byte-for-byte current regexes; telemetry.classifyGoal and model-selection.classifyTaskKind call it; decision.classifyGoalRules delegates. Golden test over plans/k20-corpus-draft.jsonl pins current labels. Pure refactor, no behaviour change."
+    },
+    {
+      "id": "T-C3",
+      "lane": "claude",
+      "repo": "acp",
+      "title": "K22 operator surface: decisions summary + shadow report",
+      "deps": [],
+      "acceptance": "GET /api/decisions/summary: counts by site/provider/mode/outcome, prompt rate, soak progress vs \u00a77.1 preconditions (n of 500, days of 14), last degraded reasons. pnpm decision:shadow-report mirroring model:shadow-report. Read-only. Tests."
+    },
+    {
+      "id": "T-B7",
+      "lane": "claude",
+      "repo": "acp",
+      "title": "Overview v4",
+      "deps": [
+        "T-A1"
+      ],
+      "acceptance": "KPI row (running, need you, waiting, settled, cost today); titled missions list with status chips and filters; collapsible sections (remember state per viewer, try/catch storage); sparkline of missions per day and success rate (from /api/scores and tasks); 'Today' panel placeholder with clear empty state. Responsive + keyboard accessible. Playwright screenshot in PR."
+    },
+    {
+      "id": "T-B6",
+      "lane": "codex",
+      "repo": "acp",
+      "title": "Agents v4 + Decision Service card",
+      "deps": [
+        "T-C3"
+      ],
+      "acceptance": "Each agent card: auth, quota gauge (from cooldowns/quota observations; 'unknown' when unsupported), running missions count, success/latency sparkline (/api/scores), models & capabilities collapsible, MCP/skills counts. Add a Decision Service (M16 / Jev) card from /api/decisions/summary: provider, mode (shadow), soak progress, prompt rate. Screenshot in PR."
+    },
+    {
+      "id": "T-B4",
+      "lane": "claude",
+      "repo": "acp",
+      "title": "Routing tab",
+      "deps": [
+        "T-C3"
+      ],
+      "acceptance": "Replace placeholder: recent routing decisions with explanation, K13 shadow vs actual model, decision records table with filters (site, outcome), prompt-rate chart over time, read-only effective policy. Collapsible sections."
+    },
+    {
+      "id": "T-B3",
+      "lane": "codex",
+      "repo": "acp",
+      "title": "Traces tab",
+      "deps": [],
+      "acceptance": "Add paginated GET /api/events?since&limit&taskId (read-only, redacted). Traces tab: cross-mission timeline, per-run drill-down reusing TaskDetail event rendering, tokens and cost by assistant chart; unknown cost stays 'unknown'."
+    },
+    {
+      "id": "T-B5",
+      "lane": "codex",
+      "repo": "acp",
+      "title": "Settings tab (read-only)",
+      "deps": [],
+      "acceptance": "Providers + auth state, schedules (/api/schedules) with next run, retention/redaction settings, health/doctor summary (/api/health, scheduler status), config file paths. No editing this slice."
+    },
+    {
+      "id": "T-B1",
+      "lane": "claude",
+      "repo": "acp",
+      "title": "Memory tab via bridge",
+      "deps": [
+        "T-A3"
+      ],
+      "acceptance": "Force-directed graph (lazy-loaded lib from allowed CDN or npm) of cockpit memory graph; node filters by source (Claude memory, Obsidian, mission context), search, Garden findings list, detail drawer. Unavailable bridge => honest empty state with setup hint."
+    },
+    {
+      "id": "T-B2",
+      "lane": "claude",
+      "repo": "acp",
+      "title": "Tools tab via bridge",
+      "deps": [
+        "T-A3"
+      ],
+      "acceptance": "Inventory table per assistant (skills, agents, MCP, plugins, hooks) with filter chips and counts chart; catalog section (trend proposals + agency-agents when T-E4 lands); security findings column (when T-E2 lands). Read-only."
+    },
+    {
+      "id": "T-E4",
+      "lane": "codex",
+      "repo": "cockpit",
+      "title": "agency-agents catalog + curated install",
+      "deps": [
+        "T-A2"
+      ],
+      "acceptance": "Discovery source for msitarzewski/agency-agents (pinned commit, MIT noted), parse frontmatter into catalog items with division; install action runs its convert step for the chosen assistant into the user's agent dir after the existing security gate. Seed curated list from plan \u00a72.1. Expose via bridge installed/catalog."
+    },
+    {
+      "id": "T-E1",
+      "lane": "codex",
+      "repo": "acp",
+      "title": "Serena on ai-workstation: doc + manifest",
+      "deps": [],
+      "acceptance": "docs/tools/serena.md: install via uv for Claude Code and Codex on the OCI box, MCP config snippets, how the capability probe sees it. Do not commit credentials. Runtime install is an owner step unless the lane runs on OCI and install is non-interactive (then record evidence)."
+    },
+    {
+      "id": "T-E2",
+      "lane": "codex",
+      "repo": "cockpit",
+      "title": "AI-Infra-Guard nightly skill/MCP scan",
+      "deps": [
+        "T-A2"
+      ],
+      "acceptance": "Script + systemd user timer running AI-Infra-Guard skill-scan/mcp-scan over installed skills and MCP configs; normalized findings JSON; exposed via bridge; failure of the scanner never blocks other jobs."
+    },
+    {
+      "id": "T-D4",
+      "lane": "claude",
+      "repo": "acp",
+      "title": "Weekly usage meters on Overview",
+      "deps": [
+        "T-B7"
+      ],
+      "acceptance": "Per-provider weekly usage % from quota observations (K3) with source and freshness ('last known'); 'unsupported' when the provider exposes none. Card design like a meter 0-100."
+    },
+    {
+      "id": "T-D2",
+      "lane": "claude",
+      "repo": "acp",
+      "title": "Skills backbone view",
+      "deps": [
+        "T-B2"
+      ],
+      "acceptance": "Domain -> task -> skill -> automation mapping stored as a small YAML in the workspace dir; Tools tab section showing each skill's automation (schedule/event/manual) and badges: 'done twice -> make it a skill', '5 green runs -> automate', 'sends/spends/publishes -> manual'. Read-only UI + loader + tests."
+    },
+    {
+      "id": "T-D3",
+      "lane": "codex",
+      "repo": "acp",
+      "title": "Receipts + vault export",
+      "deps": [],
+      "acceptance": "Daily job writes receipts/YYYY-MM-DD.md (one line per mission: title, assistant, outcome, cost, links) into a configurable vault dir (Obsidian-compatible, off by default). Redaction applied. Tests with injected clock."
+    },
+    {
+      "id": "T-G2",
+      "lane": "codex",
+      "repo": "acp",
+      "title": "Notifier on needs-you / settled",
+      "deps": [],
+      "acceptance": "Optional notifier (ntfy topic URL from env, off by default) firing on transitions to needs-operator and settled; rate-limited; payload has title + link only, never goal text by default."
+    },
+    {
+      "id": "T-C4",
+      "lane": "claude",
+      "repo": "acp",
+      "title": "Tiered fast-path proposal (docs)",
+      "deps": [
+        "T-C1"
+      ],
+      "acceptance": "docs/agentic-os-tiered-requests.md: Tier1 rules/data no-AI, Tier2 small model quick answer, Tier3 mission; decided by K20 floors; invariants (never bypass approvals), UI, metrics, slices. Docs only."
+    },
+    {
+      "id": "T-E3",
+      "lane": "codex",
+      "repo": "cockpit",
+      "title": "OpenWiki trial",
+      "deps": [],
+      "acceptance": "Run openwiki --init on cockpit with a cheap model, commit generated openwiki/ on the slice branch, add weekly workflow that opens a docs PR (never auto-merge). Report whether it helps agents in the PR body."
+    },
+    {
+      "id": "T-F1",
+      "lane": "claude",
+      "repo": "cockpit",
+      "title": "Merge prep: audit + subtree dry run",
+      "deps": [],
+      "acceptance": "Audit cockpit history and tree for secrets/PII/private paths (gitleaks or equivalent); report in docs/merge-audit.md. In ai-control-plan create branch autopilot/merge-dry-run with git subtree add --prefix=apps/cockpit (NOT merged, NOT into integration), confirm pnpm workspace builds. Never change repo visibility."
+    },
+    {
+      "id": "T-G1",
+      "lane": "claude",
+      "repo": "acp",
+      "title": "Remote mode design addendum (docs)",
+      "deps": [],
+      "acceptance": "Addendum to docs/adr/agentic-os-deployment.md: authenticated remote mode for phone access (options: Tailscale/tunnel, OIDC, device login), SSE resume/heartbeat, threat model, slices. Docs only."
+    },
+    {
+      "id": "T-D1",
+      "lane": "codex",
+      "repo": "acp",
+      "title": "Voice proposal + spike",
+      "deps": [],
+      "acceptance": "docs/agentic-os-voice.md + a spike branch: Whisper (STT) and Kokoro (TTS) on aarch64 OCI, latency numbers, how voice enters the Shell composer. No production wiring."
+    },
+    {
+      "id": "T-C2",
+      "lane": "owner",
+      "repo": "acp",
+      "title": "K20 step 2 (needs corpus approval)",
+      "deps": [
+        "T-C1"
+      ],
+      "acceptance": "Owner must approve plans/k20-corpus-draft.md first. Autopilot never starts this."
+    }
+  ],
+  "trackingIssue": {
+    "repo": "osovlanski/ai-control-plan",
+    "number": 68
+  },
+  "monitors": {
+    "issue": "https://github.com/osovlanski/ai-control-plan/issues/68"
+  }
+}
