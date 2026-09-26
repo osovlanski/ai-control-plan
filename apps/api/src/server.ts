@@ -793,7 +793,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
       db
         .prepare(
           `SELECT id, provider_request_id, state, decision, answered_by, answered_at, delivered_at,
-                  delivery_note, created_at, updated_at
+                  delivery_note, settled_reason, created_at, updated_at
              FROM approvals WHERE session_id = ? ORDER BY created_at, id`,
         )
         .all(req.params.id) as Array<Record<string, unknown>>
@@ -806,6 +806,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
       answeredAt: a.answered_at,
       deliveredAt: a.delivered_at,
       deliveryNote: a.delivery_note,
+      settledReason: a.settled_reason,
       createdAt: a.created_at,
       updatedAt: a.updated_at,
     }));

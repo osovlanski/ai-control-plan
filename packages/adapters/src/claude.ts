@@ -356,7 +356,7 @@ export class ClaudeAdapter implements AgentAdapter {
             : undefined;
         if (info.status === "rejected") {
           emit({ type: "limit.hit", summary: "Claude subscription limit reached", payload: { quota }, raw: msg });
-        } else if (info.status === "allowed_warning") {
+        } else if (info.status === "allowed_warning" && (info.utilization === undefined || info.utilization >= NEAR_LIMIT_UTILIZATION)) {
           emit({
             type: "limit.approaching",
             summary: `Claude quota warning (${usedPercent ?? "?"}% of ${info.rateLimitType ?? "window"})`,
@@ -575,6 +575,16 @@ function detectAuth(): CapabilityManifest["core"]["auth"] {
   }
   return { state: "missing" };
 }
+
+/**
+ * `allowed_warning` is the CLI's own threshold (e.g. `surpassedThreshold: 0.75` on the
+ * seven-day window) and is re-sent at the start of every session while it holds, so on
+ * its own it says nothing about THIS run. Only near exhaustion is it a limit signal;
+ * below that it is recorded as ordinary usage. Unknown utilization stays a warning.
+ * ponytail: one fixed threshold for every window; make it per-window config if a
+ * short window needs an earlier checkpoint.
+ */
+export const NEAR_LIMIT_UTILIZATION = 0.9;
 
 function classifyLimit(text: string): boolean {
   return /rate.?limit|usage limit|quota|429|overloaded|credit/i.test(text);

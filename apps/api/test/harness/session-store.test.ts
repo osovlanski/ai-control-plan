@@ -20,6 +20,7 @@ import {
   type WorktreeId,
 } from "@agent-plane/core";
 import { openDb, type Db } from "../../src/db/index.js";
+import { ApprovalService } from "../../src/modules/harness/approval-service.js";
 import {
   RequestFingerprintConflictError,
   SessionCasConflictError,
@@ -439,6 +440,64 @@ describe("terminalize — one terminal state, one result, one settler (H-I3, §9
         result: completedResult(id),
       }),
     ).toThrow(SessionCasConflictError);
+  });
+});
+
+describe("terminalize settles pending approvals", () => {
+  const failedResult = (id: string, to: TerminalSessionState, outcome: ExecutionResult["outcome"]): ExecutionResult => ({
+    ...completedResult(id),
+    terminalState: to,
+    outcome,
+  });
+  const awaiting = (): { id: string; token: string } => {
+    const { id, token } = preparedWithLease();
+    store.transition(id, { expectedVersion: 0, from: "PREPARED", to: "STARTING", leaseToken: token });
+    store.transition(id, { expectedVersion: 1, from: "STARTING", to: "RUNNING", leaseToken: token });
+    store.pauseForApproval(id, { expectedVersion: 2, leaseToken: token, approvalId: "apr_1", providerRequestId: "prq_1" });
+    return { id, token };
+  };
+  const settledEvents = (id: string) =>
+    (db.prepare("SELECT payload FROM events WHERE run_id = ? AND type = 'approval.settled'").all(id) as Array<{ payload: string }>).map(
+      (r) => JSON.parse(r.payload),
+    );
+
+  for (const [to, outcome, reason] of [
+    ["CANCELLED", "cancelled", "cancelled_with_task"],
+    ["FAILED", "failed", "ended_with_session"],
+    ["TIMED_OUT", "timed_out", "ended_with_session"],
+  ] as const) {
+    it(`${to}: the pending row is expired with ${reason}, traced, and a late answer is refused`, () => {
+      const { id, token } = awaiting();
+      const approvals = new ApprovalService(db, () => clock);
+      store.terminalize(id, {
+        expectedVersion: 3,
+        from: "AWAITING_APPROVAL",
+        to,
+        leaseToken: token,
+        settlementOwner: "runner-x",
+        result: failedResult(id, to, outcome),
+      });
+      expect(approvals.get(id, "prq_1")).toMatchObject({ state: "expired", settledReason: reason, decision: null });
+      expect(settledEvents(id)).toEqual([{ requestId: "prq_1", reason, terminalState: to }]);
+      expect(() => approvals.answer(id, "prq_1", "approved", "user")).toThrow(`expired (${reason})`);
+      expect(approvals.get(id, "prq_1")!.decision).toBeNull();
+    });
+  }
+
+  it("leaves an answered-but-undelivered row for recovery", () => {
+    const { id, token } = awaiting();
+    const approvals = new ApprovalService(db, () => clock);
+    approvals.answer(id, "prq_1", "approved", "user");
+    store.terminalize(id, {
+      expectedVersion: 3,
+      from: "AWAITING_APPROVAL",
+      to: "CANCELLED",
+      leaseToken: token,
+      settlementOwner: "runner-x",
+      result: failedResult(id, "CANCELLED", "cancelled"),
+    });
+    expect(approvals.get(id, "prq_1")).toMatchObject({ state: "answered", settledReason: null });
+    expect(settledEvents(id)).toEqual([]);
   });
 });
 

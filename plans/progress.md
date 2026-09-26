@@ -212,6 +212,10 @@ The owner said "flip" after #59 and #60 merged with merge commits.
   their provider processes exited, and no process carrying `AGENT_PLANE_INCARNATION` was left.
 - **Finding, not fixed:** after the cancel, both `approvals` rows still read `pending`. A client
   that polls approval state sees a live request on a dead session.
+  - **Fixed later on `claude/approval-settle-quota-q2`:** `SessionStore.terminalize` now closes
+    pending approvals in the terminal transaction. Each row gets `state = 'expired'` and a
+    `settled_reason` (`cancelled_with_task` or `ended_with_session`), plus one
+    `approval.settled` event. A late decision is refused.
 - **Observation:** each run logged `quota: checkpoint — provider limit approaching` within 5 s of
   `run.started`. This is parity report Q2, now seen live.
 
@@ -231,6 +235,62 @@ The owner said "flip" after #59 and #60 merged with merge commits.
    Then cancel them or let them run.
 7. Keep the DB backup unless the owner decides to discard everything written after the flip. The
    config rollback does not need it, because the flip changed no schema.
+
+#### Operator as a systemd user service (2026-09-25)
+
+The operator API now runs as a systemd `--user` unit instead of a shell-started process.
+Linger is on for `ubuntu`, so the unit runs without a login session.
+
+- **Checkout:** `~/workspace/personal/ai-control-plan-operator`, a worktree detached at
+  `6d232a4` (the #62 merge, which includes #61). It is outside `worktrees/`. The old
+  `worktrees/operator-main` worktree was removed after checking that no process had its cwd or
+  command line there.
+- **Unit:** `~/.config/systemd/user/agent-plane-operator.service`, enabled (`default.target`).
+  - `WorkingDirectory` is the checkout. `ExecStart` runs `pnpm --filter @agent-plane/api start`.
+  - Environment: `HOME=/home/ubuntu`, `PATH=/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin`
+    and `LANG=C.UTF-8` are set explicitly. `SSH_AUTH_SOCK`, `DBUS_SESSION_BUS_ADDRESS`,
+    `GSM_SKIP_SSH_AGENT_WORKAROUND` and `XDG_DATA_DIRS` are unset.
+  - `Restart=on-failure`, `RestartSec=5`. stdout and stderr go to the journal as
+    `agent-plane-operator`. Read the log with `journalctl --user -u agent-plane-operator`.
+  - Default `KillMode=control-group`: stopping the unit also stops the providers it spawned.
+    Boot recovery then handles their sessions, as it does after any restart.
+- **Env guard:** before `exec pnpm`, the start command lists every variable whose name starts
+  with `CLAUDE`, `ANTHROPIC_`, `CODEX_` or `AGENT_PLANE_`. If there is one, it logs
+  `refusing to start: inherited session variables: <names>` and exits 78.
+  `RestartPreventExitStatus=78` stops a restart loop.
+  - Tested with `systemctl --user set-environment CLAUDE_LEAK_TEST=1`: the unit logged the
+    refusal, exited 78 and did not restart. The variable was then unset.
+  - The running process (`/proc/<pid>/environ`) holds none of those variables, nor
+    `SSH_AUTH_SOCK` or `DBUS_SESSION_BUS_ADDRESS`.
+- **Move:** the old process from `worktrees/operator-main` was stopped with no live runs
+  (`runs.ended_at IS NULL` count 0). The unit started at `2026-09-25T21:52:35Z` and boot
+  reconciled 0 orphans. The flip config (`execution.harnessModes.single: true`) and the DB are
+  unchanged. Soak T0 is unchanged: `2026-09-25T21:31:57.293Z`.
+- **Soak rows after the move:** at `2026-09-26T08:07Z`, `pnpm soak:check` showed 0 rows since
+  T0. The journal showed that the API had received **no request at all** since boot: the next
+  request, a health probe made during this check, was `req-1`. A task that did not reach
+  `127.0.0.1:4176` explains the missing rows. The unit, the config path and the harness flag do
+  not. Accumulation has not yet been confirmed.
+
+**Upgrade** (config and DB stay where they are; migrations run at boot):
+
+1. Check that no harness session is live:
+   `SELECT count(*) FROM runs WHERE execution_request_id IS NOT NULL AND ended_at IS NULL;`
+2. `git -C ~/workspace/personal/ai-control-plan-operator fetch`
+3. `git -C ~/workspace/personal/ai-control-plan-operator checkout --detach <sha>`
+4. `cd ~/workspace/personal/ai-control-plan-operator && pnpm install --frozen-lockfile`
+5. `systemctl --user restart agent-plane-operator`
+6. Check `journalctl --user -u agent-plane-operator -n 20` for `Server listening`. Then check
+   `GET /api/health` with the bearer credential and run `pnpm soak:check`.
+7. Record the new SHA here.
+
+**Rollback of the service** (back to a shell-started process):
+
+1. `systemctl --user disable --now agent-plane-operator`
+2. Start the API from a clean login shell, as before:
+   `env -i HOME="$HOME" USER="$USER" LOGNAME="$USER" SHELL=/bin/bash LANG=C.UTF-8 TERM=dumb bash -lc 'cd ~/workspace/personal/ai-control-plan-operator && pnpm --filter @agent-plane/api start'`
+3. Rolling back the code means checking out the previous SHA before step 2 (or before a
+   restart). The harness-flip rollback above is separate and unchanged.
 
 #### Tool-gate shadow soak: §7.1(1), (2) and (7)
 

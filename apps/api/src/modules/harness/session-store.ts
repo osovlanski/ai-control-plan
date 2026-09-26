@@ -10,6 +10,8 @@ import { HandoffService } from './handoff.js';
  * orchestrator and API keep working through the dual-field migration window.
  */
 import type {
+  ApprovalSettledPayload,
+  ApprovalSettledReason,
   ExecutionRequest,
   ExecutionResult,
   ExecutionSession,
@@ -418,10 +420,38 @@ export class SessionStore {
            VALUES (?, ?, ?, ?, ?)`,
         )
         .run(sessionId, input.to, input.result.outcome, JSON.stringify(input.result), this.iso());
+      this.settlePendingApprovals(sessionId, input.to);
       input.extra?.(this.db);
     });
     tx();
     return input.result;
+  }
+
+  /**
+   * A terminal session can never deliver an answer, so its pending approvals are
+   * closed in the terminal transaction: `expired` with a reason, plus one
+   * `approval.settled` event each. Answered/delivering rows are left to recovery.
+   */
+  private settlePendingApprovals(sessionId: string, to: TerminalSessionState): void {
+    const pending = this.db
+      .prepare("SELECT provider_request_id FROM approvals WHERE session_id = ? AND state = 'pending' ORDER BY created_at, id")
+      .all(sessionId) as Array<{ provider_request_id: string }>;
+    if (pending.length === 0) return;
+    const reason: ApprovalSettledReason = to === "CANCELLED" ? "cancelled_with_task" : "ended_with_session";
+    const at = this.iso();
+    this.db
+      .prepare("UPDATE approvals SET state = 'expired', settled_reason = ?, updated_at = ? WHERE session_id = ? AND state = 'pending'")
+      .run(reason, at, sessionId);
+    let seq = (
+      this.db.prepare("SELECT COALESCE(MAX(seq), 0) AS n FROM events WHERE run_id = ?").get(sessionId) as { n: number }
+    ).n;
+    const insert = this.db.prepare(
+      "INSERT INTO events (run_id, seq, ts, type, summary, payload) VALUES (?, ?, ?, 'approval.settled', ?, ?)",
+    );
+    for (const { provider_request_id: requestId } of pending) {
+      const payload: ApprovalSettledPayload = { requestId, reason, terminalState: to };
+      insert.run(sessionId, ++seq, at, `approval ${requestId} settled: ${reason}`, JSON.stringify(payload));
+    }
   }
 
   result(sessionId: string): ExecutionResult | undefined {
