@@ -1278,7 +1278,9 @@ describe("execution.maxConcurrentProviderStarts", () => {
     await Promise.all([a, b]);
 
     const sidB = store.forRequest("erq_2")!.sessionId as string;
-    expect(queueEvents(sessionOf())).toMatchObject([{ note: "provider_start_queue", waitMs: 0, cap: 1 }]);
+    const [waitA] = queueEvents(sessionOf());
+    expect(waitA).toMatchObject({ note: "provider_start_queue", cap: 1 });
+    expect(waitA.waitMs).toBeLessThan(50); // uncontended: wall clock, so not exactly 0
     const [waitB] = queueEvents(sidB);
     expect(waitB).toMatchObject({ cap: 1 });
     expect(waitB.waitMs).toBeGreaterThanOrEqual(50);
