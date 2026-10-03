@@ -430,7 +430,7 @@ SELECT gate_hook, gate_reason, COUNT(*) AS prompts
 
 ### Ordering (2026-10-03)
 
-Stream A is landed. Nothing is in flight; there are no open PRs.
+Stream A is landed. K20 (shadow) is in review on `claude/k20-task-classifier`.
 
 1. **Floor evasion.** The floors are now the gate, not one layer of two. What is
    tested is ReDoS timing (`tool-floors.test.ts`) and carrier injection
@@ -438,9 +438,9 @@ Stream A is landed. Nothing is in flight; there are no open PRs.
    command that does the floored thing without matching the predicate (`env` vs
    `printenv`, `/proc/self/environ`, `node -e`, a base64 `eval`). Untested, and
    load-bearing since K19i.
-2. **K20**, per [`plans/k20-task-classifier-proposal.md`](k20-task-classifier-proposal.md).
-   **That proposal says "add migration 028"; 028, 029 and 030 are taken. K20 needs
-   031.** It was written on 2026-09-25, before session input landed.
+2. **K20**, per [`plans/k20-task-classifier-proposal.md`](k20-task-classifier-proposal.md)
+   (§8 records the build). It ships in shadow with migration 031. §6 step 6, the judge
+   replay, waits for the owner to approve the corpus.
 3. **The §7.1 soak runs on its own.** T0 `2026-09-25T21:31:57Z`; the ≥14-day arm
    matures about **2026-10-09**, or earlier at ≥500 decisions. Nothing advances it
    but time and traffic.

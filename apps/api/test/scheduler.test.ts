@@ -450,7 +450,11 @@ describe('K4 dependency waits', () => {
     await boot(); const s = scheduler();
     const dep = built.tasks.create({ goal: 'implement' }).taskId;
     const id = dependent(s, [dep], 'wait-input');
+    // Every task has a K20 decision record pointing at it, so this models a
+    // hand edit the way the sqlite3 shell makes one: foreign keys off.
+    db.pragma('foreign_keys = OFF');
     db.prepare('DELETE FROM tasks WHERE id = ?').run(dep);
+    db.pragma('foreign_keys = ON');
     await s.tick();
     expect(built.tasks.get(id)?.state).toBe('WAITING_INPUT');
     expect(built.tasks.get(id)?.pause_kind).toBe('dependency_failed');

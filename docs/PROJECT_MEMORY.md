@@ -431,3 +431,12 @@ throw unresolved, never null, so reconciliation cannot authorize resend. Legacy
 v1 inputs lack correlation and remain manual recovery. The original transport
 branch is unchanged. Evidence, limits and verification:
 `docs/codex-session-input-correlated-receipts.md`.
+
+## 2026-10-03 — M16 K20: the task label is stored at intake; v2 rules in shadow (SHIPPED; shadow only)
+
+- **One v1.** `classifyTaskV1` (`packages/core/src/task-classifier.ts`) is the only copy of the four regexes, and it is frozen. Routing, K13 and the rules provider call it. A golden fixture pins it label for label over the 208-goal K20 corpus.
+- **Cohort contract.** `tasks.task_kind` and `classifier_version` are written once at creation, and only v1 is written. Telemetry reads them through `taskKindOf`: the stored label when the version is 1, otherwise frozen v1 of the goal. Pre-031 rows stay NULL. Never backfill them, and never let another version's label into a v1 cohort.
+- **Intake writes one `task-classifier` row per task**, in shadow, rules only, with the rule for each answer in `rules_json`. It never goes through the provider chain, so a workspace configured with a judge cannot reach one at intake. A Noul is 1 or absent, never 0. `complexity` and `long_horizon` are absent from every row. The proposal's §8 records where v2 departs from the proposal.
+- **Every task now has a `decision_records` row pointing at it.** With foreign keys on, a task row cannot be deleted. No code path deletes one.
+- **Separation, operator DB 2026-10-03:** 24 tasks, all ended runs labelled `general` by v1. v2 moves 7 of them to `coding`, all from one agent-written parity goal. On the 3 organic goals v2 equals v1, and v1's one `coding` label is the noun "test", which no rule here fixes. On operator traffic, v2 does not yet earn its place.
+

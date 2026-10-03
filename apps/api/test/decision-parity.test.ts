@@ -6,8 +6,7 @@
  * `@agent-plane/core`'s decision types and apps/api's real classifier/guards.
  */
 import { describe, expect, it } from "vitest";
-import { buildContextObservation, DEFAULT_CONTEXT_POLICY, RulesDecisionProvider, type ContextCapability, type DecisionRequest } from "@agent-plane/core";
-import { classifyGoal } from "../src/modules/telemetry.js";
+import { buildContextObservation, classifyTaskV1, DEFAULT_CONTEXT_POLICY, RulesDecisionProvider, type ContextCapability, type DecisionRequest } from "@agent-plane/core";
 import { toolPolicyGuard, type GuardSnapshot } from "../src/modules/harness/guards.js";
 import { evaluateContextGuard } from "../src/modules/harness/context-guard.js";
 
@@ -29,7 +28,9 @@ function atPressure(pressure: number) {
   );
 }
 
-describe("RulesDecisionProvider parity — classifyGoal()", () => {
+// K20 collapsed the three classifier copies into `classifyTaskV1`, which routing
+// and K13 call directly; the provider must answer `kind` with exactly it.
+describe("RulesDecisionProvider parity — classifyTaskV1()", () => {
   const goals = [
     "fix the login bug",
     "implement a new endpoint",
@@ -43,8 +44,8 @@ describe("RulesDecisionProvider parity — classifyGoal()", () => {
   ];
 
   for (const goal of goals) {
-    it(`matches classifyGoal for ${JSON.stringify(goal)}`, async () => {
-      const expected = classifyGoal(goal);
+    it(`matches classifyTaskV1 for ${JSON.stringify(goal)}`, async () => {
+      const expected = classifyTaskV1(goal);
       const req: DecisionRequest = {
         site: "task-classifier",
         state: { goal },

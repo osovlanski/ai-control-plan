@@ -14,6 +14,7 @@ import type { ContextCapability, ContextObservation, ContextPolicy } from "./con
 import { CONTEXT_STALE_MS } from "./context.js";
 import type { PermissionPolicy, RedactionRule } from "./adapter.js";
 import { DEFAULT_REDACTION_RULES, redactValue } from "./redaction.js";
+import { taskClassifierAnswers } from "./task-classifier.js";
 
 /** The three System One primitives, transcribed. */
 export type DecisionQuestion =
@@ -616,33 +617,13 @@ export function buildToolGateState(
   return { state: state as unknown as DecisionState, truncated, floors: toolGateFloors(input) };
 }
 
-const CHOICE_ANSWER = (value: string, criteria: readonly string[]): DecisionAnswer => {
-  const probabilities: Record<string, number> = {};
-  for (const c of criteria) probabilities[c] = c === value ? 1 : 0;
-  return { kind: "choice", value, probabilities, confidence: 1 };
-};
-
 const SCORE_ANSWER = (value: string, criteria: readonly string[]): DecisionAnswer => {
   const probabilities: Record<string, number> = {};
   for (const c of criteria) probabilities[c] = c === value ? 1 : 0;
   return { kind: "score", value, probabilities, confidence: 1 };
 };
 
-const TASK_CLASSIFIER_LABELS = ["coding", "review", "research", "general"] as const;
 const CONTEXT_BREAKPOINT_ACTIONS = ["continue", "warn", "yield"] as const;
-
-/**
- * Verbatim port of `classifyGoal()` — apps/api/src/modules/telemetry.ts:360-366.
- * Same regexes, same precedence, same fallback. Any drift here IS a behaviour
- * change and must not happen silently.
- */
-function classifyGoalRules(goal: string): (typeof TASK_CLASSIFIER_LABELS)[number] {
-  const text = goal.toLowerCase();
-  if (/\breview|audit|critique\b/.test(text)) return "review";
-  if (/\bfix|implement|refactor|add|bug|test|build|migrate\b/.test(text)) return "coding";
-  if (/\bresearch|investigate|compare|explain|why\b/.test(text)) return "research";
-  return "general";
-}
 
 /**
  * Verbatim port of the `denied` computation in `toolPolicyGuard()` —
@@ -711,7 +692,9 @@ function contextBreakpointAction(input: ContextBreakpointState): (typeof CONTEXT
  * `exfiltration` or `credential_reach`, and I-D5 forbids inventing one.
  */
 const RULES_BASIS: Record<DecisionSite, Record<string, DecisionQuestion["kind"] | undefined>> = {
-  "task-classifier": { kind: "choice" },
+  // `kind` is v1 (`classifyTaskV1`); the rest are K20's v2 rules, which leave
+  // `needs_repo` and `high_stakes` absent wherever no rule has a basis.
+  "task-classifier": { kind: "choice", kind_v2: "choice", needs_repo: "noul", high_stakes: "noul" },
   "tool-gate": { denied: "noul" },
   "context-breakpoint": { action: "score" },
 };
@@ -759,7 +742,9 @@ export class RulesDecisionProvider implements DecisionProvider {
     switch (site) {
       case "task-classifier": {
         const goal = typeof state.goal === "string" ? state.goal : "";
-        return CHOICE_ANSWER(classifyGoalRules(goal), TASK_CLASSIFIER_LABELS);
+        const constraints = Array.isArray(state.constraints) ? state.constraints.filter((c): c is string => typeof c === "string") : [];
+        const repository = state.repository && typeof state.repository === "object" ? (state.repository as { path: string }) : undefined;
+        return taskClassifierAnswers({ goal, constraints, repository }).answers[key];
       }
       case "tool-gate": {
         const name = typeof state.toolName === "string" ? state.toolName : "";

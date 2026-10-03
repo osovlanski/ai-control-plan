@@ -17,6 +17,7 @@ export * from "./verification-planner.js";
 export * from "./repository-identity.js";
 export * from "./decision.js";
 export * from "./tool-floors.js";
+export * from "./task-classifier.js";
 
 export * from "./scheduler.js";
 export * from "./session-input-opt-in.js";

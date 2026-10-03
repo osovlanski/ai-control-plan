@@ -13,7 +13,7 @@ import type { Orchestrator } from "../src/modules/orchestrator.js";
 import { Registry } from "../src/modules/registry.js";
 import { TaskEventBus, type TaskStreamPayload } from "../src/modules/sse.js";
 import { TaskStore } from "../src/modules/tasks.js";
-import { TelemetryService, classifyGoal } from "../src/modules/telemetry.js";
+import { TelemetryService } from "../src/modules/telemetry.js";
 
 let home: string;
 let repoRoot: string;
@@ -213,7 +213,7 @@ describe("telemetry-fed routing", () => {
     await orchestrator.startTask(coding.taskId, A);
     await orchestrator.waitForSettled(coding.taskId);
 
-    expect(classifyGoal("Fix the auth bug")).toBe("coding");
+    expect(tasks.get(coding.taskId)?.task_kind).toBe("coding"); // stored at intake (K20)
     expect(telemetry.scores("coding").has(A)).toBe(true);
     expect(telemetry.scores("review").has(A)).toBe(false);
   });

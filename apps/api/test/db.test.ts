@@ -49,8 +49,9 @@ describe("migrations", () => {
         (site, provider, question_set_hash, answers_json, latency_ms, mode, created_at)
         VALUES ('tool-gate', 'rules', 'test-hash', '{}', 0, 'shadow', '2026-09-24')`).run();
       const record = baseline.prepare("SELECT * FROM decision_records").get();
-      expect(migrate(baseline)).toEqual(["028_session_input.sql", "029_session_input_commands.sql", "030_approval_settled_reason.sql"]);
-      expect(baseline.prepare("SELECT * FROM decision_records").get()).toEqual(record);
+      expect(migrate(baseline)).toEqual(["028_session_input.sql", "029_session_input_commands.sql", "030_approval_settled_reason.sql", "031_task_classifier.sql"]);
+      // 031 adds `rules_json`; an existing record gets NULL, never a backfilled rule.
+      expect(baseline.prepare("SELECT * FROM decision_records").get()).toEqual({ ...(record as object), rules_json: null });
       expect(baseline.prepare("SELECT COUNT(*) AS n FROM session_inputs").get()).toEqual({ n: 0 });
       expect(migrate(baseline)).toEqual([]);
     } finally {

@@ -1,6 +1,7 @@
 # K20 proposal: task classifier, floors first
 
-Status: PROPOSED, 2026-09-25. Docs only. Nothing in this file is built. It revises the K20 entry in
+Status: PROPOSED, 2026-09-25. §3's in-scope items are built in shadow on `claude/k20-task-classifier`
+(2026-10-03); §8 records where the build departs from this text. It revises the K20 entry in
 `plans/jev-decision-service-plan.md` §5 in light of K19i. Where the two disagree, the owner decides.
 
 ## 1. Why K20 is next, and what changed since it was written
@@ -29,7 +30,7 @@ proposal applies the same rule to the classifier.
 1. **One classifier function.** Delete two of the three copies. `classifyGoal` and
    `classifyTaskKind` both call a single `classifyTaskV1` in `packages/core`, which stays byte-for-byte
    the current regexes. This step is a pure refactor, pinned by a golden test over the corpus in §6.
-2. **Store the label at intake.** Add migration 028: `tasks.task_kind` and
+2. **Store the label at intake.** Add migration 031: `tasks.task_kind` and
    `tasks.classifier_version`, written once when the task is created. Telemetry reads the stored
    label. A row with no stored label falls back to `classifyTaskV1`, frozen, so every existing
    cohort keeps exactly its current label. Old rows are never backfilled with a newer version.
@@ -108,7 +109,7 @@ The verdicts follow AGENTS.md: PASS, FAIL, BLOCKED or SKIP, and no partial pass.
 1. **Refactor golden test (scope 1).** Over the whole corpus, `classifyTaskV1` returns what each
    of the three current copies returns, label for label. Any difference is FAIL.
 2. **Cohort-freeze test (scope 2).** On a copy of the operator DB, `telemetry.scores(kind)` for
-   every kind is identical before and after migration 028. A second fixture then stores a v2-era
+   every kind is identical before and after migration 031. A second fixture then stores a v2-era
    label on a new task, and checks that old rows keep their v1 label. Run it against a copy, never
    against the operator DB.
 3. **Rule tests (scope 3).** One positive and one negative case per rule. The known substring
@@ -169,3 +170,40 @@ the deterministic per-PR carrier test in §6 step 4: no text inside a goal can r
 conservative label. §7.2 still binds any site that does read a judge at runtime (K21). The offline
 discovery judge proposes rules and never decides, so §7.2 is a quality metric for it, not a gate.
 Before any K20 activation, `plans/jev-decision-service-plan.md` §7.1(6) needs a matching edit.
+
+## 8. As built (2026-10-03)
+
+**Migration 031, not 028.** This file said 028. 028–030 went to session input and the approval
+settled reason after it was written. Migrations are forward-only, so K20 takes 031.
+
+Where the build departs from §3–§4, each found by running the rules on the corpus:
+
+- **v1 is `classifyTaskV1` in `packages/core/src/task-classifier.ts`.** All three copies are deleted;
+  routing, K13 and the rules provider call it. Before the collapse the three agreed on all 208 goals.
+- **`whole-word` is a sixth rule.** §4 says `explicit-change` "removes today's `add` and `test`
+  substring hits", but with "no rule fires → v1 stands" nothing can remove a v1 hit unless a rule
+  fires to do it. `whole-word` re-reads v1's own vocabulary with every alternative anchored on both
+  sides. It can drop a partial-word match ("address", "latest", "auditorium") but cannot add one.
+- **`explicit-review` has no PR or diff branch.** "A PR or diff reference with no edit verb" lets
+  inserted text that contains an edit verb remove a `review` label, which breaks the §4 carrier
+  property. It also labels "Merge PR 61 with admin override" `review`. Only the whole words remain.
+  Every form is also a v1 `review` match, so even an `unread` row keeps the label.
+- **The kind rules read the goal, as v1 does.** `read-only-intent` also reads the constraints. An
+  edit verb inside a read-only clause ("do not fix it yet") is not counted as an edit.
+- **The edit-verb, code-object and research lists are wider than §4's.** They add rename, replace,
+  remove, update, create and a few more, plus a code file name (`*.ts`, `*.py`, …). On the corpus the
+  extra words add 6 `coding` labels: k20-005, 073, 144, 147, 151 and 152. The lists are in the source.
+- **`needs_repo` is 1 or absent, never 0.** "No repository attached" is not "needs none". The
+  K19a no-basis contract applies, so §4's "iff" is one-sided.
+- **`high_stakes` keeps the floors' rule names but not their patterns.** The floors parse shell
+  syntax and a goal is prose, so the build has a prose pattern per floor, typed against `FloorRule`.
+  That is a second vocabulary, contrary to §4's "no second vocabulary". It fires on 8 of the 10
+  high-stakes probes. It does not fire on a credential rotation or a push to `main`, because no floor
+  covers either.
+- **`unread` reads nothing.** A goal over the cap, or one under half Latin letters, has no text
+  Noul. A consumer must resolve an absent `high_stakes` conservatively (I-D2).
+- **The rule behind each answer lands in `decision_records.rules_json`** (also migration 031). The
+  battery asks `complexity` and `long_horizon`, and no row answers either.
+
+**§6 step 6 is still BLOCKED** on the owner's approval of the corpus. This build makes no judge
+call and writes nothing to `docs/eval-history/`.
