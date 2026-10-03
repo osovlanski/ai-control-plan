@@ -276,13 +276,38 @@ Linger is on for `ubuntu`, so the unit runs without a login session.
 
 1. Check that no harness session is live:
    `SELECT count(*) FROM runs WHERE execution_request_id IS NOT NULL AND ended_at IS NULL;`
+   Then back up the DB with SQLite's online backup (the WAL holds recent writes, so a plain
+   `cp` of `agent-plane.db` is not a backup).
 2. `git -C ~/workspace/personal/ai-control-plan-operator fetch`
 3. `git -C ~/workspace/personal/ai-control-plan-operator checkout --detach <sha>`
 4. `cd ~/workspace/personal/ai-control-plan-operator && pnpm install --frozen-lockfile`
-5. `systemctl --user restart agent-plane-operator`
-6. Check `journalctl --user -u agent-plane-operator -n 20` for `Server listening`. Then check
-   `GET /api/health` with the bearer credential and run `pnpm soak:check`.
-7. Record the new SHA here.
+5. `pnpm --filter @agent-plane/web build`. The API serves the UI from `apps/web/dist` only if it
+   exists. Without this step the upgrade ships an API with no UI: `GET /` is a 404 and only
+   `/api/*` answers.
+6. `systemctl --user restart agent-plane-operator`
+7. Check `journalctl --user -u agent-plane-operator -n 20` for `Server listening`. Check that
+   `GET /` returns the app and that `GET /api/health` answers (401 without the bearer
+   credential). Then run `pnpm soak:check`.
+8. Record the new SHA here.
+
+**Reaching the operator UI from a laptop** (the documented way):
+
+1. On the box, in the checkout: `pnpm --filter @agent-plane/api open --headless --port 4177`.
+   It signs a single-use bootstrap token with the workspace credential and waits up to 300 s.
+2. On the laptop, forward both the API and the bootstrap port:
+   `ssh -N -L 4176:127.0.0.1:4176 -L 4177:127.0.0.1:4177 ai-workstation`
+3. Browse `http://127.0.0.1:4177` right away (the token lives 10 s). It redirects to
+   `http://127.0.0.1:4176/` with a session cookie. Use `127.0.0.1`, not `localhost`: the token's
+   audience and the `__Host-` cookie are bound to the exact origin `http://127.0.0.1:4176`.
+
+`open` refuses with `No active credential covers the requested browser capabilities` when the
+newest active credential lacks any capability the browser asks for. Capabilities added to the
+code later (for example `decisions.read`, #49) are never added to an existing credential. Fix it
+by rotating with the full list, on one line:
+`pnpm --filter @agent-plane/api rotate --capabilities tasks.read,events.read,events.stream,routing.read,sessions.read,verification.read,approvals.read,schedules.read,models.read,context.read,decisions.read,commands.write`
+
+Open finding: `rotate --capabilities` with no value mints a credential with **zero**
+capabilities and still retires the active ones after the 300 s grace. It should refuse.
 
 **Rollback of the service** (back to a shell-started process):
 
@@ -291,6 +316,54 @@ Linger is on for `ubuntu`, so the unit runs without a login session.
    `env -i HOME="$HOME" USER="$USER" LOGNAME="$USER" SHELL=/bin/bash LANG=C.UTF-8 TERM=dumb bash -lc 'cd ~/workspace/personal/ai-control-plan-operator && pnpm --filter @agent-plane/api start'`
 3. Rolling back the code means checking out the previous SHA before step 2 (or before a
    restart). The harness-flip rollback above is separate and unchanged.
+
+#### Operator upgrade to `2e3c9f4` with the start cap and the curated profile (2026-09-26)
+
+- **SHA:** `2e3c9f4` (the #66 merge; includes #64 and #65). The previous SHA was `6d232a4`.
+- **DB backup:** `agent-plane.db.pre-upgrade-20260926T161909Z` (online backup), sha256
+  `6169085e4c5466b9ff47d650118d9c857267b877163dbfb5f16f3c750bd5c6c2`. 0 open runs before it.
+- **Migration 030** (`030_approval_settled_reason.sql`) applied at `2026-09-26T16:19:32.868Z`;
+  `approvals.settled_reason` exists.
+- **Env guard:** the unit file is unchanged and the unit started. None of the 5 processes in its
+  cgroup holds a `CLAUDE*`, `ANTHROPIC_*`, `CODEX_*`, `AGENT_PLANE_*`, `SSH_AUTH_SOCK` or
+  `DBUS_SESSION_BUS_ADDRESS` variable. The refusal test was not repeated.
+- **Web UI:** built from `2e3c9f4` (`index-D5FaoQTs.js`). `GET /` returns the app. Before the
+  build, the checkout had no `apps/web/dist`, so no UI was served at all.
+- **Config** (owner decision: both #66 settings on). Backup `config.yaml.pre-profile-20260926`,
+  sha256 `d664e5d74ff4c10930d40d8d9d06699f819186819e25026ac58dab91042f3cd2`; new sha256
+  `85e338c1234f5d45817cdeeb82eb1d8cd370c3cc03a84c66996d8bdb3d47b864`. Diff, appended under
+  `execution:` (the server entry is copied verbatim from the claude-mem 13.16.0 `.mcp.json`
+  and shortened here):
+
+  ```yaml
+    maxConcurrentProviderStarts: 2
+    providerProfile:
+      plugins:
+        - claude-mem@thedotmack
+      mcpServers:
+        "plugin:claude-mem:mcp-search": {"type":"stdio","command":"node","args":["-e","…"]}
+  ```
+
+  The repo's own `loadConfig` parses it: cap 2, one plugin, one server byte-identical to the
+  plugin's entry, `harnessModes.single` still true.
+- **Credential rotation:** the Sep 10 credential lacked `decisions.read`, so `open` refused. The
+  owner rotated to `k_f3344dcc` (12 capabilities). Two zero-capability secrets from a wrapped
+  command line exist and expired with the old one at `2026-09-26T16:40:46Z`.
+- **Verification: PASS.** One no-repo task, started by the owner from the UI through the tunnel:
+  `AG-muim9vb52`, run `es_d9d2443d-…`, `personal-claude`, 16:41:43Z → 16:42:23Z, COMPLETED,
+  verification passed. (The shell's preview had also saved an unstarted `AG-muim9f8x1`, which
+  stays `CREATED`.)
+  - `execution_request_id` = `erq_AG-muim9vb52_1`.
+  - 3 `decision_records` rows: `tool-gate`, `rules`, `shadow`; two `post-start`/`audit` and one
+    `pre-exec`/`preventive`, all `auto-approve`, "no floor fired; approvalMode decides".
+  - Trace has the `phase` event `{"note":"provider_start_queue","waitMs":1,"cap":2}`.
+  - claude-mem search reached the provider: `mcp__plugin_claude-mem_mcp-search__search`
+    ran (after one approval, answered in the UI) and returned the observation "Implemented
+    StartSlots class for concurrent provider start limiting".
+  - `pnpm soak:check`: 3 rows since T0 (first `16:41:56.400Z`). These are the first soak rows
+    since the flip. The §7.1 thresholds still read FAIL, as expected at 0.81 days.
+  - The run logged `limit.approaching` at 97% of the seven-day quota, and the guard checkpointed
+    early.
 
 #### Tool-gate shadow soak: §7.1(1), (2) and (7)
 
