@@ -52,7 +52,8 @@ describe("opt-in Codex execution owner", () => {
     expect(requests.find(r => r.method === "thread/start")?.params).toMatchObject({ cwd: "/tmp", sandbox: "read-only", approvalPolicy: "never" });
     const target = { sessionId: "kernel-session", assistantId: "codex", providerSessionRef: handle.providerSessionRef };
     expect(await owner.sessionInput!.enable(target)).toMatchObject({ available: true });
-    expect(await owner.sessionInput!.deliver(target, { messageId: "m", kind: "text", text: "followup" })).toMatchObject({ ackLevel: "transport" });
+    await expect(owner.sessionInput!.deliver(target, { messageId: "m", kind: "text", text: "followup" })).rejects.toThrow("transport_ack_only");
+    expect(requests.find(r => r.method === "turn/steer")?.params.clientUserMessageId).toBe("m");
     notify("item/started", { turnId: "turn", item: { id: "tool", type: "commandExecution", command: "sleep 1" } });
     notify("item/completed", { turnId: "turn", item: { id: "tool", type: "commandExecution", command: "sleep 1", status: "completed", exitCode: 0 } });
     notify("item/completed", { turnId: "turn", item: { type: "agentMessage", text: "done" } });

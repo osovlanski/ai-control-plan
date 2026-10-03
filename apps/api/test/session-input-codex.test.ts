@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -14,7 +14,7 @@ afterEach(async () => {
   for (const ws of workspaces.splice(0)) { await ws.built.app.close(); ws.db.close(); }
   for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true });
 });
-function setup(enabled = true, drop = false, defaultResolver = false) {
+function setup(enabled = true, drop = false, defaultResolver = false, historyReader?: (threadId: string) => Promise<unknown>) {
   const input = new PassThrough(), output = new PassThrough();
   const rpc = new CodexAppServerProtocol(input, output, undefined, 20); protocols.push(rpc);
   const live = { threadId: "provider-codex-session", turnId: "turn", rpc };
@@ -24,7 +24,7 @@ function setup(enabled = true, drop = false, defaultResolver = false) {
     if (req.method === "turn/steer") { sends++; if (drop) return; }
     output.write(JSON.stringify({ id: req.id, result: req.method === "thread/read" ? { thread: { id: live.threadId, status: { type: "active", activeFlags: [] } } } : { turnId: "turn", ackLevel: "provider-consumed" } }) + "\n");
   });
-  const adapter = new CodexSessionInputAdapter("codex-a", ref => ref === live.threadId ? live : undefined);
+  const adapter = new CodexSessionInputAdapter("codex-a", ref => ref === live.threadId ? live : undefined, historyReader ?? (async () => ({ id: live.threadId, turns: [] })));
   const home = mkdtempSync(join(tmpdir(), "codex-ledger-")); homes.push(home);
   const ws = boot(home, { sessionInput: enabled, adapters: defaultResolver ? undefined : id => id === "codex-a" ? adapter : undefined }); workspaces.push(ws);
   const { sessionId } = seedSession(ws.db, { sessionId: "codex-session", assistantId: "codex-a" });
@@ -42,7 +42,7 @@ describe("Codex input durable contract", () => {
     const url = `/api/sessions/${target.sessionId}/input-enablement`;
     const enable = await ws.built.app.inject({ method: "POST", url, headers: ws.headers, payload: { enabled: true } });
     expect(enable.statusCode).toBe(200);
-    expect(enable.json()).toMatchObject({ available: true, ackLevel: "transport", receiptLookup: false });
+    expect(enable.json()).toMatchObject({ available: true, ackLevel: "provider-accepted", receiptLookup: true });
     const other = seedSession(ws.db, { assistantId: "codex-a" });
     expect((await ws.built.sessionInputs!.capability(other.sessionId)).available).toBe(false);
     expect((await send(ws, target.sessionId, { clientMessageId: "live", text: "hello" })).body).toMatchObject({ state: "accepted", deliveryUnknown: true });
@@ -53,7 +53,7 @@ describe("Codex input durable contract", () => {
     expect(sends()).toBe(1);
   });
 
-  it.each([false, true])("keeps transport outcomes permanently unknown through retries and restart (lost response=%s)", async drop => {
+  it.each([false, true])("keeps unrecorded transport outcomes unknown without replay through retries and restart (lost response=%s)", async drop => {
     const { ws, home, adapter, target, sends } = setup(true, drop);
     await adapter.enable(target);
     const sent = await send(ws, target.sessionId, { clientMessageId: "once", text: "hello" });
@@ -63,7 +63,7 @@ describe("Codex input durable contract", () => {
     for (let i = 0; i < 2; i++) expect((await command(ws, id, "retry")).body).toMatchObject({ state: "accepted", deliveryUnknown: true, reason: "manual_recovery_required" });
     await ws.built.app.close(); ws.db.close();
     workspaces.splice(workspaces.indexOf(ws), 1);
-    const restarted = new CodexSessionInputAdapter("codex-a", () => undefined);
+    const restarted = new CodexSessionInputAdapter("codex-a", () => undefined, async () => ({ id: target.providerSessionRef, turns: [] }));
     const reboot = boot(home, { adapters: id => id === "codex-a" ? restarted : undefined });
     workspaces.push(reboot);
     expect(await restarted.probeTarget(target)).toMatchObject({ available: false, reason: "session_input_not_enabled" });
@@ -71,6 +71,41 @@ describe("Codex input durable contract", () => {
     expect(reboot.built.sessionInputs!.attempts(id)).toHaveLength(1);
     expect(reboot.built.sessionInputs!.events(id).some(e => e.type === "input.delivered")).toBe(false);
     expect(sends()).toBe(1);
+  });
+
+  it("reconciles the exact durable message after plane/provider restart without a grant or another send", async () => {
+    const providerHome = mkdtempSync(join(tmpdir(), "codex-history-test-")); homes.push(providerHome);
+    const historyFile = join(providerHome, "provider-history.json");
+    const empty = { id: "provider-codex-session", turns: [{ id: "turn", items: [] as unknown[] }] };
+    writeFileSync(historyFile, JSON.stringify(empty));
+    // Every invocation reopens the provider-authored storage double. Live
+    // process durability is separately established by the real-provider matrix.
+    let reads = 0;
+    const reader = async () => { reads++; return JSON.parse(readFileSync(historyFile, "utf8")) as unknown; };
+    const { ws, home, adapter, target, sends } = setup(true, true, false, reader);
+    await adapter.enable(target);
+    const first = await send(ws, target.sessionId, { clientMessageId: "first", text: "identical text" });
+    const second = await send(ws, target.sessionId, { clientMessageId: "second", text: "identical text" });
+    const firstId = first.body.id as string, secondId = second.body.id as string;
+    expect(first.body).toMatchObject({ state: "accepted", deliveryUnknown: true });
+    expect(second.body).toMatchObject({ state: "accepted", deliveryUnknown: true });
+    expect(sends()).toBe(2);
+    await ws.built.app.close(); ws.db.close(); workspaces.splice(workspaces.indexOf(ws), 1);
+    // The provider folds only the first logical message while the plane is down.
+    empty.turns[0]!.items.push({ type: "userMessage", id: "provider-first", clientId: firstId, content: [{ type: "text", text: "identical text" }] });
+    writeFileSync(historyFile, JSON.stringify(empty));
+    const restarted = new CodexSessionInputAdapter("codex-a", () => undefined, reader);
+    const deliver = vi.spyOn(restarted, "deliver");
+    const reboot = boot(home, { adapters: id => id === "codex-a" ? restarted : undefined }); workspaces.push(reboot);
+    expect(await restarted.probeTarget(target)).toMatchObject({ available: false, reason: "session_input_not_enabled" });
+    expect((await command(reboot, firstId, "retry")).body).toMatchObject({ state: "delivered", deliveryUnknown: false, providerReceipt: { messageId: firstId, ackLevel: "provider-accepted", reference: "codex-user:provider-codex-session:provider-first" } });
+    // Same text in the same thread is not evidence for the other caller ID.
+    for (let i = 0; i < 2; i++) expect((await command(reboot, secondId, "retry")).body).toMatchObject({ state: "accepted", deliveryUnknown: true, reason: "manual_recovery_required" });
+    expect(reboot.built.sessionInputs!.attempts(firstId)).toHaveLength(1);
+    expect(reboot.built.sessionInputs!.attempts(secondId)).toHaveLength(1);
+    expect(reboot.built.sessionInputs!.events(firstId).filter(e => e.type === "input.delivered")).toHaveLength(1);
+    expect(reboot.built.sessionInputs!.events(secondId).some(e => e.type === "input.delivered")).toBe(false);
+    expect(deliver).not.toHaveBeenCalled(); expect(sends()).toBe(2); expect(reads).toBeGreaterThanOrEqual(3);
   });
 
   it("rejects sends until per-session opt-in and never exposes disabled routes", async () => {

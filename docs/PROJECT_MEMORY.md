@@ -417,3 +417,17 @@ The bounded real app-server spike cannot attach to the actual SDK AgentAdapter r
 ## 2026-09-22 — Codex transport-only session input
 
 The SDK attachment blocker above is preserved as historical evidence. The Codex provider branch now supplies an opt-in app-server-owned execution transport and `CodexSessionInputAdapter`, with the unchanged shared interface. Workspace flag, assistant `options.appServerInput`, and an exact-session enablement command are all required. Defaults retain SDK execution. Same-owner live CLI 0.154.0 steering succeeded and its text appeared in history/output, but the stored item had no caller message ID. Ack ceiling remains `transport`; no idempotent replay or receipt lookup is claimed. Unknown attempts require manual recovery. Evidence, limits, commands and validation: `docs/codex-session-input-adapter.md`.
+
+## 2026-09-23 — Codex durable correlation, no replay (SHIPPED on receipt spike)
+
+The pinned 0.154.0 app-server persists `turn/steer.clientUserMessageId` as
+`userMessage.clientId`, verified with fresh processes and identical-text inputs.
+Repeated caller IDs are accepted twice, including after provider restart.
+A steer response can precede storage and an interruption/crash can discard that
+queued input. Receipt v2 therefore sends the ledger ID, leaves the initial
+transport outcome unknown, and reconciles only an exact fresh-history record as
+provider-accepted. No consumption or idempotency claim. Missing/unreadable records
+throw unresolved, never null, so reconciliation cannot authorize resend. Legacy
+v1 inputs lack correlation and remain manual recovery. The original transport
+branch is unchanged. Evidence, limits and verification:
+`docs/codex-session-input-correlated-receipts.md`.

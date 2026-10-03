@@ -2,6 +2,11 @@
 
 2026-09-22. Implementation on `feat/agentic-os-session-input-codex-adapter`.
 
+This is the historical **transport-v1** record at `4c0c6bd`; its claims and
+manual runner apply to that commit. The later [correlated-receipt investigation
+and receipt-v2 implementation](codex-session-input-correlated-receipts.md)
+adds evidence-backed lookup on a separate branch.
+
 ## Base and contract
 
 The exact common ancestor with Claude `da1f7d0` is

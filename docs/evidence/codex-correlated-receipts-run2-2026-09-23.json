@@ -1,0 +1,1345 @@
+{
+  "cliVersion": "codex-cli 0.154.0",
+  "transport": "websocket",
+  "cases": [
+    {
+      "name": "unique-id-unique-text",
+      "transport": "websocket",
+      "cliVersion": "codex-cli 0.154.0",
+      "attempts": [
+        {
+          "turnActiveBeforeRequest": true,
+          "requestFields": [
+            "clientUserMessageId",
+            "expectedTurnId",
+            "input",
+            "threadId"
+          ],
+          "inputFields": [
+            "text",
+            "type"
+          ],
+          "responseFields": [
+            "turnId"
+          ],
+          "errorFields": [],
+          "rejected": false,
+          "errorCode": null,
+          "callerReceivedResponse": true,
+          "providerResponseObserved": true,
+          "providerRpcSucceeded": true,
+          "timingBoundary": "response-received",
+          "callerIdInResponse": false
+        }
+      ],
+      "terminalStatus": "completed",
+      "liveNotification": {
+        "itemFields": [
+          "clientId",
+          "content",
+          "id",
+          "type"
+        ],
+        "callerIdPresent": true,
+        "clientIdPresent": true,
+        "providerItemIdPresent": true,
+        "providerItemIdEqualsCallerId": false,
+        "matchingItemCount": 1,
+        "callerCorrelatedItemCount": 1,
+        "distinctClientIdCount": 1,
+        "duplicateEffectCount": 1
+      },
+      "liveHistory": {
+        "itemFields": [
+          "clientId",
+          "content",
+          "id",
+          "type"
+        ],
+        "callerIdPresent": true,
+        "clientIdPresent": true,
+        "providerItemIdPresent": true,
+        "providerItemIdEqualsCallerId": false,
+        "matchingItemCount": 1,
+        "callerCorrelatedItemCount": 1,
+        "distinctClientIdCount": 1,
+        "duplicateEffectCount": 1
+      },
+      "freshProcessHistory": {
+        "itemFields": [
+          "clientId",
+          "content",
+          "id",
+          "type"
+        ],
+        "callerIdPresent": true,
+        "clientIdPresent": true,
+        "providerItemIdPresent": true,
+        "providerItemIdEqualsCallerId": false,
+        "matchingItemCount": 1,
+        "callerCorrelatedItemCount": 1,
+        "distinctClientIdCount": 1,
+        "duplicateEffectCount": 1
+      },
+      "callerCorrelationDurableAfterRestart": true,
+      "providerItemIdStableAfterRestart": true,
+      "duplicateEffectCount": 1
+    },
+    {
+      "name": "same-text-distinct-id-a",
+      "transport": "websocket",
+      "cliVersion": "codex-cli 0.154.0",
+      "attempts": [
+        {
+          "turnActiveBeforeRequest": true,
+          "requestFields": [
+            "clientUserMessageId",
+            "expectedTurnId",
+            "input",
+            "threadId"
+          ],
+          "inputFields": [
+            "text",
+            "type"
+          ],
+          "responseFields": [
+            "turnId"
+          ],
+          "errorFields": [],
+          "rejected": false,
+          "errorCode": null,
+          "callerReceivedResponse": true,
+          "providerResponseObserved": true,
+          "providerRpcSucceeded": true,
+          "timingBoundary": "response-received",
+          "callerIdInResponse": false
+        }
+      ],
+      "terminalStatus": "completed",
+      "liveNotification": {
+        "itemFields": [
+          "clientId",
+          "content",
+          "id",
+          "type"
+        ],
+        "callerIdPresent": true,
+        "clientIdPresent": true,
+        "providerItemIdPresent": true,
+        "providerItemIdEqualsCallerId": false,
+        "matchingItemCount": 2,
+        "callerCorrelatedItemCount": 1,
+        "distinctClientIdCount": 2,
+        "duplicateEffectCount": 2
+      },
+      "liveHistory": {
+        "itemFields": [
+          "clientId",
+          "content",
+          "id",
+          "type"
+        ],
+        "callerIdPresent": true,
+        "clientIdPresent": true,
+        "providerItemIdPresent": true,
+        "providerItemIdEqualsCallerId": false,
+        "matchingItemCount": 2,
+        "callerCorrelatedItemCount": 1,
+        "distinctClientIdCount": 2,
+        "duplicateEffectCount": 2
+      },
+      "freshProcessHistory": {
+        "itemFields": [
+          "clientId",
+          "content",
+          "id",
+          "type"
+        ],
+        "callerIdPresent": true,
+        "clientIdPresent": true,
+        "providerItemIdPresent": true,
+        "providerItemIdEqualsCallerId": false,
+        "matchingItemCount": 2,
+        "callerCorrelatedItemCount": 1,
+        "distinctClientIdCount": 2,
+        "duplicateEffectCount": 2
+      },
+      "callerCorrelationDurableAfterRestart": true,
+      "providerItemIdStableAfterRestart": true,
+      "duplicateEffectCount": 2
+    },
+    {
+      "name": "same-text-distinct-id-b",
+      "transport": "websocket",
+      "cliVersion": "codex-cli 0.154.0",
+      "attempts": [
+        {
+          "turnActiveBeforeRequest": true,
+          "requestFields": [
+            "clientUserMessageId",
+            "expectedTurnId",
+            "input",
+            "threadId"
+          ],
+          "inputFields": [
+            "text",
+            "type"
+          ],
+          "responseFields": [
+            "turnId"
+          ],
+          "errorFields": [],
+          "rejected": false,
+          "errorCode": null,
+          "callerReceivedResponse": true,
+          "providerResponseObserved": true,
+          "providerRpcSucceeded": true,
+          "timingBoundary": "response-received",
+          "callerIdInResponse": false
+        }
+      ],
+      "terminalStatus": "completed",
+      "liveNotification": {
+        "itemFields": [
+          "clientId",
+          "content",
+          "id",
+          "type"
+        ],
+        "callerIdPresent": true,
+        "clientIdPresent": true,
+        "providerItemIdPresent": true,
+        "providerItemIdEqualsCallerId": false,
+        "matchingItemCount": 2,
+        "callerCorrelatedItemCount": 1,
+        "distinctClientIdCount": 2,
+        "duplicateEffectCount": 2
+      },
+      "liveHistory": {
+        "itemFields": [
+          "clientId",
+          "content",
+          "id",
+          "type"
+        ],
+        "callerIdPresent": true,
+        "clientIdPresent": true,
+        "providerItemIdPresent": true,
+        "providerItemIdEqualsCallerId": false,
+        "matchingItemCount": 2,
+        "callerCorrelatedItemCount": 1,
+        "distinctClientIdCount": 2,
+        "duplicateEffectCount": 2
+      },
+      "freshProcessHistory": {
+        "itemFields": [
+          "clientId",
+          "content",
+          "id",
+          "type"
+        ],
+        "callerIdPresent": true,
+        "clientIdPresent": true,
+        "providerItemIdPresent": true,
+        "providerItemIdEqualsCallerId": false,
+        "matchingItemCount": 2,
+        "callerCorrelatedItemCount": 1,
+        "distinctClientIdCount": 2,
+        "duplicateEffectCount": 2
+      },
+      "callerCorrelationDurableAfterRestart": true,
+      "providerItemIdStableAfterRestart": true,
+      "duplicateEffectCount": 2
+    },
+    {
+      "name": "duplicate-id-concurrent-live-turn",
+      "transport": "websocket",
+      "cliVersion": "codex-cli 0.154.0",
+      "attempts": [
+        {
+          "turnActiveBeforeRequest": true,
+          "requestFields": [
+            "clientUserMessageId",
+            "expectedTurnId",
+            "input",
+            "threadId"
+          ],
+          "inputFields": [
+            "text",
+            "type"
+          ],
+          "responseFields": [
+            "turnId"
+          ],
+          "errorFields": [],
+          "rejected": false,
+          "errorCode": null,
+          "callerReceivedResponse": true,
+          "providerResponseObserved": true,
+          "providerRpcSucceeded": true,
+          "timingBoundary": "response-received",
+          "callerIdInResponse": false
+        },
+        {
+          "turnActiveBeforeRequest": true,
+          "requestFields": [
+            "clientUserMessageId",
+            "expectedTurnId",
+            "input",
+            "threadId"
+          ],
+          "inputFields": [
+            "text",
+            "type"
+          ],
+          "responseFields": [
+            "turnId"
+          ],
+          "errorFields": [],
+          "rejected": false,
+          "errorCode": null,
+          "callerReceivedResponse": true,
+          "providerResponseObserved": true,
+          "providerRpcSucceeded": true,
+          "timingBoundary": "response-received",
+          "callerIdInResponse": false
+        }
+      ],
+      "terminalStatus": "completed",
+      "liveNotification": {
+        "itemFields": [
+          "clientId",
+          "content",
+          "id",
+          "type"
+        ],
+        "callerIdPresent": true,
+        "clientIdPresent": true,
+        "providerItemIdPresent": true,
+        "providerItemIdEqualsCallerId": false,
+        "matchingItemCount": 2,
+        "callerCorrelatedItemCount": 2,
+        "distinctClientIdCount": 1,
+        "duplicateEffectCount": 2
+      },
+      "liveHistory": {
+        "itemFields": [
+          "clientId",
+          "content",
+          "id",
+          "type"
+        ],
+        "callerIdPresent": true,
+        "clientIdPresent": true,
+        "providerItemIdPresent": true,
+        "providerItemIdEqualsCallerId": false,
+        "matchingItemCount": 2,
+        "callerCorrelatedItemCount": 2,
+        "distinctClientIdCount": 1,
+        "duplicateEffectCount": 2
+      },
+      "freshProcessHistory": {
+        "itemFields": [
+          "clientId",
+          "content",
+          "id",
+          "type"
+        ],
+        "callerIdPresent": true,
+        "clientIdPresent": true,
+        "providerItemIdPresent": true,
+        "providerItemIdEqualsCallerId": false,
+        "matchingItemCount": 2,
+        "callerCorrelatedItemCount": 2,
+        "distinctClientIdCount": 1,
+        "duplicateEffectCount": 2
+      },
+      "callerCorrelationDurableAfterRestart": true,
+      "providerItemIdStableAfterRestart": true,
+      "duplicateEffectCount": 2
+    },
+    {
+      "name": "duplicate-id-after-rpc-response",
+      "transport": "websocket",
+      "cliVersion": "codex-cli 0.154.0",
+      "attempts": [
+        {
+          "turnActiveBeforeRequest": true,
+          "requestFields": [
+            "clientUserMessageId",
+            "expectedTurnId",
+            "input",
+            "threadId"
+          ],
+          "inputFields": [
+            "text",
+            "type"
+          ],
+          "responseFields": [
+            "turnId"
+          ],
+          "errorFields": [],
+          "rejected": false,
+          "errorCode": null,
+          "callerReceivedResponse": true,
+          "providerResponseObserved": true,
+          "providerRpcSucceeded": true,
+          "timingBoundary": "response-received",
+          "callerIdInResponse": false
+        },
+        {
+          "turnActiveBeforeRequest": true,
+          "requestFields": [
+            "clientUserMessageId",
+            "expectedTurnId",
+            "input",
+            "threadId"
+          ],
+          "inputFields": [
+            "text",
+            "type"
+          ],
+          "responseFields": [
+            "turnId"
+          ],
+          "errorFields": [],
+          "rejected": false,
+          "errorCode": null,
+          "callerReceivedResponse": true,
+          "providerResponseObserved": true,
+          "providerRpcSucceeded": true,
+          "timingBoundary": "response-received",
+          "callerIdInResponse": false
+        }
+      ],
+      "terminalStatus": "completed",
+      "liveNotification": {
+        "itemFields": [
+          "clientId",
+          "content",
+          "id",
+          "type"
+        ],
+        "callerIdPresent": true,
+        "clientIdPresent": true,
+        "providerItemIdPresent": true,
+        "providerItemIdEqualsCallerId": false,
+        "matchingItemCount": 2,
+        "callerCorrelatedItemCount": 2,
+        "distinctClientIdCount": 1,
+        "duplicateEffectCount": 2
+      },
+      "liveHistory": {
+        "itemFields": [
+          "clientId",
+          "content",
+          "id",
+          "type"
+        ],
+        "callerIdPresent": true,
+        "clientIdPresent": true,
+        "providerItemIdPresent": true,
+        "providerItemIdEqualsCallerId": false,
+        "matchingItemCount": 2,
+        "callerCorrelatedItemCount": 2,
+        "distinctClientIdCount": 1,
+        "duplicateEffectCount": 2
+      },
+      "freshProcessHistory": {
+        "itemFields": [
+          "clientId",
+          "content",
+          "id",
+          "type"
+        ],
+        "callerIdPresent": true,
+        "clientIdPresent": true,
+        "providerItemIdPresent": true,
+        "providerItemIdEqualsCallerId": false,
+        "matchingItemCount": 2,
+        "callerCorrelatedItemCount": 2,
+        "distinctClientIdCount": 1,
+        "duplicateEffectCount": 2
+      },
+      "callerCorrelationDurableAfterRestart": true,
+      "providerItemIdStableAfterRestart": true,
+      "duplicateEffectCount": 2
+    },
+    {
+      "name": "duplicate-id-after-disconnect-reconnect",
+      "transport": "websocket",
+      "cliVersion": "codex-cli 0.154.0",
+      "attempts": [
+        {
+          "turnActiveBeforeRequest": true,
+          "requestFields": [
+            "clientUserMessageId",
+            "expectedTurnId",
+            "input",
+            "threadId"
+          ],
+          "inputFields": [
+            "text",
+            "type"
+          ],
+          "responseFields": [
+            "turnId"
+          ],
+          "errorFields": [],
+          "rejected": false,
+          "errorCode": null,
+          "callerReceivedResponse": true,
+          "providerResponseObserved": true,
+          "providerRpcSucceeded": true,
+          "timingBoundary": "response-received",
+          "callerIdInResponse": false
+        },
+        {
+          "turnActiveBeforeRequest": true,
+          "requestFields": [
+            "clientUserMessageId",
+            "expectedTurnId",
+            "input",
+            "threadId"
+          ],
+          "inputFields": [
+            "text",
+            "type"
+          ],
+          "responseFields": [
+            "turnId"
+          ],
+          "errorFields": [],
+          "rejected": false,
+          "errorCode": null,
+          "callerReceivedResponse": true,
+          "providerResponseObserved": true,
+          "providerRpcSucceeded": true,
+          "timingBoundary": "response-received",
+          "callerIdInResponse": false
+        }
+      ],
+      "terminalStatus": "completed",
+      "liveNotification": {
+        "itemFields": [
+          "clientId",
+          "content",
+          "id",
+          "type"
+        ],
+        "callerIdPresent": true,
+        "clientIdPresent": true,
+        "providerItemIdPresent": true,
+        "providerItemIdEqualsCallerId": false,
+        "matchingItemCount": 2,
+        "callerCorrelatedItemCount": 2,
+        "distinctClientIdCount": 1,
+        "duplicateEffectCount": 2
+      },
+      "liveHistory": {
+        "itemFields": [
+          "clientId",
+          "content",
+          "id",
+          "type"
+        ],
+        "callerIdPresent": true,
+        "clientIdPresent": true,
+        "providerItemIdPresent": true,
+        "providerItemIdEqualsCallerId": false,
+        "matchingItemCount": 2,
+        "callerCorrelatedItemCount": 2,
+        "distinctClientIdCount": 1,
+        "duplicateEffectCount": 2
+      },
+      "freshProcessHistory": {
+        "itemFields": [
+          "clientId",
+          "content",
+          "id",
+          "type"
+        ],
+        "callerIdPresent": true,
+        "clientIdPresent": true,
+        "providerItemIdPresent": true,
+        "providerItemIdEqualsCallerId": false,
+        "matchingItemCount": 2,
+        "callerCorrelatedItemCount": 2,
+        "distinctClientIdCount": 1,
+        "duplicateEffectCount": 2
+      },
+      "callerCorrelationDurableAfterRestart": true,
+      "providerItemIdStableAfterRestart": true,
+      "duplicateEffectCount": 2
+    },
+    {
+      "name": "wrong-expected-turn-id",
+      "transport": "websocket",
+      "cliVersion": "codex-cli 0.154.0",
+      "attempts": [
+        {
+          "turnActiveBeforeRequest": true,
+          "requestFields": [
+            "clientUserMessageId",
+            "expectedTurnId",
+            "input",
+            "threadId"
+          ],
+          "inputFields": [
+            "text",
+            "type"
+          ],
+          "responseFields": [],
+          "errorFields": [
+            "code",
+            "message"
+          ],
+          "rejected": true,
+          "errorCode": -32600,
+          "callerReceivedResponse": true,
+          "providerResponseObserved": true,
+          "providerRpcSucceeded": false,
+          "timingBoundary": "response-received",
+          "callerIdInResponse": false
+        }
+      ],
+      "terminalStatus": "completed",
+      "liveNotification": {
+        "itemFields": [],
+        "callerIdPresent": false,
+        "clientIdPresent": false,
+        "providerItemIdPresent": false,
+        "providerItemIdEqualsCallerId": false,
+        "matchingItemCount": 0,
+        "callerCorrelatedItemCount": 0,
+        "distinctClientIdCount": 0,
+        "duplicateEffectCount": 0
+      },
+      "liveHistory": {
+        "itemFields": [],
+        "callerIdPresent": false,
+        "clientIdPresent": false,
+        "providerItemIdPresent": false,
+        "providerItemIdEqualsCallerId": false,
+        "matchingItemCount": 0,
+        "callerCorrelatedItemCount": 0,
+        "distinctClientIdCount": 0,
+        "duplicateEffectCount": 0
+      },
+      "freshProcessHistory": {
+        "itemFields": [],
+        "callerIdPresent": false,
+        "clientIdPresent": false,
+        "providerItemIdPresent": false,
+        "providerItemIdEqualsCallerId": false,
+        "matchingItemCount": 0,
+        "callerCorrelatedItemCount": 0,
+        "distinctClientIdCount": 0,
+        "duplicateEffectCount": 0
+      },
+      "callerCorrelationDurableAfterRestart": false,
+      "providerItemIdStableAfterRestart": null,
+      "duplicateEffectCount": 0
+    },
+    {
+      "name": "duplicate-id-after-provider-restart",
+      "transport": "websocket",
+      "cliVersion": "codex-cli 0.154.0",
+      "attempts": [
+        {
+          "turnActiveBeforeRequest": true,
+          "requestFields": [
+            "clientUserMessageId",
+            "expectedTurnId",
+            "input",
+            "threadId"
+          ],
+          "inputFields": [
+            "text",
+            "type"
+          ],
+          "responseFields": [
+            "turnId"
+          ],
+          "errorFields": [],
+          "rejected": false,
+          "errorCode": null,
+          "callerReceivedResponse": true,
+          "providerResponseObserved": true,
+          "providerRpcSucceeded": true,
+          "timingBoundary": "response-received",
+          "callerIdInResponse": false
+        }
+      ],
+      "terminalStatus": "completed",
+      "liveNotification": {
+        "itemFields": [
+          "clientId",
+          "content",
+          "id",
+          "type"
+        ],
+        "callerIdPresent": true,
+        "clientIdPresent": true,
+        "providerItemIdPresent": true,
+        "providerItemIdEqualsCallerId": false,
+        "matchingItemCount": 1,
+        "callerCorrelatedItemCount": 1,
+        "distinctClientIdCount": 1,
+        "duplicateEffectCount": 1
+      },
+      "liveHistory": {
+        "itemFields": [
+          "clientId",
+          "content",
+          "id",
+          "type"
+        ],
+        "callerIdPresent": true,
+        "clientIdPresent": true,
+        "providerItemIdPresent": true,
+        "providerItemIdEqualsCallerId": false,
+        "matchingItemCount": 2,
+        "callerCorrelatedItemCount": 2,
+        "distinctClientIdCount": 1,
+        "duplicateEffectCount": 2
+      },
+      "freshProcessHistory": {
+        "itemFields": [
+          "clientId",
+          "content",
+          "id",
+          "type"
+        ],
+        "callerIdPresent": true,
+        "clientIdPresent": true,
+        "providerItemIdPresent": true,
+        "providerItemIdEqualsCallerId": false,
+        "matchingItemCount": 2,
+        "callerCorrelatedItemCount": 2,
+        "distinctClientIdCount": 1,
+        "duplicateEffectCount": 2
+      },
+      "callerCorrelationDurableAfterRestart": true,
+      "providerItemIdStableAfterRestart": true,
+      "duplicateEffectCount": 2
+    },
+    {
+      "name": "duplicate-id-after-completed-response",
+      "transport": "websocket",
+      "cliVersion": "codex-cli 0.154.0",
+      "attempts": [
+        {
+          "turnActiveBeforeRequest": true,
+          "requestFields": [
+            "clientUserMessageId",
+            "expectedTurnId",
+            "input",
+            "threadId"
+          ],
+          "inputFields": [
+            "text",
+            "type"
+          ],
+          "responseFields": [
+            "turnId"
+          ],
+          "errorFields": [],
+          "rejected": false,
+          "errorCode": null,
+          "callerReceivedResponse": true,
+          "providerResponseObserved": true,
+          "providerRpcSucceeded": true,
+          "timingBoundary": "response-received",
+          "callerIdInResponse": false
+        },
+        {
+          "turnActiveBeforeRequest": true,
+          "requestFields": [
+            "clientUserMessageId",
+            "expectedTurnId",
+            "input",
+            "threadId"
+          ],
+          "inputFields": [
+            "text",
+            "type"
+          ],
+          "responseFields": [
+            "turnId"
+          ],
+          "errorFields": [],
+          "rejected": false,
+          "errorCode": null,
+          "callerReceivedResponse": true,
+          "providerResponseObserved": true,
+          "providerRpcSucceeded": true,
+          "timingBoundary": "response-received",
+          "callerIdInResponse": false
+        }
+      ],
+      "terminalStatus": "completed",
+      "liveNotification": {
+        "itemFields": [
+          "clientId",
+          "content",
+          "id",
+          "type"
+        ],
+        "callerIdPresent": true,
+        "clientIdPresent": true,
+        "providerItemIdPresent": true,
+        "providerItemIdEqualsCallerId": false,
+        "matchingItemCount": 2,
+        "callerCorrelatedItemCount": 2,
+        "distinctClientIdCount": 1,
+        "duplicateEffectCount": 2
+      },
+      "liveHistory": {
+        "itemFields": [
+          "clientId",
+          "content",
+          "id",
+          "type"
+        ],
+        "callerIdPresent": true,
+        "clientIdPresent": true,
+        "providerItemIdPresent": true,
+        "providerItemIdEqualsCallerId": false,
+        "matchingItemCount": 2,
+        "callerCorrelatedItemCount": 2,
+        "distinctClientIdCount": 1,
+        "duplicateEffectCount": 2
+      },
+      "freshProcessHistory": {
+        "itemFields": [
+          "clientId",
+          "content",
+          "id",
+          "type"
+        ],
+        "callerIdPresent": true,
+        "clientIdPresent": true,
+        "providerItemIdPresent": true,
+        "providerItemIdEqualsCallerId": false,
+        "matchingItemCount": 2,
+        "callerCorrelatedItemCount": 2,
+        "distinctClientIdCount": 1,
+        "duplicateEffectCount": 2
+      },
+      "callerCorrelationDurableAfterRestart": true,
+      "providerItemIdStableAfterRestart": true,
+      "duplicateEffectCount": 2
+    },
+    {
+      "name": "disconnect-before-response",
+      "transport": "websocket",
+      "cliVersion": "codex-cli 0.154.0",
+      "attempts": [
+        {
+          "turnActiveBeforeRequest": true,
+          "requestFields": [
+            "clientUserMessageId",
+            "expectedTurnId",
+            "input",
+            "threadId"
+          ],
+          "inputFields": [
+            "text",
+            "type"
+          ],
+          "responseFields": [],
+          "errorFields": [],
+          "rejected": false,
+          "errorCode": null,
+          "callerReceivedResponse": false,
+          "providerResponseObserved": false,
+          "providerRpcSucceeded": null,
+          "timingBoundary": "before-response",
+          "callerIdInResponse": false
+        }
+      ],
+      "terminalStatus": "completed",
+      "liveNotification": {
+        "itemFields": [],
+        "callerIdPresent": false,
+        "clientIdPresent": false,
+        "providerItemIdPresent": false,
+        "providerItemIdEqualsCallerId": false,
+        "matchingItemCount": 0,
+        "callerCorrelatedItemCount": 0,
+        "distinctClientIdCount": 0,
+        "duplicateEffectCount": 0
+      },
+      "liveHistory": {
+        "itemFields": [],
+        "callerIdPresent": false,
+        "clientIdPresent": false,
+        "providerItemIdPresent": false,
+        "providerItemIdEqualsCallerId": false,
+        "matchingItemCount": 0,
+        "callerCorrelatedItemCount": 0,
+        "distinctClientIdCount": 0,
+        "duplicateEffectCount": 0
+      },
+      "freshProcessHistory": {
+        "itemFields": [],
+        "callerIdPresent": false,
+        "clientIdPresent": false,
+        "providerItemIdPresent": false,
+        "providerItemIdEqualsCallerId": false,
+        "matchingItemCount": 0,
+        "callerCorrelatedItemCount": 0,
+        "distinctClientIdCount": 0,
+        "duplicateEffectCount": 0
+      },
+      "callerCorrelationDurableAfterRestart": false,
+      "providerItemIdStableAfterRestart": null,
+      "duplicateEffectCount": 0
+    },
+    {
+      "name": "disconnect-after-provider-response",
+      "transport": "websocket",
+      "cliVersion": "codex-cli 0.154.0",
+      "attempts": [
+        {
+          "turnActiveBeforeRequest": true,
+          "requestFields": [
+            "clientUserMessageId",
+            "expectedTurnId",
+            "input",
+            "threadId"
+          ],
+          "inputFields": [
+            "text",
+            "type"
+          ],
+          "responseFields": [
+            "turnId"
+          ],
+          "errorFields": [],
+          "rejected": false,
+          "errorCode": null,
+          "callerReceivedResponse": false,
+          "providerResponseObserved": true,
+          "providerRpcSucceeded": true,
+          "timingBoundary": "after-provider-response",
+          "callerIdInResponse": false
+        }
+      ],
+      "terminalStatus": "completed",
+      "liveNotification": {
+        "itemFields": [
+          "clientId",
+          "content",
+          "id",
+          "type"
+        ],
+        "callerIdPresent": true,
+        "clientIdPresent": true,
+        "providerItemIdPresent": true,
+        "providerItemIdEqualsCallerId": false,
+        "matchingItemCount": 1,
+        "callerCorrelatedItemCount": 1,
+        "distinctClientIdCount": 1,
+        "duplicateEffectCount": 1
+      },
+      "liveHistory": {
+        "itemFields": [
+          "clientId",
+          "content",
+          "id",
+          "type"
+        ],
+        "callerIdPresent": true,
+        "clientIdPresent": true,
+        "providerItemIdPresent": true,
+        "providerItemIdEqualsCallerId": false,
+        "matchingItemCount": 1,
+        "callerCorrelatedItemCount": 1,
+        "distinctClientIdCount": 1,
+        "duplicateEffectCount": 1
+      },
+      "freshProcessHistory": {
+        "itemFields": [
+          "clientId",
+          "content",
+          "id",
+          "type"
+        ],
+        "callerIdPresent": true,
+        "clientIdPresent": true,
+        "providerItemIdPresent": true,
+        "providerItemIdEqualsCallerId": false,
+        "matchingItemCount": 1,
+        "callerCorrelatedItemCount": 1,
+        "distinctClientIdCount": 1,
+        "duplicateEffectCount": 1
+      },
+      "callerCorrelationDurableAfterRestart": true,
+      "providerItemIdStableAfterRestart": true,
+      "duplicateEffectCount": 1
+    },
+    {
+      "name": "interrupted-turn-after-steer-response",
+      "transport": "websocket",
+      "cliVersion": "codex-cli 0.154.0",
+      "attempts": [
+        {
+          "turnActiveBeforeRequest": true,
+          "requestFields": [
+            "clientUserMessageId",
+            "expectedTurnId",
+            "input",
+            "threadId"
+          ],
+          "inputFields": [
+            "text",
+            "type"
+          ],
+          "responseFields": [
+            "turnId"
+          ],
+          "errorFields": [],
+          "rejected": false,
+          "errorCode": null,
+          "callerReceivedResponse": true,
+          "providerResponseObserved": true,
+          "providerRpcSucceeded": true,
+          "timingBoundary": "response-received",
+          "callerIdInResponse": false
+        }
+      ],
+      "terminalStatus": "interrupted",
+      "liveNotification": {
+        "itemFields": [],
+        "callerIdPresent": false,
+        "clientIdPresent": false,
+        "providerItemIdPresent": false,
+        "providerItemIdEqualsCallerId": false,
+        "matchingItemCount": 0,
+        "callerCorrelatedItemCount": 0,
+        "distinctClientIdCount": 0,
+        "duplicateEffectCount": 0
+      },
+      "liveHistory": {
+        "itemFields": [],
+        "callerIdPresent": false,
+        "clientIdPresent": false,
+        "providerItemIdPresent": false,
+        "providerItemIdEqualsCallerId": false,
+        "matchingItemCount": 0,
+        "callerCorrelatedItemCount": 0,
+        "distinctClientIdCount": 0,
+        "duplicateEffectCount": 0
+      },
+      "freshProcessHistory": {
+        "itemFields": [],
+        "callerIdPresent": false,
+        "clientIdPresent": false,
+        "providerItemIdPresent": false,
+        "providerItemIdEqualsCallerId": false,
+        "matchingItemCount": 0,
+        "callerCorrelatedItemCount": 0,
+        "distinctClientIdCount": 0,
+        "duplicateEffectCount": 0
+      },
+      "callerCorrelationDurableAfterRestart": false,
+      "providerItemIdStableAfterRestart": null,
+      "duplicateEffectCount": 0
+    },
+    {
+      "name": "interrupted-turn-after-durable-fold",
+      "transport": "websocket",
+      "cliVersion": "codex-cli 0.154.0",
+      "attempts": [
+        {
+          "turnActiveBeforeRequest": true,
+          "requestFields": [
+            "clientUserMessageId",
+            "expectedTurnId",
+            "input",
+            "threadId"
+          ],
+          "inputFields": [
+            "text",
+            "type"
+          ],
+          "responseFields": [
+            "turnId"
+          ],
+          "errorFields": [],
+          "rejected": false,
+          "errorCode": null,
+          "callerReceivedResponse": true,
+          "providerResponseObserved": true,
+          "providerRpcSucceeded": true,
+          "timingBoundary": "response-received",
+          "callerIdInResponse": false
+        }
+      ],
+      "terminalStatus": "interrupted",
+      "liveNotification": {
+        "itemFields": [
+          "clientId",
+          "content",
+          "id",
+          "type"
+        ],
+        "callerIdPresent": true,
+        "clientIdPresent": true,
+        "providerItemIdPresent": true,
+        "providerItemIdEqualsCallerId": false,
+        "matchingItemCount": 1,
+        "callerCorrelatedItemCount": 1,
+        "distinctClientIdCount": 1,
+        "duplicateEffectCount": 1
+      },
+      "liveHistory": {
+        "itemFields": [
+          "clientId",
+          "content",
+          "id",
+          "type"
+        ],
+        "callerIdPresent": true,
+        "clientIdPresent": true,
+        "providerItemIdPresent": true,
+        "providerItemIdEqualsCallerId": false,
+        "matchingItemCount": 1,
+        "callerCorrelatedItemCount": 1,
+        "distinctClientIdCount": 1,
+        "duplicateEffectCount": 1
+      },
+      "freshProcessHistory": {
+        "itemFields": [
+          "clientId",
+          "content",
+          "id",
+          "type"
+        ],
+        "callerIdPresent": true,
+        "clientIdPresent": true,
+        "providerItemIdPresent": true,
+        "providerItemIdEqualsCallerId": false,
+        "matchingItemCount": 1,
+        "callerCorrelatedItemCount": 1,
+        "distinctClientIdCount": 1,
+        "duplicateEffectCount": 1
+      },
+      "callerCorrelationDurableAfterRestart": true,
+      "providerItemIdStableAfterRestart": true,
+      "duplicateEffectCount": 1
+    },
+    {
+      "name": "provider-id-without-caller-id-control",
+      "transport": "websocket",
+      "cliVersion": "codex-cli 0.154.0",
+      "attempts": [
+        {
+          "turnActiveBeforeRequest": true,
+          "requestFields": [
+            "expectedTurnId",
+            "input",
+            "threadId"
+          ],
+          "inputFields": [
+            "text",
+            "type"
+          ],
+          "responseFields": [
+            "turnId"
+          ],
+          "errorFields": [],
+          "rejected": false,
+          "errorCode": null,
+          "callerReceivedResponse": true,
+          "providerResponseObserved": true,
+          "providerRpcSucceeded": true,
+          "timingBoundary": "response-received",
+          "callerIdInResponse": false
+        }
+      ],
+      "terminalStatus": "completed",
+      "liveNotification": {
+        "itemFields": [
+          "clientId",
+          "content",
+          "id",
+          "type"
+        ],
+        "callerIdPresent": false,
+        "clientIdPresent": false,
+        "providerItemIdPresent": true,
+        "providerItemIdEqualsCallerId": false,
+        "matchingItemCount": 1,
+        "callerCorrelatedItemCount": 0,
+        "distinctClientIdCount": 0,
+        "duplicateEffectCount": 1
+      },
+      "liveHistory": {
+        "itemFields": [
+          "clientId",
+          "content",
+          "id",
+          "type"
+        ],
+        "callerIdPresent": false,
+        "clientIdPresent": false,
+        "providerItemIdPresent": true,
+        "providerItemIdEqualsCallerId": false,
+        "matchingItemCount": 1,
+        "callerCorrelatedItemCount": 0,
+        "distinctClientIdCount": 0,
+        "duplicateEffectCount": 1
+      },
+      "freshProcessHistory": {
+        "itemFields": [
+          "clientId",
+          "content",
+          "id",
+          "type"
+        ],
+        "callerIdPresent": false,
+        "clientIdPresent": false,
+        "providerItemIdPresent": true,
+        "providerItemIdEqualsCallerId": false,
+        "matchingItemCount": 1,
+        "callerCorrelatedItemCount": 0,
+        "distinctClientIdCount": 0,
+        "duplicateEffectCount": 1
+      },
+      "callerCorrelationDurableAfterRestart": false,
+      "providerItemIdStableAfterRestart": true,
+      "duplicateEffectCount": 1
+    },
+    {
+      "name": "provider-crash-after-acceptance-before-caller-response",
+      "cliVersion": "codex-cli 0.154.0",
+      "attempts": [
+        {
+          "turnActiveBeforeRequest": true,
+          "requestFields": [
+            "clientUserMessageId",
+            "expectedTurnId",
+            "input",
+            "threadId"
+          ],
+          "inputFields": [
+            "text",
+            "type"
+          ],
+          "responseFields": [
+            "turnId"
+          ],
+          "errorFields": [],
+          "rejected": false,
+          "errorCode": null,
+          "callerReceivedResponse": false,
+          "providerResponseObserved": true,
+          "providerRpcSucceeded": true,
+          "timingBoundary": "after-provider-response",
+          "callerIdInResponse": false
+        }
+      ],
+      "timingBoundary": "SIGKILL-after-provider-response-before-fold",
+      "freshProcessHistory": {
+        "itemFields": [],
+        "callerIdPresent": false,
+        "clientIdPresent": false,
+        "providerItemIdPresent": false,
+        "providerItemIdEqualsCallerId": false,
+        "matchingItemCount": 0,
+        "callerCorrelatedItemCount": 0,
+        "distinctClientIdCount": 0,
+        "duplicateEffectCount": 0
+      },
+      "callerCorrelationDurableAfterRestart": false,
+      "duplicateEffectCount": 0
+    },
+    {
+      "name": "stdio-unique-id-durable-history",
+      "transport": "stdio",
+      "cliVersion": "codex-cli 0.154.0",
+      "attempts": [
+        {
+          "turnActiveBeforeRequest": true,
+          "requestFields": [
+            "clientUserMessageId",
+            "expectedTurnId",
+            "input",
+            "threadId"
+          ],
+          "inputFields": [
+            "text",
+            "type"
+          ],
+          "responseFields": [
+            "turnId"
+          ],
+          "errorFields": [],
+          "rejected": false,
+          "errorCode": null,
+          "callerReceivedResponse": true,
+          "providerResponseObserved": true,
+          "providerRpcSucceeded": true,
+          "timingBoundary": "response-received",
+          "callerIdInResponse": false
+        }
+      ],
+      "terminalStatus": "completed",
+      "liveNotification": {
+        "itemFields": [
+          "clientId",
+          "content",
+          "id",
+          "type"
+        ],
+        "callerIdPresent": true,
+        "clientIdPresent": true,
+        "providerItemIdPresent": true,
+        "providerItemIdEqualsCallerId": false,
+        "matchingItemCount": 1,
+        "callerCorrelatedItemCount": 1,
+        "distinctClientIdCount": 1,
+        "duplicateEffectCount": 1
+      },
+      "liveHistory": {
+        "itemFields": [
+          "clientId",
+          "content",
+          "id",
+          "type"
+        ],
+        "callerIdPresent": true,
+        "clientIdPresent": true,
+        "providerItemIdPresent": true,
+        "providerItemIdEqualsCallerId": false,
+        "matchingItemCount": 1,
+        "callerCorrelatedItemCount": 1,
+        "distinctClientIdCount": 1,
+        "duplicateEffectCount": 1
+      },
+      "freshProcessHistory": {
+        "itemFields": [
+          "clientId",
+          "content",
+          "id",
+          "type"
+        ],
+        "callerIdPresent": true,
+        "clientIdPresent": true,
+        "providerItemIdPresent": true,
+        "providerItemIdEqualsCallerId": false,
+        "matchingItemCount": 1,
+        "callerCorrelatedItemCount": 1,
+        "distinctClientIdCount": 1,
+        "duplicateEffectCount": 1
+      },
+      "callerCorrelationDurableAfterRestart": true,
+      "providerItemIdStableAfterRestart": true,
+      "duplicateEffectCount": 1
+    }
+  ],
+  "verdict": "MATRIX_COMPLETED"
+}

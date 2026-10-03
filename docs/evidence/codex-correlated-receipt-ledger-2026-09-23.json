@@ -1,0 +1,57 @@
+{
+  "cliVersion": "codex-cli 0.154.0",
+  "initial": {
+    "rowCount": 2,
+    "allUnknown": true,
+    "sendCalls": 2,
+    "responseFields": [
+      "attempts",
+      "clientMessageId",
+      "createdAt",
+      "deliveryUnknown",
+      "events",
+      "expiresAt",
+      "generation",
+      "id",
+      "kind",
+      "providerReceipt",
+      "reason",
+      "retryOf",
+      "sessionId",
+      "state",
+      "taskId",
+      "text",
+      "updatedAt",
+      "version"
+    ]
+  },
+  "recovery": {
+    "databaseReopened": true,
+    "providerExited": true,
+    "freshAdapterHasGrant": false,
+    "connectionCalls": 0,
+    "coldSendCalls": 0,
+    "totalOriginalSends": 2,
+    "allDelivered": true,
+    "separateProviderReferences": true,
+    "ackLevels": [
+      "provider-accepted",
+      "provider-accepted"
+    ],
+    "callerIdCounts": [
+      1,
+      1
+    ],
+    "attemptsPerMessage": [
+      1,
+      1
+    ],
+    "receiptFields": [
+      "ackLevel",
+      "at",
+      "messageId",
+      "reference"
+    ]
+  },
+  "verdict": "PASS"
+}

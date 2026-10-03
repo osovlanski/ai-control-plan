@@ -1,9 +1,10 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { createRequire } from "node:module";
-import { dirname, join } from "node:path";
 import { newRunId, NotSupportedError, type AssistantId, type NormalizedEvent, type ProviderSessionRef, type RunHandle, type RunSpec } from "@agent-plane/core";
 import { CodexAppServerProtocol, type RpcFrame } from "./codex-app-server-protocol.js";
 import { CodexSessionInputAdapter, type CodexInputConnection } from "./codex-session-input.js";
+import { codexSdkBinary } from "./codex-sdk-binary.js";
+import { readCodexThreadHistory } from "./codex-app-server-history.js";
+export { codexSdkBinary } from "./codex-sdk-binary.js";
 import { EventQueue } from "./event-queue.js";
 
 interface State {
@@ -18,22 +19,6 @@ interface State {
   timer?: ReturnType<typeof setTimeout>;
 }
 
-/** Use the SDK's pinned CLI, not an unrelated PATH installation. */
-export function codexSdkBinary(): string {
-  const sdk = createRequire(import.meta.resolve("@openai/codex-sdk"));
-  const cli = createRequire(sdk.resolve("@openai/codex/package.json"));
-  const arch = process.arch;
-  const os = process.platform;
-  const triples: Record<string, string> = {
-    "linux-arm64": "aarch64-unknown-linux-musl", "linux-x64": "x86_64-unknown-linux-musl",
-    "darwin-arm64": "aarch64-apple-darwin", "darwin-x64": "x86_64-apple-darwin",
-    "win32-arm64": "aarch64-pc-windows-msvc", "win32-x64": "x86_64-pc-windows-msvc",
-  };
-  const triple = triples[`${os}-${arch}`];
-  if (!triple) throw new NotSupportedError("Codex app-server platform");
-  return join(dirname(cli.resolve(`@openai/codex-${os}-${arch}/package.json`)), `vendor/${triple}/bin/codex${os === "win32" ? ".exe" : ""}`);
-}
-
 /** Explicitly opted-in execution owner. One app-server child per run. */
 export class CodexAppServerRuntime {
   private readonly runs = new Map<string, State>();
@@ -43,7 +28,7 @@ export class CodexAppServerRuntime {
     this.sessionInput = new CodexSessionInputAdapter(id, (ref) => {
       for (const state of this.runs.values()) if (!state.ended && !state.cancelling && state.input?.threadId === ref) return state.input;
       return undefined;
-    });
+    }, threadId => readCodexThreadHistory(threadId, this.binary));
   }
 
   async start(run: RunSpec, ref?: ProviderSessionRef): Promise<RunHandle> {
