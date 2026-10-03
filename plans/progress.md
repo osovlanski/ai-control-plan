@@ -8,47 +8,31 @@
 
 **Live verification against real providers (2026-08-22) — see log entry below for the full report.** Two real defects found and fixed in `claude.ts`/`orchestrator.ts`; everything else in the core loop, handoff, parallel compare, and telemetry worked against real `claude`/`codex` CLIs on the first try.
 
-## Workstreams (2026-09-23)
+## Workstreams (2026-10-03)
 
-Three streams are in flight. Every SHA below was verified against `origin` on the
-date in the heading; a SHA here is a **claim about the remote**, so `git fetch`
+Verified against `origin` on the date in the heading: `main` at `987ee47`, and
+**no open pull requests**. A SHA here is a claim about the remote — `git fetch`
 and re-check before acting on one. Where this section and the tree disagree, the
 tree wins.
 
-### A — Session input: live contract → provider adapters → delivery UI
+### A — Session input: live contract → provider adapters → delivery UI — **LANDED**
 
-Topology (every ancestry link verified, 2026-09-23):
+All on `main`. The stack that was in flight on 2026-09-23 is resolved:
 
-```text
-main (91c9781)
-  └─ 0221ab2  feat/agentic-os-session-input-live-contract   PR #50 → main
-       ├─ f745600  …-claude-adapter    PR #47 → live-contract
-       │    └─ 2adca5c  …-delivery-ui  PR #48 → claude-adapter
-       └─ 4c0c6bd  …-codex-adapter     PR #51 → live-contract; transport-only claims
-```
+| PR | Outcome |
+|---|---|
+| #50 live contract → `main` | **Closed, not merged.** 18 commits / 114 files, and 4 `add/add` conflicts with `main`: PR #45 had landed an independent standalone-Shell implementation. Reconciling that inside a 114-file merge was the wrong unit. |
+| #58 `feat/session-input-core` | **Merged** — the re-stack of the durable core onto `main`, preserving `main`'s Shell. This is what #50 should have been. |
+| #47 Claude adapter, #51 Codex adapter | **Merged** to `main` after retargeting off the dead base. |
+| #48 delivery UI | **Closed**, superseded by #65 (`feat(web): session-input delivery UI on main's Shell`), merged. |
+| #63 Codex correlated-receipt spike | **Merged.** Pinned CLI 0.154.0 persists `clientUserMessageId` as `userMessage.clientId`, readable from fresh processes. `idempotentSend` stays **false**: repeated caller ids produced two inputs, including after restart, and a crash before storage can lose acknowledged input. The transport-only claims stand. |
 
-`main` carries **none** of this lineage. PR #50 is therefore the whole linear
-chain — 18 commits, 114 files — not a single slice. Its body lists which parts
-were already reviewed (as #44 and #46, both of which merged into side branches
-that never reached `main`) and which never had a PR at all: the conversational
-shell and standalone Shell slices. PR #44's own body flagged that gap on
-2026-09-20. The `#44` / `#46` merge commits are side branches off this line, not
-ancestors of it; `f48ff48` is the ancestor that carries their content forward.
+**The lesson, recorded because it cost a week:** a stack whose base has no route
+to `main` is not a stack, it is an orphan. #44's own body flagged on 2026-09-20
+that the Shell slice had no PR; nothing acted on it until the base had drifted
+far enough that `main` grew its own copy of the same files.
 
-**Open decision:** land #50 as one 18-commit unit, or re-stack the shell slices
-as their own PRs to `main` first. The second costs time and buys a review unit
-per slice.
-
-- **Status:** the topology repair is complete — the provider-neutral contract is
-  genuinely shared rather than duplicated, and both adapters descend from it.
-- **Next:** merge bottom-up — #50, then #47, then #51, then #48. A four-deep
-  stack re-rebases on every commit to `main`, so this is the stream that costs
-  the most to leave open.
-- **Deferred:** the Codex correlated-receipt spike (does `clientUserMessageId`
-  support durable, message-correlated receipts?). It branches from the Codex
-  adapter, so running it before that lands means rebasing research mid-flight.
-  The Codex adapter's transport-only claims stand until empirical evidence
-  replaces them.
+Migrations from this stream: 028 `session_input`, 029 `session_input_commands`.
 
 ### B — M16 Decision Service (Jev / System One) — K17–K22
 
@@ -444,12 +428,24 @@ SELECT gate_hook, gate_reason, COUNT(*) AS prompts
 - Not schedulable as a workstream until that remote-auth design exists. It is a
   prerequisite, not a backlog item.
 
-### Ordering
+### Ordering (2026-10-03)
 
-1. Land stream A bottom-up: #50 → #47 → #51 → #48.
-2. Stream B K19d — concurrently; the two touch disjoint files.
-3. The Codex receipt spike, once the Codex adapter is on `main`.
-4. Stream C only after authenticated remote mode is designed and approved.
+Stream A is landed. Nothing is in flight; there are no open PRs.
+
+1. **Floor evasion.** The floors are now the gate, not one layer of two. What is
+   tested is ReDoS timing (`tool-floors.test.ts`) and carrier injection
+   ("appended carrier text cannot remove a floor"). Neither is *evasion* — a
+   command that does the floored thing without matching the predicate (`env` vs
+   `printenv`, `/proc/self/environ`, `node -e`, a base64 `eval`). Untested, and
+   load-bearing since K19i.
+2. **K20**, per [`plans/k20-task-classifier-proposal.md`](k20-task-classifier-proposal.md).
+   **That proposal says "add migration 028"; 028, 029 and 030 are taken. K20 needs
+   031.** It was written on 2026-09-25, before session input landed.
+3. **The §7.1 soak runs on its own.** T0 `2026-09-25T21:31:57Z`; the ≥14-day arm
+   matures about **2026-10-09**, or earlier at ≥500 decisions. Nothing advances it
+   but time and traffic.
+4. **Activation** after the soak, per §7.4 — not before.
+5. Stream C only after authenticated remote mode is designed and approved.
 
 ## Done
 
