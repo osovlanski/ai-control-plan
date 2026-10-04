@@ -1,6 +1,7 @@
 import type { AssistantId } from "./ids.js";
 import type { Freshness, Provenance } from "./model-catalog.js";
 import type { TaskIntent } from "./scheduler.js";
+import { classifyTaskV1 } from "./task-classifier.js";
 
 /**
  * K13 — conservative model selection (agentic-os-kernel-services §4.4.3).
@@ -279,20 +280,10 @@ export function classifyTask(intent: Pick<TaskIntent, "goal" | "profile" | "cons
 
   const total = TASK_DIMENSIONS.reduce((sum, d) => sum + weights[d], 0);
   for (const d of TASK_DIMENSIONS) weights[d] = weights[d] / total;
-  return { weights, signals, taskKind: classifyTaskKind(intent.goal) };
-}
-
-/**
- * The cohort key's task kind. Deliberately the SAME vocabulary the assistant-level
- * telemetry already uses, so a K13 cohort and an assistant score never disagree
- * about what kind of work a task was (I-M4's rule, applied to task filtering).
- */
-export function classifyTaskKind(goal: string): "coding" | "review" | "research" | "general" {
-  const text = goal.toLowerCase();
-  if (/\breview|audit|critique\b/.test(text)) return "review";
-  if (/\bfix|implement|refactor|add|bug|test|build|migrate\b/.test(text)) return "coding";
-  if (/\bresearch|investigate|compare|explain|why\b/.test(text)) return "research";
-  return "general";
+  // The cohort key's task kind: the SAME function assistant-level telemetry
+  // uses, so a K13 cohort and an assistant score never disagree about what kind
+  // of work a task was (I-M4's rule, applied to task filtering).
+  return { weights, signals, taskKind: classifyTaskV1(intent.goal) };
 }
 
 // --- blending ---------------------------------------------------------------

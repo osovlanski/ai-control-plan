@@ -1,6 +1,7 @@
 import type { PauseKind, TransitionGrant, TaskIntent, RoutingProfile, TaskEnvelope, TaskId, TaskMode, TaskState } from "@agent-plane/core";
-import { assertTransition, isTaskState, isTerminal, newTaskId, redactValue } from "@agent-plane/core";
+import { CLASSIFIER_VERSION, assertTransition, classifyTaskV1, isTaskState, isTerminal, newTaskId, redactValue } from "@agent-plane/core";
 import type { Db } from "../db/index.js";
+import { recordTaskClassification } from "./decision.js";
 
 export interface CreateTaskInput {
   goal: string;
@@ -27,6 +28,9 @@ export interface TaskRow {
   worktree_path: string | null;
   base_ref: string | null;
   envelope: string;
+  /** K20: the label routing reads, stored once at intake. NULL on every pre-031 row. */
+  task_kind: string | null;
+  classifier_version: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -57,10 +61,11 @@ export class TaskStore {
       decisions: (input.constraints ?? []).map((c) => ({ text: c, madeBy: "user" as const, at: now })),
       artifacts: { changedFiles: [], testResults: [] },
     };
+    const intent = { goal: input.goal, constraints: input.constraints ?? [], repository: envelope.repository, profile: input.profile ?? "auto", overrides: input.overrides, requirements: input.requirements } satisfies TaskIntent;
     this.db
       .prepare(
-        `INSERT INTO tasks (id, goal, state, profile, repo_path, branch, envelope, intent_json, created_at, updated_at)
-         VALUES (?, ?, 'CREATED', ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO tasks (id, goal, state, profile, repo_path, branch, envelope, intent_json, task_kind, classifier_version, created_at, updated_at)
+         VALUES (?, ?, 'CREATED', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         taskId,
@@ -69,10 +74,14 @@ export class TaskStore {
         input.repoPath ?? null,
         envelope.repository?.branch ?? null,
         JSON.stringify(envelope),
-        JSON.stringify({ goal: input.goal, constraints: input.constraints ?? [], repository: envelope.repository, profile: input.profile ?? "auto", overrides: input.overrides, requirements: input.requirements } satisfies TaskIntent),
+        JSON.stringify(intent),
+        // K20: v1, the label routing and K13 read. Written once; never rewritten.
+        classifyTaskV1(input.goal),
+        CLASSIFIER_VERSION,
         now,
         now,
       );
+    recordTaskClassification(this.db, taskId, intent, now);
     return envelope;
   }
 

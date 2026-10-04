@@ -2,7 +2,7 @@
  * M16 K17 — `RulesDecisionProvider` (plan `plans/jev-decision-service-plan.md` §5).
  *
  * Pure unit coverage of the three site mappings, isolated from the real
- * `classifyGoal` / `toolPolicyGuard` / `evaluateContextGuard` functions
+ * `toolPolicyGuard` / `evaluateContextGuard` functions
  * (apps/api can't be imported from packages/core). The exact-reproduction
  * claim against the real functions is proven separately in
  * apps/api/test/decision-parity.test.ts, which imports both sides.
@@ -44,7 +44,7 @@ describe("RulesDecisionProvider", () => {
     expect(provider.describe()).toEqual({ reachable: true, egress: "local" });
   });
 
-  it("answers task-classifier with a Choice matching classifyGoal's precedence", async () => {
+  it("answers task-classifier with a Choice matching classifyTaskV1's precedence", async () => {
     const req = (goal: string): DecisionRequest => ({
       site: "task-classifier",
       state: { goal },
@@ -55,7 +55,7 @@ describe("RulesDecisionProvider", () => {
     expect((await provider.decide(req("review this diff"))).answers.kind).toMatchObject({ kind: "choice", value: "review" });
     expect((await provider.decide(req("investigate why this fails"))).answers.kind).toMatchObject({ kind: "choice", value: "research" });
     expect((await provider.decide(req("say hello"))).answers.kind).toMatchObject({ kind: "choice", value: "general" });
-    // review wins over fix when both match — same precedence as classifyGoal.
+    // review wins over fix when both match — same precedence as classifyTaskV1.
     expect((await provider.decide(req("review and fix"))).answers.kind).toMatchObject({ kind: "choice", value: "review" });
   });
 

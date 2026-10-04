@@ -1,5 +1,5 @@
-import type { ExecutionResult } from "@agent-plane/core";
-import { modelKey, reliabilityClass } from "@agent-plane/core";
+import type { ExecutionResult, TaskKind } from "@agent-plane/core";
+import { CLASSIFIER_VERSION, classifyTaskV1, modelKey, reliabilityClass } from "@agent-plane/core";
 import type { Db } from "../db/index.js";
 import { effectiveStateSql, effectiveUsageJoin, effectiveUsageSql } from "./harness/state-vocab.js";
 
@@ -46,7 +46,7 @@ export class TelemetryService {
            ${effectiveStateSql("r")} AS state,
            ${effectiveUsageSql("r")} AS usage,
            er.result AS result,
-           r.started_at, r.ended_at, t.goal
+           r.started_at, r.ended_at, t.goal, t.task_kind, t.classifier_version
          FROM runs r
          JOIN tasks t ON t.id = r.task_id
          ${effectiveUsageJoin("r")}
@@ -61,11 +61,13 @@ export class TelemetryService {
       started_at: string;
       ended_at: string;
       goal: string;
+      task_kind: string | null;
+      classifier_version: number | null;
     }>;
 
     const byAssistant = new Map<string, AssistantScore & { durations: number[]; tokens: number[] }>();
     for (const row of rows) {
-      if (taskKind && classifyGoal(row.goal) !== taskKind) continue;
+      if (taskKind && taskKindOf(row) !== taskKind) continue;
       let score = byAssistant.get(row.assistant_id);
       if (!score) {
         score = {
@@ -210,7 +212,7 @@ export function modelCohorts(
          ${effectiveStateSql("r")} AS state,
          ${effectiveUsageSql("r")} AS usage,
          er.result AS result,
-         r.started_at, r.ended_at, t.goal
+         r.started_at, r.ended_at, t.goal, t.task_kind, t.classifier_version
        FROM runs r
        JOIN tasks t ON t.id = r.task_id
        JOIN assistants a ON a.id = r.assistant_id
@@ -228,6 +230,8 @@ export function modelCohorts(
     started_at: string;
     ended_at: string;
     goal: string;
+    task_kind: string | null;
+    classifier_version: number | null;
   }>;
 
   interface Acc extends ModelCohort {
@@ -239,7 +243,7 @@ export function modelCohorts(
   }
   const byModel = new Map<string, Acc>();
   for (const row of rows) {
-    if (classifyGoal(row.goal) !== opts.taskKind) continue;
+    if (taskKindOf(row) !== opts.taskKind) continue;
     const key = modelKey(row.provider, row.model_resolved);
     let acc = byModel.get(key);
     if (!acc) {
@@ -356,13 +360,14 @@ function reliabilityView(resultJson: string | null, state: string): Pick<Executi
   return { outcome: "failed" };
 }
 
-/** Cheap task-kind heuristic — no LLM call on the routing path (review §3.3). */
-export function classifyGoal(goal: string): "coding" | "review" | "research" | "general" {
-  const text = goal.toLowerCase();
-  if (/\breview|audit|critique\b/.test(text)) return "review";
-  if (/\bfix|implement|refactor|add|bug|test|build|migrate\b/.test(text)) return "coding";
-  if (/\bresearch|investigate|compare|explain|why\b/.test(text)) return "research";
-  return "general";
+/**
+ * A task's cohort label (K20): the v1 label stored at intake, or — for a row
+ * stored before migration 031 — the FROZEN `classifyTaskV1` of its goal, which
+ * is the label it has always had. A label from any other classifier version is
+ * never read here, so a v1 cohort cannot absorb one. No LLM call (review §3.3).
+ */
+export function taskKindOf(row: { goal: string; task_kind: string | null; classifier_version: number | null }): TaskKind {
+  return row.task_kind !== null && row.classifier_version === CLASSIFIER_VERSION ? (row.task_kind as TaskKind) : classifyTaskV1(row.goal);
 }
 
 function median(values: number[]): number | undefined {

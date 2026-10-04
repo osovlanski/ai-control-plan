@@ -7,7 +7,7 @@ import type { AssistantId, CapabilityManifest, ModelRecommendation, RoutingExpla
 import type { ModelCatalogService } from "./model-catalog.js";
 import { recommendModel } from "./model-selection.js";
 import type { Db } from "../db/index.js";
-import { TelemetryService, classifyGoal, type AssistantScore } from "./telemetry.js";
+import { TelemetryService, taskKindOf, type AssistantScore } from "./telemetry.js";
 import { continuationProvenance } from "./context-continuation.js";
 
 export interface RouteCandidate {
@@ -256,7 +256,7 @@ export function routeTask(
   const intent = JSON.parse(row.intent_json) as TaskIntent;
   const telemetry = new TelemetryService(deps.db);
   const scores = telemetry.scores();
-  for (const [id, score] of telemetry.scores(classifyGoal(intent.goal))) scores.set(id, score);
+  for (const [id, score] of telemetry.scores(taskKindOf(row))) scores.set(id, score);
   const candidates = deps.registry.list().map(a => ({ id: a.id as AssistantId, enabled: a.enabled === 1 && a.id !== options.exclude, manifest: a.manifestParsed }));
   const dispatch = options.dispatchId ? deps.db.prepare('SELECT checkpoint_id FROM dispatches WHERE dispatch_id = ? AND task_id = ?').get(options.dispatchId, taskId) as { checkpoint_id: string | null } | undefined : undefined;
   // K11 provenance: read back from the checkpoint anchor, never from a second

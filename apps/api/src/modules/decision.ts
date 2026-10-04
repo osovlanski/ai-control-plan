@@ -8,8 +8,8 @@
  * construction (K19i), and a chain that starts above it skips it.
  */
 import { createHash } from "node:crypto";
-import type { DecisionOutcome, DecisionProvider, DecisionRequest, DecisionSite, ToolGateVerdict } from "@agent-plane/core";
-import { RulesDecisionProvider, TOOL_GATE_JUDGED_KEYS } from "@agent-plane/core";
+import type { ClassifierIntent, DecisionOutcome, DecisionProvider, DecisionRequest, DecisionSite, ToolGateVerdict } from "@agent-plane/core";
+import { RulesDecisionProvider, TASK_CLASSIFIER_BATTERY, TOOL_GATE_JUDGED_KEYS, taskClassifierAnswers } from "@agent-plane/core";
 import type { Db } from "../db/index.js";
 import { ModelDecisionProvider } from "./decision-model.js";
 
@@ -44,6 +44,8 @@ export interface DecisionRecordContext {
   stateTruncated?: boolean;
   /** K19c: what the tool gate did with this decision (migration 026). Absent on every other site. */
   gate?: ToolGateVerdict & { hook: "pre-exec" | "post-start"; tier: "preventive" | "audit" };
+  /** K20: the rule behind each answer, keyed by answer key (migration 031). Absent on every other site. */
+  rules?: Record<string, string>;
 }
 
 /**
@@ -69,6 +71,7 @@ export interface DecisionRecordRow {
   gateReason: string | null;
   gateHook: "pre-exec" | "post-start" | null;
   gateTier: "preventive" | "audit" | null;
+  rules: Record<string, string> | null;
   createdAt: string;
 }
 
@@ -88,8 +91,8 @@ export function insertDecisionRecord(
   db.prepare(
     `INSERT INTO decision_records
        (task_id, session_id, site, provider, model_reported, question_set_hash, answers_json, latency_ms, input_tokens, output_tokens, mode, degraded_reason, state_truncated, created_at,
-        gate_outcome, gate_reason, gate_hook, gate_tier)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        gate_outcome, gate_reason, gate_hook, gate_tier, rules_json)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     ctx.taskId ?? null,
     ctx.sessionId ?? null,
@@ -113,6 +116,27 @@ export function insertDecisionRecord(
     ctx.gate?.reason ?? null,
     ctx.gate?.hook ?? null,
     ctx.gate?.tier ?? null,
+    ctx.rules ? JSON.stringify(ctx.rules) : null,
+  );
+}
+
+/**
+ * K20: the shadow `task-classifier` row for a task just created — v1 (what
+ * routing reads) and v2 side by side, with the rule behind each answer.
+ * Synchronous and rules-only on purpose: it never goes through the provider
+ * chain, so a workspace configured with a judge cannot reach one at intake
+ * (K19i: no judge on the hot path). Nothing reads this row to route.
+ */
+export function recordTaskClassification(db: Db, taskId: string, intent: ClassifierIntent, createdAt: string): void {
+  const startedMs = Date.now();
+  const { answers, rules } = taskClassifierAnswers(intent);
+  insertDecisionRecord(
+    db,
+    // `state` is never stored (025's invariant); the record keeps the answers and the question-set hash.
+    { site: "task-classifier", state: {}, questions: TASK_CLASSIFIER_BATTERY, budgetMs: 0 },
+    { answers, provider: "rules", latencyMs: Date.now() - startedMs },
+    { taskId, mode: "shadow", rules },
+    createdAt,
   );
 }
 
@@ -147,6 +171,7 @@ export function listDecisions(db: Db, opts: { site?: DecisionSite; limit?: numbe
     gate_reason: string | null;
     gate_hook: "pre-exec" | "post-start" | null;
     gate_tier: "preventive" | "audit" | null;
+    rules_json: string | null;
   }>;
   return rows.map((r) => ({
     id: r.id,
@@ -167,6 +192,7 @@ export function listDecisions(db: Db, opts: { site?: DecisionSite; limit?: numbe
     gateReason: r.gate_reason,
     gateHook: r.gate_hook,
     gateTier: r.gate_tier,
+    rules: r.rules_json ? (JSON.parse(r.rules_json) as Record<string, string>) : null,
     createdAt: r.created_at,
   }));
 }
