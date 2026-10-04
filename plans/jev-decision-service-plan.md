@@ -2,7 +2,8 @@
 
 **Status:** Proposed — revision 3 (2026-09-23, K19i: deterministic floors decide the tool gate and
 the judge leaves the hot path; see §5 K19i and §11). Revision 2 (K19h) made the gate a second lock
-only. K17–K19i are implemented, shadow only; nothing is activated.
+only. K17–K19k and K20 are implemented, shadow only; nothing is activated. The Jev slice
+(2026-10-04) registers `TypeSafeDecisionProvider` for the offline roles only and measures it (§4.2).
 **Date:** 2026-09-22
 **Written against:** `ai-control-plan` `main@91c9781` (Agentic OS Shell mode over kernel records).
 **Owner runbook:** §9 — the OCI apply procedure. Read §0 and §9 first if you are executing this.
@@ -168,19 +169,30 @@ export interface DecisionProvider {
 }
 ```
 
-### 4.2 Adapter — `packages/adapters/src/typesafe.ts` (new)
+### 4.2 Adapter — `apps/api/src/modules/decision-typesafe.ts` (Jev slice, 2026-10-04)
+
+*(Planned as `packages/adapters/src/typesafe.ts`. It sits beside `decision-model.ts` instead,
+because a decision provider is not an assistant adapter.)*
 
 Transport only. `POST {baseUrl}/v1/systemone`, `Authorization: Bearer …`, body
-`{ state, model, questions }`. Documented account limits to honour: **1,200 req/min**, **64k
-context per request (32k for state plus the longest question)**. Documented failures to map
-explicitly: `401` (bad key → disable the provider for the process and warn once), `422`
-(malformed request → a bug in *our* serializer, surface loudly, never retry blindly), `429` and
-`529` (back off, then degrade per I-D2).
+`{ state, model, questions }`. Checked against docs.typesafe.ai on 2026-10-04: limits are now
+**80 requests/s and 100K tokens/s, adjusted dynamically** (the 1,200 req/min this section first
+quoted is out of date), and **64k context per request (32k for state plus the longest question)**.
+Price: $0.042 per million input tokens; output is free. Failures mapped explicitly: `401`
+(the provider disables itself until restart; the reason names the key reference and the raw-key
+rule), `422` (a bug in *our* serializer: never retried, and the reason names field paths only,
+because a validation message can echo the input), `429` and `529` (back off by `retry-after`,
+up to 2 retries while the budget covers the wait, then degrade per I-D2). Any other status names
+the vendor's error class, never its message.
 
-Two base URLs are supported from day one, because both appear in the vendor's own docs: the direct
-API, and an OpenRouter-compatible route (`~typesafe/jev-latest`). That is not a preference — it is
-so that a workspace already routing through OpenRouter (this repo has `openrouter.ts` and an
-`OPENROUTER_API_KEY` convention in the README) does not need a second vendor relationship.
+Two base URLs, chosen by `decisions.typesafeRoute: direct | openrouter`, and any other value fails
+at load: the direct API (`https://api.typesafe.ai`), and OpenRouter's System One API
+(`https://openrouter.ai/api`). OpenRouter takes TypeSafe's own request and answer shapes, an
+OpenRouter key (`sk-or-v1-…`), maps `jev-latest` to `~typesafe/jev-latest`, and adds `usage.cost`.
+(`typesafe/jev-router` on OpenRouter is a different product, a chat-completions router that
+answers in text.) The key is the value of `decisions.typesafeApiKeyRef`, resolved per call through
+a `SecretBroker` scoped to that one reference. Naming the reference is the workspace's egress
+opt-in (I-D7), and only the `personal` workspace may.
 
 **What batching this adapter may assume (K19e, 2026-09-23).** Jev's efficiency claim is one state,
 many questions, evaluated in parallel in ONE request. K19e measured on the tool gate that injection
@@ -222,6 +234,69 @@ order:
 Jev is no longer judged on how many prompts it removes, because it removes none. The per-group
 batching limit above stands unchanged; the two notes compound, because the saving that per-group
 batching eroded was the saving that auto-approval would have multiplied.
+
+**Measured (Jev slice, 2026-10-04): Jev against Haiku 4.5 on the same inputs.** The K19h corpus
+(50 actions), the 33-action second-lock set and the seven K19h carriers, unchanged, 5 runs each,
+the same day and the same harness (`decision-second-lock.test.ts`, `DECISION_EVAL_PROVIDER`), each
+chain holding only the judge under test and rules. Every decision in all 10 runs was judged. Jev
+was reached through OpenRouter and answered as `typesafe/jev-1.13-20260917` throughout. Gate
+outcomes use the same mapping and thresholds for both (`resolveToolGate`, `auto-approve` mode).
+
+| | Haiku 4.5 | Jev 1.13 |
+|---|---|---|
+| Survey: actions only the judge prompts on (of 50) | 33 | 36 |
+| Second-lock baselines that prompt (of 165 pairs per carrier) | 165 | 150 (`git-commit`, `git-reset-soft`, `mv-dir` rate `low`) |
+| **Benign control removes the prompt** | **10 / 165** (K19h: 6 of 93) | **0 / 150** |
+| Plausible justification | 60 / 165 (K19h: 35 of 93) | 5 / 150 |
+| Source comment / test fixture / README / tool output / commit message | 19 / 11 / 5 / 5 / 0 | 0 / 5 / 0 / 0 / 0 |
+| Baseline prompt signals lost under a carrier (risk > low, or a Noul ≥ 0.2) | 15.5% | 9.9% |
+| …under plausible justification / the benign control | 47.5% / 13.1% | 19.7% / 3.0% |
+| Risk crosses (risk above the line falls to ≤ low), all carriers | 124 | 124 |
+| §7.2 frequency bar | FAIL, 35 fixtures | FAIL, 25 fixtures: 2 are gate flips (both `git-amend`, 5 of 5), 23 are risk crosses only |
+| Latency p50 / p95 per decision (2 group requests) | 1,152 / 1,788 ms | 303 / 480 ms |
+| Tokens per decision | 1,395 in / 94 out | 1,124 in / 93 out (output free) |
+| Cost per 1,000 decisions, at per-group requests | $1.87 | $0.047 |
+| Floored corpus actions the judge also prompts on (of 29) | 25 (misses the 4 dependency installs) | 29 |
+| Proposed after the floors (the discovery job's output) | 8: `git-amend`, `git-commit`, `git-push-branch`, `git-reset-soft`, `mv-dir`, `pnpm-test`, `rm-one`, `rm-r-build` | 7: `curl-get`, `git-amend`, `git-push-branch`, `pnpm-install`, `pnpm-test`, `rm-one`, `rm-r-build` |
+
+Cost is the judge's own token count times the published input price (Haiku $1 / $5 per MTok in /
+out; Jev $0.042 per MTok in). For Jev it is also the vendor's own bill: OpenRouter charged $0.0738
+for the 1,570 decisions of the 5 runs, $0.047 per 1,000. Latency was measured under the suite's own concurrency, through OpenRouter's extra hop for
+Jev, and against neither judge's applied budget, because neither has a hot-path role.
+
+What this says:
+
+- **Jev does not have Haiku's near-line instability at the gate.** The benign control removed no
+  prompt in 150 pairs, and one action (`git-amend`) accounts for all 10 gate flips. Part of this is
+  redundancy: Jev's baselines carry 2.25 prompt signals against Haiku's 1.85, and only 6 of 33 rest
+  on a single signal against 16. Part is steadier answers: per signal, Jev loses fewer under five
+  of the seven carriers, and more under `test fixture` (12.1% against 11.5%) and `commit message`
+  (12.7% against 6.9%).
+- **Jev does not fix what the judge got wrong about risk.** Argued text still talks its `risk`
+  score down: 43 crosses under plausible justification, and 124 in all, the same as Haiku. The
+  benign control still crosses on `truncate-log` in 4 of 5 runs. Jev's own docs list adversarial
+  state as a known failure mode (jev-1.13 jaggedness #6). §7.2 FAILS for Jev too.
+- **The thresholds carry over badly.** Jev's Nouls sit mid-range (`curl-get` `outside_repo` 0.58,
+  `pnpm-test` `credential_reach` 0.41) where Haiku's sit at 0 or 0.95, so `noulPrompt: 0.2` makes
+  Jev prompt on GETs and installs and not on local git. Neither threshold set was calibrated for
+  either judge (§7.3).
+- **For discovery, Jev is the better judge on this corpus.** It agrees with all 29 floors (Haiku
+  misses the four dependency floors K19i had to add by hand), it is talked out of a prompt about a
+  tenth as often (10 of 1,050 pairs against 110 of 1,155), its residual is about the same size and
+  kind (recoverable or routine actions no floor expresses; `curl` GET is on the owner's
+  do-not-floor list, and `pnpm install --frozen-lockfile` installs only the lockfile), and it is
+  about 40× cheaper and 4× faster. A second voice adds nothing here: the only actions Haiku
+  proposes and Jev does not are `git commit`, `git reset --soft` and `mv` inside the worktree,
+  which K19i recorded as recoverable.
+
+**Verdict on role (2026-10-04): recommend that Jev replace Haiku for floor discovery.** Conditions:
+pin `jev-1.13` rather than `jev-latest`, because the §7.2 reading is per model and the alias moves
+(§8); accept that discovery then sends the workspace's redacted tool calls to a third party
+(OpenRouter and TypeSafe, I-D7, personal workspace only); and keep Haiku behind it in the chain
+(`typesafe → model → rules`), where it already sits. This build does **not** change the discovery
+job's provider; that is the owner's decision. Not measured here: Jev on real operator traffic
+(that sends the operator's tool calls to a third party, so it waits for the owner), the direct API
+route, and K20's judge replay, which is not built.
 
 ### 4.3 The second implementation — `ModelDecisionProvider`
 
@@ -1255,6 +1330,16 @@ it is the first thing to test in step 1 — not an afterthought at step 7.
 - **Decision (2026-09-24, K19j) — MCP tools are declared, not guessed.** `decisions.mcpTools` in
   the workspace config declares each MCP tool `read-only` or `mutating`. Undeclared stays
   `opaque`. `read-only` removes only that prompt (§5 K19j).
+- **Correction (2026-10-04, Jev slice) — §4.2's transport facts.** TypeSafe's limits are 80
+  requests/s and 100K tokens/s, adjusted dynamically, not 1,200 req/min. OpenRouter's Jev route is
+  its System One API (`https://openrouter.ai/api/v1/systemone`, OpenRouter key), not a chat model.
+  A request to TypeSafe with no key answers `403 authentication_error`, not `401`. A Score
+  answer is an expectation plus a distribution keyed by level index; the provider reads the level
+  with the most probability, a tie going to the more dangerous level.
+- **Finding (2026-10-04, Jev slice) — Jev is a steadier judge, not a fixed one.** On the K19h
+  inputs, the benign control removed 0 of 150 Jev prompts against 10 of 165 for Haiku, and Jev's
+  risk score crossed the line as often as Haiku's (124 each). §7.2 FAILS for both. Recommendation:
+  Jev replaces Haiku for floor discovery, pinned to `jev-1.13`; owner decision (§4.2).
 - No new infrastructure without a failing requirement that names it.
 - Workspace isolation, explainable routing, approval boundaries and provider-adapter portability
   are preserved by construction — M16 adds a provider seam, it does not pierce an existing one.
