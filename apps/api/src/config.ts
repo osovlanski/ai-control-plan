@@ -113,13 +113,14 @@ export interface WorkspaceConfig {
    * makes no network call.
    */
   decisions?: {
-    /** typesafe | model | rules (default: rules). `typesafe` is not registered in this build: choosing it fails at startup (K19i). Since K19i the tool gate reads no judge whatever this says; floors decide. */
+    /** typesafe | model | rules (default: rules). `typesafe` needs `typesafeApiKeyRef`. Since K19i the tool gate reads no judge whatever this says; floors decide. */
     provider?: "typesafe" | "model" | "rules";
     /**
      * Reference NAME only, e.g. "TYPESAFE_API_KEY" — resolved through
      * `SecretBroker` at the call boundary when a caller actually needs it
      * (harness/secret-broker.ts). Never the key value, never read from
-     * `process.env` here.
+     * `process.env` here. Naming it is this workspace's opt-in to send decision
+     * state to TypeSafe (I-D7), and only the `personal` workspace may.
      */
     typesafeApiKeyRef?: string;
     /**
@@ -341,7 +342,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ResolvedConfig
 
   validate(config, configPath);
   validateModels(models, configPath);
-  validateDecisions(decisions, configPath);
+  validateDecisions(decisions, configPath, workspace);
 
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   chmodSync(dir, 0o700);
@@ -528,12 +529,27 @@ function resolveMcpTools(declared: unknown, configPath: string): McpToolPolicy {
   return policy;
 }
 
-function validateDecisions(decisions: ResolvedDecisionsConfig, path: string): void {
-  if (
-    decisions.typesafeApiKeyRef !== undefined &&
-    (typeof decisions.typesafeApiKeyRef !== "string" || decisions.typesafeApiKeyRef.trim() === "")
-  ) {
+/**
+ * I-D7, egress is per-workspace opt-in: naming `typesafeApiKeyRef` IS the
+ * opt-in, and only the `personal` workspace may (the Work workspace waits for
+ * a vendor review, plan §9.2). `workspace` is the directory's name, not the
+ * file's own `workspace:` claim. `provider: typesafe` with no reference would
+ * degrade on every call, so it fails here instead (K19i, degrade loud).
+ */
+function validateDecisions(decisions: ResolvedDecisionsConfig, path: string, workspace: string): void {
+  const ref = decisions.typesafeApiKeyRef;
+  if (ref !== undefined && (typeof ref !== "string" || ref.trim() === "")) {
     throw new Error(`Invalid config at ${path}:\n  - decisions.typesafeApiKeyRef must be a non-empty string`);
+  }
+  if (ref !== undefined && workspace !== "personal") {
+    throw new Error(
+      `Invalid config at ${path}:\n  - decisions.typesafeApiKeyRef: sending decision state to TypeSafe is opt-in for the personal workspace only (I-D7); workspace "${workspace}" may not`,
+    );
+  }
+  if (decisions.provider === "typesafe" && ref === undefined) {
+    throw new Error(
+      `Invalid config at ${path}:\n  - decisions.provider: typesafe needs decisions.typesafeApiKeyRef; naming the key reference is this workspace's egress opt-in (I-D7)`,
+    );
   }
 }
 

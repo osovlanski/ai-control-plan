@@ -3,19 +3,28 @@
  * `plans/jev-decision-service-plan.md` §5, K17), plus the K18 decision-record
  * write path.
  *
- * K19d registers `ModelDecisionProvider` (`decision-model.ts`) under `model`.
- * `typesafe` is named in the chain but not registered: configuring it fails at
- * construction (K19i), and a chain that starts above it skips it.
+ * K19d registers `ModelDecisionProvider` (`decision-model.ts`) under `model`,
+ * and the Jev slice `TypeSafeDecisionProvider` (`decision-typesafe.ts`) under
+ * `typesafe`. Neither has a hot-path role: the tool gate reads rules and
+ * floors only (K19i).
  */
 import { createHash } from "node:crypto";
 import type { ClassifierIntent, DecisionOutcome, DecisionProvider, DecisionRequest, DecisionSite, ToolGateVerdict } from "@agent-plane/core";
 import { RulesDecisionProvider, TASK_CLASSIFIER_BATTERY, TOOL_GATE_JUDGED_KEYS, taskClassifierAnswers } from "@agent-plane/core";
 import type { Db } from "../db/index.js";
 import { ModelDecisionProvider } from "./decision-model.js";
+import { TypeSafeDecisionProvider } from "./decision-typesafe.js";
+import { SecretBroker } from "./harness/secret-broker.js";
 
 export interface DecisionServiceConfig {
   /** The first provider to try. The chain still falls back toward "rules". */
   provider: DecisionProvider["id"];
+  /**
+   * The TypeSafe key's reference NAME (`decisions.typesafeApiKeyRef`). Naming
+   * it is the workspace's egress opt-in (I-D7, config.ts); with none, Jev has
+   * no key and is never called.
+   */
+  typesafeApiKeyRef?: string;
   /** Consecutive failures before a provider's circuit opens. */
   circuitBreakerThreshold?: number;
   /** How long an open circuit stays open before the next attempt is allowed. */
@@ -316,18 +325,35 @@ export function toolGateSoakCheck(db: Db, opts: { since: string; now: string; re
  * Every `DecisionProvider` this build has BEYOND `RulesDecisionProvider`,
  * which `DecisionService` always registers itself (I-D6).
  *
- * K19d registers `ModelDecisionProvider`. Registering is not selecting: the
- * chain starts at `config.provider`, whose default is `rules`, so a workspace
- * that has not chosen `model` (or `typesafe`) never reaches it and emits no
- * byte (I-D7). Every consumer picks this list up with no change of its own —
- * the composition root, and the §7.2 injection suite, which drives the chain
- * from the top and so measures the judge whenever a credential is present.
+ * Registering is not selecting: the chain starts at `config.provider`, whose
+ * default is `rules`, so a workspace that has not chosen a judge never reaches
+ * one and emits no byte (I-D7). The §7.2 suites drive the chain from the top
+ * and so measure a judge whenever its credential is present.
  *
- * The credential is the workspace's own Anthropic account key, read at the
- * call boundary on every decision, never stored on the provider.
+ * - `model` (K19d): the workspace's own Anthropic account key, read at the
+ *   call boundary on every decision, never stored on the provider.
+ * - `typesafe` (Jev): the key named by `typesafeApiKeyRef`, resolved per call
+ *   through a `SecretBroker` scoped to that one reference and disposed at
+ *   once. No reference, no key: the provider is registered and unreachable.
  */
-export function decisionProviders(_config: DecisionServiceConfig): DecisionProvider[] {
-  return [new ModelDecisionProvider({ apiKey: () => process.env.ANTHROPIC_API_KEY })];
+export function decisionProviders(config: DecisionServiceConfig): DecisionProvider[] {
+  const ref = config.typesafeApiKeyRef;
+  return [
+    new ModelDecisionProvider({ apiKey: () => process.env.ANTHROPIC_API_KEY }),
+    new TypeSafeDecisionProvider({ apiKey: ref ? () => brokeredSecret(ref) : () => undefined, ...(ref ? { keyRef: ref } : {}) }),
+  ];
+}
+
+/** One reference, resolved from the session env (§9.1) through a broker scoped to it alone. */
+function brokeredSecret(ref: string): string | undefined {
+  const broker = new SecretBroker((r) => process.env[r], [ref]);
+  try {
+    return broker.resolve([ref])[ref];
+  } catch {
+    return undefined; // the error names the reference; the caller reports it as "did not resolve"
+  } finally {
+    broker.dispose();
+  }
 }
 
 const FALLBACK_ORDER: DecisionProvider["id"][] = ["typesafe", "model", "rules"];

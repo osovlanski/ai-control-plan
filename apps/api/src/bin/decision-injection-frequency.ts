@@ -8,7 +8,7 @@
  * is not a pass.
  */
 import { readFileSync } from "node:fs";
-import { FREQUENCY_BAR, injectionFrequency, type EvalRow } from "../modules/decision-frequency.js";
+import { FREQUENCY_BAR, injectionFrequency, type EvalRow, type EvalSide } from "../modules/decision-frequency.js";
 
 const files = process.argv.slice(2);
 const runs: EvalRow[][] = files.map((f) =>
@@ -36,6 +36,45 @@ if (survey.size) {
   }
   const judgeOnly = [...survey.values()].filter((s) => s.prompt > 0).length;
   console.log(`  ${judgeOnly} of ${survey.size} rules-allowed, unfloored actions prompted only because the judge did.`);
+}
+
+// Reported beside the bar, never part of it: flips per carrier, and the judge's
+// own latency and token accounting, so two judges' runs can be read side by side.
+const carriers = new Map<string, { judged: number; basePrompted: number; flips: number }>();
+const decisions: EvalSide[] = [];
+for (const rows of runs) {
+  for (const r of rows) {
+    // A second-lock baseline is repeated on each of its carrier rows, so it is not counted as a decision here.
+    if (r.suite === "survey" && r.baseline.provider !== "rules") decisions.push(r.baseline);
+    if (r.injected && r.injected.provider !== "rules") decisions.push(r.injected);
+    if (r.suite !== "second-lock" || !r.injected || r.baseline.provider === "rules" || r.injected.provider === "rules") continue;
+    const vector = r.fixture.split(" × ")[1] ?? r.fixture;
+    const c = carriers.get(vector) ?? { judged: 0, basePrompted: 0, flips: 0 };
+    c.judged += 1;
+    if (r.baseline.gate === "prompt") {
+      c.basePrompted += 1;
+      if (r.injected.gate !== "prompt") c.flips += 1;
+    }
+    carriers.set(vector, c);
+  }
+}
+if (carriers.size) {
+  console.log(`\nSecond-lock flips per carrier (${runs.length} runs; a flip needs a baseline prompt):`);
+  for (const [vector, c] of carriers) {
+    console.log(`  ${vector.padEnd(24)} ${c.flips}/${c.judged} judged pairs (${c.flips}/${c.basePrompted} where the baseline prompted)`);
+  }
+}
+if (decisions.length) {
+  const ms = decisions.flatMap((d) => (d.latencyMs === undefined ? [] : [d.latencyMs])).sort((a, b) => a - b);
+  const pct = (p: number) => ms[Math.min(ms.length - 1, Math.ceil((p / 100) * ms.length) - 1)];
+  const metered = decisions.filter((d) => d.usage);
+  const mean = (f: (u: { inputTokens: number; outputTokens: number }) => number) =>
+    metered.length ? Math.round(metered.reduce((s, d) => s + f(d.usage!), 0) / metered.length) : "-";
+  console.log(
+    `\n${decisions.length} judged decisions (survey + injected; models ${[...new Set(decisions.map((d) => d.model ?? "unreported"))].join(", ")}): ` +
+      `latency p50 ${pct(50) ?? "-"} ms, p95 ${pct(95) ?? "-"} ms; per decision ${mean((u) => u.inputTokens)} input / ` +
+      `${mean((u) => u.outputTokens)} output tokens over ${metered.length} metered`,
+  );
 }
 
 const { verdict, fixtures } = injectionFrequency(runs);
