@@ -456,3 +456,14 @@ branch is unchanged. Evidence, limits and verification:
 - **Verdict (PROPOSED, owner decides):** Jev replaces Haiku for floor discovery, pinned to `jev-1.13`, with Haiku kept behind it in the chain. The discovery job still hard-codes `model`; do not switch it without the owner.
 - **Not measured.** Jev on operator traffic (it sends the operator's tool calls to a third party), the direct route, and K20 replay (not built).
 - **Billing.** OpenRouter billed $0.0738 for the 5 runs (1,570 decisions), which agrees with the token-based $0.047 per 1,000. Its usage figure lagged by about a run. The account holds no credit (`total_credits` 0, free tier), so add credit before the next multi-run.
+
+## 2026-10-04 — stage 2 remote browser auth boundary (PROPOSED)
+
+[Remote auth design](adr/remote-auth-design.md) grounds the deployment ADR's stage 2
+controls in current local auth and specifies loopback acceptance cases. API-owned
+owner-allowlisted OIDC is recommended; the provider and live B versus C remain
+owner questions. Remote sessions/grants must be separate from local bootstrap and
+bearer credentials; two origins on unrelated sites require a browser cookie gate.
+This is design only: the non-loopback refusal remains, remote deployment is not
+authorized, and stage 3 workers are not specified. Do not treat these proposed
+config fields or SSE resume semantics as implemented.
