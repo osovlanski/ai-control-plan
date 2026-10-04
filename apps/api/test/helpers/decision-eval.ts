@@ -16,7 +16,7 @@ export function recordEvalRow(row: EvalRow): void {
   if (path) appendFileSync(path, `${JSON.stringify(row)}\n`);
 }
 
-/** What a row keeps of one decision: the gate outcome and the judge's raw answers. */
+/** What a row keeps of one decision: the gate outcome, the judge's raw answers, and its own latency and token accounting. */
 export function evalSide(o: DecisionOutcome, gate: ToolGateOutcome): EvalSide {
   const risk = o.answers.risk?.kind === "score" ? o.answers.risk.value : undefined;
   const nouls: Record<string, number> = {};
@@ -24,7 +24,15 @@ export function evalSide(o: DecisionOutcome, gate: ToolGateOutcome): EvalSide {
     const a = o.answers[k];
     if (a?.kind === "noul") nouls[k] = a.value;
   }
-  return { gate, risk, nouls, provider: o.provider };
+  return {
+    gate,
+    risk,
+    nouls,
+    provider: o.provider,
+    latencyMs: o.latencyMs,
+    ...(o.modelReported ? { model: o.modelReported } : {}),
+    ...(o.usage ? { usage: o.usage } : {}),
+  };
 }
 
 /** One readable line of a decision's judged answers. */

@@ -56,10 +56,23 @@ import {
 import { DecisionService, decisionProviders } from "../src/modules/decision.js";
 import { CARRIERS, evalSide, recordEvalRow, summariseOutcome } from "./helpers/decision-eval.js";
 
-const CONFIG = { provider: "model" as const };
-const providers = decisionProviders(CONFIG);
+/**
+ * The judge under measurement: `model` (Haiku 4.5, the default) or, with
+ * `DECISION_EVAL_PROVIDER=typesafe`, Jev on the same corpus and carriers
+ * (`DECISION_EVAL_TYPESAFE_ROUTE=openrouter` to reach it through OpenRouter). The
+ * chain holds only that judge and rules, so a failed Jev call reads as
+ * unjudged rather than as Haiku's answer.
+ */
+const PROVIDER = process.env.DECISION_EVAL_PROVIDER === "typesafe" ? "typesafe" : "model";
+const CONFIG = {
+  provider: PROVIDER,
+  typesafeApiKeyRef: "TYPESAFE_API_KEY",
+  typesafeRoute: process.env.DECISION_EVAL_TYPESAFE_ROUTE === "openrouter" ? "openrouter" : "direct",
+} as const;
+const providers = decisionProviders(CONFIG).filter((p) => p.id === PROVIDER);
 const service = new DecisionService(CONFIG, providers);
-const JUDGE = providers.some((p) => p.describe().judges?.["tool-gate"]) && !!process.env.ANTHROPIC_API_KEY;
+// `describe()` claims the judged keys only when the credential resolves.
+const JUDGE = providers.some((p) => p.describe().judges?.["tool-gate"]);
 
 const WORKTREE = "/home/ubuntu/.agent-plane/personal/worktrees/AG-1";
 const REPO = "/home/ubuntu/workspace/personal/ai-control-plan";

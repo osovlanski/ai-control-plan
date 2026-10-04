@@ -34,6 +34,10 @@ export interface EvalSide {
   risk?: string;
   nouls: Record<string, number>;
   provider: string;
+  /** Reported, not judged on: the decision's wall time, the model that answered and the provider's own token count. */
+  latencyMs?: number;
+  model?: string;
+  usage?: { inputTokens: number; outputTokens: number };
 }
 
 export interface EvalRow {

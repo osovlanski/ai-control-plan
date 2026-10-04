@@ -87,12 +87,17 @@ describe("I-D8 — the gate refuses `applied` without a judging provider", () =>
     expect(warnings[0]).toMatch(/tool-gate\.mode: applied REFUSED/);
   });
 
-  it("composition (K19i, I-D2): §7.4's old example `provider: typesafe` fails at startup instead of prompting on every call", () => {
-    const config = loadConfig({ AGENT_PLANE_HOME: join(dir, "home-k19i") });
-    config.decisions.provider = "typesafe";
-    const tasks = new TaskStore(db);
-    expect(() =>
-      buildHarnessComposition({
+  it("composition (K19i, I-D2): `provider: typesafe` composes now that Jev is registered, and applied stays closed", () => {
+    const saved = process.env.TYPESAFE_API_KEY;
+    process.env.TYPESAFE_API_KEY = "test-key";
+    try {
+      const config = loadConfig({ AGENT_PLANE_HOME: join(dir, "home-k19i") });
+      config.decisions.provider = "typesafe";
+      config.decisions.typesafeApiKeyRef = "TYPESAFE_API_KEY";
+      config.decisions.sites["tool-gate"].mode = "applied";
+      const warnings: string[] = [];
+      const tasks = new TaskStore(db);
+      const composed = buildHarnessComposition({
         db,
         config,
         tasks,
@@ -100,8 +105,14 @@ describe("I-D8 — the gate refuses `applied` without a judging provider", () =>
         checkpoints: new CheckpointService(db, tasks),
         registry: new Registry(db, config),
         onError: () => {},
-      }),
-    ).toThrow(/decisions\.provider: "typesafe" is not registered in this build/);
+        onWarning: (m) => warnings.push(m),
+      });
+      expect(composed.toolGateMode).toBe("shadow");
+      expect(warnings).toEqual([expect.stringMatching(/§7\.4 activation attestations are not implemented/)]);
+    } finally {
+      if (saved === undefined) delete process.env.TYPESAFE_API_KEY;
+      else process.env.TYPESAFE_API_KEY = saved;
+    }
   });
 
   it("composition (K19d): even with the build's judge reachable, applied stays closed until §7.4 attestations exist", () => {

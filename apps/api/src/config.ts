@@ -113,15 +113,23 @@ export interface WorkspaceConfig {
    * makes no network call.
    */
   decisions?: {
-    /** typesafe | model | rules (default: rules). `typesafe` is not registered in this build: choosing it fails at startup (K19i). Since K19i the tool gate reads no judge whatever this says; floors decide. */
+    /** typesafe | model | rules (default: rules). `typesafe` needs `typesafeApiKeyRef`. Since K19i the tool gate reads no judge whatever this says; floors decide. */
     provider?: "typesafe" | "model" | "rules";
     /**
      * Reference NAME only, e.g. "TYPESAFE_API_KEY" — resolved through
      * `SecretBroker` at the call boundary when a caller actually needs it
      * (harness/secret-broker.ts). Never the key value, never read from
-     * `process.env` here.
+     * `process.env` here. Naming it is this workspace's opt-in to send decision
+     * state to TypeSafe (I-D7), and only the `personal` workspace may.
      */
     typesafeApiKeyRef?: string;
+    /**
+     * Where Jev is called (plan §4.2): `direct` (default) is TypeSafe's own
+     * `api.typesafe.ai`; `openrouter` is OpenRouter's System One API, the same
+     * request and answer shapes, authenticated with an OpenRouter key. Either
+     * is a third party; naming the route is part of the egress opt-in (I-D7).
+     */
+    typesafeRoute?: "direct" | "openrouter";
     /**
      * Per-site mode (§7.4). `shadow` records what the site would do and changes
      * nothing; it is the default and the fail-closed value (I-D3). `applied`
@@ -190,6 +198,7 @@ export interface ResolvedModelsConfig {
 export interface ResolvedDecisionsConfig {
   provider: "typesafe" | "model" | "rules";
   typesafeApiKeyRef?: string;
+  typesafeRoute?: "direct" | "openrouter";
   /** The REQUESTED mode. The effective one is resolved against the provider chain (I-D8) at composition. */
   sites: { "tool-gate": { mode: "shadow" | "applied" } };
   /** Null-prototype maps of own keys only; empty when nothing is declared. */
@@ -341,7 +350,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ResolvedConfig
 
   validate(config, configPath);
   validateModels(models, configPath);
-  validateDecisions(decisions, configPath);
+  validateDecisions(decisions, configPath, workspace);
 
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   chmodSync(dir, 0o700);
@@ -493,11 +502,16 @@ function resolveDecisions(file: WorkspaceConfig["decisions"], configPath: string
   if (toolGateMode !== "shadow" && toolGateMode !== "applied") {
     throw new Error(`${configPath}: decisions.sites.tool-gate.mode must be shadow | applied, got ${JSON.stringify(toolGateMode)}`);
   }
+  const route = file?.typesafeRoute;
+  if (route !== undefined && route !== "direct" && route !== "openrouter") {
+    throw new Error(`${configPath}: decisions.typesafeRoute must be direct | openrouter, got ${JSON.stringify(route)}`);
+  }
   return {
     provider: provider as ResolvedDecisionsConfig["provider"],
     sites: { "tool-gate": { mode: toolGateMode } },
     mcpTools: resolveMcpTools(file?.mcpTools, configPath),
     ...(file?.typesafeApiKeyRef !== undefined ? { typesafeApiKeyRef: file.typesafeApiKeyRef } : {}),
+    ...(route !== undefined ? { typesafeRoute: route } : {}),
   };
 }
 
@@ -528,12 +542,27 @@ function resolveMcpTools(declared: unknown, configPath: string): McpToolPolicy {
   return policy;
 }
 
-function validateDecisions(decisions: ResolvedDecisionsConfig, path: string): void {
-  if (
-    decisions.typesafeApiKeyRef !== undefined &&
-    (typeof decisions.typesafeApiKeyRef !== "string" || decisions.typesafeApiKeyRef.trim() === "")
-  ) {
+/**
+ * I-D7, egress is per-workspace opt-in: naming `typesafeApiKeyRef` IS the
+ * opt-in, and only the `personal` workspace may (the Work workspace waits for
+ * a vendor review, plan §9.2). `workspace` is the directory's name, not the
+ * file's own `workspace:` claim. `provider: typesafe` with no reference would
+ * degrade on every call, so it fails here instead (K19i, degrade loud).
+ */
+function validateDecisions(decisions: ResolvedDecisionsConfig, path: string, workspace: string): void {
+  const ref = decisions.typesafeApiKeyRef;
+  if (ref !== undefined && (typeof ref !== "string" || ref.trim() === "")) {
     throw new Error(`Invalid config at ${path}:\n  - decisions.typesafeApiKeyRef must be a non-empty string`);
+  }
+  if (ref !== undefined && workspace !== "personal") {
+    throw new Error(
+      `Invalid config at ${path}:\n  - decisions.typesafeApiKeyRef: sending decision state to TypeSafe is opt-in for the personal workspace only (I-D7); workspace "${workspace}" may not`,
+    );
+  }
+  if (decisions.provider === "typesafe" && ref === undefined) {
+    throw new Error(
+      `Invalid config at ${path}:\n  - decisions.provider: typesafe needs decisions.typesafeApiKeyRef; naming the key reference is this workspace's egress opt-in (I-D7)`,
+    );
   }
 }
 

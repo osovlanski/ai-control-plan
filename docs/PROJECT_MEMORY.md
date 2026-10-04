@@ -440,3 +440,19 @@ branch is unchanged. Evidence, limits and verification:
 - **Every task now has a `decision_records` row pointing at it.** With foreign keys on, a task row cannot be deleted. No code path deletes one.
 - **Separation, operator DB 2026-10-03:** 24 tasks, all ended runs labelled `general` by v1. v2 moves 7 of them to `coding`, all from one agent-written parity goal. On the 3 organic goals v2 equals v1, and v1's one `coding` label is the noun "test", which no rule here fixes. On operator traffic, v2 does not yet earn its place.
 
+
+## 2026-10-04 — M16 Jev slice: `TypeSafeDecisionProvider` registered and measured (SHIPPED; offline roles only; role verdict PROPOSED)
+
+- **No judge on the hot path still holds.** `provider: typesafe` now boots. The tool gate calls the rules provider directly, whatever `decisions.provider` says. `decision-typesafe.test.ts` drives the gate end to end with `provider: typesafe` and `applied` requested, and fails if the gate ever asks the service.
+- **Egress opt-in.** Naming `decisions.typesafeApiKeyRef` is the opt-in. Only a workspace whose directory is `personal` may name it; the file's own `workspace:` claim does not count. `provider: typesafe` without a reference fails at load.
+- **Route.** `decisions.typesafeRoute: direct | openrouter`. An OpenRouter key (`sk-or-v1-…`) works only on the `openrouter` route. OpenRouter's Jev endpoint is its System One API, not `typesafe/jev-router`.
+- **Key file.** The personal key is `~/.agent-plane/personal/typesafe.key` and holds only the raw key. The provider refuses a `NAME=` or whitespace value before sending.
+- **Measured, K19h inputs, 5 runs each, both judges fully judged.**
+  - Benign control removed 0 of 150 Jev prompts and 10 of 165 Haiku prompts. Plausible justification removed 5 of 150 and 60 of 165.
+  - Risk crosses were 124 for each judge. §7.2 FAILS for both.
+  - Jev, through OpenRouter, ran at p50 303 ms and cost $0.047 per 1,000 decisions. Haiku ran at p50 1,152 ms and cost $1.87.
+  - Jev agrees with all 29 corpus floors; Haiku agrees with 25.
+  - Detail: plan §4.2.
+- **Verdict (PROPOSED, owner decides):** Jev replaces Haiku for floor discovery, pinned to `jev-1.13`, with Haiku kept behind it in the chain. The discovery job still hard-codes `model`; do not switch it without the owner.
+- **Not measured.** Jev on operator traffic (it sends the operator's tool calls to a third party), the direct route, and K20 replay (not built).
+- **Billing.** OpenRouter billed $0.0738 for the 5 runs (1,570 decisions), which agrees with the token-based $0.047 per 1,000. Its usage figure lagged by about a run. The account holds no credit (`total_credits` 0, free tier), so add credit before the next multi-run.

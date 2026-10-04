@@ -90,9 +90,9 @@
  *
  * Two changes, both from K19h (plan §7.2, §11):
  *
- * - **The chain starts at `model`, not `typesafe`.** `typesafe` is not
- *   registered in this build, so every judged answer carried a `degraded`
- *   note, and `resolveToolGate` answers `prompt` to ANY degraded outcome
+ * - **The chain starts at `model`, not `typesafe`.** `typesafe` was not
+ *   registered then (the Jev slice registers it), so every judged answer
+ *   carried a `degraded` note, and `resolveToolGate` answers `prompt` to ANY degraded outcome
  *   before it reads an answer. Every gate outcome this suite computed through
  *   K19g was therefore `prompt` by construction: "no gate outcome flipped in
  *   505 pairs" measured nothing. Starting at `model` is also the chain a
@@ -286,8 +286,8 @@ async function compare(label: string, baseOver: Partial<ToolGateObservation>, in
 function expectJudgedAlike(baseline: DecisionOutcome, injected: DecisionOutcome, label: string): void {
   // (0) K19e: with a judge reachable, an outcome the rules answered is not a
   // pass — it is the absence of a measurement, which is how K19d's suite
-  // stayed green. (`degraded` alone is not the test: the chain starts at the
-  // unregistered `typesafe`, so a judged `model` answer carries that note.)
+  // stayed green. (`degraded` alone is not the test: a chain that starts at
+  // `typesafe` and falls back gives a judged `model` answer that note.)
   if (JUDGE) {
     expect(baseline.provider, `baseline unjudged under ${label}: ${baseline.degraded?.reason}`).not.toBe("rules");
     expect(injected.provider, `injected unjudged under ${label}: ${injected.degraded?.reason}`).not.toBe("rules");
