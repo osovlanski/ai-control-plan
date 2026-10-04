@@ -298,6 +298,31 @@ job's provider; that is the owner's decision. Not measured here: Jev on real ope
 (that sends the operator's tool calls to a third party, so it waits for the owner), the direct API
 route, and K20's judge replay, which is not built.
 
+**Egress map for the verdict (gate-reachability review, 2026-10-04; detail in
+`plans/gate-reachability.md` Part C).** The live server sends no decision state to anyone. Driven
+on `buildServer` with `decisions.provider: typesafe` and `typesafeRoute: openrouter`, it made 0
+outbound requests across harness and legacy runs; its `DecisionService` is used only for
+`activation()` and nothing calls its `decide()`. Only the floor discovery job judges.
+
+| Process | Today | If Jev went on discovery via `openrouter` |
+|---|---|---|
+| Live API (tool gate, K20 intake) | nobody | nobody |
+| Floor discovery (operator or nightly) | Anthropic: tool name and `commandText` of each unfloored call | **OpenRouter and TypeSafe**, one request per question group |
+| Nightly `eval.yml` | Anthropic: fixtures and synthetic scenario calls | unchanged unless the workflow is changed |
+
+On the discovery path the state is redacted twice (at event storage and in `buildToolGateState`),
+bounded (2,000-char `commandText`, 12k state) and scoped per question group. The §4.4 trust gate does
+**not** cover `commandText`, which for a non-shell tool is the JSON of its input, so up to 2,000 chars
+of a written file's content leave from any repository.
+
+Three things the verdict assumed are not true of this build, and each needs code, not config:
+- **The discovery bin reads no `decisions.*` provider key.** It hard-codes `model`
+  (`decision-floor-discovery.ts:48`). `decisions.provider` steers only the live server's unused
+  chain, and I-D7's opt-in is validated there, not on the process that would send.
+- **Nothing pins `jev-1.13`.** Every path sends `jev-latest` and no config key sets a model.
+- **Haiku behind Jev adds nothing to discovery.** A degraded outcome is counted unjudged even when
+  the fallback judge answered (`floor-discovery.ts:118`).
+
 ### 4.3 The second implementation — `ModelDecisionProvider`
 
 The same `DecisionProvider` interface, answered by a cheap structured-output call to the
@@ -1027,6 +1052,24 @@ would be a new owner decision with its own plan, not a config change. Removing i
 and the runtime checks must pass, exactly as `evaluateActivationGate()` does for K13. A missing or
 expired attestation degrades the site to shadow and says so in the record.
 
+**Activation precondition — evidence that could have blocked (gate-reachability review,
+2026-10-04).** The operator soak is mostly an audit log, and too thin to read
+(`plans/gate-reachability.md` Part B). Since T0 it holds 3 rows from one task: 2 `post-start`
+(audit) and 1 `pre-exec`, and the `pre-exec` row is the same call as one of the `post-start` rows.
+`toolGateSoakCheck` would still pass §7.1(1) on 2026-10-09, because "≥ 14 days and one row"
+passes on the clock. Until the soak check implements the following, `shadowReviewedAt` and
+`promptRateReviewedAt` may not be attested:
+- §7.1(1), (2) and (7) count **distinct calls**, with a `pre-exec` row and the `post-start` row of
+  the same call counted once, and only **`pre-exec` (preventive) rows** count toward the volume.
+- The evidence is **per adapter and approval mode**, and only the pair being activated counts. Rows
+  from an adapter/mode pair with no pre-exec hook are excluded. Those pairs are Claude under
+  `auto-approve`, Codex, OpenRouter, Cursor and Bedrock in every mode, and any legacy-path or
+  compare/race run. They are audit-only and cannot be activated as a preventing gate.
+- The 14-day arm of §7.1(1) needs a minimum number of distinct pre-exec calls, set by the owner. It
+  never passes on "at least one row".
+- Hooks, MCP server processes and plugin code run outside the gate in every adapter. A soak says
+  nothing about them.
+
 ---
 
 ## 8. Risks, stated plainly
@@ -1340,6 +1383,13 @@ it is the first thing to test in step 1 — not an afterthought at step 7.
   inputs, the benign control removed 0 of 150 Jev prompts against 10 of 165 for Haiku, and Jev's
   risk score crossed the line as often as Haiku's (124 each). §7.2 FAILS for both. Recommendation:
   Jev replaces Haiku for floor discovery, pinned to `jev-1.13`; owner decision (§4.2).
+- **Finding (2026-10-04, gate-reachability review) — the soak is mostly audit, and the
+  discovery switch cannot be made in config.** Since T0 the operator soak holds 3 rows from one
+  task, and only 1 of them came from a pre-exec hook. §7.1(1) would still pass on 2026-10-09
+  because of the 14-day arm, so §7.4 gains an evidence precondition. The live server sends no
+  decision state to anyone. The discovery bin hard-codes `model`, nothing pins `jev-1.13`, and the
+  verdict's Haiku fallback does not count in discovery (§4.2 egress map). Matrices, egress map and
+  ranked fixes: `plans/gate-reachability.md`.
 - No new infrastructure without a failing requirement that names it.
 - Workspace isolation, explainable routing, approval boundaries and provider-adapter portability
   are preserved by construction — M16 adds a provider seam, it does not pierce an existing one.
