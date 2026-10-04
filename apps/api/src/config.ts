@@ -124,6 +124,13 @@ export interface WorkspaceConfig {
      */
     typesafeApiKeyRef?: string;
     /**
+     * Where Jev is called (plan §4.2): `direct` (default) is TypeSafe's own
+     * `api.typesafe.ai`; `openrouter` is OpenRouter's System One API, the same
+     * request and answer shapes, authenticated with an OpenRouter key. Either
+     * is a third party; naming the route is part of the egress opt-in (I-D7).
+     */
+    typesafeRoute?: "direct" | "openrouter";
+    /**
      * Per-site mode (§7.4). `shadow` records what the site would do and changes
      * nothing; it is the default and the fail-closed value (I-D3). `applied`
      * is refused at load time — and the site kept in shadow, loudly — unless a
@@ -191,6 +198,7 @@ export interface ResolvedModelsConfig {
 export interface ResolvedDecisionsConfig {
   provider: "typesafe" | "model" | "rules";
   typesafeApiKeyRef?: string;
+  typesafeRoute?: "direct" | "openrouter";
   /** The REQUESTED mode. The effective one is resolved against the provider chain (I-D8) at composition. */
   sites: { "tool-gate": { mode: "shadow" | "applied" } };
   /** Null-prototype maps of own keys only; empty when nothing is declared. */
@@ -494,11 +502,16 @@ function resolveDecisions(file: WorkspaceConfig["decisions"], configPath: string
   if (toolGateMode !== "shadow" && toolGateMode !== "applied") {
     throw new Error(`${configPath}: decisions.sites.tool-gate.mode must be shadow | applied, got ${JSON.stringify(toolGateMode)}`);
   }
+  const route = file?.typesafeRoute;
+  if (route !== undefined && route !== "direct" && route !== "openrouter") {
+    throw new Error(`${configPath}: decisions.typesafeRoute must be direct | openrouter, got ${JSON.stringify(route)}`);
+  }
   return {
     provider: provider as ResolvedDecisionsConfig["provider"],
     sites: { "tool-gate": { mode: toolGateMode } },
     mcpTools: resolveMcpTools(file?.mcpTools, configPath),
     ...(file?.typesafeApiKeyRef !== undefined ? { typesafeApiKeyRef: file.typesafeApiKeyRef } : {}),
+    ...(route !== undefined ? { typesafeRoute: route } : {}),
   };
 }
 

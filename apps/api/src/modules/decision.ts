@@ -13,7 +13,7 @@ import type { ClassifierIntent, DecisionOutcome, DecisionProvider, DecisionReque
 import { RulesDecisionProvider, TASK_CLASSIFIER_BATTERY, TOOL_GATE_JUDGED_KEYS, taskClassifierAnswers } from "@agent-plane/core";
 import type { Db } from "../db/index.js";
 import { ModelDecisionProvider } from "./decision-model.js";
-import { TypeSafeDecisionProvider } from "./decision-typesafe.js";
+import { TYPESAFE_ROUTES, TypeSafeDecisionProvider } from "./decision-typesafe.js";
 import { SecretBroker } from "./harness/secret-broker.js";
 
 export interface DecisionServiceConfig {
@@ -25,6 +25,8 @@ export interface DecisionServiceConfig {
    * no key and is never called.
    */
   typesafeApiKeyRef?: string;
+  /** Which endpoint serves Jev (`decisions.typesafeRoute`); default `direct`. */
+  typesafeRoute?: "direct" | "openrouter";
   /** Consecutive failures before a provider's circuit opens. */
   circuitBreakerThreshold?: number;
   /** How long an open circuit stays open before the next attempt is allowed. */
@@ -340,7 +342,11 @@ export function decisionProviders(config: DecisionServiceConfig): DecisionProvid
   const ref = config.typesafeApiKeyRef;
   return [
     new ModelDecisionProvider({ apiKey: () => process.env.ANTHROPIC_API_KEY }),
-    new TypeSafeDecisionProvider({ apiKey: ref ? () => brokeredSecret(ref) : () => undefined, ...(ref ? { keyRef: ref } : {}) }),
+    new TypeSafeDecisionProvider({
+      apiKey: ref ? () => brokeredSecret(ref) : () => undefined,
+      ...(ref ? { keyRef: ref } : {}),
+      baseUrl: TYPESAFE_ROUTES[config.typesafeRoute ?? "direct"],
+    }),
   ];
 }
 

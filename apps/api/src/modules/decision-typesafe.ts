@@ -11,10 +11,11 @@
  * `POST https://api.typesafe.ai/v1/systemone`, Bearer auth, body
  * `{ state, model, questions: { <key>: { type, instructions, criteria? } } }`,
  * answer `{ model, answers: { <key>: { type, noul | score, … } }, usage }`.
- * Billed on input tokens only. The docs list no OpenRouter route for this
- * endpoint: OpenRouter lists `typesafe/jev-router`, a chat-completions router
- * that answers in generated text, so it is not a transport for typed
- * questions and is not implemented.
+ * Billed on input tokens only. OpenRouter serves the same shapes at
+ * `https://openrouter.ai/api/v1/systemone` with an OpenRouter key, maps
+ * `jev-latest` to `~typesafe/jev-latest`, and adds `usage.cost` (USD), which
+ * is not read here. (`typesafe/jev-router` on OpenRouter is a different thing:
+ * a chat-completions router that answers in text.)
  *
  * Same shape as `ModelDecisionProvider`: the rules port answers `denied`, and
  * every key at every other site, so a record keeps its K18 baseline. The five
@@ -27,7 +28,8 @@
 import type { DecisionAnswer, DecisionCapability, DecisionOutcome, DecisionProvider, DecisionRequest } from "@agent-plane/core";
 import { RulesDecisionProvider, TOOL_GATE_JUDGED_KEYS, TOOL_GATE_QUESTION_GROUPS, TOOL_GATE_RISK_LEVELS, scopeDecisionState } from "@agent-plane/core";
 
-export const TYPESAFE_BASE_URL = "https://api.typesafe.ai";
+/** The two documented endpoints (`decisions.typesafeRoute`). `/v1/systemone` is appended to either. */
+export const TYPESAFE_ROUTES = { direct: "https://api.typesafe.ai", openrouter: "https://openrouter.ai/api" } as const;
 /** A moving alias; `modelReported` records the versioned id that answered (K7, §8). */
 export const DEFAULT_TYPESAFE_MODEL = "jev-latest";
 
@@ -184,7 +186,7 @@ export class TypeSafeDecisionProvider implements DecisionProvider {
     let res: Response;
     for (let attempt = 0; ; attempt += 1) {
       try {
-        res = await fetch(`${this.opts.baseUrl ?? TYPESAFE_BASE_URL}/v1/systemone`, {
+        res = await fetch(`${this.opts.baseUrl ?? TYPESAFE_ROUTES.direct}/v1/systemone`, {
           method: "POST",
           headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
           body,

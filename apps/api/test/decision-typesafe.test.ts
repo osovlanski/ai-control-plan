@@ -47,7 +47,7 @@ function stub(answers: Record<string, unknown> = CLEAR, respond?: (n: number) =>
   const sent: Sent[] = [];
   const fetch = (async (url: unknown, init?: RequestInit) => {
     // Stubbed globally in one test below, so anything else the server fetches is answered 404 and not counted.
-    if (!String(url).startsWith("https://api.typesafe.ai/")) return new Response(null, { status: 404 });
+    if (!/^https:\/\/(api\.typesafe\.ai|openrouter\.ai\/api)\/v1\/systemone$/.test(String(url))) return new Response(null, { status: 404 });
     const body = JSON.parse(String(init?.body)) as Sent["body"];
     sent.push({ url: String(url), headers: { ...(init?.headers as Record<string, string>) }, body });
     const custom = respond?.(sent.length);
@@ -244,6 +244,28 @@ describe("TypeSafe credential and egress opt-in (I-D7)", () => {
     expect(typesafe("SOME_OTHER_REF").describe().reachable).toBe(false);
   });
 
+  it("`typesafeRoute: openrouter` sends the same request to OpenRouter's System One API, and nowhere else", async () => {
+    vi.stubEnv("TYPESAFE_API_KEY", "sk-or-v1-test");
+    const { fetch, sent } = stub();
+    vi.stubGlobal("fetch", fetch);
+    try {
+      const [direct, openrouter] = (["direct", "openrouter"] as const).map(
+        (typesafeRoute) => decisionProviders({ provider: "typesafe", typesafeApiKeyRef: "TYPESAFE_API_KEY", typesafeRoute }).find((p) => p.id === "typesafe")!,
+      );
+      await openrouter!.decide(req());
+      await direct!.decide(req());
+      expect(sent.map((s) => s.url)).toEqual([
+        "https://openrouter.ai/api/v1/systemone",
+        "https://openrouter.ai/api/v1/systemone",
+        "https://api.typesafe.ai/v1/systemone",
+        "https://api.typesafe.ai/v1/systemone",
+      ]);
+      expect(sent[0]!.body).toEqual(sent[2]!.body);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   const write = (workspace: string, yaml: string) => {
     home = mkdtempSync(join(tmpdir(), "jev-config-"));
     mkdirSync(join(home, workspace), { recursive: true });
@@ -257,6 +279,10 @@ describe("TypeSafe credential and egress opt-in (I-D7)", () => {
 
   it("a work directory cannot claim to be personal through its own `workspace:` key", () => {
     expect(() => loadConfig(write("work", "workspace: personal\ndecisions:\n  typesafeApiKeyRef: TYPESAFE_API_KEY\n"))).toThrow(/workspace "work" may not/);
+  });
+
+  it("a route other than direct or openrouter fails at load", () => {
+    expect(() => loadConfig(write("personal", "decisions:\n  typesafeApiKeyRef: K\n  typesafeRoute: https://example.net\n"))).toThrow(/typesafeRoute must be direct \| openrouter/);
   });
 
   it("`provider: typesafe` without the reference fails at load, not on every call (K19i, degrade loud)", () => {

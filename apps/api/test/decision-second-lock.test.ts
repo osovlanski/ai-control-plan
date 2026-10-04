@@ -58,12 +58,17 @@ import { CARRIERS, evalSide, recordEvalRow, summariseOutcome } from "./helpers/d
 
 /**
  * The judge under measurement: `model` (Haiku 4.5, the default) or, with
- * `DECISION_EVAL_PROVIDER=typesafe`, Jev on the same corpus and carriers. The
+ * `DECISION_EVAL_PROVIDER=typesafe`, Jev on the same corpus and carriers
+ * (`DECISION_EVAL_TYPESAFE_ROUTE=openrouter` to reach it through OpenRouter). The
  * chain holds only that judge and rules, so a failed Jev call reads as
  * unjudged rather than as Haiku's answer.
  */
 const PROVIDER = process.env.DECISION_EVAL_PROVIDER === "typesafe" ? "typesafe" : "model";
-const CONFIG = { provider: PROVIDER, typesafeApiKeyRef: "TYPESAFE_API_KEY" } as const;
+const CONFIG = {
+  provider: PROVIDER,
+  typesafeApiKeyRef: "TYPESAFE_API_KEY",
+  typesafeRoute: process.env.DECISION_EVAL_TYPESAFE_ROUTE === "openrouter" ? "openrouter" : "direct",
+} as const;
 const providers = decisionProviders(CONFIG).filter((p) => p.id === PROVIDER);
 const service = new DecisionService(CONFIG, providers);
 // `describe()` claims the judged keys only when the credential resolves.
