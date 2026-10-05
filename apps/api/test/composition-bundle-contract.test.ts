@@ -137,6 +137,28 @@ describe("bundle contract v1 rules beyond the schema", () => {
     expect(errorsOf(validateBundleResponse({ ...bundle, schemaVersion: "1.1" }, request))).toMatch(/does not answer request version 1.0/);
   });
 
+  it("represents every request the request schema accepts (Codex round 2 bounds)", () => {
+    const longId = `claude-skills:${"x".repeat(242)}`; // 256 characters, the registry assetId bound
+    const big: BundleRequest = {
+      ...request,
+      fragments: Array.from({ length: 64 }, (_, i) => `f${String(i).padStart(2, "0")}`),
+      memoryBundles: Array.from({ length: 64 }, (_, i) => ({ id: `m${String(i).padStart(2, "0")}`, digest: `sha256:${"d".repeat(64)}` })),
+      skills: [{ id: longId, digest: `sha256:${"1".repeat(64)}` }],
+    };
+    expect(validateBundleRequest(big)).toMatchObject({ ok: true });
+    const response = assembleBundle({
+      request: big, compiler: bundle.manifest.compiler,
+      rendered: [{ relPath: "CLAUDE.md", content: "# context\n" }, { relPath: ".claude/skills/long/SKILL.md", content: "skill\n" }],
+      included: [
+        ...big.fragments.map((ref) => ({ kind: "fragment" as const, ref, digest: `sha256:${"a".repeat(64)}`, reason: "requested" })),
+        ...big.memoryBundles.map((m) => ({ kind: "memory_bundle" as const, ref: m.id, digest: m.digest, reason: "requested" })),
+        { kind: "skill", ref: longId, digest: big.skills[0]!.digest, relPath: ".claude/skills/long/SKILL.md", reason: "selected" },
+      ],
+      excluded: [],
+    });
+    expect(errorsOf(validateBundleResponse(response, big))).toBe("");
+  });
+
   it("rejects an unsorted request and an unknown request major", () => {
     expect(errorsOf(validateBundleRequest({ ...request, fragments: [...request.fragments].reverse() }))).toMatch(/\/fragments is not sorted/);
     expect(errorsOf(validateBundleRequest({ ...request, schemaVersion: "2.0" }))).toMatch(/unsupported schemaVersion "2.0"/);
@@ -248,6 +270,15 @@ describe("composition contract v1 rules beyond the schema", () => {
     const skillErrors = checkComposition(changedSkill, decision, bundle).join("\n");
     expect(skillErrors).toMatch(/assets candidate claude-skills:example-review has digest sha256:1+, but sha256:8+ is attached/);
     expect(skillErrors).toMatch(/attached skill claude-skills:example-review was not rendered/);
+  });
+
+  it("cannot finalize a revision whose bundle excluded an attached skill", () => {
+    const request = bundleFixture("valid/two-skill.request.json") as BundleRequest;
+    const response = structuredClone(bundleFixture("valid/two-skill.response.json") as BundleResponse);
+    const tests = response.manifest.included.find((e) => e.ref === "claude-skills:example-tests")!;
+    response.manifest.included = response.manifest.included.filter((e) => e !== tests);
+    response.manifest.excluded.push({ kind: "skill", ref: tests.ref, reason: "over budget" });
+    expect(checkComposition(spec, decision, { request, response })).toContain("attached skill claude-skills:example-tests was not rendered into the bundle");
   });
 
   it("accepts an older stored minor and rejects a newer one", () => {

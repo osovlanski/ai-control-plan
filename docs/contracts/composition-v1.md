@@ -96,6 +96,8 @@ validation. No field of either document holds a secret value.
   `context`; its pinned `memoryBundles` and `skills` equal `context.memory_bundles` and
   `assets.skills` by id **and digest**; every attached skill was rendered at that digest; and every
   rendered memory bundle is one the spec records at that digest.
+- A bundle that excluded a requested skill cannot pass: the Composer re-requests without it
+  (bundle v1, "Finalization") and persists the revision from the final bundle.
 
 ## Versioning
 

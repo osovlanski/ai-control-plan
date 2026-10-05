@@ -73,6 +73,11 @@ each with a human-readable `reason`. An included pinned input MUST carry the pin
 included skill MUST have its file, so a renderer cannot add a skill nobody selected. A harness
 without a skill path in this version (`codex`) excludes requested skills with a reason.
 
+**Finalization.** A composition is final only when no requested skill is excluded. When the
+manifest excludes a skill (no skill path for the harness, or over budget), the Composer drops it
+from the selection, records why in the assets stage, and requests the bundle again. The revision
+is persisted from that second request; it never carries an attached skill that was not rendered.
+
 **Tokens.** `estimated` is `ceil(total Unicode code points of all contents / charsPerToken)`, and
 `tokenMethod` is always `estimated`: no exact local tokenizer exists for Claude or Codex. The
 estimate MUST NOT exceed `budget`; the renderer excludes inputs (and says so) to fit.
@@ -106,7 +111,7 @@ Identical requests against identical inputs MUST produce byte-identical `files` 
 | Total decoded UTF-8 bytes of all `content` | 256 KiB (262144) | See below |
 | Files | 64 | One instruction file plus skills |
 | Bytes or code points per file | 262144 (schema `maxLength`) | Coarse schema guard; the total is the binding limit |
-| Manifest entries, each of `included` / `excluded` | 128 | Two lists of at most 64 requested inputs |
+| Manifest entries, each of `included` / `excluded` | 192 | Three request lists of at most 64 inputs each; a `ref` is up to 256 characters, the registry asset id bound |
 
 The bundle travels inline in the `ExecutionRequest` (vnext increment 5: inline, size-bounded, not
 a content-addressed reference), so it lands in a persisted request row and in every replay of the

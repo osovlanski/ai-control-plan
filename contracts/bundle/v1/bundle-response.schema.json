@@ -98,7 +98,7 @@
         "ref": {
           "type": "string",
           "minLength": 1,
-          "maxLength": 128
+          "maxLength": 256
         }
       }
     },
@@ -138,7 +138,7 @@
         },
         "included": {
           "type": "array",
-          "maxItems": 128,
+          "maxItems": 192,
           "items": {
             "type": "object",
             "allOf": [
@@ -183,7 +183,7 @@
         },
         "excluded": {
           "type": "array",
-          "maxItems": 128,
+          "maxItems": 192,
           "items": {
             "type": "object",
             "allOf": [
