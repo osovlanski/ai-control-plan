@@ -119,6 +119,17 @@ export class CursorAdapter implements AgentAdapter {
   }
 
   async start(run: RunSpec): Promise<RunHandle> {
+    // `agent -p` "has access to all tools, including write and shell"
+    // (cursor.com/docs/cli/reference/parameters, read 2026-10-05), which is
+    // auto-approve. `--mode ask` and `--sandbox` exist in current docs, but no
+    // Cursor CLI is pinned or installed here to verify either is a hard
+    // boundary, and print mode has no approval relay. So any stricter mode is
+    // refused rather than run with more permission than the workspace allows.
+    if (run.permissionPolicy.mode !== "auto-approve") {
+      throw new NotSupportedError(
+        `${this.id}: approval mode ${run.permissionPolicy.mode} (Cursor print mode runs with write and shell access; only auto-approve is enforceable)`,
+      );
+    }
     const runId = newRunId();
     const state: CursorRunState = { queue: new EventQueue<NormalizedEvent>(), cancelled: false };
     this.runs.set(runId, state);

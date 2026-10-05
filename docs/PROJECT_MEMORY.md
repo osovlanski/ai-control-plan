@@ -460,7 +460,7 @@ branch is unchanged. Evidence, limits and verification:
 ## 2026-10-04 — Gate and decision-provider reachability review (PROPOSED; soak evidence is not activation evidence)
 
 - **The soak is mostly an audit log, and it is thin.** Since T0 the operator DB holds 3 tool-gate rows from one task: 2 `post-start` (audit) and 1 `pre-exec`. The `pre-exec` row is the same call as one of the `post-start` rows. A Claude call that needs permission writes both rows, so the row count double-counts it. `toolGateSoakCheck` would still pass §7.1(1) on 2026-10-09 on n = 3, because "≥ 14 days and one row" passes on the clock. Plan §7.4 now bars `shadowReviewedAt`/`promptRateReviewedAt` until the check counts distinct `pre-exec` calls for the adapter and mode being activated.
-- **Pre-exec exists only on Claude under `prompt-on-escalation`, and only for calls the CLI routes to `canUseTool`.** Claude under `auto-approve`, Codex, OpenRouter, Cursor and Bedrock are audit-only or unreachable. Codex file changes and MCP calls never reach the gate. The Codex SDK path runs `workspace-write` even under `read-only`. Hooks and MCP server processes are outside the gate everywhere. The legacy path, compare/race and parallel runs have no gate.
+- **Pre-exec exists only on Claude under `prompt-on-escalation`, and only for calls the CLI routes to `canUseTool`.** Claude under `auto-approve`, Codex, OpenRouter, Cursor and Bedrock are audit-only or unreachable. Codex file changes and MCP calls never reach the gate. Hooks and MCP server processes are outside the gate everywhere. The legacy path, compare/race and parallel runs have no gate.
 - **The live server sends no decision state to any vendor.** This was driven with `provider: typesafe`, through both harness modes and the legacy path, and made 0 outbound requests. Its `DecisionService` is used only for `activation()`.
 - **Config cannot put Jev on discovery.** The bin hard-codes `model` and reads no `decisions.*` provider key. Nothing pins `jev-1.13`, because every path sends `jev-latest`. Discovery counts a degraded outcome as unjudged, so a Haiku fallback behind Jev adds nothing. Any switch needs code and an owner decision. The smallest proposal is `decisions.discoveryProvider` plus a pinned model, read only by the bin.
 - On the operator's running build (`2e3c9f4`), `provider: typesafe` still fails at startup, because Jev is not registered there.
@@ -475,3 +475,14 @@ bearer credentials; two origins on unrelated sites require a browser cookie gate
 This is design only: the non-loopback refusal remains, remote deployment is not
 authorized, and stage 3 workers are not specified. Do not treat these proposed
 config fields or SSE resume semantics as implemented.
+
+## 2026-10-05 — adapters enforce or refuse the approval mode (SHIPPED)
+
+Codex (SDK and app-server, so OpenRouter too) maps `read-only` to sandbox `read-only` and
+`auto-approve` to `workspace-write`, both with approval policy `never`, and refuses
+`prompt-on-escalation` at `start`/`resume` because neither path relays approvals. Cursor refuses
+every mode except `auto-approve`: `agent -p` has write and shell access, and `--mode ask` /
+`--sandbox` are documented but unverified on any pinned CLI. Refusals throw `NotSupportedError`
+before a process starts, so the legacy path (which has no enforceability check) fails loudly too.
+Still unenforced in the adapter: Bedrock (tools run remotely) and Claude `read-only` allowing
+rule-allowed tools; neither changed here.
