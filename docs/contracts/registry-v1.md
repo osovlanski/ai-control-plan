@@ -86,7 +86,9 @@ fields. `SecretRef` and `mcp.env` are the exceptions; they are closed.
 All digests are `sha256:` followed by 64 lowercase hex characters.
 
 **Canonical JSON** is RFC 8785 (JCS). The digested value space is strings, booleans, `null`,
-integers, arrays and objects; a non-integer number in a digested field is a producer error.
+integers, arrays and objects; a non-integer number in a digested field is a producer error,
+and so is a string (or key) containing an unpaired UTF-16 surrogate. A content file's `path`, and
+the content of a `utf8` file, must likewise be well-formed Unicode.
 
 **Asset digest.** The producer decides which files make up an asset, and the content endpoint
 returns exactly those files. For that file set, build one line per file,
