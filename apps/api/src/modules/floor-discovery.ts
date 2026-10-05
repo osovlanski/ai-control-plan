@@ -25,6 +25,14 @@ import type { Db } from "../db/index.js";
 
 export interface RecentToolAction extends ToolAction {
   worktreePath?: string;
+  /** The task's repository. With `repoAllowlist`, decides whether the command may reach the judge (§4.4). */
+  repoPath?: string;
+  /**
+   * Only in an `--actions` file: the allowlist of the workspace that recorded
+   * the call (the nightly eval's scenario fixtures). Absent, the job's own
+   * argument decides. A file is the operator's own input, as config is.
+   */
+  repoAllowlist?: readonly string[];
   seenAt: string;
 }
 
@@ -35,7 +43,7 @@ export interface RecentToolAction extends ToolAction {
 export function readRecentToolActions(db: Db, opts: { limit?: number } = {}): RecentToolAction[] {
   const rows = db
     .prepare(
-      `SELECT e.ts, e.summary, e.payload, COALESCE(r.worktree_path, t.worktree_path) AS worktree_path
+      `SELECT e.ts, e.summary, e.payload, COALESCE(r.worktree_path, t.worktree_path) AS worktree_path, t.repo_path
          FROM events e
          JOIN runs r ON r.id = e.run_id
          LEFT JOIN tasks t ON t.id = r.task_id
@@ -48,6 +56,7 @@ export function readRecentToolActions(db: Db, opts: { limit?: number } = {}): Re
     summary: string | null;
     payload: string | null;
     worktree_path: string | null;
+    repo_path: string | null;
   }>;
   const out: RecentToolAction[] = [];
   for (const row of rows) {
@@ -57,7 +66,12 @@ export function readRecentToolActions(db: Db, opts: { limit?: number } = {}): Re
     } catch {
       continue; // a corrupt payload is not a command
     }
-    out.push({ ...toolActionFromEvent(payload, row.summary ?? undefined), worktreePath: row.worktree_path ?? undefined, seenAt: row.ts });
+    out.push({
+      ...toolActionFromEvent(payload, row.summary ?? undefined),
+      worktreePath: row.worktree_path ?? undefined,
+      repoPath: row.repo_path ?? undefined,
+      seenAt: row.ts,
+    });
   }
   return out;
 }
@@ -70,6 +84,8 @@ export interface FloorCandidate {
   lastSeen: string;
   /** The judge's own verdict reason, e.g. `judged: risk=medium, outside_repo=0.85`. An explanation, not a probability to trust. */
   judgeReason: string;
+  /** The provider that proposed it, and the model the vendor said answered (absent when it did not say). */
+  proposedBy: { provider: string; modelReported?: string };
 }
 
 export interface DiscoveryReport {
@@ -92,6 +108,8 @@ export async function discoverFloorCandidates(
   actions: readonly RecentToolAction[],
   decide: (req: DecisionRequest) => Promise<DecisionOutcome>,
   mcpTools?: McpToolPolicy,
+  /** `config.repoAllowlist`. Without it every repo is untrusted and no command reaches the judge (§4.4). */
+  repoAllowlist?: readonly string[],
 ): Promise<DiscoveryReport> {
   const groups = new Map<string, { action: RecentToolAction; occurrences: number; lastSeen: string }>();
   for (const a of actions) {
@@ -109,9 +127,17 @@ export async function discoverFloorCandidates(
       report.floored += 1;
       continue;
     }
+    const { state } = buildToolGateState({ ...observation, repoPath: action.repoPath, repoAllowlist: action.repoAllowlist ?? repoAllowlist });
+    if (state.commandText === undefined) {
+      // §4.4: the repo is not in the allowlist, so its command stays here. Nothing is sent.
+      report.unjudged += 1;
+      const why = "command withheld: repo not in repoAllowlist (§4.4)";
+      if (!report.unjudgedReasons.includes(why)) report.unjudgedReasons.push(why);
+      continue;
+    }
     const outcome = await decide({
       site: "tool-gate",
-      state: buildToolGateState(observation).state,
+      state,
       questions: TOOL_GATE_BATTERY,
       budgetMs: TOOL_GATE_BUDGET_MS.shadow,
     });
@@ -131,6 +157,7 @@ export async function discoverFloorCandidates(
       occurrences,
       lastSeen,
       judgeReason: verdict.reason,
+      proposedBy: { provider: outcome.provider, ...(outcome.modelReported ? { modelReported: outcome.modelReported } : {}) },
     });
   }
   report.candidates.sort((a, b) => b.occurrences - a.occurrences || (a.lastSeen < b.lastSeen ? 1 : -1));
@@ -158,7 +185,8 @@ export function renderCandidates(report: DiscoveryReport, generatedAt: string): 
     );
   }
   for (const c of report.candidates) {
-    lines.push(`## \`${c.toolName}\` × ${c.occurrences} (last ${c.lastSeen})`, "", "```text", c.commandText, "```", "", `Judge: ${c.judgeReason}`, "");
+    const by = `${c.proposedBy.provider} (${c.proposedBy.modelReported ?? "model not reported"})`;
+    lines.push(`## \`${c.toolName}\` × ${c.occurrences} (last ${c.lastSeen})`, "", "```text", c.commandText, "```", "", `Judge: ${c.judgeReason}`, `Proposed by: ${by}`, "");
   }
   return `${lines.join("\n")}\n`;
 }

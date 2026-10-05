@@ -390,7 +390,7 @@ const CAP = {
 export interface ToolGateObservation {
   /** The tool or command identity the allow/deny policy matches on. */
   toolName: string;
-  /** The action's arguments, verbatim. The subject of the questions, not repository content. */
+  /** The action's arguments, verbatim. Can carry repository content (a `Write`'s input), so trust-gated like `paths`. */
   commandText?: string;
   /** Filesystem paths the action names. Trust-gated: see `buildToolGateState`. */
   paths?: readonly string[];
@@ -418,7 +418,7 @@ export interface ToolGateObservation {
  * | `toolName`             | `denied` (the rules substring match), every judged key         |
  * | `toolsAllow`           | `denied` only — reaches no judge                               |
  * | `toolsDeny`            | `denied` only — reaches no judge                               |
- * | `commandText`          | every judged key                                               |
+ * | `commandText`          | every judged key; withheld for an untrusted repo (K19l)        |
  * | `networkDestinations`  | `exfiltration`, `risk`                                         |
  * | `pathsInside`          | `outside_repo`, `risk`                                         |
  * | `pathsOutside`         | `outside_repo`, `risk`                                         |
@@ -450,6 +450,7 @@ export interface ToolGateState {
   toolName: string;
   toolsAllow?: readonly string[];
   toolsDeny?: readonly string[];
+  /** Withheld entirely for an untrusted repo (K19l): it can carry file content. */
   commandText?: string;
   /** Part of the ACTION, not repository content — never trust-gated. */
   networkDestinations?: readonly string[];
@@ -593,7 +594,11 @@ export function buildToolGateState(
   };
   if (input.toolsAllow) state.toolsAllow = clipList(input.toolsAllow, CAP.toolsList, CAP.toolsListChars);
   if (input.toolsDeny) state.toolsDeny = clipList(input.toolsDeny, CAP.toolsList, CAP.toolsListChars);
-  if (input.commandText !== undefined) state.commandText = clip(redact(input.commandText), CAP.commandText);
+  // THE TRUST GATE covers the command too (K19l). For a non-shell tool the
+  // command is `JSON.stringify(input)`, which carries a `Write`'s file content;
+  // a shell command can carry it as well (`cat > f <<EOF`). From an untrusted
+  // repo, or a task with none, it is withheld whole.
+  if (repoTrusted && input.commandText !== undefined) state.commandText = clip(redact(input.commandText), CAP.commandText);
   if (input.networkDestinations?.length) {
     // Destinations are part of the action, not repository content, so they are
     // not trust-gated — `exfiltration` is unanswerable without them.

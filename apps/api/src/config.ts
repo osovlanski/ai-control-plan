@@ -131,13 +131,32 @@ export interface WorkspaceConfig {
      */
     typesafeRoute?: "direct" | "openrouter";
     /**
+     * Which judge the offline floor discovery job asks (K19l). Read ONLY by that
+     * job; the live server reads no judge (K19i). Default `model` (Haiku).
+     * `typesafe` sends discovery's tool calls to TypeSafe (and to OpenRouter on
+     * that route), so it needs the same opt-in as any Jev call: a
+     * `typesafeApiKeyRef`, in the personal workspace only (I-D7).
+     */
+    discoveryProvider?: "model" | "typesafe";
+    /** The Jev model every TypeSafe request names (§4.2). Default `jev-1.13`. `jev-latest` is refused: a moving alias is not a pin. */
+    typesafeModel?: string;
+    /**
      * Per-site mode (§7.4). `shadow` records what the site would do and changes
      * nothing; it is the default and the fail-closed value (I-D3). `applied`
      * is refused at load time — and the site kept in shadow, loudly — unless a
      * judging provider is registered in the chain (I-D8). K19c wires only
      * `tool-gate`; the §7.4 attestations are the activation slice's.
      */
-    sites?: { "tool-gate"?: { mode?: "shadow" | "applied" } };
+    sites?: {
+      "tool-gate"?: {
+        mode?: "shadow" | "applied";
+        /**
+         * The owner's minimum of distinct pre-exec calls for §7.1(1)'s 14-day arm
+         * (plan §7.4). Unset, `pnpm soak:check` reports INSUFFICIENT, never PASS.
+         */
+        soakMinPreExecCalls?: number;
+      };
+    };
     /**
      * K19j: what each MCP tool does, `server → tool → read-only | mutating`.
      * Only this file declares it; an undeclared tool stays `opaque` and
@@ -199,8 +218,10 @@ export interface ResolvedDecisionsConfig {
   provider: "typesafe" | "model" | "rules";
   typesafeApiKeyRef?: string;
   typesafeRoute?: "direct" | "openrouter";
+  discoveryProvider: "model" | "typesafe";
+  typesafeModel?: string;
   /** The REQUESTED mode. The effective one is resolved against the provider chain (I-D8) at composition. */
-  sites: { "tool-gate": { mode: "shadow" | "applied" } };
+  sites: { "tool-gate": { mode: "shadow" | "applied"; soakMinPreExecCalls?: number } };
   /** Null-prototype maps of own keys only; empty when nothing is declared. */
   mcpTools: McpToolPolicy;
 }
@@ -272,7 +293,7 @@ const PERSONAL_DEFAULTS: Omit<WorkspaceConfig, "workspace"> = {
   sessionInput: { enabled: false },
   // M16 seam only (K17): no vendor provider exists yet, so `rules` is the only
   // real choice. Reproduces today's regex/threshold behaviour exactly.
-  decisions: { provider: "rules", sites: { "tool-gate": { mode: "shadow" } } },
+  decisions: { provider: "rules", discoveryProvider: "model", sites: { "tool-gate": { mode: "shadow" } } },
 };
 
 /**
@@ -502,16 +523,30 @@ function resolveDecisions(file: WorkspaceConfig["decisions"], configPath: string
   if (toolGateMode !== "shadow" && toolGateMode !== "applied") {
     throw new Error(`${configPath}: decisions.sites.tool-gate.mode must be shadow | applied, got ${JSON.stringify(toolGateMode)}`);
   }
+  const soakMin = file?.sites?.["tool-gate"]?.soakMinPreExecCalls;
+  if (soakMin !== undefined && !(Number.isInteger(soakMin) && soakMin > 0)) {
+    throw new Error(`${configPath}: decisions.sites.tool-gate.soakMinPreExecCalls must be a positive integer, got ${JSON.stringify(soakMin)}`);
+  }
   const route = file?.typesafeRoute;
   if (route !== undefined && route !== "direct" && route !== "openrouter") {
     throw new Error(`${configPath}: decisions.typesafeRoute must be direct | openrouter, got ${JSON.stringify(route)}`);
   }
+  const discoveryProvider = file?.discoveryProvider ?? "model";
+  if (discoveryProvider !== "model" && discoveryProvider !== "typesafe") {
+    throw new Error(`${configPath}: decisions.discoveryProvider must be model | typesafe, got ${JSON.stringify(discoveryProvider)}`);
+  }
+  const typesafeModel = file?.typesafeModel;
+  if (typesafeModel !== undefined && (typeof typesafeModel !== "string" || !typesafeModel.trim() || /latest/i.test(typesafeModel))) {
+    throw new Error(`${configPath}: decisions.typesafeModel must name a pinned Jev version such as jev-1.13, never a moving alias; got ${JSON.stringify(typesafeModel)}`);
+  }
   return {
     provider: provider as ResolvedDecisionsConfig["provider"],
-    sites: { "tool-gate": { mode: toolGateMode } },
+    discoveryProvider,
+    sites: { "tool-gate": { mode: toolGateMode, ...(soakMin !== undefined ? { soakMinPreExecCalls: soakMin } : {}) } },
     mcpTools: resolveMcpTools(file?.mcpTools, configPath),
     ...(file?.typesafeApiKeyRef !== undefined ? { typesafeApiKeyRef: file.typesafeApiKeyRef } : {}),
     ...(route !== undefined ? { typesafeRoute: route } : {}),
+    ...(typesafeModel !== undefined ? { typesafeModel } : {}),
   };
 }
 
@@ -557,6 +592,11 @@ function validateDecisions(decisions: ResolvedDecisionsConfig, path: string, wor
   if (ref !== undefined && workspace !== "personal") {
     throw new Error(
       `Invalid config at ${path}:\n  - decisions.typesafeApiKeyRef: sending decision state to TypeSafe is opt-in for the personal workspace only (I-D7); workspace "${workspace}" may not`,
+    );
+  }
+  if (decisions.discoveryProvider === "typesafe" && ref === undefined) {
+    throw new Error(
+      `Invalid config at ${path}:\n  - decisions.discoveryProvider: typesafe needs decisions.typesafeApiKeyRef; naming the key reference is this workspace's egress opt-in (I-D7)`,
     );
   }
   if (decisions.provider === "typesafe" && ref === undefined) {

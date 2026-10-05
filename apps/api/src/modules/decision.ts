@@ -13,7 +13,8 @@ import type { ClassifierIntent, DecisionOutcome, DecisionProvider, DecisionReque
 import { RulesDecisionProvider, TASK_CLASSIFIER_BATTERY, TOOL_GATE_JUDGED_KEYS, taskClassifierAnswers } from "@agent-plane/core";
 import type { Db } from "../db/index.js";
 import { ModelDecisionProvider } from "./decision-model.js";
-import { TYPESAFE_ROUTES, TypeSafeDecisionProvider } from "./decision-typesafe.js";
+import type { ResolvedDecisionsConfig } from "../config.js";
+import { DEFAULT_TYPESAFE_MODEL, TYPESAFE_ROUTES, TypeSafeDecisionProvider } from "./decision-typesafe.js";
 import { SecretBroker } from "./harness/secret-broker.js";
 
 export interface DecisionServiceConfig {
@@ -27,6 +28,8 @@ export interface DecisionServiceConfig {
   typesafeApiKeyRef?: string;
   /** Which endpoint serves Jev (`decisions.typesafeRoute`); default `direct`. */
   typesafeRoute?: "direct" | "openrouter";
+  /** The pinned Jev model (`decisions.typesafeModel`); default `DEFAULT_TYPESAFE_MODEL`. */
+  typesafeModel?: string;
   /** Consecutive failures before a provider's circuit opens. */
   circuitBreakerThreshold?: number;
   /** How long an open circuit stays open before the next attempt is allowed. */
@@ -249,77 +252,164 @@ export function toolGatePromptRates(db: Db, opts: { limit?: number } = {}): Tool
 }
 
 /**
- * The tool gate's shadow-soak queries for §7.1(1), (2) and (7). `plans/progress.md`
- * quotes them verbatim, so a change here is a change there. Every one reads only
- * shadow `tool-gate` rows written at or after `:since`, the soak's T0.
- * "Rules-allowed" is `auto-approve` or `prompt`: `block` is a rules deny and
- * `unchanged` a read-only workspace, neither of which the gate adds a prompt to.
+ * The tool gate's shadow-soak query for §7.1(1), (2) and (7). `plans/progress.md`
+ * quotes it verbatim, so a change here is a change there. It reads only shadow
+ * `tool-gate` rows written at or after `:since`, the soak's T0, from sessions of
+ * one adapter (`assistants.provider`) under one approval mode (the execution
+ * request's policy): the pair being judged for activation (plan §7.4).
  */
-export const SOAK_SQL = {
-  volume: `SELECT COUNT(*) AS n, MIN(created_at) AS first, MAX(created_at) AS last
-  FROM decision_records
- WHERE site = 'tool-gate' AND mode = 'shadow' AND created_at >= :since`,
-  disagreements: `SELECT id, task_id, gate_hook, gate_reason, created_at
-  FROM decision_records
- WHERE site = 'tool-gate' AND mode = 'shadow' AND created_at >= :since
-   AND gate_outcome = 'prompt'
- ORDER BY id`,
-  promptRate: `SELECT gate_hook, COUNT(*) AS calls, SUM(gate_outcome = 'prompt') AS prompts
-  FROM decision_records
- WHERE site = 'tool-gate' AND mode = 'shadow' AND created_at >= :since
-   AND gate_outcome IN ('auto-approve', 'prompt')
- GROUP BY gate_hook
- ORDER BY gate_hook`,
-  byReason: `SELECT gate_hook, gate_reason, COUNT(*) AS prompts
-  FROM decision_records
- WHERE site = 'tool-gate' AND mode = 'shadow' AND created_at >= :since
-   AND gate_outcome = 'prompt'
- GROUP BY gate_hook, gate_reason
- ORDER BY prompts DESC, gate_hook, gate_reason`,
-} as const;
+export const SOAK_SQL = `SELECT d.session_id, d.gate_hook, d.gate_outcome, d.gate_reason, d.created_at
+  FROM decision_records d
+  JOIN runs r ON r.id = d.session_id
+  JOIN assistants a ON a.id = r.assistant_id
+  JOIN execution_requests e ON e.id = r.execution_request_id
+ WHERE d.site = 'tool-gate' AND d.mode = 'shadow' AND d.created_at >= :since
+   AND a.provider = :adapter AND json_extract(e.policy, '$.approval.mode') = :approvalMode
+ ORDER BY d.session_id, d.id`;
+
+type SoakVerdict = "PASS" | "FAIL" | "INSUFFICIENT";
 
 export interface SoakCheck {
   since: string;
   now: string;
   readThrough: string | null;
-  volume: { n: number; first: string | null; last: string | null; days: number; pass: boolean };
-  disagreements: { n: number; unread: number; pass: boolean };
+  adapter: string;
+  approvalMode: string;
+  volume: {
+    rows: number;
+    calls: number;
+    /** The volume §7.4 counts: distinct calls that had a pre-exec hook. */
+    preExecCalls: number;
+    /** `decisions.sites.tool-gate.soakMinPreExecCalls`; null when the owner has set none. */
+    minPreExecCalls: number | null;
+    first: string | null;
+    last: string | null;
+    days: number;
+    verdict: SoakVerdict;
+    pass: boolean;
+  };
+  disagreements: { n: number; unread: number; verdict: SoakVerdict; pass: boolean };
   promptRate: {
     byHook: Array<{ hook: string | null; calls: number; prompts: number; rate: number | null }>;
     byReason: Array<{ hook: string | null; reason: string | null; prompts: number }>;
+    verdict: SoakVerdict;
     pass: boolean;
   };
 }
 
+interface SoakRow {
+  session_id: string;
+  gate_hook: "pre-exec" | "post-start" | null;
+  gate_outcome: string | null;
+  gate_reason: string | null;
+  created_at: string;
+}
+
+/** One tool call: its `post-start` row, its `pre-exec` row, or both. */
+type SoakCall = { post?: SoakRow; pre?: SoakRow };
+
 /**
- * §7.1(1): ≥ 500 rows, or ≥ 14 days since T0 with at least one row.
- * §7.1(2): (1) holds and every disagreement is at or before `readThrough`,
+ * A Claude call that needs permission writes a `post-start` row (the
+ * `tool_use` block) and then a `pre-exec` row (`canUseTool`), so rows are not
+ * calls. Within a session, a `pre-exec` row is the same call as the latest
+ * earlier `post-start` row not already paired. Rows are in session, id order.
+ */
+// ponytail: rows carry no tool identity, so pairing is by order. Two calls
+// emitted together pair crosswise, which keeps the counts right. An adapter
+// that raises an approval with no tool.started, after an unpaired one in the
+// same session, would lose one call; record the tool-use id if one ever does.
+function soakCalls(rows: readonly SoakRow[]): SoakCall[] {
+  const calls: SoakCall[] = [];
+  let session: string | undefined;
+  let open: SoakCall[] = [];
+  for (const row of rows) {
+    if (row.session_id !== session) [session, open] = [row.session_id, []];
+    if (row.gate_hook === "pre-exec") {
+      const call = open.pop();
+      if (call) call.pre = row;
+      else calls.push({ pre: row });
+    } else {
+      const call = { post: row };
+      calls.push(call);
+      open.push(call);
+    }
+  }
+  return calls;
+}
+
+const RULES_ALLOWED = new Set(["auto-approve", "prompt"]);
+
+/**
+ * §7.1(1): the distinct `pre-exec` calls for the pair reach the owner's
+ * minimum, at ≥ 14 days since T0, or reach 500. With no minimum set the
+ * verdict is INSUFFICIENT whatever the count: a soak never passes on the
+ * clock (plan §7.4).
+ * §7.1(2): (1) holds and every prompting call is at or before `readThrough`,
  * the time through which the operator's reading is recorded.
  * §7.1(7): (1) holds and the reading covers the last row, so the rate read is
  * the rate measured. A reading is recorded by hand in `plans/progress.md`;
  * nothing here writes one. Timestamps are ISO strings, compared as such.
+ * (2) and (7) read INSUFFICIENT while (1) does.
  */
-export function toolGateSoakCheck(db: Db, opts: { since: string; now: string; readThrough?: string }): SoakCheck {
-  const since = opts.since;
+export function toolGateSoakCheck(
+  db: Db,
+  opts: { since: string; now: string; readThrough?: string; adapter: string; approvalMode: string; minPreExecCalls?: number },
+): SoakCheck {
+  const { since, adapter, approvalMode } = opts;
   const readThrough = opts.readThrough ?? null;
-  const v = db.prepare(SOAK_SQL.volume).get({ since }) as { n: number; first: string | null; last: string | null };
+  const min = opts.minPreExecCalls ?? null;
+  const rows = db.prepare(SOAK_SQL).all({ since, adapter, approvalMode }) as SoakRow[];
+  const calls = soakCalls(rows);
   const days = (Date.parse(opts.now) - Date.parse(since)) / 86_400_000;
-  const volumePass = v.n >= 500 || (days >= 14 && v.n > 0);
-  const dis = db.prepare(SOAK_SQL.disagreements).all({ since }) as Array<{ created_at: string }>;
-  const unread = dis.filter((d) => readThrough === null || d.created_at > readThrough).length;
-  const byHook = (db.prepare(SOAK_SQL.promptRate).all({ since }) as Array<{ gate_hook: string | null; calls: number; prompts: number }>).map(
-    (r) => ({ hook: r.gate_hook, calls: r.calls, prompts: r.prompts, rate: r.calls ? r.prompts / r.calls : null }),
+  const preExecCalls = calls.filter((c) => c.pre).length;
+  const volumePass = min !== null && (preExecCalls >= 500 || (days >= 14 && preExecCalls >= min));
+  const stamps = rows.map((r) => r.created_at).sort();
+  const last = stamps.at(-1) ?? null;
+  const verdict = (pass: boolean): SoakVerdict => (!volumePass ? "INSUFFICIENT" : pass ? "PASS" : "FAIL");
+
+  // A call prompts when either of its rows does; it is read once, at its last row.
+  const prompting = calls.filter((c) => c.pre?.gate_outcome === "prompt" || c.post?.gate_outcome === "prompt");
+  const unread = prompting.filter((c) => readThrough === null || (c.pre ?? c.post)!.created_at > readThrough).length;
+
+  const byHook = (["post-start", "pre-exec"] as const).flatMap((hook) => {
+    const hookRows = calls.map((c) => (hook === "pre-exec" ? c.pre : c.post)).filter((r): r is SoakRow => !!r && RULES_ALLOWED.has(r.gate_outcome ?? ""));
+    if (!hookRows.length) return [];
+    const prompts = hookRows.filter((r) => r.gate_outcome === "prompt").length;
+    return [{ hook, calls: hookRows.length, prompts, rate: prompts / hookRows.length }];
+  });
+  const reasons = new Map<string, { hook: string | null; reason: string | null; prompts: number }>();
+  for (const c of prompting) {
+    const r = c.pre?.gate_outcome === "prompt" ? c.pre : c.post!;
+    const key = `${r.gate_hook}\u0000${r.gate_reason}`;
+    const e = reasons.get(key) ?? { hook: r.gate_hook, reason: r.gate_reason, prompts: 0 };
+    e.prompts += 1;
+    reasons.set(key, e);
+  }
+  const byReason = [...reasons.values()].sort(
+    (a, b) => b.prompts - a.prompts || String(a.hook).localeCompare(String(b.hook)) || String(a.reason).localeCompare(String(b.reason)),
   );
-  const byReason = (db.prepare(SOAK_SQL.byReason).all({ since }) as Array<{ gate_hook: string | null; gate_reason: string | null; prompts: number }>).map(
-    (r) => ({ hook: r.gate_hook, reason: r.gate_reason, prompts: r.prompts }),
-  );
+
+  const disPass = volumePass && unread === 0;
+  const ratePass = volumePass && readThrough !== null && last !== null && last <= readThrough;
   return {
     since,
     now: opts.now,
     readThrough,
-    volume: { ...v, days, pass: volumePass },
-    disagreements: { n: dis.length, unread, pass: volumePass && unread === 0 },
-    promptRate: { byHook, byReason, pass: volumePass && readThrough !== null && v.last !== null && v.last <= readThrough },
+    adapter,
+    approvalMode,
+    volume: {
+      rows: rows.length,
+      calls: calls.length,
+      preExecCalls,
+      minPreExecCalls: min,
+      first: stamps[0] ?? null,
+      last,
+      days,
+      verdict: volumePass ? "PASS" : "INSUFFICIENT",
+      pass: volumePass,
+    },
+    disagreements: { n: prompting.length, unread, verdict: verdict(disPass), pass: disPass },
+    promptRate: { byHook, byReason, verdict: verdict(ratePass), pass: ratePass },
   };
 }
 
@@ -346,8 +436,40 @@ export function decisionProviders(config: DecisionServiceConfig): DecisionProvid
       apiKey: ref ? () => brokeredSecret(ref) : () => undefined,
       ...(ref ? { keyRef: ref } : {}),
       baseUrl: TYPESAFE_ROUTES[config.typesafeRoute ?? "direct"],
+      model: config.typesafeModel ?? DEFAULT_TYPESAFE_MODEL,
     }),
   ];
+}
+
+/**
+ * The floor discovery job's service (K19l), the one process that sends
+ * decision state to a vendor. The judge is `decisions.discoveryProvider`
+ * (default `model`, Haiku, as before), and I-D7 is checked HERE, where the
+ * egress happens, not only at config load: `typesafe` sends tool calls to
+ * TypeSafe (and OpenRouter), so it needs the workspace's opt-in, a named
+ * `typesafeApiKeyRef` in the personal workspace. Without it this throws and
+ * nothing is sent.
+ */
+export function discoveryDecisionService(
+  decisions: Pick<ResolvedDecisionsConfig, "discoveryProvider" | "typesafeApiKeyRef" | "typesafeRoute" | "typesafeModel">,
+  workspace: string,
+): DecisionService {
+  const provider = decisions.discoveryProvider;
+  if (provider === "typesafe") {
+    if (!decisions.typesafeApiKeyRef) {
+      throw new Error("decisions.discoveryProvider: typesafe REFUSED — this workspace has not opted in to TypeSafe egress (no decisions.typesafeApiKeyRef, I-D7). Nothing was sent.");
+    }
+    if (workspace !== "personal") {
+      throw new Error(`decisions.discoveryProvider: typesafe REFUSED — TypeSafe egress is opt-in for the personal workspace only (I-D7); workspace "${workspace}" may not. Nothing was sent.`);
+    }
+  }
+  const config: DecisionServiceConfig = {
+    provider,
+    ...(provider === "typesafe"
+      ? { typesafeApiKeyRef: decisions.typesafeApiKeyRef, typesafeRoute: decisions.typesafeRoute, typesafeModel: decisions.typesafeModel }
+      : {}),
+  };
+  return new DecisionService(config, decisionProviders(config));
 }
 
 /** One reference, resolved from the session env (§9.1) through a broker scoped to it alone. */

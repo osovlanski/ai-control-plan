@@ -11,12 +11,15 @@ import { openDb, type Db } from "../src/db/index.js";
 import { discoverFloorCandidates, readRecentToolActions, renderCandidates, type RecentToolAction } from "../src/modules/floor-discovery.js";
 
 const WT = "/wt/AG-1";
-const bash = (commandText: string, seenAt = "2026-09-23T00:00:00.000Z"): RecentToolAction => ({
+const REPO = "/repos/app";
+const ALLOW = [REPO];
+const bash = (commandText: string, seenAt = "2026-09-23T00:00:00.000Z", repoPath: string | undefined = REPO): RecentToolAction => ({
   toolName: "Bash",
   commandText,
   paths: [],
   shell: true,
   worktreePath: WT,
+  ...(repoPath ? { repoPath } : {}),
   seenAt,
 });
 
@@ -30,6 +33,7 @@ const judged = (risk: string, destructive = 0): DecisionOutcome => ({
     credential_reach: noul(0),
   },
   provider: "model",
+  modelReported: "claude-haiku-4-5-20251001",
   latencyMs: 1,
 });
 
@@ -52,6 +56,8 @@ describe("discoverFloorCandidates", () => {
         bash("make deploy"),
       ],
       judge,
+      undefined,
+      ALLOW,
     );
     expect(asked).not.toContain("printenv");
     expect(report).toMatchObject({ scanned: 5, distinct: 4, floored: 1, judged: 2, unjudged: 1, unjudgedReasons: ["no key"] });
@@ -62,16 +68,47 @@ describe("discoverFloorCandidates", () => {
         occurrences: 2,
         lastSeen: "2026-09-23T02:00:00.000Z",
         judgeReason: "judged: risk=medium",
+        proposedBy: { provider: "model", modelReported: "claude-haiku-4-5-20251001" },
       },
     ]);
     const md = renderCandidates(report, "2026-09-23T03:00:00.000Z");
     expect(md).toContain("proposed by the judge, not active");
     expect(md).toContain("git commit --amend --no-edit");
     expect(md).not.toContain("No judgement ran");
+    expect(md).toContain("Proposed by: model (claude-haiku-4-5-20251001)");
+  });
+
+  it("§4.4 on commands (K19l): an untrusted repo, or none, sends no command to the judge", async () => {
+    // A Write's input is its file content. Redacted sample of the leak the review found.
+    const write: RecentToolAction = {
+      toolName: "Write",
+      commandText: JSON.stringify({ file_path: `${WT}/notes.md`, content: "customer list: [REDACTED] ..." }),
+      paths: [`${WT}/notes.md`],
+      shell: false,
+      worktreePath: WT,
+      repoPath: "/repos/other",
+      seenAt: "2026-09-23T00:00:00.000Z",
+    };
+    const sent: DecisionRequest[] = [];
+    const judge = async (req: DecisionRequest) => (sent.push(req), judged("medium"));
+    const before = await discoverFloorCandidates([write, bash("make deploy", undefined, "")], judge, undefined, ALLOW);
+    expect(sent).toEqual([]);
+    expect(before).toMatchObject({ judged: 0, unjudged: 2, unjudgedReasons: ["command withheld: repo not in repoAllowlist (§4.4)"], candidates: [] });
+    // The same Write from an allowlisted repo reaches the judge, as before.
+    const after = await discoverFloorCandidates([{ ...write, repoPath: REPO }], judge, undefined, ALLOW);
+    expect(after.judged).toBe(1);
+    expect(sent[0]!.state.commandText).toContain("customer list");
+  });
+
+  it("a vendor that does not name its model is recorded as such, never guessed", async () => {
+    const { modelReported: _, ...unnamed } = judged("medium");
+    const report = await discoverFloorCandidates([bash("make release")], async () => unnamed, undefined, ALLOW);
+    expect(report.candidates[0]!.proposedBy).toEqual({ provider: "model" });
+    expect(renderCandidates(report, "t")).toContain("Proposed by: model (model not reported)");
   });
 
   it("with no reachable judge it says so, rather than reporting an empty list as a finding", async () => {
-    const report = await discoverFloorCandidates([bash("ls src")], async () => ({ answers: {}, provider: "rules", latencyMs: 0 }));
+    const report = await discoverFloorCandidates([bash("ls src")], async () => ({ answers: {}, provider: "rules", latencyMs: 0 }), undefined, ALLOW);
     expect(report).toMatchObject({ judged: 0, unjudged: 1, candidates: [] });
     expect(renderCandidates(report, "t")).toContain("**No judgement ran** (no judging provider in the chain)");
   });
@@ -84,7 +121,7 @@ describe("readRecentToolActions", () => {
     dir = mkdtempSync(join(tmpdir(), "floor-discovery-"));
     db = openDb(join(dir, "t.db"));
     db.prepare("INSERT INTO assistants (id, provider) VALUES ('a1','fake')").run();
-    db.prepare("INSERT INTO tasks (id, goal, envelope, created_at, updated_at, worktree_path) VALUES ('AG-1','g','{}','t','t', ?)").run(WT);
+    db.prepare("INSERT INTO tasks (id, goal, envelope, created_at, updated_at, worktree_path, repo_path) VALUES ('AG-1','g','{}','t','t', ?, ?)").run(WT, REPO);
     db.prepare("INSERT INTO runs (id, task_id, assistant_id, state, started_at) VALUES ('run-1','AG-1','a1','ACTIVE','t')").run();
   });
   afterEach(() => {
@@ -99,8 +136,8 @@ describe("readRecentToolActions", () => {
     ev.run(3, "2026-09-23T00:00:03Z", "approval.requested", "Write", JSON.stringify({ tool: "Write", input: { file_path: `${WT}/a.ts` } }));
     ev.run(4, "2026-09-23T00:00:04Z", "tool.started", "x", "{corrupt");
     expect(readRecentToolActions(db)).toEqual([
-      { toolName: "Write", commandText: JSON.stringify({ file_path: `${WT}/a.ts` }), paths: [`${WT}/a.ts`], shell: false, worktreePath: WT, seenAt: "2026-09-23T00:00:03Z" },
-      { toolName: "Bash", commandText: "ls src", paths: [], shell: true, worktreePath: WT, seenAt: "2026-09-23T00:00:01Z" },
+      { toolName: "Write", commandText: JSON.stringify({ file_path: `${WT}/a.ts` }), paths: [`${WT}/a.ts`], shell: false, worktreePath: WT, repoPath: REPO, seenAt: "2026-09-23T00:00:03Z" },
+      { toolName: "Bash", commandText: "ls src", paths: [], shell: true, worktreePath: WT, repoPath: REPO, seenAt: "2026-09-23T00:00:01Z" },
     ]);
   });
 });

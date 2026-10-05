@@ -1,5 +1,5 @@
 /**
- * `pnpm soak:check [--since <ISO>] [--read-through <ISO>] [--db <path>]`
+ * `pnpm soak:check [--since <ISO>] [--now <ISO>] [--read-through <ISO>] [--db <path>] [--adapter <provider>] [--approval-mode <mode>]`
  *
  * The daily check for the tool gate's shadow soak: §7.1(1), (2) and (7), plus
  * the prompt rate grouped by floor reason. It opens the workspace DB read-only
@@ -11,10 +11,16 @@
  * rows came from parity runs with an env override, or from the flip's own
  * verification tasks, and are not the soak. `--read-through` is the time
  * through which the operator's reading is recorded.
+ *
+ * It judges one adapter/approval-mode pair (plan §7.4), by default Claude
+ * (`anthropic`) under `prompt-on-escalation`, the one pair with a pre-exec
+ * hook. Volume is distinct pre-exec calls of that pair against the owner's
+ * `decisions.sites.tool-gate.soakMinPreExecCalls`, read from this workspace's
+ * config; unset, the verdict is INSUFFICIENT.
  */
 import { join } from "node:path";
 import Database from "better-sqlite3";
-import { configHome, workspaceName } from "../config.js";
+import { configHome, loadConfig, workspaceName } from "../config.js";
 import { toolGateSoakCheck } from "../modules/decision.js";
 
 const SOAK_T0 = "2026-09-25T21:31:57.293Z";
@@ -35,22 +41,28 @@ const iso = (name: string, value: string | undefined): string | undefined => {
 
 const dbPath = arg("--db") ?? join(configHome(), workspaceName(), "agent-plane.db");
 const db = new Database(dbPath, { readonly: true, fileMustExist: true });
+const min = loadConfig(process.env).decisions.sites["tool-gate"].soakMinPreExecCalls;
+const readThrough = iso("--read-through", arg("--read-through"));
 const r = toolGateSoakCheck(db, {
   since: iso("--since", arg("--since")) ?? SOAK_T0,
-  now: new Date().toISOString(),
-  readThrough: iso("--read-through", arg("--read-through")),
+  now: iso("--now", arg("--now")) ?? new Date().toISOString(),
+  ...(readThrough ? { readThrough } : {}),
+  adapter: arg("--adapter") ?? "anthropic",
+  approvalMode: arg("--approval-mode") ?? "prompt-on-escalation",
+  ...(min !== undefined ? { minPreExecCalls: min } : {}),
 });
 db.close();
 
-const verdict = (pass: boolean) => (pass ? "PASS" : "FAIL");
 const pct = (x: number | null) => (x === null ? "n/a" : `${(x * 100).toFixed(1)}%`);
 const out = [
   `tool-gate shadow soak — ${dbPath}`,
   `since ${r.since}  now ${r.now}  readings recorded through ${r.readThrough ?? "(none)"}`,
+  `pair ${r.adapter} / ${r.approvalMode}`,
   "",
-  `§7.1(1) volume        ${verdict(r.volume.pass)}  ${r.volume.n} rows over ${r.volume.days.toFixed(2)} days (need ≥ 500 rows, or ≥ 14 days with rows); first ${r.volume.first ?? "-"}, last ${r.volume.last ?? "-"}`,
-  `§7.1(2) disagreements ${verdict(r.disagreements.pass)}  ${r.disagreements.n} prompts where rules allowed, ${r.disagreements.unread} not yet read`,
-  `§7.1(7) prompt rate   ${verdict(r.promptRate.pass)}  ${r.promptRate.byHook.map((h) => `${h.hook ?? "(no hook)"} ${h.prompts}/${h.calls} = ${pct(h.rate)}`).join("; ") || "no rules-allowed rows"}`,
+  `§7.1(1) volume        ${r.volume.verdict}  ${r.volume.preExecCalls} distinct pre-exec calls (${r.volume.calls} calls, ${r.volume.rows} rows) over ${r.volume.days.toFixed(2)} days; ` +
+    `need ≥ 500, or ≥ 14 days and ≥ ${r.volume.minPreExecCalls ?? "(no minimum set: decisions.sites.tool-gate.soakMinPreExecCalls)"}; first ${r.volume.first ?? "-"}, last ${r.volume.last ?? "-"}`,
+  `§7.1(2) disagreements ${r.disagreements.verdict}  ${r.disagreements.n} prompts where rules allowed, ${r.disagreements.unread} not yet read`,
+  `§7.1(7) prompt rate   ${r.promptRate.verdict}  ${r.promptRate.byHook.map((h) => `${h.hook ?? "(no hook)"} ${h.prompts}/${h.calls} = ${pct(h.rate)}`).join("; ") || "no rules-allowed rows"}`,
   "",
   "prompts by floor reason:",
   ...(r.promptRate.byReason.length

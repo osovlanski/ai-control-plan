@@ -185,6 +185,13 @@ because a validation message can echo the input), `429` and `529` (back off by `
 up to 2 retries while the budget covers the wait, then degrade per I-D2). Any other status names
 the vendor's error class, never its message.
 
+**Pin and discovery role (K19l, 2026-10-05).** Every request names `decisions.typesafeModel`,
+default `jev-1.13`. Config refuses any `latest` alias. `decisions.discoveryProvider: model | typesafe`
+(default `model`) is read only by the floor discovery job, which checks the I-D7 opt-in itself
+before it sends. Each floor candidate records the provider and the reported model that proposed it.
+Whether OpenRouter's System One API accepts `jev-1.13` (it maps `jev-latest`) was not checked.
+Checking needs a paid call.
+
 Two base URLs, chosen by `decisions.typesafeRoute: direct | openrouter`, and any other value fails
 at load: the direct API (`https://api.typesafe.ai`), and OpenRouter's System One API
 (`https://openrouter.ai/api`). OpenRouter takes TypeSafe's own request and answer shapes, an
@@ -1069,6 +1076,11 @@ passes on the clock. Until the soak check implements the following, `shadowRevie
   never passes on "at least one row".
 - Hooks, MCP server processes and plugin code run outside the gate in every adapter. A soak says
   nothing about them.
+
+*K19l (2026-10-05): the soak check now implements the first three bullets.* It counts distinct
+calls per adapter and approval mode, only `pre-exec` calls count toward volume, and the 14-day arm
+needs `decisions.sites.tool-gate.soakMinPreExecCalls`. With no minimum it reports INSUFFICIENT.
+The owner has not set a minimum, so the bar on `shadowReviewedAt` and `promptRateReviewedAt` stays.
 
 ---
 

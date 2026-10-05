@@ -10,9 +10,12 @@ import { TOOL_GATE_BATTERY, buildToolGateState, resolveToolGate, type DecisionRe
 import { ModelDecisionProvider } from "../src/modules/decision-model.js";
 import { DecisionService } from "../src/modules/decision.js";
 
+/** A repo in the allowlist: the command reaches the judge (§4.4, K19l). */
+const TRUSTED = { repoPath: "/repo", repoAllowlist: ["/repo"] };
+
 const req = (over: Partial<DecisionRequest> = {}): DecisionRequest => ({
   site: "tool-gate",
-  state: buildToolGateState({ toolName: "bash", commandText: "rm -rf ./src", toolsDeny: [] }).state,
+  state: buildToolGateState({ toolName: "bash", commandText: "rm -rf ./src", toolsDeny: [], ...TRUSTED }).state,
   questions: TOOL_GATE_BATTERY,
   budgetMs: 2_000,
   ...over,
