@@ -118,7 +118,7 @@ export function assembleBundle(input: {
     .sort((a, b) => byteOrder(a.relPath, b.relPath));
   const byInput = (a: { kind: string; ref: string }, b: { kind: string; ref: string }) => byteOrder(`${a.kind}\0${a.ref}`, `${b.kind}\0${b.ref}`);
   return {
-    schemaVersion: BUNDLE_SCHEMA_VERSION,
+    schemaVersion: input.request.schemaVersion,
     files,
     manifest: {
       harness: input.request.harness,
@@ -168,6 +168,8 @@ export function validateBundleResponse(body: unknown, request?: BundleRequest, s
   let bytes = 0;
   bundle.files.forEach((f, i) => {
     if (!HARNESS_PATHS[manifest.harness].test(f.relPath)) errors.push(`/files/${i}/relPath ${f.relPath} is not allowed for harness ${manifest.harness}`);
+    // RFC 8785 rejects lone surrogates, and UTF-8 encoding would silently turn them into U+FFFD.
+    if (/\p{Cs}/u.test(f.content)) errors.push(`/files/${i} content contains an unpaired surrogate`);
     if (fileDigest(f.content) !== f.digest) errors.push(`/files/${i} digest does not match its content`);
     for (const [pattern, what] of CONTENT_GUARDS) if (pattern.test(f.content)) errors.push(`/files/${i} content contains ${what}`);
     bytes += Buffer.byteLength(f.content, "utf8");

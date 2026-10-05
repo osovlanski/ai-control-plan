@@ -84,6 +84,7 @@ validation. No field of either document holds a secret value.
 - `why` is required and non-empty. **`chosen: []` with a `why` is a valid outcome**, and is how
   the assets stage records "no optional asset fits".
 - `override` is `null` or records who changed the stage's outcome, from what, to what and why.
+  Every `from` ref is a candidate, and `to` is exactly the stage's `chosen` set.
 
 ## Consistency between documents
 

@@ -2,7 +2,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
-  assembleBundle, BUNDLE_CONTRACT_DIR, computeBundleDigest, MAX_BUNDLE_BYTES, validateBundleRequest, validateBundleResponse,
+  assembleBundle, BUNDLE_CONTRACT_DIR, computeBundleDigest, estimateTokens, fileDigest, MAX_BUNDLE_BYTES, validateBundleRequest, validateBundleResponse,
   type BundleRequest, type BundleResponse,
 } from "../src/bundle-contract.js";
 import {
@@ -170,6 +170,22 @@ describe("bundle contract v1 rules beyond the schema", () => {
 
   it("answers in the request's version", () => {
     expect(errorsOf(validateBundleResponse({ ...bundle, schemaVersion: "1.1" }, request))).toMatch(/does not answer request version 1.0/);
+    const newer = { ...request, schemaVersion: "1.1" };
+    const rendered = bundle.files.map(({ relPath, content }) => ({ relPath, content }));
+    const assembled = assembleBundle({ request: newer, rendered, compiler: bundle.manifest.compiler, included: bundle.manifest.included, excluded: bundle.manifest.excluded });
+    expect(assembled.schemaVersion).toBe("1.1");
+  });
+
+  it("rejects content with an unpaired surrogate and accepts a surrogate pair", () => {
+    const withContent = (content: string) => mutate((b) => {
+      b.files[0]!.content = content;
+      b.files[0]!.digest = fileDigest(content);
+      b.manifest.bundleDigest = computeBundleDigest(b.files);
+      b.manifest.tokens.estimated = estimateTokens(b.files, b.manifest.tokens.charsPerToken);
+    });
+    expect(withContent("# x \ud800")).toMatch(/\/files\/0 content contains an unpaired surrogate/);
+    expect(withContent("# x \udc00 y")).toMatch(/unpaired surrogate/);
+    expect(withContent("# x \ud83d\ude00")).toBe("");
   });
 
   it("represents every request the request schema accepts (Codex round 2 bounds)", () => {
@@ -276,6 +292,16 @@ describe("composition contract v1 rules beyond the schema", () => {
     expect(withAssets({ filters: [{ filter: "allowlist", removed: ["claude-skills:example-tests"], reason: "not allowlisted" }] }))
       .toMatch(/chose claude-skills:example-tests, which a filter removed/);
     expect(errorsOf(validateCompositionDecision({ ...decision, stages: [...decision.stages].reverse() }))).toMatch(/\/stages must be intent,/);
+  });
+
+  it("requires an override to start from candidates and end at the chosen outcome", () => {
+    const assets = decision.stages.find((s) => s.stage === "assets")!;
+    const withOverride = (override: CompositionDecision["stages"][number]["override"]) =>
+      errorsOf(validateCompositionDecision({ ...decision, stages: decision.stages.map((s) => (s.stage === "assets" ? { ...s, override } : s)) }));
+    const base = { actor: "operator", reason: "manual pick" };
+    expect(withOverride({ ...base, from: ["non-candidate"], to: ["different-non-candidate"] })).toMatch(/override from non-candidate, which is not a candidate[\s\S]*override to does not match chosen/);
+    expect(withOverride({ ...base, from: [], to: [...assets.chosen].reverse() })).toBe("");
+    if (assets.chosen.length > 1) expect(withOverride({ ...base, from: [], to: [assets.chosen.join("\u0000")] })).toMatch(/override to does not match chosen/);
   });
 
   it("detects a spec whose assets or bundle disagree with its decision", () => {

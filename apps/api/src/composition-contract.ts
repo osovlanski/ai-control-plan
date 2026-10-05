@@ -122,6 +122,10 @@ export function validateCompositionDecision(body: unknown, supported = COMPOSITI
       if (!candidates.has(ref)) errors.push(`/stages/${i} chose ${ref}, which is not a candidate`);
       if (removed.has(ref)) errors.push(`/stages/${i} chose ${ref}, which a filter removed`);
     }
+    if (stage.override) {
+      for (const ref of stage.override.from) if (!candidates.has(ref)) errors.push(`/stages/${i}/override from ${ref}, which is not a candidate`);
+      if (JSON.stringify([...stage.override.to].sort()) !== JSON.stringify([...stage.chosen].sort())) errors.push(`/stages/${i}/override to does not match chosen`);
+    }
   });
   return errors.length ? { ok: false, errors } : { ok: true, value: decision };
 }

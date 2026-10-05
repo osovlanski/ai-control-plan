@@ -60,7 +60,7 @@ letter, never contains `\`, and never contains a `.` or `..` segment. The allowl
 per-harness narrowing is a validator rule. Widening the allowlist is a minor version.
 
 **Files.** `files` MUST be sorted by `relPath` in strictly ascending byte order, so paths are
-unique. `content` is UTF-8 text. `digest` is `sha256:` + hex sha256 of the UTF-8 bytes of
+unique. `content` is UTF-8 text and must be well-formed Unicode: an unpaired surrogate is rejected (RFC 8785). `digest` is `sha256:` + hex sha256 of the UTF-8 bytes of
 `content`. An empty `files` array is valid.
 
 **Manifest.** `kind` is `fragment`, `memory_bundle` or `skill`. Every requested input appears
