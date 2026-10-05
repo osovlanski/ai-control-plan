@@ -20,6 +20,8 @@ const addFormats = ((addFormatsImport as unknown as { default?: unknown }).defau
 export const REGISTRY_SCHEMA_VERSION = "1.0";
 export const REGISTRY_VERSION_HEADER = "x-cockpit-registry-version";
 /** Fields excluded from snapshotDigest because they change without the asset changing. */
+/** docs/contracts/registry-v1.md §Limits: decoded content bytes per asset. */
+export const MAX_ASSET_CONTENT_BYTES = 4 * 1024 * 1024;
 export const VOLATILE_ASSET_FIELDS = ["installedAt", "lastUsedAt", "stats"] as const;
 
 export const REGISTRY_CONTRACT_DIR = join(dirname(fileURLToPath(import.meta.url)), "../../../contracts/registry/v1");
@@ -126,7 +128,13 @@ export function validateSnapshot(body: unknown, supported = REGISTRY_SCHEMA_VERS
     if (asset.requirements.commands && !isSorted(asset.requirements.commands)) errors.push(`/assets/${i}/requirements/commands is not sorted`);
   });
   if (errors.length === 0) {
-    const expected = computeSnapshotDigest(snapshot.assets);
+    let expected: string;
+    try {
+      expected = computeSnapshotDigest(snapshot.assets);
+    } catch (err) {
+      // A non-integer in digested metadata is a producer error, not a crash.
+      return { ok: false, errors: [`assets are outside the digested value space: ${(err as Error).message}`] };
+    }
     if (expected !== snapshot.snapshotDigest) errors.push(`snapshotDigest ${snapshot.snapshotDigest} does not match ${expected}`);
   }
   return errors.length ? { ok: false, errors } : { ok: true, value: snapshot };
@@ -137,6 +145,9 @@ export function validateContent(body: unknown, supported = REGISTRY_SCHEMA_VERSI
   if (!isCompatibleVersion(version, supported)) return { ok: false, errors: [`unsupported schemaVersion ${JSON.stringify(version)}; client supports ${supported}`] };
   if (!contentSchema(body)) return { ok: false, errors: schemaErrors(contentSchema) };
   const content = body as RegistryAssetContent;
+  // Size the decoded bytes before decoding anything, so an over-limit body is rejected without buffering it.
+  const decodedBytes = content.files.reduce((sum, f) => sum + Buffer.byteLength(f.content, f.encoding === "base64" ? "base64" : "utf8"), 0);
+  if (decodedBytes > MAX_ASSET_CONTENT_BYTES) return { ok: false, errors: [`payload_too_large: ${decodedBytes} decoded content bytes exceed ${MAX_ASSET_CONTENT_BYTES}`] };
   const errors: string[] = [];
   const files = content.files.map((f, i) => {
     const bytes = Buffer.from(f.content, f.encoding === "base64" ? "base64" : "utf8");

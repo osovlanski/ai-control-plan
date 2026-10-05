@@ -123,8 +123,8 @@ between the two reads; the consumer re-reads the snapshot and never mixes the tw
 - Schema guards: `mcp.env` values must be `SecretRef` objects, so a string value fails validation.
   `mcp.command`, `mcp.args[]`, `mcp.url` and the `server.json` content must not contain a
   recognised inline credential (`Bearer <value>`, `token=`, `api_key=`, `secret=`, `password=`,
-  `key=`, case-insensitive) unless the value is a `${VAR}` placeholder or the redaction marker
-  `***`. The producer replaces any such value with `***` before emitting it.
+  `key=`, case-insensitive, quoted or unquoted, with optional spaces around `=`) unless the value
+  is a `${VAR}` placeholder or the redaction marker `***`. The producer replaces any such value with `***` before emitting it.
 - Guards only cover recognised shapes. The normative rule above is the requirement; the guards
   catch common violations.
 
@@ -135,6 +135,9 @@ between the two reads; the consumer re-reads the snapshot and never mixes the tw
 | Assets per snapshot | 5000 | `413 payload_too_large` |
 | Content files per asset | 500 | `413 payload_too_large` |
 | Content bytes per asset (decoded) | 4 MiB | `413 payload_too_large` |
+
+A consumer enforces the decoded-bytes limit itself: the reference validator sums the decoded size of
+every file and rejects a body above 4 MiB (`MAX_ASSET_CONTENT_BYTES`) before decoding it.
 
 Errors use `{ "error": { "code", "message" } }`. Codes: `unauthenticated` (401), `bad_request`
 (400), `not_found` (404), `payload_too_large` (413), `unavailable`
