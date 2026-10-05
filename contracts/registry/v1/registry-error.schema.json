@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-plane.local/contracts/registry/v1/registry-error.schema.json",
+  "title": "RegistryError",
+  "description": "Cockpit registry v1 structured error body, sent with every non-2xx response.",
+  "type": "object",
+  "required": ["error"],
+  "properties": {
+    "error": {
+      "type": "object",
+      "required": ["code", "message"],
+      "properties": {
+        "code": {
+          "enum": [
+            "unauthenticated",
+            "bad_request",
+            "not_found",
+            "payload_too_large",
+            "unavailable",
+            "internal"
+          ]
+        },
+        "message": { "type": "string", "maxLength": 1024 }
+      }
+    }
+  }
+}

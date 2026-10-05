@@ -1,0 +1,112 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-plane.local/contracts/registry/v1/registry-asset-content.schema.json",
+  "title": "RegistryAssetContent",
+  "description": "Cockpit registry v1: the current content of one asset. No history. The asset digest is recomputable from files (docs/contracts/registry-v1.md \u00a7Digests). For an mcp_server, `mcp` is authoritative and the single server.json file must equal its canonical JSON.",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "id",
+    "kind",
+    "digest",
+    "files"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "$ref": "registry-snapshot.schema.json#/$defs/schemaVersion"
+    },
+    "id": {
+      "$ref": "registry-snapshot.schema.json#/$defs/assetId"
+    },
+    "kind": {
+      "enum": [
+        "skill",
+        "plugin",
+        "agent",
+        "hook",
+        "mcp_server",
+        "rule"
+      ]
+    },
+    "digest": {
+      "$ref": "registry-snapshot.schema.json#/$defs/digest"
+    },
+    "files": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 500,
+      "items": {
+        "type": "object",
+        "required": [
+          "path",
+          "size",
+          "digest",
+          "encoding",
+          "content"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.?(?:/|$))[^\\u0000\\\\]+$"
+          },
+          "size": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "digest": {
+            "$ref": "registry-snapshot.schema.json#/$defs/digest"
+          },
+          "encoding": {
+            "enum": [
+              "utf8",
+              "base64"
+            ]
+          },
+          "content": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  },
+  "if": {
+    "properties": {
+      "kind": {
+        "const": "mcp_server"
+      }
+    },
+    "required": [
+      "kind"
+    ]
+  },
+  "then": {
+    "required": [
+      "mcp"
+    ],
+    "properties": {
+      "mcp": {
+        "$ref": "registry-snapshot.schema.json#/$defs/McpLaunch"
+      },
+      "files": {
+        "maxItems": 1,
+        "items": {
+          "properties": {
+            "path": {
+              "const": "server.json"
+            },
+            "encoding": {
+              "const": "utf8"
+            },
+            "content": {
+              "$ref": "registry-snapshot.schema.json#/$defs/noInlineSecret"
+            }
+          },
+          "type": "object"
+        },
+        "type": "array"
+      }
+    }
+  }
+}
