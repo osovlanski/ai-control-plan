@@ -473,3 +473,13 @@ branch is unchanged. Evidence, limits and verification:
 - **§4.4 now covers commands.** `buildToolGateState` withholds `commandText` unless the repo is in `repoAllowlist`, and a task with no repo counts as untrusted. Judges skip a state with no command, so discovery reports "command withheld" and sends nothing. Operator scratch tasks have no repo, so discovery on operator traffic now judges nothing unless a repo is allowlisted. Floors still read the raw command.
 - **Discovery reads `decisions.discoveryProvider`** (default `model`, as before) and checks I-D7 where it sends. `typesafe` needs `typesafeApiKeyRef`, and only in the personal workspace. Jev is pinned by `decisions.typesafeModel` (default `jev-1.13`), and `latest` is refused. Candidates record the provider and the reported model. Nobody has checked whether OpenRouter accepts `jev-1.13`.
 
+## 2026-10-04 — stage 2 remote browser auth boundary (PROPOSED)
+
+[Remote auth design](adr/remote-auth-design.md) grounds the deployment ADR's stage 2
+controls in current local auth and specifies loopback acceptance cases. API-owned
+owner-allowlisted OIDC is recommended; the provider and live B versus C remain
+owner questions. Remote sessions/grants must be separate from local bootstrap and
+bearer credentials; two origins on unrelated sites require a browser cookie gate.
+This is design only: the non-loopback refusal remains, remote deployment is not
+authorized, and stage 3 workers are not specified. Do not treat these proposed
+config fields or SSE resume semantics as implemented.
