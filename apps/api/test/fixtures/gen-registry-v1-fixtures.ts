@@ -76,6 +76,11 @@ const secretArg = clone();
 secretArg.assets[2]!.mcp!.args = ["--stdio", `--api_key=${FAKE_SECRET}`];
 write("invalid/mcp-inline-secret-arg.json", secretArg);
 
+const quotedSecretArg = clone();
+quotedSecretArg.assets[2]!.mcp!.args = ["--stdio", `token="${FAKE_SECRET}"`];
+quotedSecretArg.snapshotDigest = computeSnapshotDigest(quotedSecretArg.assets);
+write("invalid/mcp-quoted-secret-arg.json", quotedSecretArg);
+
 const unordered = clone();
 unordered.assets = [unordered.assets[1]!, unordered.assets[0]!, unordered.assets[2]!];
 unordered.snapshotDigest = computeSnapshotDigest(unordered.assets);

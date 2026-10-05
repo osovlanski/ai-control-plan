@@ -36,10 +36,10 @@
       }
     },
     "noInlineSecret": {
-      "description": "Rejects a recognised inline credential (Bearer token, key=/token=/secret=/password= value) unless it is a ${VAR} placeholder or the redaction marker ***.",
+      "description": "Rejects a recognised inline credential (Bearer token, key=/token=/secret=/password= value, quoted or not, with optional spaces around =) unless it is a ${VAR} placeholder or the redaction marker ***.",
       "type": "string",
       "maxLength": 4096,
-      "not": { "pattern": "\\b(?:[Bb][Ee][Aa][Rr][Ee][Rr]\\s+|(?:[Aa][Pp][Ii]_?[Kk][Ee][Yy]|[Tt][Oo][Kk][Ee][Nn]|[Aa][Cc][Cc][Ee][Ss][Ss]_[Tt][Oo][Kk][Ee][Nn]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]|[Kk][Ee][Yy])=)(?!\\$\\{|\\*\\*\\*)[^\\s&\"']" }
+      "not": { "pattern": "\\b(?:[Bb][Ee][Aa][Rr][Ee][Rr]\\s+|(?:[Aa][Pp][Ii]_?[Kk][Ee][Yy]|[Tt][Oo][Kk][Ee][Nn]|[Aa][Cc][Cc][Ee][Ss][Ss]_[Tt][Oo][Kk][Ee][Nn]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]|[Kk][Ee][Yy])\\s*=\\s*[\"']?)(?!\\$\\{|\\*\\*\\*)[^\\s&\"']" }
     },
     "McpLaunch": {
       "description": "MCP server launch shape. env values are SecretRefs only: a plain string value is a schema violation.",
