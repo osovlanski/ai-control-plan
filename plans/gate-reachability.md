@@ -348,6 +348,11 @@ On the discovery path, were Jev wired in:
 
 ## Part D — Gaps ranked by exposure
 
+**Status (K19l, 2026-10-05):** #1, #7, #9 and the pin and model record in #10 are implemented on
+branch `claude/k19l-honest-evidence`. #9 went further than proposed. An untrusted repo's whole
+command is withheld (§4.4), not only its content fields. The owner has not decided whether to put
+Jev on discovery. The default stays `model`.
+
 Exposure is what flows through each gap on the operator workspace today (all-time harness traffic:
 23 Claude tool calls; since T0: 2) and what would flow under the defaults.
 

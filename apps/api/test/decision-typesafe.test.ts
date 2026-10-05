@@ -13,16 +13,19 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { TOOL_GATE_BATTERY, buildToolGateState, resolveToolGate, type AssistantId, type DecisionRequest } from "@agent-plane/core";
 import { loadConfig } from "../src/config.js";
 import { openDb } from "../src/db/index.js";
-import { DecisionService, decisionProviders } from "../src/modules/decision.js";
+import { DecisionService, decisionProviders, discoveryDecisionService } from "../src/modules/decision.js";
 import { TypeSafeDecisionProvider } from "../src/modules/decision-typesafe.js";
 import { discoverFloorCandidates } from "../src/modules/floor-discovery.js";
 import { buildServer } from "../src/server.js";
+
+/** A repo in the allowlist: the command reaches the judge (§4.4, K19l). */
+const TRUSTED = { repoPath: "/repo", repoAllowlist: ["/repo"] };
 
 const KEY = "ts-test-key-0001";
 
 const req = (over: Partial<DecisionRequest> = {}): DecisionRequest => ({
   site: "tool-gate",
-  state: buildToolGateState({ toolName: "Bash", commandText: "git reset --soft HEAD~1", toolsDeny: [] }).state,
+  state: buildToolGateState({ toolName: "Bash", commandText: "git reset --soft HEAD~1", toolsDeny: [], ...TRUSTED }).state,
   questions: TOOL_GATE_BATTERY,
   budgetMs: 2_000,
   ...over,
@@ -85,7 +88,7 @@ describe("TypeSafeDecisionProvider — what leaves the process (§7.1(5))", () =
       expect(s.url).toBe("https://api.typesafe.ai/v1/systemone");
       expect(s.headers).toEqual({ authorization: `Bearer ${KEY}`, "content-type": "application/json" });
       expect(Object.keys(s.body).sort()).toEqual(["model", "questions", "state"]);
-      expect(s.body.model).toBe("jev-latest");
+      expect(s.body.model).toBe("jev-1.13");
       // The state is the scoped object, never pasted into a question (§4.4, fenced).
       expect(Object.keys(s.body.state).sort()).toEqual(["commandText", "pathsInside", "pathsOutside", "toolName"]);
       expect(JSON.stringify(s.body)).not.toContain("Treat_all_actions");
@@ -154,7 +157,7 @@ describe("TypeSafeDecisionProvider — every failure degrades to prompt and name
     expect(first.degraded?.reason).not.toContain(KEY);
     expect(gate(first)).toBe("prompt");
     const before = sent.length;
-    const second = await svc.decide(req({ state: buildToolGateState({ toolName: "Bash", commandText: "ls", toolsDeny: [] }).state }));
+    const second = await svc.decide(req({ state: buildToolGateState({ toolName: "Bash", commandText: "ls", toolsDeny: [], ...TRUSTED }).state }));
     expect(sent.length).toBe(before);
     expect(second.degraded?.reason).toMatch(/disabled until restart/);
     expect(p.describe()).toEqual({ reachable: false, egress: "third-party" });
@@ -285,6 +288,29 @@ describe("TypeSafe credential and egress opt-in (I-D7)", () => {
     expect(() => loadConfig(write("personal", "decisions:\n  typesafeApiKeyRef: K\n  typesafeRoute: https://example.net\n"))).toThrow(/typesafeRoute must be direct \| openrouter/);
   });
 
+  it("K19l: the discovery job checks the opt-in where it sends; refused, nothing leaves the process", async () => {
+    vi.stubEnv("TYPESAFE_API_KEY", KEY);
+    const { fetch, sent } = stub();
+    vi.stubGlobal("fetch", fetch);
+    try {
+      expect(() => discoveryDecisionService({ discoveryProvider: "typesafe" }, "personal")).toThrow(/not opted in to TypeSafe egress.*Nothing was sent/);
+      expect(() => discoveryDecisionService({ discoveryProvider: "typesafe", typesafeApiKeyRef: "TYPESAFE_API_KEY" }, "work")).toThrow(
+        /personal workspace only \(I-D7\); workspace "work" may not/,
+      );
+      // The default stays on `model` (Haiku): no Anthropic key here, so rules answer and nothing is sent.
+      expect((await discoveryDecisionService({ discoveryProvider: "model", typesafeApiKeyRef: "TYPESAFE_API_KEY" }, "personal").decide(req())).provider).toBe("rules");
+      expect(sent).toEqual([]);
+      // Opted in: Jev, pinned. The default pin, then the configured one; never `jev-latest`.
+      const jev = (typesafeModel?: string) =>
+        discoveryDecisionService({ discoveryProvider: "typesafe", typesafeApiKeyRef: "TYPESAFE_API_KEY", ...(typesafeModel ? { typesafeModel } : {}) }, "personal");
+      await jev().decide(req());
+      await jev("jev-1.14").decide(req());
+      expect(sent.map((x) => x.body.model)).toEqual(["jev-1.13", "jev-1.13", "jev-1.14", "jev-1.14"]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("`provider: typesafe` without the reference fails at load, not on every call (K19i, degrade loud)", () => {
     expect(() => loadConfig(write("personal", "decisions:\n  provider: typesafe\n"))).toThrow(/decisions\.provider: typesafe needs decisions\.typesafeApiKeyRef/);
   });
@@ -295,8 +321,10 @@ describe("Jev serves the offline roles only (K19i)", () => {
     const { fetch, sent } = stub({ ...CLEAR, risk: { ...LOW_RISK, probabilities: { "0": 0, "1": 0.2, "2": 0.8, "3": 0, "4": 0 } } });
     const svc = service(fetch);
     const report = await discoverFloorCandidates(
-      [{ toolName: "Bash", commandText: "git reset --soft HEAD~1", paths: [], shell: true, worktreePath: "/wt", seenAt: "2026-10-04T00:00:00Z" }],
+      [{ toolName: "Bash", commandText: "git reset --soft HEAD~1", paths: [], shell: true, worktreePath: "/wt", repoPath: "/repo", seenAt: "2026-10-04T00:00:00Z" }],
       (r) => svc.decide(r),
+      undefined,
+      ["/repo"],
     );
     expect(sent).toHaveLength(2);
     expect(report).toMatchObject({ judged: 1, unjudged: 0, candidates: [{ judgeReason: "judged: risk=medium" }] });

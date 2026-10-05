@@ -24,7 +24,7 @@ const env = (overrides: Record<string, string> = {}) => ({ AGENT_PLANE_HOME: hom
 describe("decisions config", () => {
   it("defaults to the rules provider, which makes no network call", () => {
     const config = loadConfig(env());
-    expect(config.decisions).toEqual({ provider: "rules", sites: { "tool-gate": { mode: "shadow" } }, mcpTools: {} });
+    expect(config.decisions).toEqual({ provider: "rules", discoveryProvider: "model", sites: { "tool-gate": { mode: "shadow" } }, mcpTools: {} });
   });
 
   it("renders the decisions block in the first-boot default config", () => {
@@ -39,7 +39,25 @@ describe("decisions config", () => {
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, "config.yaml"), "decisions:\n  provider: typesafe\n  typesafeApiKeyRef: TYPESAFE_API_KEY\n");
     const config = loadConfig(env({ TYPESAFE_API_KEY: "should-never-be-read" }));
-    expect(config.decisions).toEqual({ provider: "typesafe", typesafeApiKeyRef: "TYPESAFE_API_KEY", sites: { "tool-gate": { mode: "shadow" } }, mcpTools: {} });
+    expect(config.decisions).toEqual({ provider: "typesafe", discoveryProvider: "model", typesafeApiKeyRef: "TYPESAFE_API_KEY", sites: { "tool-gate": { mode: "shadow" } }, mcpTools: {} });
+  });
+
+  it("K19l: discoveryProvider, the Jev pin and the soak minimum resolve; bad values fail at load", () => {
+    const dir = join(home, "personal");
+    mkdirSync(dir, { recursive: true });
+    const load = (yaml: string) => {
+      writeFileSync(join(dir, "config.yaml"), yaml);
+      return loadConfig(env()).decisions;
+    };
+    expect(
+      load("decisions:\n  discoveryProvider: typesafe\n  typesafeApiKeyRef: K\n  typesafeModel: jev-1.14\n  sites:\n    tool-gate:\n      soakMinPreExecCalls: 50\n"),
+    ).toMatchObject({ provider: "rules", discoveryProvider: "typesafe", typesafeModel: "jev-1.14", sites: { "tool-gate": { mode: "shadow", soakMinPreExecCalls: 50 } } });
+    expect(() => load("decisions:\n  discoveryProvider: typesafe\n")).toThrow(/discoveryProvider: typesafe needs decisions\.typesafeApiKeyRef/);
+    expect(() => load("decisions:\n  discoveryProvider: rules\n")).toThrow(/discoveryProvider must be model \| typesafe/);
+    expect(() => load("decisions:\n  typesafeModel: jev-latest\n")).toThrow(/never a moving alias/);
+    for (const bad of ["0", "-3", "2.5", "lots"]) {
+      expect(() => load(`decisions:\n  sites:\n    tool-gate:\n      soakMinPreExecCalls: ${bad}\n`)).toThrow(/soakMinPreExecCalls must be a positive integer/);
+    }
   });
 
   it("rejects an unknown provider", () => {

@@ -377,9 +377,9 @@ merges.
 
 | # | What it needs | Minimum | Verdict rule in `soak:check` |
 |---|---|---|---|
-| 1 | Shadow `tool-gate` rows from normal use | ≥ 500 rows since T0, or ≥ 14 days since T0 with at least one row. At the post-flip pace this is likely the 14 days: **earliest 2026-10-09T21:31:57Z**. | PASS if either holds |
-| 2 | Every disagreement read by a human, with the reading recorded here | (1), plus every `prompt` row since T0 read | PASS if (1) holds and no prompt row is newer than `--read-through` |
-| 7 | The prompt rate measured over the soak and read by the operator, with the reading recorded here | (1), plus a reading that covers the last row | PASS if (1) holds and the last row is not newer than `--read-through` |
+| 1 | Distinct `pre-exec` calls of the pair being judged (default Claude under `prompt-on-escalation`; `--adapter`, `--approval-mode`) | ≥ 500, or ≥ 14 days since T0 **and** ≥ the owner's `decisions.sites.tool-gate.soakMinPreExecCalls`. No minimum set: INSUFFICIENT, never PASS (K19l, plan §7.4). A call that writes a `post-start` and a `pre-exec` row counts once. | PASS if either holds, else INSUFFICIENT |
+| 2 | Every disagreement read by a human, with the reading recorded here | (1), plus every prompting call since T0 read | INSUFFICIENT while (1) is; else PASS if no prompting call is newer than `--read-through` |
+| 7 | The prompt rate measured over the soak and read by the operator, with the reading recorded here | (1), plus a reading that covers the last row | INSUFFICIENT while (1) is; else PASS if the last row is not newer than `--read-through` |
 
 Record a reading here as one line with its date, its `--read-through` time, and what was
 concluded for each floor reason.
@@ -388,34 +388,18 @@ concluded for each floor reason.
 `:since` is T0.
 
 ```sql
--- §7.1(1) volume
-SELECT COUNT(*) AS n, MIN(created_at) AS first, MAX(created_at) AS last
-  FROM decision_records
- WHERE site = 'tool-gate' AND mode = 'shadow' AND created_at >= :since;
-
--- §7.1(2) disagreements to read
-SELECT id, task_id, gate_hook, gate_reason, created_at
-  FROM decision_records
- WHERE site = 'tool-gate' AND mode = 'shadow' AND created_at >= :since
-   AND gate_outcome = 'prompt'
- ORDER BY id;
-
--- §7.1(7) prompt rate, per hook
-SELECT gate_hook, COUNT(*) AS calls, SUM(gate_outcome = 'prompt') AS prompts
-  FROM decision_records
- WHERE site = 'tool-gate' AND mode = 'shadow' AND created_at >= :since
-   AND gate_outcome IN ('auto-approve', 'prompt')
- GROUP BY gate_hook
- ORDER BY gate_hook;
-
--- prompts grouped by floor reason
-SELECT gate_hook, gate_reason, COUNT(*) AS prompts
-  FROM decision_records
- WHERE site = 'tool-gate' AND mode = 'shadow' AND created_at >= :since
-   AND gate_outcome = 'prompt'
- GROUP BY gate_hook, gate_reason
- ORDER BY prompts DESC, gate_hook, gate_reason;
+SELECT d.session_id, d.gate_hook, d.gate_outcome, d.gate_reason, d.created_at
+  FROM decision_records d
+  JOIN runs r ON r.id = d.session_id
+  JOIN assistants a ON a.id = r.assistant_id
+  JOIN execution_requests e ON e.id = r.execution_request_id
+ WHERE d.site = 'tool-gate' AND d.mode = 'shadow' AND d.created_at >= :since
+   AND a.provider = :adapter AND json_extract(e.policy, '$.approval.mode') = :approvalMode
+ ORDER BY d.session_id, d.id
 ```
+
+Calls are counted from these rows in `toolGateSoakCheck`: within a session, a `pre-exec` row is the
+same call as the latest earlier unpaired `post-start` row (K19l).
 
 
 ### C — Remote deployment (Vercel / Railway frontend split)

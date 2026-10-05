@@ -65,7 +65,7 @@ export async function bootScenario(opts: BootOptions = {}): Promise<BootedScenar
       // M16 K19i: the nightly floor discovery job reads the tool calls real
       // scenarios made. The workspace is deleted below, so they are kept here.
       const keep = process.env.AGENT_PLANE_EVAL_TOOL_ACTIONS;
-      if (keep) for (const a of readRecentToolActions(db)) appendFileSync(keep, `${JSON.stringify(a)}\n`);
+      if (keep) for (const a of readRecentToolActions(db)) appendFileSync(keep, `${JSON.stringify({ ...a, repoAllowlist: config.repoAllowlist })}\n`);
       db.close();
       rmSync(home, { recursive: true, force: true });
     },

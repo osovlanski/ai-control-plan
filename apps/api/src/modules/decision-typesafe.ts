@@ -30,8 +30,12 @@ import { RulesDecisionProvider, TOOL_GATE_JUDGED_KEYS, TOOL_GATE_QUESTION_GROUPS
 
 /** The two documented endpoints (`decisions.typesafeRoute`). `/v1/systemone` is appended to either. */
 export const TYPESAFE_ROUTES = { direct: "https://api.typesafe.ai", openrouter: "https://openrouter.ai/api" } as const;
-/** A moving alias; `modelReported` records the versioned id that answered (K7, §8). */
-export const DEFAULT_TYPESAFE_MODEL = "jev-latest";
+/**
+ * The pin (§4.2, K19l): every request names this version unless
+ * `decisions.typesafeModel` names another. Never `jev-latest`, a moving alias
+ * under which a calibration or a candidate cannot name what answered (K7, §8).
+ */
+export const DEFAULT_TYPESAFE_MODEL = "jev-1.13";
 
 type JudgedKey = (typeof TOOL_GATE_JUDGED_KEYS)[number];
 

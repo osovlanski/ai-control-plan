@@ -465,3 +465,11 @@ branch is unchanged. Evidence, limits and verification:
 - **Config cannot put Jev on discovery.** The bin hard-codes `model` and reads no `decisions.*` provider key. Nothing pins `jev-1.13`, because every path sends `jev-latest`. Discovery counts a degraded outcome as unjudged, so a Haiku fallback behind Jev adds nothing. Any switch needs code and an owner decision. The smallest proposal is `decisions.discoveryProvider` plus a pinned model, read only by the bin.
 - On the operator's running build (`2e3c9f4`), `provider: typesafe` still fails at startup, because Jev is not registered there.
 - Detail, matrices, search log and ranked fixes are in `plans/gate-reachability.md`.
+
+## 2026-10-05 — K19l: soak counts calls per pair; discovery checks its own egress (SHIPPED; nothing activated)
+
+- **The soak cannot pass on the clock.** `toolGateSoakCheck` counts distinct calls, not rows. It counts them for one adapter and approval mode (default `anthropic` / `prompt-on-escalation`). Volume is distinct `pre-exec` calls against the owner's `decisions.sites.tool-gate.soakMinPreExecCalls`. With no minimum it reports INSUFFICIENT. On the operator DB copy, since T0, at the 14-day mark, it reads 3 rows, 2 calls and 1 pre-exec call: INSUFFICIENT. All time it reads 42 rows, 23 calls and 19 pre-exec calls.
+- **Pairing is by order, not identity.** Rows carry no tool-use id. Within a session, a `pre-exec` row pairs with the latest earlier unpaired `post-start` row. If an adapter ever raises an approval with no `tool.started`, record the id.
+- **§4.4 now covers commands.** `buildToolGateState` withholds `commandText` unless the repo is in `repoAllowlist`, and a task with no repo counts as untrusted. Judges skip a state with no command, so discovery reports "command withheld" and sends nothing. Operator scratch tasks have no repo, so discovery on operator traffic now judges nothing unless a repo is allowlisted. Floors still read the raw command.
+- **Discovery reads `decisions.discoveryProvider`** (default `model`, as before) and checks I-D7 where it sends. `typesafe` needs `typesafeApiKeyRef`, and only in the personal workspace. Jev is pinned by `decisions.typesafeModel` (default `jev-1.13`), and `latest` is refused. Candidates record the provider and the reported model. Nobody has checked whether OpenRouter accepts `jev-1.13`.
+

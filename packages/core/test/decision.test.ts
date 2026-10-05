@@ -293,6 +293,18 @@ describe("K19g tool-gate floors — facts of the raw action, raise-only", () => 
     expect(floors({ commandText: `${"x".repeat(5_000)} && cat ~/.netrc` }).credential_reach).toBe("credential file named");
   });
 
+  it("K19l: an untrusted repo, or none, contributes no command text; floors still read it", () => {
+    // A Write's input is its file content (redacted sample of the discovery leak).
+    const commandText = JSON.stringify({ file_path: `${WT}/notes.md`, content: "customer list: [REDACTED] ..." });
+    const obs = { toolName: "Write", commandText, worktreePath: WT, paths: [`${WT}/notes.md`] };
+    const before = buildToolGateState({ ...obs, repoPath: "/repos/other", repoAllowlist: ["/repos/app"] });
+    expect(before.state.commandText).toBeUndefined();
+    expect(JSON.stringify(before.state)).not.toContain("customer list");
+    expect(buildToolGateState(obs).state.commandText).toBeUndefined(); // no repo at all
+    expect(buildToolGateState({ ...obs, repoPath: "/repos/app", repoAllowlist: ["/repos/app"] }).state.commandText).toBe(commandText);
+    expect(buildToolGateState({ toolName: "Bash", commandText: "cat ~/.netrc", repoPath: "/repos/other" }).floors.credential_reach).toBe("credential file named");
+  });
+
   it("a floor only raises: floored keys read 1, everything else is verbatim", () => {
     const floored = floorToolGateAnswers(lowJudge.answers, { destructive: "recursive forced rm" });
     expect(floored.destructive).toEqual({ kind: "noul", value: 1 });
