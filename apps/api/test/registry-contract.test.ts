@@ -62,6 +62,9 @@ describe("registry contract v1 digests", () => {
   it("canonicalises key order and rejects non-integer numbers", () => {
     expect(canonicalJson({ b: 1, a: [true, null, "x"] })).toBe('{"a":[true,null,"x"],"b":1}');
     expect(() => canonicalJson({ a: 1.5 })).toThrow();
+    expect(() => canonicalJson({ a: "x\ud800" })).toThrow(/unpaired surrogate/);
+    expect(() => canonicalJson({ ["\udc00"]: 1 })).toThrow(/unpaired surrogate/);
+    expect(canonicalJson({ a: "\ud83d\ude00" })).toBe('{"a":"\ud83d\ude00"}');
   });
 
   it("rejects a content body whose bytes do not match its digest", () => {
@@ -93,6 +96,37 @@ describe("registry contract v1 secret and size guards", () => {
     for (const arg of ['token="***"', "token=${API_TOKEN}", "token='${API_TOKEN}'", "--stdio"]) {
       expect(validateSnapshot(withArg(arg)), arg).toMatchObject({ ok: true });
     }
+  });
+
+  it("rejects an unpaired surrogate in utf8 content, a file path or mcp metadata, and accepts a pair", () => {
+    type Content = { files: Array<{ path: string; content: string; encoding: string; size: number; digest: string }>; digest: string };
+    // Size and digests match the UTF-8 bytes (U+FFFD for the lone surrogate), so only the Unicode rule can reject.
+    const withFile = (patch: { path?: string; content?: string }) => {
+      const doc = structuredClone(fixture("valid/content-skill.json")) as Content;
+      const file = doc.files[0]!;
+      Object.assign(file, patch);
+      const bytes = Buffer.from(file.content, "utf8");
+      file.size = bytes.length;
+      file.digest = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+      doc.digest = computeAssetDigest(doc.files.map((f) => ({ path: f.path, bytes: Buffer.from(f.content, f.encoding === "base64" ? "base64" : "utf8") })));
+      const result = validateContent(doc);
+      return result.ok ? "" : result.errors.join("\n");
+    };
+    const original = (fixture("valid/content-skill.json") as Content).files[0]!;
+    expect(withFile({ content: original.content + "\ud800" })).toBe("/files/0 content contains an unpaired surrogate");
+    expect(withFile({ path: original.path.replace(/[^/]+$/, "\udc00.md") })).toMatch(/\/files\/0 path contains an unpaired surrogate/);
+    expect(withFile({ content: original.content + "\ud83d\ude00" })).toBe("");
+    const mcp = structuredClone(fixture("valid/content-mcp.json")) as { mcp: Record<string, unknown> };
+    mcp.mcp.futureField = "\udc00";
+    const result = validateContent(mcp);
+    expect(result.ok ? "" : result.errors.join("\n")).toMatch(/\/mcp is outside the digested value space/);
+  });
+
+  it("classifies an unpaired surrogate as a validation failure instead of throwing", () => {
+    const snapshot = structuredClone(fixture("valid/snapshot.json")) as RegistrySnapshot & { assets: Array<Record<string, unknown>> };
+    snapshot.assets[0]!.futureField = "x\ud800";
+    const result = validateSnapshot(snapshot);
+    expect(result.ok ? "" : result.errors.join("\n")).toMatch(/unpaired surrogate/);
   });
 
   it("classifies non-integer digested metadata as a validation failure instead of throwing", () => {

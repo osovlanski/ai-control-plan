@@ -63,17 +63,21 @@ const snapshotSchema = ajv.getSchema("registry-snapshot.schema.json")!;
 const contentSchema = ajv.getSchema("registry-asset-content.schema.json")!;
 const errorSchema = ajv.getSchema("registry-error.schema.json")!;
 
+/** An unpaired UTF-16 surrogate: RFC 8785 rejects it, and UTF-8 encoding silently turns it into U+FFFD. */
+export const hasLoneSurrogate = (text: string) => /\p{Cs}/u.test(text);
+
 /** RFC 8785 (JCS) for the value space the contract uses: strings, booleans, integers, null, arrays, objects. */
 export function canonicalJson(value: unknown): string {
   if (value === null || typeof value !== "object") {
     if (typeof value === "number" && !Number.isSafeInteger(value)) throw new Error("canonicalJson: non-integer numbers are not part of the digested value space");
+    if (typeof value === "string" && hasLoneSurrogate(value)) throw new Error("canonicalJson: strings must not contain an unpaired surrogate");
     return JSON.stringify(value);
   }
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
   const entries = Object.entries(value as Record<string, unknown>)
     .filter(([, v]) => v !== undefined)
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
-  return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${canonicalJson(v)}`).join(",")}}`;
+  return `{${entries.map(([k, v]) => `${canonicalJson(k)}:${canonicalJson(v)}`).join(",")}}`;
 }
 
 const sha256 = (data: string | Buffer) => createHash("sha256").update(data).digest("hex");
@@ -150,13 +154,23 @@ export function validateContent(body: unknown, supported = REGISTRY_SCHEMA_VERSI
   if (decodedBytes > MAX_ASSET_CONTENT_BYTES) return { ok: false, errors: [`payload_too_large: ${decodedBytes} decoded content bytes exceed ${MAX_ASSET_CONTENT_BYTES}`] };
   const errors: string[] = [];
   const files = content.files.map((f, i) => {
+    if (hasLoneSurrogate(f.path)) errors.push(`/files/${i} path contains an unpaired surrogate`);
+    if (f.encoding === "utf8" && hasLoneSurrogate(f.content)) errors.push(`/files/${i} content contains an unpaired surrogate`);
     const bytes = Buffer.from(f.content, f.encoding === "base64" ? "base64" : "utf8");
     if (bytes.length !== f.size) errors.push(`/files/${i} size ${f.size} does not match ${bytes.length} bytes`);
     if (`sha256:${sha256(bytes)}` !== f.digest) errors.push(`/files/${i} digest does not match its bytes`);
     return { path: f.path, bytes };
   });
   if (new Set(files.map((f) => f.path)).size !== files.length) errors.push("/files has duplicate paths");
-  if (content.kind === "mcp_server" && content.files[0]?.content !== canonicalJson(content.mcp)) errors.push("/files/0 server.json is not the canonical JSON of /mcp");
+  if (content.kind === "mcp_server") {
+    let canonical: string | undefined;
+    try {
+      canonical = canonicalJson(content.mcp);
+    } catch (err) {
+      errors.push(`/mcp is outside the digested value space: ${(err as Error).message}`);
+    }
+    if (canonical !== undefined && content.files[0]?.content !== canonical) errors.push("/files/0 server.json is not the canonical JSON of /mcp");
+  }
   const expected = computeAssetDigest(files);
   if (expected !== content.digest) errors.push(`digest ${content.digest} does not match ${expected}`);
   return errors.length ? { ok: false, errors } : { ok: true, value: content };
