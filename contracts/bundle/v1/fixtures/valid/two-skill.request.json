@@ -6,7 +6,20 @@
     "typescript-style"
   ],
   "memoryBundles": [
-    "mem-example-notes"
+    {
+      "id": "mem-example-notes",
+      "digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    }
+  ],
+  "skills": [
+    {
+      "id": "claude-skills:example-review",
+      "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+    },
+    {
+      "id": "claude-skills:example-tests",
+      "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+    }
   ],
   "model": {
     "id": "example-model",

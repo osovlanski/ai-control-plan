@@ -22,11 +22,16 @@ The key words MUST, MUST NOT, SHOULD and MAY are used as in RFC 2119.
 ## BundleRequest
 
 ```text
-{ schemaVersion, harness, fragments: [name], memoryBundles: [id], model: { id, charsPerToken }, tokenBudget }
+{ schemaVersion, harness, fragments: [name], memoryBundles: [{ id, digest }], skills: [{ id, digest }],
+  model: { id, charsPerToken }, tokenBudget }
 ```
 
 - `harness` is `claude-code` or `codex`.
-- `fragments` and `memoryBundles` are sorted ascending (byte order) with no duplicates.
+- `fragments` is sorted ascending (byte order) with no duplicates. `memoryBundles` and `skills`
+  are sorted by `id`, strictly.
+- **Memory bundles and skills are pinned by digest.** Cockpit renders exactly that revision or
+  fails the request; it never substitutes the current content. `skills` are the Composer's
+  selected skills (registry v1 ids and digests) and the only skills that may be rendered.
 - `model.charsPerToken` is the per-model estimator ratio (plan §3.3 stage 4). `tokenBudget` is the
   estimated-token ceiling for the whole bundle.
 - **There is no output path.** The request object is closed: an unknown field, including any
@@ -39,7 +44,7 @@ The key words MUST, MUST NOT, SHOULD and MAY are used as in RFC 2119.
 ```text
 { schemaVersion, files: [{ relPath, content, digest }], manifest }
 manifest = { harness, bundleDigest, compiler: { name, version },
-             included: [{ kind, ref, digest, reason }], excluded: [{ kind, ref, reason }],
+             included: [{ kind, ref, digest, reason, relPath? }], excluded: [{ kind, ref, reason }],
              tokens: { estimated, tokenMethod: "estimated", charsPerToken, budget } }
 ```
 
@@ -58,14 +63,25 @@ per-harness narrowing is a validator rule. Widening the allowlist is a minor ver
 unique. `content` is UTF-8 text. `digest` is `sha256:` + hex sha256 of the UTF-8 bytes of
 `content`. An empty `files` array is valid.
 
-**Manifest.** `kind` is `fragment` or `memory_bundle`. Every requested fragment and memory bundle
-appears exactly once, in `included` (with the digest of the input that was rendered) or in
-`excluded`, each with a human-readable `reason`. `compiler` names the renderer and its semver.
+**Manifest.** `kind` is `fragment`, `memory_bundle` or `skill`. Every requested input appears
+exactly once, in `included` (with the digest of the revision that was rendered) or in `excluded`,
+each with a human-readable `reason`. An included pinned input MUST carry the pinned digest.
+`compiler` names the renderer and its semver.
+
+**Skills.** An included skill names the file it became in `relPath`. Every
+`.claude/skills/<id>/SKILL.md` file MUST be named by exactly one included skill, and every
+included skill MUST have its file, so a renderer cannot add a skill nobody selected. A harness
+without a skill path in this version (`codex`) excludes requested skills with a reason.
 
 **Tokens.** `estimated` is `ceil(total Unicode code points of all contents / charsPerToken)`, and
 `tokenMethod` is always `estimated`: no exact local tokenizer exists for Claude or Codex. The
 estimate MUST NOT exceed `budget`; the renderer excludes inputs (and says so) to fit.
 `charsPerToken` and `budget` echo the request.
+
+**Secrets.** Rendered content MUST NOT contain a secret value. Cockpit is responsible for not
+rendering one; the plane rejects a bundle whose content matches registry v1's inline-credential
+shape (`noInlineSecret`, read from that schema, not copied) and never persists it. As in registry
+v1, the guard covers recognised shapes only.
 
 The response object and the manifest are open for additive minor fields; `BundleFile` and the
 request are closed.
@@ -111,8 +127,10 @@ A dedicated immutable composition-blob store is the upgrade path if real bundles
 ## Versioning
 
 `schemaVersion` is `MAJOR.MINOR`, policy as in registry v1. Cockpit accepts a request whose minor
-does not exceed its own (the request is closed, so an older server cannot honour a newer field).
-The Control Plane accepts a response whose minor is at least its own.
+does not exceed its own (the request is closed, so an older server cannot honour a newer field),
+and answers with the **request's** `schemaVersion`, using only what that version allows. A newer
+server therefore never sends an older client a path its allowlist rejects; widening the allowlist
+is a minor version that a client opts into by asking for it.
 
 ## Distribution (open owner decision, plan §7.7a)
 

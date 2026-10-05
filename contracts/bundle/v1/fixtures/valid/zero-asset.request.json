@@ -5,6 +5,7 @@
     "typescript-style"
   ],
   "memoryBundles": [],
+  "skills": [],
   "model": {
     "id": "example-model",
     "charsPerToken": 3.7

@@ -36,6 +36,20 @@
         "ref": "typescript-style",
         "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "reason": "requested by the composition"
+      },
+      {
+        "kind": "skill",
+        "ref": "claude-skills:example-review",
+        "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "relPath": ".claude/skills/example-review/SKILL.md",
+        "reason": "selected by the composition"
+      },
+      {
+        "kind": "skill",
+        "ref": "claude-skills:example-tests",
+        "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+        "relPath": ".claude/skills/example-tests/SKILL.md",
+        "reason": "selected by the composition"
       }
     ],
     "excluded": [

@@ -90,9 +90,12 @@ validation. No field of either document holds a secret value.
 `checkComposition(spec, decision, bundle?)` holds when:
 
 - `spec.explanation_ref == decision.id` and both name the same `composition_revision_id`;
-- the assets stage's `chosen` set equals the ids of every attached asset;
-- with a bundle: its `bundleDigest`, harness, fragments, memory bundles, compiler and token
-  estimate match `context`.
+- the assets stage's `chosen` set equals the ids of every attached asset, and a chosen
+  candidate's `digest` equals the attached `digest`;
+- with a bundle: its `bundleDigest`, harness, fragments, compiler and token estimate match
+  `context`; its pinned `memoryBundles` and `skills` equal `context.memory_bundles` and
+  `assets.skills` by id **and digest**; every attached skill was rendered at that digest; and every
+  rendered memory bundle is one the spec records at that digest.
 
 ## Versioning
 

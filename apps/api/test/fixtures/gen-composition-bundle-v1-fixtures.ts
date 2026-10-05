@@ -23,7 +23,7 @@ function write(dir: string, name: string, value: unknown) {
 
 const claudeMd = "# Project context\n\n## typescript-style\n\nUse strict TypeScript. Prefer named exports.\n";
 const zeroRequest: BundleRequest = {
-  schemaVersion: "1.0", harness: "claude-code", fragments: ["typescript-style"], memoryBundles: [],
+  schemaVersion: "1.0", harness: "claude-code", fragments: ["typescript-style"], memoryBundles: [], skills: [],
   model: { id: "example-model", charsPerToken: 3.7 }, tokenBudget: 8000,
 };
 const zeroBundle = assembleBundle({
@@ -33,8 +33,12 @@ const zeroBundle = assembleBundle({
   excluded: [],
 });
 
+const reviewSkill = { id: "claude-skills:example-review", digest: digestOf("1") };
+const testsSkill = { id: "claude-skills:example-tests", digest: digestOf("2") };
+const memoryNotes = { id: "mem-example-notes", digest: digestOf("d") };
 const twoRequest: BundleRequest = {
-  schemaVersion: "1.0", harness: "claude-code", fragments: ["repo:example", "typescript-style"], memoryBundles: ["mem-example-notes"],
+  schemaVersion: "1.0", harness: "claude-code", fragments: ["repo:example", "typescript-style"],
+  memoryBundles: [memoryNotes], skills: [reviewSkill, testsSkill],
   model: { id: "example-model", charsPerToken: 3.7 }, tokenBudget: 8000,
 };
 const skill = (name: string, body: string) => `---\nname: ${name}\ndescription: Example skill for the composition v1 fixtures.\n---\n\n${body}\n`;
@@ -49,6 +53,8 @@ const twoBundle = assembleBundle({
   included: [
     { kind: "fragment", ref: "typescript-style", digest: digestOf("a"), reason: "requested by the composition" },
     { kind: "fragment", ref: "repo:example", digest: digestOf("b"), reason: "linked from the repository" },
+    { kind: "skill", ref: reviewSkill.id, digest: reviewSkill.digest, relPath: ".claude/skills/example-review/SKILL.md", reason: "selected by the composition" },
+    { kind: "skill", ref: testsSkill.id, digest: testsSkill.digest, relPath: ".claude/skills/example-tests/SKILL.md", reason: "selected by the composition" },
   ],
   excluded: [{ kind: "memory_bundle", ref: "mem-example-notes", reason: "over the token budget after required fragments" }],
 });
@@ -80,7 +86,7 @@ const base = (id: string, bundle: BundleResponse, request: BundleRequest): Omit<
   registry: { snapshot_digest: digestOf("c"), observed_at: "2026-10-01T09:00:00.000Z", stale: false },
   context: {
     fragments: request.fragments,
-    memory_bundles: request.memoryBundles.map((m) => ({ id: m, digest: digestOf("d"), reason: "linked from repo notes" })),
+    memory_bundles: request.memoryBundles.map((m) => ({ ...m, reason: "linked from repo notes" })),
     bundle_digest: bundle.manifest.bundleDigest,
     compiler: { ...compiler, tokens: bundle.manifest.tokens.estimated, token_method: "estimated", chars_per_token: request.model.charsPerToken },
   },
@@ -116,8 +122,8 @@ const twoSpec: AgentSpec = {
   ...base("CR-0002-1", twoBundle, twoRequest),
   assets: {
     skills: [
-      { id: "claude-skills:example-review", digest: digestOf("1"), allowlisted: true },
-      { id: "claude-skills:example-tests", digest: digestOf("2"), allowlisted: false, opt_in: { digest: digestOf("2"), actor: "operator", at: "2026-10-01T09:05:00.000Z" } },
+      { ...reviewSkill, allowlisted: true },
+      { ...testsSkill, allowlisted: false, opt_in: { digest: testsSkill.digest, actor: "operator", at: "2026-10-01T09:05:00.000Z" } },
     ],
     mcp_servers: [],
     subagents: [],

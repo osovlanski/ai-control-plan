@@ -138,16 +138,30 @@ export function checkComposition(
   const errors: string[] = [];
   if (spec.explanation_ref !== decision.id) errors.push(`explanation_ref ${spec.explanation_ref} is not decision ${decision.id}`);
   if (decision.composition_revision_id !== spec.composition_revision_id) errors.push("decision explains a different composition revision");
-  const attached = [...spec.assets.skills, ...spec.assets.mcp_servers, ...spec.assets.subagents].map((a) => a.id).sort();
-  const chosen = [...(decision.stages.find((s) => s.stage === "assets")?.chosen ?? [])].sort();
+  const attachedRefs: AssetRef[] = [...spec.assets.skills, ...spec.assets.mcp_servers, ...spec.assets.subagents];
+  const attached = attachedRefs.map((a) => a.id).sort();
+  const assetsStage = decision.stages.find((s) => s.stage === "assets");
+  const chosen = [...(assetsStage?.chosen ?? [])].sort();
   if (attached.join("\n") !== chosen.join("\n")) errors.push(`assets stage chose [${chosen.join(", ")}] but the spec attaches [${attached.join(", ")}]`);
+  // The decision explains the same revision that is attached: candidate digest == attached digest.
+  for (const asset of attachedRefs) {
+    const candidate = assetsStage?.candidates.find((c) => c.ref === asset.id);
+    if (candidate && candidate.digest !== asset.digest) errors.push(`assets candidate ${asset.id} has digest ${candidate.digest ?? "none"}, but ${asset.digest} is attached`);
+  }
   if (bundle) {
     const { request, response } = bundle;
     const { compiler } = spec.context;
     if (response.manifest.bundleDigest !== spec.context.bundle_digest) errors.push("context.bundle_digest does not match the bundle");
     if (request.harness !== spec.harness) errors.push("bundle harness does not match the spec");
     if (request.fragments.join("\n") !== spec.context.fragments.join("\n")) errors.push("bundle fragments do not match context.fragments");
-    if (request.memoryBundles.join("\n") !== spec.context.memory_bundles.map((m) => m.id).join("\n")) errors.push("bundle memory bundles do not match context.memory_bundles");
+    const pins = (list: ReadonlyArray<{ id: string; digest: string }>) => list.map((m) => `${m.id}@${m.digest}`).join("\n");
+    if (pins(request.memoryBundles) !== pins(spec.context.memory_bundles)) errors.push("bundle memory bundles (id and digest) do not match context.memory_bundles");
+    if (pins(request.skills) !== pins(spec.assets.skills)) errors.push("bundle skills (id and digest) do not match assets.skills");
+    const rendered = new Set(response.manifest.included.filter((e) => e.kind === "skill").map((e) => `${e.ref}@${e.digest}`));
+    for (const skill of spec.assets.skills) if (!rendered.has(`${skill.id}@${skill.digest}`)) errors.push(`attached skill ${skill.id} was not rendered into the bundle`);
+    for (const m of response.manifest.included.filter((e) => e.kind === "memory_bundle")) {
+      if (!spec.context.memory_bundles.some((b) => b.id === m.ref && b.digest === m.digest)) errors.push(`bundle rendered memory bundle ${m.ref} at ${m.digest}, which the spec does not record`);
+    }
     if (response.manifest.compiler.name !== compiler.name || response.manifest.compiler.version !== compiler.version) errors.push("bundle compiler does not match context.compiler");
     if (response.manifest.tokens.estimated !== compiler.tokens || response.manifest.tokens.charsPerToken !== compiler.chars_per_token) errors.push("bundle token estimate does not match context.compiler");
   }

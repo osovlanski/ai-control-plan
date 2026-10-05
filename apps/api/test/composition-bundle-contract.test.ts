@@ -114,6 +114,29 @@ describe("bundle contract v1 rules beyond the schema", () => {
     expect(mutate((b) => { b.manifest.excluded.push({ kind: "fragment", ref: "typescript-style", reason: "dup" }); })).toMatch(/more than once/);
   });
 
+  it("renders skills only from the request, at the pinned digest", () => {
+    // Codex round 1: a renderer must not be able to add a skill nobody selected.
+    const rogue = "---\nname: unapproved\n---\n";
+    const extra = { relPath: ".claude/skills/unapproved/SKILL.md", content: rogue, digest: `sha256:${"0".repeat(64)}` };
+    expect(mutate((b) => { b.files.push(extra); b.files.sort((x, y) => (x.relPath < y.relPath ? -1 : 1)); }))
+      .toMatch(/\.claude\/skills\/unapproved\/SKILL\.md is not named by an included skill/);
+    expect(mutate((b) => { b.manifest.included.find((e) => e.kind === "skill")!.digest = `sha256:${"9".repeat(64)}`; }))
+      .toMatch(/rendered sha256:9+, not the pinned/);
+    expect(mutate((b) => { b.manifest.included = b.manifest.included.filter((e) => e.kind !== "skill"); }))
+      .toMatch(/is not named by an included skill[\s\S]*do not cover exactly the requested/);
+  });
+
+  it("rejects an inline credential in rendered content", () => {
+    expect(mutate((b) => {
+      b.files[2]!.content += `\nexport API_KEY=${["fake", "value"].join("-")}\n`;
+      b.files[2]!.digest = `sha256:${"0".repeat(64)}`;
+    })).toMatch(/\/files\/2 content contains an inline credential/);
+  });
+
+  it("answers in the request's version", () => {
+    expect(errorsOf(validateBundleResponse({ ...bundle, schemaVersion: "1.1" }, request))).toMatch(/does not answer request version 1.0/);
+  });
+
   it("rejects an unsorted request and an unknown request major", () => {
     expect(errorsOf(validateBundleRequest({ ...request, fragments: [...request.fragments].reverse() }))).toMatch(/\/fragments is not sorted/);
     expect(errorsOf(validateBundleRequest({ ...request, schemaVersion: "2.0" }))).toMatch(/unsupported schemaVersion "2.0"/);
@@ -207,6 +230,24 @@ describe("composition contract v1 rules beyond the schema", () => {
       response: bundleFixture("valid/zero-asset.response.json") as BundleResponse,
     };
     expect(checkComposition(spec, decision, other)).toContain("context.bundle_digest does not match the bundle");
+  });
+
+  it("compares input digests across spec, decision and bundle", () => {
+    // Codex round 1: ids matching is not enough; the revisions must match too.
+    const bundle = {
+      request: bundleFixture("valid/two-skill.request.json") as BundleRequest,
+      response: bundleFixture("valid/two-skill.response.json") as BundleResponse,
+    };
+    const drifted = structuredClone(spec);
+    drifted.context.memory_bundles[0]!.digest = `sha256:${"7".repeat(64)}`;
+    const memoryErrors = checkComposition(drifted, decision, bundle).join("\n");
+    expect(memoryErrors).toMatch(/memory bundles \(id and digest\) do not match/);
+
+    const changedSkill = structuredClone(spec);
+    changedSkill.assets.skills[0]!.digest = `sha256:${"8".repeat(64)}`;
+    const skillErrors = checkComposition(changedSkill, decision, bundle).join("\n");
+    expect(skillErrors).toMatch(/assets candidate claude-skills:example-review has digest sha256:1+, but sha256:8+ is attached/);
+    expect(skillErrors).toMatch(/attached skill claude-skills:example-review was not rendered/);
   });
 
   it("accepts an older stored minor and rejects a newer one", () => {

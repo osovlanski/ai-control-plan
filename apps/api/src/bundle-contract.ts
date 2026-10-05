@@ -12,7 +12,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Ajv2020, type ErrorObject } from "ajv/dist/2020.js";
 import addFormatsImport from "ajv-formats";
-import { canonicalJson, isCompatibleVersion, type ContractResult } from "./registry-contract.js";
+import { canonicalJson, isCompatibleVersion, REGISTRY_CONTRACT_DIR, type ContractResult } from "./registry-contract.js";
 
 // ajv-formats is CJS; under bundler resolution its default lands on `.default`.
 const addFormats = ((addFormatsImport as unknown as { default?: unknown }).default ?? addFormatsImport) as (ajv: Ajv2020) => void;
@@ -23,17 +23,19 @@ export const BUNDLE_CONTRACT_DIR = join(dirname(fileURLToPath(import.meta.url)),
 export const MAX_BUNDLE_BYTES = 256 * 1024;
 
 export type BundleHarness = "claude-code" | "codex";
+export interface PinnedInput { id: string; digest: string }
 export interface BundleRequest {
   schemaVersion: string;
   harness: BundleHarness;
   fragments: string[];
-  memoryBundles: string[];
+  memoryBundles: PinnedInput[];
+  skills: PinnedInput[];
   model: { id: string; charsPerToken: number };
   tokenBudget: number;
 }
 export interface BundleFile { relPath: string; content: string; digest: string }
-export type InputKind = "fragment" | "memory_bundle";
-export interface ManifestIncluded { kind: InputKind; ref: string; digest: string; reason: string }
+export type InputKind = "fragment" | "memory_bundle" | "skill";
+export interface ManifestIncluded { kind: InputKind; ref: string; digest: string; reason: string; relPath?: string }
 export interface ManifestExcluded { kind: InputKind; ref: string; reason: string }
 export interface BundleManifest {
   harness: BundleHarness;
@@ -50,19 +52,31 @@ const HARNESS_PATHS: Record<BundleHarness, RegExp> = {
   "claude-code": /^(CLAUDE\.md|\.claude\/skills\/[a-z0-9][a-z0-9-]{0,63}\/SKILL\.md)$/,
   codex: /^AGENTS\.md$/,
 };
-/** Guards for the determinism rule. They catch common leaks; the normative rule is the requirement. */
+const SKILL_PATH = /^\.claude\/skills\/[^/]+\/SKILL\.md$/;
+/** Registry v1's inline-credential shape, read from its schema rather than copied. */
+const INLINE_SECRET = new RegExp(
+  (JSON.parse(readFileSync(join(REGISTRY_CONTRACT_DIR, "registry-snapshot.schema.json"), "utf8")) as { $defs: { noInlineSecret: { not: { pattern: string } } } })
+    .$defs.noInlineSecret.not.pattern,
+);
+/** Guards for the determinism and secret rules. They catch common leaks; the normative rules are the requirement. */
 const CONTENT_GUARDS: Array<[RegExp, string]> = [
   [/\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/, "a timestamp"],
   [/(^|[\s"'`(=])(\/(home|Users|root|tmp|var|private)\/|~\/|[A-Za-z]:\\)/m, "an absolute path"],
+  [INLINE_SECRET, "an inline credential"],
 ];
 
 const ajv = new Ajv2020({ allErrors: true, strict: true, strictRequired: false });
 addFormats(ajv);
-for (const file of ["bundle-request.schema.json", "bundle-response.schema.json"]) {
-  ajv.addSchema(JSON.parse(readFileSync(join(BUNDLE_CONTRACT_DIR, file), "utf8")) as object, file);
+for (const path of [
+  join(REGISTRY_CONTRACT_DIR, "registry-snapshot.schema.json"),
+  join(BUNDLE_CONTRACT_DIR, "bundle-request.schema.json"),
+  join(BUNDLE_CONTRACT_DIR, "bundle-response.schema.json"),
+]) {
+  // Registered under the schema's own $id, so the cross-contract $refs resolve.
+  ajv.addSchema(JSON.parse(readFileSync(path, "utf8")) as object);
 }
-const requestSchema = ajv.getSchema("bundle-request.schema.json")!;
-const responseSchema = ajv.getSchema("bundle-response.schema.json")!;
+const requestSchema = ajv.getSchema("https://agent-plane.local/contracts/bundle/v1/bundle-request.schema.json")!;
+const responseSchema = ajv.getSchema("https://agent-plane.local/contracts/bundle/v1/bundle-response.schema.json")!;
 
 const sha256 = (data: string) => createHash("sha256").update(data, "utf8").digest("hex");
 const byteOrder = (a: string, b: string) => Buffer.compare(Buffer.from(a, "utf8"), Buffer.from(b, "utf8"));
@@ -132,7 +146,8 @@ export function validateBundleRequest(body: unknown, served = BUNDLE_SCHEMA_VERS
   const request = body as BundleRequest;
   const errors: string[] = [];
   if (!isStrictlySorted(request.fragments)) errors.push("/fragments is not sorted");
-  if (!isStrictlySorted(request.memoryBundles)) errors.push("/memoryBundles is not sorted");
+  if (!isStrictlySorted(request.memoryBundles.map((m) => m.id))) errors.push("/memoryBundles is not sorted by id");
+  if (!isStrictlySorted(request.skills.map((m) => m.id))) errors.push("/skills is not sorted by id");
   return errors.length ? { ok: false, errors } : { ok: true, value: request };
 }
 
@@ -168,14 +183,33 @@ export function validateBundleResponse(body: unknown, request?: BundleRequest, s
   const keys = [...manifest.included, ...manifest.excluded].map((e) => `${e.kind}:${e.ref}`);
   if (new Set(keys).size !== keys.length) errors.push("/manifest lists an input more than once across included and excluded");
 
+  // A skill file exists only because an included skill names it, and every included skill has its file.
+  const skillPaths = manifest.included.filter((e) => e.kind === "skill").map((e) => e.relPath!);
+  const skillFiles = bundle.files.map((f) => f.relPath).filter((p) => SKILL_PATH.test(p));
+  for (const path of skillFiles) if (!skillPaths.includes(path)) errors.push(`/files ${path} is not named by an included skill`);
+  for (const path of skillPaths) if (!skillFiles.includes(path)) errors.push(`/manifest included skill ${path} has no file`);
+  if (new Set(skillPaths).size !== skillPaths.length) errors.push("/manifest names one skill file for two skills");
+
   if (request) {
+    // The response is rendered to the request's version, so a newer server never emits a path an older client rejects.
+    if (bundle.schemaVersion !== request.schemaVersion) errors.push(`/schemaVersion ${bundle.schemaVersion} does not answer request version ${request.schemaVersion}`);
     if (request.harness !== manifest.harness) errors.push(`/manifest/harness ${manifest.harness} does not match requested ${request.harness}`);
     if (request.tokenBudget !== manifest.tokens.budget) errors.push("/manifest/tokens/budget does not match the request");
     if (request.model.charsPerToken !== manifest.tokens.charsPerToken) errors.push("/manifest/tokens/charsPerToken does not match the request");
     const requested = [
       ...request.fragments.map((r) => `fragment:${r}`),
-      ...request.memoryBundles.map((r) => `memory_bundle:${r}`),
+      ...request.memoryBundles.map((r) => `memory_bundle:${r.id}`),
+      ...request.skills.map((r) => `skill:${r.id}`),
     ].sort();
+    // Pinned inputs render exactly the requested revision.
+    const pinned = new Map<string, string>([
+      ...request.memoryBundles.map((r) => [`memory_bundle:${r.id}`, r.digest] as const),
+      ...request.skills.map((r) => [`skill:${r.id}`, r.digest] as const),
+    ]);
+    for (const e of manifest.included) {
+      const want = pinned.get(`${e.kind}:${e.ref}`);
+      if (want && want !== e.digest) errors.push(`/manifest included ${e.kind} ${e.ref} rendered ${e.digest}, not the pinned ${want}`);
+    }
     if (canonicalJson([...keys].sort()) !== canonicalJson(requested)) {
       errors.push("/manifest included and excluded do not cover exactly the requested fragments and memory bundles");
     }

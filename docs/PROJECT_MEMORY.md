@@ -505,7 +505,9 @@ rule-allowed tools; neither changed here.
 
 - **Bundle v1 is the Cockpit ⇄ plane wire** (`contracts/bundle/v1/`, `docs/contracts/bundle-v1.md`,
   `apps/api/src/bundle-contract.ts`). The request is closed, so no output-path field can exist; a
-  field naming a filesystem location is forbidden in every version. relPath allowlist:
+  field naming a filesystem location is forbidden in every version. Memory bundles and skills are
+  pinned `{ id, digest }` in the request; a skill file exists only if an included skill names it
+  (Codex round 1: otherwise a renderer could inject an unselected skill). relPath allowlist:
   `claude-code` → `CLAUDE.md`, `.claude/skills/<id>/SKILL.md`; `codex` → `AGENTS.md` only.
 - **`bundleDigest` = sha256 of RFC 8785 JSON of `files` sorted by relPath; the manifest is not
   digested.** Token estimate = ceil(code points / charsPerToken), always `estimated`, MUST fit the
@@ -513,7 +515,8 @@ rule-allowed tools; neither changed here.
   an error, never truncation.
 - **Composition v1 is plane-internal and snake_case** (§3.2), every object closed. Rules beyond
   the schema: `allowlisted: false` needs `opt_in.digest == digest`; `requested: isolated` +
-  `achieved: ambient` is invalid; decision stages are the fixed six in order; an empty `chosen`
+  `achieved: ambient` is invalid; `checkComposition` compares digests, not just ids, across spec,
+  decision and bundle; decision stages are the fixed six in order; an empty `chosen`
   with `why` is valid. `SecretRef` is `$ref`'d from registry v1.
 - **The bundle bytes are not in AgentSpec**; `context.bundle_digest` binds them. The M1 tables
   (wave 2) must persist the BundleResponse with the revision to keep it replayable.
