@@ -465,3 +465,13 @@ branch is unchanged. Evidence, limits and verification:
 - **Config cannot put Jev on discovery.** The bin hard-codes `model` and reads no `decisions.*` provider key. Nothing pins `jev-1.13`, because every path sends `jev-latest`. Discovery counts a degraded outcome as unjudged, so a Haiku fallback behind Jev adds nothing. Any switch needs code and an owner decision. The smallest proposal is `decisions.discoveryProvider` plus a pinned model, read only by the bin.
 - On the operator's running build (`2e3c9f4`), `provider: typesafe` still fails at startup, because Jev is not registered there.
 - Detail, matrices, search log and ranked fixes are in `plans/gate-reachability.md`.
+## 2026-10-04 — stage 2 remote browser auth boundary (PROPOSED)
+
+[Remote auth design](adr/remote-auth-design.md) grounds the deployment ADR's stage 2
+controls in current local auth and specifies loopback acceptance cases. API-owned
+owner-allowlisted OIDC is recommended; the provider and live B versus C remain
+owner questions. Remote sessions/grants must be separate from local bootstrap and
+bearer credentials; two origins on unrelated sites require a browser cookie gate.
+This is design only: the non-loopback refusal remains, remote deployment is not
+authorized, and stage 3 workers are not specified. Do not treat these proposed
+config fields or SSE resume semantics as implemented.
