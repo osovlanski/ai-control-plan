@@ -6,14 +6,16 @@ import { scheduleDailyJobs } from "./modules/jobs.js";
 
 const config = loadConfig();
 const db = openDb(config.dbPath);
-const { app, registry, orchestrator, scheduler, modelCatalog } = buildServer({ config, db });
+const { app, registry, orchestrator, scheduler, modelCatalog, registryFederation } = buildServer({ config, db });
 
 registry.init();
 const reconciled = await orchestrator.reconcileOnBoot();
 await registry.syncChangedAll();
+// Never blocks boot: a failure keeps the cached snapshot and is logged with its reason.
+await registryFederation.sync();
 await scheduler.reconcileOnBoot();
 scheduler.startTimer();
-const stopJobs = scheduleDailyJobs(config.sync.dailyHour, registry, new EventRetention(db), app.log, modelCatalog);
+const stopJobs = scheduleDailyJobs(config.sync.dailyHour, registry, new EventRetention(db), app.log, modelCatalog, registryFederation);
 
 app.log.info(
   {

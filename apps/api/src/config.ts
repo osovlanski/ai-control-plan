@@ -1,7 +1,7 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { ensureCredential } from "./auth/credential-file.js";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { parse, stringify } from "yaml";
 import type { McpToolAccess, McpToolPolicy } from "@agent-plane/core";
 
@@ -79,6 +79,22 @@ export interface WorkspaceConfig {
   sync: {
     /** Local hour (0-23) for the daily capability sync. */
     dailyHour: number;
+  };
+  /**
+   * M4 registry federation. Off by default: when enabled the plane reads
+   * Cockpit's registry v1 API (loopback, bearer token) on boot and in the daily
+   * sync, and caches asset metadata. It never scrapes ~/.claude itself.
+   */
+  registry?: {
+    cockpit?: {
+      enabled?: boolean;
+      /** Cockpit origin, loopback only, e.g. http://127.0.0.1:8787. */
+      baseUrl?: string;
+      /** Absolute path of Cockpit's registry token file (0600, same uid, not a symlink). */
+      tokenPath?: string;
+      /** A cached snapshot older than this is reported stale. */
+      maxCacheAgeHours?: number;
+    };
   };
   /**
    * M12 model intelligence (K13). The catalog, its benchmark evidence and the
@@ -205,7 +221,12 @@ export interface ResolvedDecisionsConfig {
   mcpTools: McpToolPolicy;
 }
 
-export interface ResolvedConfig extends Omit<WorkspaceConfig, "execution" | "models" | "decisions" | "sessionInput"> {
+export interface ResolvedRegistryConfig {
+  cockpit: { enabled: boolean; baseUrl: string; tokenPath: string; maxCacheAgeHours: number };
+}
+
+export interface ResolvedConfig extends Omit<WorkspaceConfig, "execution" | "models" | "decisions" | "sessionInput" | "registry"> {
+  registry: ResolvedRegistryConfig;
   execution: ResolvedExecutionConfig;
   models: ResolvedModelsConfig;
   decisions: ResolvedDecisionsConfig;
@@ -335,6 +356,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ResolvedConfig
   const models = resolveModels(file.models, configPath);
   const decisions = resolveDecisions(file.decisions, configPath);
   const sessionInput = resolveSessionInput(file.sessionInput, configPath);
+  const registry = resolveRegistry(file.registry, configPath);
 
   const config: WorkspaceConfig = {
     workspace: file.workspace ?? workspace,
@@ -360,7 +382,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ResolvedConfig
   }
   ensureCredential(dir);
 
-  return { ...config, execution, models, decisions, sessionInput, dir, dbPath: join(dir, "agent-plane.db"), warnings };
+  return { ...config, execution, models, decisions, sessionInput, registry, dir, dbPath: join(dir, "agent-plane.db"), warnings };
 }
 
 /**
@@ -582,6 +604,26 @@ function resolveSessionInput(
     throw new Error(`${configPath}: sessionInput.enabled must be a boolean, got ${JSON.stringify(file.enabled)}`);
   }
   return { enabled: file?.enabled === true };
+}
+
+function resolveRegistry(file: WorkspaceConfig["registry"], configPath: string): ResolvedRegistryConfig {
+  const c = file?.cockpit ?? {};
+  const cockpit = {
+    enabled: c.enabled === true,
+    baseUrl: c.baseUrl ?? "http://127.0.0.1:8787",
+    tokenPath: c.tokenPath ?? "",
+    maxCacheAgeHours: c.maxCacheAgeHours ?? 48,
+  };
+  const problems: string[] = [];
+  if (c.enabled !== undefined && typeof c.enabled !== "boolean") problems.push("registry.cockpit.enabled must be a boolean");
+  if (typeof cockpit.maxCacheAgeHours !== "number" || !(cockpit.maxCacheAgeHours > 0)) problems.push("registry.cockpit.maxCacheAgeHours must be a positive number");
+  let url: URL | undefined;
+  try { url = new URL(cockpit.baseUrl); } catch { problems.push(`registry.cockpit.baseUrl is not a URL: ${JSON.stringify(cockpit.baseUrl)}`); }
+  // Loopback is transport scope; the token is the authentication. Remote Cockpit is not a v1 deployment.
+  if (url && (url.protocol !== "http:" || !["127.0.0.1", "[::1]", "localhost"].includes(url.hostname))) problems.push("registry.cockpit.baseUrl must be an http loopback origin");
+  if (cockpit.enabled && !isAbsolute(cockpit.tokenPath)) problems.push("registry.cockpit.tokenPath must be an absolute path when enabled");
+  if (problems.length) throw new Error(`Invalid config at ${configPath}:\n  - ${problems.join("\n  - ")}`);
+  return { cockpit };
 }
 
 function validateModels(models: ResolvedModelsConfig, path: string): void {

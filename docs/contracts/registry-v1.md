@@ -155,3 +155,12 @@ Default for v1: the schema files live in this repository under `contracts/regist
 vendors a copy pinned to a commit SHA of this repository, with a test that checks each vendored
 file's sha256 against a recorded manifest. A moving-branch git dependency is never used. A
 published package or release artifact can replace this once the owner decides §7.7a.
+
+## Control Plane consumption (M4)
+
+`apps/api/src/modules/registry-federation.ts` syncs the unfiltered snapshot on boot and in the daily
+job when `registry.cockpit.enabled` is true. It validates each response with the reference
+validator, caches metadata keyed by `(id, digest)`, and records `added` / `removed` /
+`digest_changed` rows in `registry_asset_changes`. On any failure it keeps the last good snapshot.
+`GET /api/registry/assets` (`registry.read`) returns the cache with `snapshotDigest`, `observedAt`
+and `stale`.

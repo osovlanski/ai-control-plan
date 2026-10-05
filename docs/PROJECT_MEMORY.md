@@ -500,3 +500,11 @@ rule-allowed tools; neither changed here.
   shapes in command/args/url must be `${VAR}` or `***`.
 - **Distribution default, pending the owner's §7.7a decision:** Cockpit vendors the schema files
   pinned to a commit SHA of this repo, with a sha256 manifest test. Never a moving-branch dependency.
+
+## 2026-10-05 — M4 registry federation, metadata only (SHIPPED; off by default)
+
+- `registry.cockpit.{enabled, baseUrl, tokenPath, maxCacheAgeHours}` (default off, 48 h; loopback `baseUrl` only). Sync runs on boot and in the daily job. Every response is validated against registry v1; an unknown major or an invalid body changes nothing.
+- **Failure keeps the last good snapshot.** `registry_sync_state.last_failure` holds a classified reason (`unreachable`, `unauthenticated`, `unsupported_version`, …), and `GET /api/registry/assets` reports `stale` once the snapshot is older than `maxCacheAgeHours`. There is no scrape fallback.
+- **Asset changes go to a sibling table, `registry_asset_changes`, not `capability_changes`.** That table's `assistant_id` is a NOT NULL FK to `assistants`, and an asset is not owned by one assistant. The first observation is a baseline with no rows.
+- API 2.4 adds `registry.read`. Credentials minted before 2.4 get 403 on the registry routes until `pnpm --filter @agent-plane/api rotate`.
+- Content is not cached. That is composition-time work (risk 8), together with selection, the allowlist and provisioning.
