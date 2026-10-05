@@ -180,10 +180,10 @@ describe("bundle contract v1 rules beyond the schema", () => {
     const withContent = (content: string) => mutate((b) => {
       b.files[0]!.content = content;
       b.files[0]!.digest = fileDigest(content);
-      b.manifest.bundleDigest = computeBundleDigest(b.files);
+      if (!/\p{Cs}/u.test(content)) b.manifest.bundleDigest = computeBundleDigest(b.files);
       b.manifest.tokens.estimated = estimateTokens(b.files, b.manifest.tokens.charsPerToken);
     });
-    expect(withContent("# x \ud800")).toMatch(/\/files\/0 content contains an unpaired surrogate/);
+    expect(withContent("# x \ud800")).toBe("/files/0 content contains an unpaired surrogate");
     expect(withContent("# x \udc00 y")).toMatch(/unpaired surrogate/);
     expect(withContent("# x \ud83d\ude00")).toBe("");
   });

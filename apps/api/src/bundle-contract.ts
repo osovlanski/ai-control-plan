@@ -12,7 +12,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Ajv2020, type ErrorObject } from "ajv/dist/2020.js";
 import addFormatsImport from "ajv-formats";
-import { canonicalJson, isCompatibleVersion, REGISTRY_CONTRACT_DIR, type ContractResult } from "./registry-contract.js";
+import { canonicalJson, hasLoneSurrogate, isCompatibleVersion, REGISTRY_CONTRACT_DIR, type ContractResult } from "./registry-contract.js";
 
 // ajv-formats is CJS; under bundler resolution its default lands on `.default`.
 const addFormats = ((addFormatsImport as unknown as { default?: unknown }).default ?? addFormatsImport) as (ajv: Ajv2020) => void;
@@ -168,15 +168,15 @@ export function validateBundleResponse(body: unknown, request?: BundleRequest, s
   let bytes = 0;
   bundle.files.forEach((f, i) => {
     if (!HARNESS_PATHS[manifest.harness].test(f.relPath)) errors.push(`/files/${i}/relPath ${f.relPath} is not allowed for harness ${manifest.harness}`);
-    // RFC 8785 rejects lone surrogates, and UTF-8 encoding would silently turn them into U+FFFD.
-    if (/\p{Cs}/u.test(f.content)) errors.push(`/files/${i} content contains an unpaired surrogate`);
+    if (hasLoneSurrogate(f.content)) errors.push(`/files/${i} content contains an unpaired surrogate`);
     if (fileDigest(f.content) !== f.digest) errors.push(`/files/${i} digest does not match its content`);
     for (const [pattern, what] of CONTENT_GUARDS) if (pattern.test(f.content)) errors.push(`/files/${i} content contains ${what}`);
     bytes += Buffer.byteLength(f.content, "utf8");
   });
   if (bytes > MAX_BUNDLE_BYTES) errors.push(`/files total ${bytes} bytes exceeds ${MAX_BUNDLE_BYTES}`);
-  const expectedDigest = computeBundleDigest(bundle.files);
-  if (expectedDigest !== manifest.bundleDigest) errors.push(`/manifest/bundleDigest ${manifest.bundleDigest} does not match ${expectedDigest}`);
+  // canonicalJson throws on an unpaired surrogate, which the per-file check has already reported.
+  const expectedDigest = bundle.files.some((f) => hasLoneSurrogate(f.content)) ? undefined : computeBundleDigest(bundle.files);
+  if (expectedDigest !== undefined && expectedDigest !== manifest.bundleDigest) errors.push(`/manifest/bundleDigest ${manifest.bundleDigest} does not match ${expectedDigest}`);
 
   const expectedTokens = estimateTokens(bundle.files, manifest.tokens.charsPerToken);
   if (manifest.tokens.estimated !== expectedTokens) errors.push(`/manifest/tokens/estimated ${manifest.tokens.estimated} does not match ${expectedTokens}`);
@@ -212,7 +212,7 @@ export function validateBundleResponse(body: unknown, request?: BundleRequest, s
       const want = pinned.get(`${e.kind}:${e.ref}`);
       if (want && want !== e.digest) errors.push(`/manifest included ${e.kind} ${e.ref} rendered ${e.digest}, not the pinned ${want}`);
     }
-    if (canonicalJson([...keys].sort()) !== canonicalJson(requested)) {
+    if (JSON.stringify([...keys].sort()) !== JSON.stringify(requested)) {
       errors.push("/manifest included and excluded do not cover exactly the requested fragments and memory bundles");
     }
   }
