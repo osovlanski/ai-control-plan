@@ -491,7 +491,7 @@ rule-allowed tools; neither changed here.
 
 - **The registry wire authority is JSON Schema in `contracts/registry/v1/`**, normative text in
   `docs/contracts/registry-v1.md`, reference checks in `apps/api/src/registry-contract.ts`. This is
-  the M0 slice for the registry only; AgentSpec/CompositionDecision schemas are still unwritten.
+  the M0 slice for the registry only; composition and bundle v1 follow below.
 - **`snapshotDigest` excludes exactly `installedAt`, `lastUsedAt` and `stats`.** Every other field,
   including unknown fields from a newer minor, is digested, so objects stay open for additive minors
   while `SecretRef` and `mcp.env` stay closed. Asset order and sorted arrays are normative but not
@@ -500,3 +500,22 @@ rule-allowed tools; neither changed here.
   shapes in command/args/url must be `${VAR}` or `***`.
 - **Distribution default, pending the owner's §7.7a decision:** Cockpit vendors the schema files
   pinned to a commit SHA of this repo, with a sha256 manifest test. Never a moving-branch dependency.
+
+## 2026-10-05 — Composition and bundle contracts v1 (SHIPPED as contracts; no consumer wired yet)
+
+- **Bundle v1 is the Cockpit ⇄ plane wire** (`contracts/bundle/v1/`, `docs/contracts/bundle-v1.md`,
+  `apps/api/src/bundle-contract.ts`). The request is closed, so no output-path field can exist; a
+  field naming a filesystem location is forbidden in every version. relPath allowlist:
+  `claude-code` → `CLAUDE.md`, `.claude/skills/<id>/SKILL.md`; `codex` → `AGENTS.md` only.
+- **`bundleDigest` = sha256 of RFC 8785 JSON of `files` sorted by relPath; the manifest is not
+  digested.** Token estimate = ceil(code points / charsPerToken), always `estimated`, MUST fit the
+  budget. **Size bound: 256 KiB total UTF-8 content**, inline in ExecutionRequest; over-limit is
+  an error, never truncation.
+- **Composition v1 is plane-internal and snake_case** (§3.2), every object closed. Rules beyond
+  the schema: `allowlisted: false` needs `opt_in.digest == digest`; `requested: isolated` +
+  `achieved: ambient` is invalid; decision stages are the fixed six in order; an empty `chosen`
+  with `why` is valid. `SecretRef` is `$ref`'d from registry v1.
+- **The bundle bytes are not in AgentSpec**; `context.bundle_digest` binds them. The M1 tables
+  (wave 2) must persist the BundleResponse with the revision to keep it replayable.
+- Distribution: same SHA-pinned vendoring default as registry v1 (§7.7a still unanswered).
+  Stacked on #76.

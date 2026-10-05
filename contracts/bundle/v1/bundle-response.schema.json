@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-plane.local/contracts/bundle/v1/bundle-response.schema.json",
+  "title": "BundleResponse",
+  "description": "Bundle v1: the rendered per-run bundle Cockpit returns. Files are relative POSIX paths from a closed allowlist. Ordering, digests, the per-harness allowlist, the size bound and manifest coverage are normative rules in docs/contracts/bundle-v1.md that the reference validator enforces.",
+  "type": "object",
+  "required": ["schemaVersion", "files", "manifest"],
+  "properties": {
+    "schemaVersion": { "$ref": "bundle-request.schema.json#/$defs/schemaVersion" },
+    "files": {
+      "type": "array", "maxItems": 64,
+      "items": { "$ref": "#/$defs/BundleFile" }
+    },
+    "manifest": { "$ref": "#/$defs/Manifest" }
+  },
+  "$defs": {
+    "notAbsolute": {
+      "description": "A relPath never starts with / or a drive letter and never contains a backslash.",
+      "not": { "type": "string", "pattern": "^(/|[A-Za-z]:)|\\\\" }
+    },
+    "noDotSegment": {
+      "description": "A relPath never contains a . or .. segment.",
+      "not": { "type": "string", "pattern": "(^|/)\\.{1,2}(/|$)" }
+    },
+    "allowlistedPath": {
+      "description": "The closed relPath allowlist. Which entries a harness may use is a validator rule.",
+      "type": "string",
+      "pattern": "^(CLAUDE\\.md|AGENTS\\.md|\\.claude/skills/[a-z0-9][a-z0-9-]{0,63}/SKILL\\.md)$"
+    },
+    "relPath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "allOf": [
+        { "$ref": "#/$defs/notAbsolute" },
+        { "$ref": "#/$defs/noDotSegment" },
+        { "$ref": "#/$defs/allowlistedPath" }
+      ]
+    },
+    "BundleFile": {
+      "type": "object",
+      "required": ["relPath", "content", "digest"],
+      "additionalProperties": false,
+      "properties": {
+        "relPath": { "$ref": "#/$defs/relPath" },
+        "content": { "type": "string", "maxLength": 262144 },
+        "digest": { "$ref": "bundle-request.schema.json#/$defs/digest" }
+      }
+    },
+    "inputRef": {
+      "type": "object",
+      "required": ["kind", "ref"],
+      "properties": {
+        "kind": { "enum": ["fragment", "memory_bundle"] },
+        "ref": { "type": "string", "minLength": 1, "maxLength": 128 }
+      }
+    },
+    "Manifest": {
+      "type": "object",
+      "required": ["harness", "bundleDigest", "compiler", "included", "excluded", "tokens"],
+      "properties": {
+        "harness": { "$ref": "bundle-request.schema.json#/$defs/harness" },
+        "bundleDigest": { "$ref": "bundle-request.schema.json#/$defs/digest" },
+        "compiler": {
+          "type": "object",
+          "required": ["name", "version"],
+          "properties": {
+            "name": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$" },
+            "version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" }
+          }
+        },
+        "included": {
+          "type": "array", "maxItems": 128,
+          "items": {
+            "type": "object",
+            "allOf": [{ "$ref": "#/$defs/inputRef" }],
+            "required": ["digest", "reason"],
+            "properties": {
+              "digest": { "$ref": "bundle-request.schema.json#/$defs/digest" },
+              "reason": { "type": "string", "minLength": 1, "maxLength": 512 }
+            }
+          }
+        },
+        "excluded": {
+          "type": "array", "maxItems": 128,
+          "items": {
+            "type": "object",
+            "allOf": [{ "$ref": "#/$defs/inputRef" }],
+            "required": ["reason"],
+            "properties": {
+              "reason": { "type": "string", "minLength": 1, "maxLength": 512 }
+            }
+          }
+        },
+        "tokens": {
+          "type": "object",
+          "required": ["estimated", "tokenMethod", "charsPerToken", "budget"],
+          "properties": {
+            "estimated": { "type": "integer", "minimum": 0 },
+            "tokenMethod": { "const": "estimated" },
+            "charsPerToken": { "type": "number", "exclusiveMinimum": 0, "maximum": 16 },
+            "budget": { "type": "integer", "minimum": 1 }
+          }
+        }
+      }
+    }
+  }
+}

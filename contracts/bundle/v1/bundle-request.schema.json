@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-plane.local/contracts/bundle/v1/bundle-request.schema.json",
+  "title": "BundleRequest",
+  "description": "Bundle v1: what the Control Plane asks Cockpit to render. Closed by construction: there is no field naming an output location, and an unknown field is rejected. Normative text: docs/contracts/bundle-v1.md.",
+  "type": "object",
+  "required": ["schemaVersion", "harness", "fragments", "memoryBundles", "model", "tokenBudget"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "$ref": "#/$defs/schemaVersion" },
+    "harness": { "$ref": "#/$defs/harness" },
+    "fragments": {
+      "description": "Fragment names to render, sorted ascending, unique.",
+      "type": "array", "uniqueItems": true, "maxItems": 64,
+      "items": { "$ref": "#/$defs/fragmentName" }
+    },
+    "memoryBundles": {
+      "description": "Memory bundle ids to render, sorted ascending, unique.",
+      "type": "array", "uniqueItems": true, "maxItems": 64,
+      "items": { "$ref": "#/$defs/memoryBundleId" }
+    },
+    "model": {
+      "type": "object",
+      "required": ["id", "charsPerToken"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "charsPerToken": { "type": "number", "exclusiveMinimum": 0, "maximum": 16 }
+      }
+    },
+    "tokenBudget": { "type": "integer", "minimum": 1, "maximum": 200000 }
+  },
+  "$defs": {
+    "schemaVersion": { "type": "string", "pattern": "^1\\.(0|[1-9][0-9]*)$" },
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "harness": { "enum": ["claude-code", "codex"] },
+    "fragmentName": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._:-]{0,127}$" },
+    "memoryBundleId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" }
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "schemaVersion": "1.0",
+  "harness": "claude-code",
+  "fragments": [
+    "typescript-style"
+  ],
+  "memoryBundles": [],
+  "model": {
+    "id": "example-model",
+    "charsPerToken": 3.7
+  },
+  "tokenBudget": 8000,
+  "outputDir": "worktree/.claude"
+}
