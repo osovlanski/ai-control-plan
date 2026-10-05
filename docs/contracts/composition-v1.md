@@ -43,7 +43,7 @@ inline secret or any unknown field cannot be persisted. Failover and re-composit
 | `registry` | `snapshot_digest` (registry v1 `snapshotDigest`), `observed_at`, `stale`. A stale snapshot is recorded, never hidden. |
 | `assets.*[]` | `{ id, digest, allowlisted, opt_in? }`. The digest **is** the revision (invariant 1). `mcp_servers` add sorted `tools_allowed` and `secret_refs`. |
 | `context` | sorted `fragments`, `memory_bundles` `{ id, digest, reason }`, `bundle_digest` (bundle v1 `bundleDigest`), `compiler { name, version, tokens, token_method: estimated, chars_per_token }`. |
-| `policy` | `permission`, sorted `tool_allowlist`, `budget { max_tokens?, max_cost_usd?, max_runtime_ms? }`. |
+| `policy` | `revision { id, digest }` of the workspace policy and digest allowlist that authorized the composition (invariant 1), `permission`, sorted `tool_allowlist`, `budget { max_tokens?, max_cost_usd?, max_runtime_ms? }`. |
 | `workspace` | `repository_id`, `branch`, `worktree_id`. Opaque ids, never a filesystem path. |
 | `provisioning` | `requested` (`isolated`/`ambient`), `achieved?` (`full`/`high`/`partial`/`ambient`/`select-only`), `profile_digest?`. |
 | `explanation_ref` | The `id` of this revision's CompositionDecision. |

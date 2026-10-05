@@ -95,9 +95,16 @@
     },
     "policy": {
       "type": "object",
-      "required": ["permission", "tool_allowlist", "budget"],
+      "required": ["revision", "permission", "tool_allowlist", "budget"],
       "additionalProperties": false,
       "properties": {
+        "revision": {
+          "description": "The workspace policy and digest allowlist revision that authorized this composition (invariant 1). The digest is of the effective policy document, so a later policy edit cannot be mistaken for the one that applied.",
+          "type": "object",
+          "required": ["id", "digest"],
+          "additionalProperties": false,
+          "properties": { "id": { "$ref": "#/$defs/id" }, "digest": { "$ref": "#/$defs/digest" } }
+        },
         "permission": { "enum": ["auto", "prompt-on-escalation"] },
         "tool_allowlist": { "$ref": "#/$defs/sortedNames" },
         "budget": {

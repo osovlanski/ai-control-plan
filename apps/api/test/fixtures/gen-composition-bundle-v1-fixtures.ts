@@ -90,7 +90,7 @@ const base = (id: string, bundle: BundleResponse, request: BundleRequest): Omit<
     bundle_digest: bundle.manifest.bundleDigest,
     compiler: { ...compiler, tokens: bundle.manifest.tokens.estimated, token_method: "estimated", chars_per_token: request.model.charsPerToken },
   },
-  policy: { permission: "prompt-on-escalation", tool_allowlist: ["Edit", "Read"], budget: { max_tokens: 200000, max_runtime_ms: 1800000 } },
+  policy: { revision: { id: "workspace-policy:example", digest: `sha256:${"9".repeat(64)}` }, permission: "prompt-on-escalation", tool_allowlist: ["Edit", "Read"], budget: { max_tokens: 200000, max_runtime_ms: 1800000 } },
   workspace: { repository_id: "repo-example", branch: "task/AG-0001", worktree_id: "wt-example" },
   provisioning: { requested: "isolated" },
   explanation_ref: `${id}.decision`,

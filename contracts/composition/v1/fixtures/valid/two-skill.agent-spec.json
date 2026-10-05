@@ -45,6 +45,10 @@
     }
   },
   "policy": {
+    "revision": {
+      "id": "workspace-policy:example",
+      "digest": "sha256:9999999999999999999999999999999999999999999999999999999999999999"
+    },
     "permission": "prompt-on-escalation",
     "tool_allowlist": [
       "Edit",

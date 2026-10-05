@@ -133,6 +133,41 @@ describe("bundle contract v1 rules beyond the schema", () => {
     })).toMatch(/\/files\/2 content contains an inline credential/);
   });
 
+  it("rejects quoted credential assignments in rendered content with correct digests", () => {
+    // Review on 314450b: the shared guard missed token="...". The digests here are right, so the
+    // secret rule is the only reason left to reject.
+    const zeroRequest = bundleFixture("valid/zero-asset.request.json") as BundleRequest;
+    const zeroBundle = bundleFixture("valid/zero-asset.response.json") as BundleResponse;
+    for (const line of ['token="FAKE_REVIEW_VALUE"', "password = 'FAKE_REVIEW_VALUE'"]) {
+      const response = assembleBundle({
+        request: zeroRequest, compiler: zeroBundle.manifest.compiler,
+        rendered: [{ relPath: "CLAUDE.md", content: `# context\n${line}\n` }],
+        included: zeroBundle.manifest.included, excluded: zeroBundle.manifest.excluded,
+      });
+      expect(errorsOf(validateBundleResponse(response, zeroRequest)), line).toMatch(/\/files\/0 content contains an inline credential/);
+    }
+    const marker = assembleBundle({
+      request: zeroRequest, compiler: zeroBundle.manifest.compiler,
+      rendered: [{ relPath: "CLAUDE.md", content: '# context\ntoken="***"\n' }],
+      included: zeroBundle.manifest.included, excluded: zeroBundle.manifest.excluded,
+    });
+    expect(errorsOf(validateBundleResponse(marker, zeroRequest))).toBe("");
+  });
+
+  it("renders an instruction file plus the 64 skills a request may select", () => {
+    const skills = Array.from({ length: 64 }, (_, i) => ({ id: `claude-skills:s${String(i).padStart(2, "0")}`, digest: `sha256:${"2".repeat(64)}` }));
+    const full: BundleRequest = { ...request, fragments: [], memoryBundles: [], skills, tokenBudget: 100000 };
+    expect(validateBundleRequest(full)).toMatchObject({ ok: true });
+    const response = assembleBundle({
+      request: full, compiler: bundle.manifest.compiler,
+      rendered: [{ relPath: "CLAUDE.md", content: "# context\n" }, ...skills.map((s, i) => ({ relPath: `.claude/skills/s${String(i).padStart(2, "0")}/SKILL.md`, content: "skill\n" }))],
+      included: skills.map((s, i) => ({ kind: "skill" as const, ref: s.id, digest: s.digest, relPath: `.claude/skills/s${String(i).padStart(2, "0")}/SKILL.md`, reason: "selected" })),
+      excluded: [],
+    });
+    expect(response.files).toHaveLength(65);
+    expect(errorsOf(validateBundleResponse(response, full))).toBe("");
+  });
+
   it("answers in the request's version", () => {
     expect(errorsOf(validateBundleResponse({ ...bundle, schemaVersion: "1.1" }, request))).toMatch(/does not answer request version 1.0/);
   });
@@ -270,6 +305,22 @@ describe("composition contract v1 rules beyond the schema", () => {
     const skillErrors = checkComposition(changedSkill, decision, bundle).join("\n");
     expect(skillErrors).toMatch(/assets candidate claude-skills:example-review has digest sha256:1+, but sha256:8+ is attached/);
     expect(skillErrors).toMatch(/attached skill claude-skills:example-review was not rendered/);
+  });
+
+  it("rejects a bundle rendered for a different model than the spec selects", () => {
+    // Review on 314450b: every document stays individually valid; only the model differs.
+    const request = structuredClone(bundleFixture("valid/two-skill.request.json") as BundleRequest);
+    request.model.id = "different-model";
+    expect(validateBundleRequest(request)).toMatchObject({ ok: true });
+    const response = bundleFixture("valid/two-skill.response.json") as BundleResponse;
+    expect(checkComposition(spec, decision, { request, response }))
+      .toContain(`bundle was rendered for model different-model, but the spec selects ${spec.model.primary.id}`);
+  });
+
+  it("records which policy revision authorized the composition", () => {
+    const noRevision = structuredClone(spec) as unknown as { policy: { revision?: unknown } };
+    delete noRevision.policy.revision;
+    expect(errorsOf(validateAgentSpec(noRevision))).toMatch(/\/policy must have required property 'revision'/);
   });
 
   it("cannot finalize a revision whose bundle excluded an attached skill", () => {

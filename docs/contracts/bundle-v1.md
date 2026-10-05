@@ -109,7 +109,7 @@ Identical requests against identical inputs MUST produce byte-identical `files` 
 | Limit | Value | Why |
 |---|---|---|
 | Total decoded UTF-8 bytes of all `content` | 256 KiB (262144) | See below |
-| Files | 64 | One instruction file plus skills |
+| Files | 65 | One instruction file plus the 64 skills a request may select |
 | Bytes or code points per file | 262144 (schema `maxLength`) | Coarse schema guard; the total is the binding limit |
 | Manifest entries, each of `included` / `excluded` | 192 | Three request lists of at most 64 inputs each; a `ref` is up to 256 characters, the registry asset id bound |
 

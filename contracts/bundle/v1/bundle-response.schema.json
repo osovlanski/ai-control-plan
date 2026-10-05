@@ -15,7 +15,7 @@
     },
     "files": {
       "type": "array",
-      "maxItems": 64,
+      "maxItems": 65,
       "items": {
         "$ref": "#/$defs/BundleFile"
       }

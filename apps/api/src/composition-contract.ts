@@ -37,7 +37,7 @@ export interface AgentSpec {
     bundle_digest: string;
     compiler: { name: string; version: string; tokens: number; token_method: "estimated"; chars_per_token: number };
   };
-  policy: { permission: "auto" | "prompt-on-escalation"; tool_allowlist: string[]; budget: { max_tokens?: number; max_cost_usd?: number; max_runtime_ms?: number } };
+  policy: { revision: { id: string; digest: string }; permission: "auto" | "prompt-on-escalation"; tool_allowlist: string[]; budget: { max_tokens?: number; max_cost_usd?: number; max_runtime_ms?: number } };
   workspace: { repository_id: string; branch: string; worktree_id: string };
   provisioning: { requested: "isolated" | "ambient"; achieved?: "full" | "high" | "partial" | "ambient" | "select-only"; profile_digest?: string };
   explanation_ref: string;
@@ -153,6 +153,7 @@ export function checkComposition(
     const { compiler } = spec.context;
     if (response.manifest.bundleDigest !== spec.context.bundle_digest) errors.push("context.bundle_digest does not match the bundle");
     if (request.harness !== spec.harness) errors.push("bundle harness does not match the spec");
+    if (request.model.id !== spec.model.primary.id) errors.push(`bundle was rendered for model ${request.model.id}, but the spec selects ${spec.model.primary.id}`);
     if (request.fragments.join("\n") !== spec.context.fragments.join("\n")) errors.push("bundle fragments do not match context.fragments");
     const pins = (list: ReadonlyArray<{ id: string; digest: string }>) => list.map((m) => `${m.id}@${m.digest}`).join("\n");
     if (pins(request.memoryBundles) !== pins(spec.context.memory_bundles)) errors.push("bundle memory bundles (id and digest) do not match context.memory_bundles");
