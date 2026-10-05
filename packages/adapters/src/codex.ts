@@ -14,6 +14,7 @@ import type {
 } from "@agent-plane/core";
 import { newRunId, NotSupportedError } from "@agent-plane/core";
 import { CodexAppServerRuntime } from "./codex-app-server-runtime.js";
+import { codexPermissions } from "./codex-permissions.js";
 import { EventQueue } from "./event-queue.js";
 
 interface CodexRunState {
@@ -41,8 +42,9 @@ export interface CodexAdapterOptions {
  * - This SDK layer exposes NO rate_limits/quota-percent payload, so the
  *   manifest reports reportsLimits: false; limit *hits* are still detected
  *   by error classification and emitted as limit.hit.
- * - No mid-turn input or approval round-trip: runs execute sandboxed
- *   (workspace-write, approvalPolicy "never"); supportsMidRunInput: false.
+ * - No mid-turn input or approval round-trip: runs execute sandboxed with
+ *   approvalPolicy "never"; the sandbox follows the workspace approval mode
+ *   (codexPermissions) and prompt-on-escalation is refused at start.
  */
 export class CodexAdapter implements AgentAdapter {
   private codex: Codex;
@@ -97,12 +99,14 @@ export class CodexAdapter implements AgentAdapter {
   }
 
   async start(run: RunSpec): Promise<RunHandle> {
+    codexPermissions(run.permissionPolicy); // refuse before any process starts
     if (this.appServer) return this.appServer.start(run);
     const thread = this.codex.startThread(this.threadOptions(run));
     return this.launch(thread, run);
   }
 
   async resume(ref: ProviderSessionRef, run: RunSpec): Promise<RunHandle> {
+    codexPermissions(run.permissionPolicy);
     if (this.appServer) return this.appServer.start(run, ref);
     const thread = this.codex.resumeThread(ref, this.threadOptions(run));
     return this.launch(thread, run);
@@ -112,10 +116,9 @@ export class CodexAdapter implements AgentAdapter {
     return {
       workingDirectory: run.workdir,
       model: run.model?.id === "default" ? undefined : run.model?.id,
-      sandboxMode: "workspace-write" as const,
       // Sandbox is the safety boundary; interactive approvals are not part of
       // this SDK's typed surface, so escalations are simply unavailable.
-      approvalPolicy: "never" as const,
+      ...codexPermissions(run.permissionPolicy),
     };
   }
 

@@ -3,6 +3,7 @@ import { newRunId, NotSupportedError, type AssistantId, type NormalizedEvent, ty
 import { CodexAppServerProtocol, type RpcFrame } from "./codex-app-server-protocol.js";
 import { CodexSessionInputAdapter, type CodexInputConnection } from "./codex-session-input.js";
 import { codexSdkBinary } from "./codex-sdk-binary.js";
+import { codexPermissions } from "./codex-permissions.js";
 import { readCodexThreadHistory } from "./codex-app-server-history.js";
 export { codexSdkBinary } from "./codex-sdk-binary.js";
 import { EventQueue } from "./event-queue.js";
@@ -17,6 +18,11 @@ interface State {
   cancelling?: boolean;
   usage?: Record<string, unknown>;
   timer?: ReturnType<typeof setTimeout>;
+}
+
+function appServerPermissions(run: RunSpec): { sandbox: string; approvalPolicy: string } {
+  const { sandboxMode, approvalPolicy } = codexPermissions(run.permissionPolicy);
+  return { sandbox: sandboxMode, approvalPolicy };
 }
 
 /** Explicitly opted-in execution owner. One app-server child per run. */
@@ -54,8 +60,7 @@ export class CodexAppServerRuntime {
     const response = await rpc.request(ref ? "thread/resume" : "thread/start", {
       ...(ref ? { threadId: ref } : {}), cwd: run.workdir,
       model: run.model?.id === "default" ? undefined : run.model?.id,
-      sandbox: run.permissionPolicy.mode === "read-only" ? "read-only" : "workspace-write",
-      approvalPolicy: "never",
+      ...appServerPermissions(run),
     });
     const thread = object(response.result?.thread);
     if (response.error || typeof thread.id !== "string" || (ref && thread.id !== ref)) throw new Error("thread identity unavailable");
