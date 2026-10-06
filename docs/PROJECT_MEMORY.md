@@ -20,7 +20,8 @@ AI Agent Control Plane routes work across complete assistant environments (Claud
 - Integration: `GET /api/meta` publishes `CONTROL_PLANE_API_VERSION` (`packages/core/src/contracts.ts`) and the capabilities a credential holds. API routes need a bearer credential or a bootstrapped browser session, even on loopback; a route opts out only by declaring `config.auth: null`. Cockpit is a live consumer: its `ControlPlaneClient` speaks API 2.x with a bearer credential read from `controlPlaneCredentialPath` and checks versions per policy (Cockpit #34). It also renders the context gauge (#37) and model catalog (#38).
 - Weaknesses: large orchestration module; the API refuses a non-loopback bind because remote mode is designed but not built (`docs/adr/remote-auth-design.md`); limited production packaging/observability.
 - Portfolio: the source of truth for control/execution-plane contracts. `ai-control-plan-agentic-os` was a documentation worktree; its design docs are now tracked here under `docs/`. It is not a separate product.
-- Open questions: whether remote execution is actually required; how the contracts shared with Cockpit are distributed (plan §7.7a).
+- Contract distribution (plan §7.7a, owner decision 2026-10-06 on #76): JSON Schemas under `contracts/` live in this repo, and Cockpit vendors a copy pinned by commit SHA with a sha256 manifest test. Never use a moving-branch dependency. Revisit publishing a package at M10.
+- Open questions: whether remote execution is actually required.
 
 ## K1 durable dispatch implementation
 
