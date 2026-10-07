@@ -499,7 +499,7 @@ rule-allowed tools; neither changed here.
   expressible in JSON Schema; the reference validator enforces them.
 - **MCP env values are `SecretRef` objects, never strings** (schema-enforced), and inline credential
   shapes in command/args/url must be `${VAR}` or `***`.
-- **Distribution default, pending the owner's §7.7a decision:** Cockpit vendors the schema files
+- **Distribution (owner decided §7.7a on 2026-10-06):** Cockpit vendors the schema files
   pinned to a commit SHA of this repo, with a sha256 manifest test. Never a moving-branch dependency.
 
 ## 2026-10-05 — Composition and bundle contracts v1 (SHIPPED as contracts; no consumer wired yet)
@@ -521,5 +521,5 @@ rule-allowed tools; neither changed here.
   with `why` is valid. `SecretRef` is `$ref`'d from registry v1.
 - **The bundle bytes are not in AgentSpec**; `context.bundle_digest` binds them. The M1 tables
   (wave 2) must persist the BundleResponse with the revision to keep it replayable.
-- Distribution: same SHA-pinned vendoring default as registry v1 (§7.7a still unanswered).
-  Stacked on #76.
+- Distribution: SHA-pinned vendoring, as for registry v1 (owner decided §7.7a). Composition is
+  plane-internal and not vendored.
