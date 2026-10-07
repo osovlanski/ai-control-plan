@@ -1,0 +1,104 @@
+{
+  "schema_version": "1.0",
+  "id": "CR-0001-1.decision",
+  "composition_revision_id": "CR-0001-1",
+  "stages": [
+    {
+      "stage": "intent",
+      "candidates": [
+        {
+          "ref": "coding"
+        },
+        {
+          "ref": "review"
+        }
+      ],
+      "filters": [],
+      "chosen": [
+        "coding"
+      ],
+      "why": "prompt asks for a code change",
+      "override": null
+    },
+    {
+      "stage": "harness_model",
+      "candidates": [
+        {
+          "ref": "claude-code/example-model"
+        }
+      ],
+      "filters": [],
+      "chosen": [
+        "claude-code/example-model"
+      ],
+      "why": "routing decision",
+      "override": null
+    },
+    {
+      "stage": "assets",
+      "candidates": [
+        {
+          "ref": "claude-skills:example-deploy",
+          "digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          "evidence": [
+            "tag deploy does not match intent coding"
+          ]
+        }
+      ],
+      "filters": [
+        {
+          "filter": "compatibility",
+          "removed": [
+            "claude-skills:example-deploy"
+          ],
+          "reason": "requires a command the worktree does not provide"
+        }
+      ],
+      "chosen": [],
+      "why": "no optional asset fits this task; attaching none is the least-privilege composition",
+      "override": null
+    },
+    {
+      "stage": "context",
+      "candidates": [
+        {
+          "ref": "typescript-style"
+        }
+      ],
+      "filters": [],
+      "chosen": [
+        "typescript-style"
+      ],
+      "why": "repository language",
+      "override": null
+    },
+    {
+      "stage": "policy",
+      "candidates": [
+        {
+          "ref": "prompt-on-escalation"
+        }
+      ],
+      "filters": [],
+      "chosen": [
+        "prompt-on-escalation"
+      ],
+      "why": "workspace default for normal risk",
+      "override": null
+    },
+    {
+      "stage": "confirm",
+      "candidates": [
+        {
+          "ref": "operator"
+        }
+      ],
+      "filters": [],
+      "chosen": [
+        "operator"
+      ],
+      "why": "confirmed before start",
+      "override": null
+    }
+  ]
+}

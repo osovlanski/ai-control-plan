@@ -1,0 +1,106 @@
+{
+  "schema_version": "1.0",
+  "id": "CR-0002-1.decision",
+  "composition_revision_id": "CR-0002-1",
+  "stages": [
+    {
+      "stage": "intent",
+      "candidates": [
+        {
+          "ref": "coding"
+        },
+        {
+          "ref": "review"
+        }
+      ],
+      "filters": [],
+      "chosen": [
+        "coding"
+      ],
+      "why": "prompt asks for a code change",
+      "override": null
+    },
+    {
+      "stage": "harness_model",
+      "candidates": [
+        {
+          "ref": "claude-code/example-model"
+        }
+      ],
+      "filters": [],
+      "chosen": [
+        "claude-code/example-model"
+      ],
+      "why": "routing decision",
+      "override": null
+    },
+    {
+      "stage": "assets",
+      "candidates": [
+        {
+          "ref": "claude-skills:example-review",
+          "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "evidence": [
+            "tag review matches"
+          ]
+        },
+        {
+          "ref": "claude-skills:example-tests",
+          "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+          "evidence": [
+            "tag testing matches"
+          ]
+        }
+      ],
+      "filters": [],
+      "chosen": [
+        "claude-skills:example-review",
+        "claude-skills:example-tests"
+      ],
+      "why": "both match the coding intent; example-tests is outside the allowlist and was opted in by digest",
+      "override": null
+    },
+    {
+      "stage": "context",
+      "candidates": [
+        {
+          "ref": "typescript-style"
+        }
+      ],
+      "filters": [],
+      "chosen": [
+        "typescript-style"
+      ],
+      "why": "repository language",
+      "override": null
+    },
+    {
+      "stage": "policy",
+      "candidates": [
+        {
+          "ref": "prompt-on-escalation"
+        }
+      ],
+      "filters": [],
+      "chosen": [
+        "prompt-on-escalation"
+      ],
+      "why": "workspace default for normal risk",
+      "override": null
+    },
+    {
+      "stage": "confirm",
+      "candidates": [
+        {
+          "ref": "operator"
+        }
+      ],
+      "filters": [],
+      "chosen": [
+        "operator"
+      ],
+      "why": "confirmed before start",
+      "override": null
+    }
+  ]
+}

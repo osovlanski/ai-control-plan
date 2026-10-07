@@ -1,0 +1,33 @@
+{
+  "schemaVersion": "1.0",
+  "files": [
+    {
+      "relPath": "CLAUDE.md",
+      "content": "# Project context\n\n## typescript-style\n\nUse strict TypeScript. Prefer named exports.\n",
+      "digest": "sha256:8695a268438eb0e2ee0c1f3bbe4c470a7c12c273542967782b70ae507a1ea1f9"
+    }
+  ],
+  "manifest": {
+    "harness": "claude-code",
+    "bundleDigest": "sha256:95a0b87b609569f55abf0907e5e1f3edef44276955ab85a6504925e2f7cdf6bb",
+    "compiler": {
+      "name": "cockpit-context-compiler",
+      "version": "1.0.0"
+    },
+    "included": [
+      {
+        "kind": "fragment",
+        "ref": "typescript-style",
+        "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "reason": "requested by the composition"
+      }
+    ],
+    "excluded": [],
+    "tokens": {
+      "estimated": 23,
+      "tokenMethod": "estimated",
+      "charsPerToken": 3.7,
+      "budget": 8000
+    }
+  }
+}

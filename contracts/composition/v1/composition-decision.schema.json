@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-plane.local/contracts/composition/v1/composition-decision.schema.json",
+  "title": "CompositionDecision",
+  "description": "Composition v1: the explanation of one composition revision (plan §3.2, §3.3). One entry per Composer stage, in pipeline order. An empty `chosen` with a `why` is a valid outcome. Normative text: docs/contracts/composition-v1.md.",
+  "type": "object",
+  "required": ["schema_version", "id", "composition_revision_id", "stages"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "type": "string", "pattern": "^1\\.(0|[1-9][0-9]*)$" },
+    "id": { "$ref": "agent-spec.schema.json#/$defs/id" },
+    "composition_revision_id": { "$ref": "agent-spec.schema.json#/$defs/id" },
+    "stages": {
+      "type": "array", "minItems": 6, "maxItems": 6,
+      "items": { "$ref": "#/$defs/Stage" }
+    }
+  },
+  "$defs": {
+    "ref": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "Stage": {
+      "type": "object",
+      "required": ["stage", "candidates", "filters", "chosen", "why", "override"],
+      "additionalProperties": false,
+      "properties": {
+        "stage": { "enum": ["intent", "harness_model", "assets", "context", "policy", "confirm"] },
+        "candidates": {
+          "type": "array", "maxItems": 512,
+          "items": {
+            "type": "object",
+            "required": ["ref"],
+            "additionalProperties": false,
+            "properties": {
+              "ref": { "$ref": "#/$defs/ref" },
+              "digest": { "$ref": "agent-spec.schema.json#/$defs/digest" },
+              "evidence": { "type": "array", "maxItems": 16, "items": { "type": "string", "minLength": 1, "maxLength": 512 } }
+            }
+          }
+        },
+        "filters": {
+          "type": "array", "maxItems": 64,
+          "items": {
+            "type": "object",
+            "required": ["filter", "removed", "reason"],
+            "additionalProperties": false,
+            "properties": {
+              "filter": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$" },
+              "removed": { "type": "array", "uniqueItems": true, "maxItems": 512, "items": { "$ref": "#/$defs/ref" } },
+              "reason": { "type": "string", "minLength": 1, "maxLength": 512 }
+            }
+          }
+        },
+        "chosen": {
+          "description": "What this stage selected. May be empty; `why` then states why nothing was chosen.",
+          "type": "array", "uniqueItems": true, "maxItems": 128,
+          "items": { "$ref": "#/$defs/ref" }
+        },
+        "why": { "type": "string", "minLength": 1, "maxLength": 2048 },
+        "override": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "required": ["actor", "from", "to", "reason"],
+              "additionalProperties": false,
+              "properties": {
+                "actor": { "type": "string", "minLength": 1, "maxLength": 128 },
+                "from": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/ref" } },
+                "to": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/ref" } },
+                "reason": { "type": "string", "minLength": 1, "maxLength": 512 }
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

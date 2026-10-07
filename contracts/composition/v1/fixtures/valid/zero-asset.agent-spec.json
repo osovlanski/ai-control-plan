@@ -1,0 +1,69 @@
+{
+  "schema_version": "1.0",
+  "composition_revision_id": "CR-0001-1",
+  "task_id": "AG-0001",
+  "intent": {
+    "kind": "coding",
+    "domains": [
+      "fastify",
+      "typescript"
+    ],
+    "complexity": "M",
+    "risk": "normal"
+  },
+  "harness": "claude-code",
+  "model": {
+    "primary": {
+      "id": "example-model"
+    },
+    "fallbacks": []
+  },
+  "registry": {
+    "snapshot_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "observed_at": "2026-10-01T09:00:00.000Z",
+    "stale": false
+  },
+  "context": {
+    "fragments": [
+      "typescript-style"
+    ],
+    "memory_bundles": [],
+    "bundle_digest": "sha256:95a0b87b609569f55abf0907e5e1f3edef44276955ab85a6504925e2f7cdf6bb",
+    "compiler": {
+      "name": "cockpit-context-compiler",
+      "version": "1.0.0",
+      "tokens": 23,
+      "token_method": "estimated",
+      "chars_per_token": 3.7
+    }
+  },
+  "policy": {
+    "revision": {
+      "id": "workspace-policy:example",
+      "digest": "sha256:9999999999999999999999999999999999999999999999999999999999999999"
+    },
+    "permission": "prompt-on-escalation",
+    "tool_allowlist": [
+      "Edit",
+      "Read"
+    ],
+    "budget": {
+      "max_tokens": 200000,
+      "max_runtime_ms": 1800000
+    }
+  },
+  "workspace": {
+    "repository_id": "repo-example",
+    "branch": "task/AG-0001",
+    "worktree_id": "wt-example"
+  },
+  "provisioning": {
+    "requested": "isolated"
+  },
+  "explanation_ref": "CR-0001-1.decision",
+  "assets": {
+    "skills": [],
+    "mcp_servers": [],
+    "subagents": []
+  }
+}
