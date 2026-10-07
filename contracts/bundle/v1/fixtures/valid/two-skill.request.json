@@ -1,0 +1,29 @@
+{
+  "schemaVersion": "1.0",
+  "harness": "claude-code",
+  "fragments": [
+    "repo:example",
+    "typescript-style"
+  ],
+  "memoryBundles": [
+    {
+      "id": "mem-example-notes",
+      "digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    }
+  ],
+  "skills": [
+    {
+      "id": "claude-skills:example-review",
+      "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+    },
+    {
+      "id": "claude-skills:example-tests",
+      "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+    }
+  ],
+  "model": {
+    "id": "example-model",
+    "charsPerToken": 3.7
+  },
+  "tokenBudget": 8000
+}

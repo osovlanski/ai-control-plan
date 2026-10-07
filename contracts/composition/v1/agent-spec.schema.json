@@ -1,0 +1,200 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-plane.local/contracts/composition/v1/agent-spec.schema.json",
+  "title": "AgentSpec",
+  "description": "Composition v1: one immutable composition revision (plan §3.2). Plane-internal and persisted. Every object is closed so that a mutable pointer, an inline secret or an unknown field cannot be persisted. Normative text: docs/contracts/composition-v1.md.",
+  "type": "object",
+  "required": [
+    "schema_version", "composition_revision_id", "task_id", "intent", "harness", "model", "registry",
+    "assets", "context", "policy", "workspace", "provisioning", "explanation_ref"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "type": "string", "pattern": "^1\\.(0|[1-9][0-9]*)$" },
+    "composition_revision_id": { "$ref": "#/$defs/id" },
+    "task_id": { "$ref": "#/$defs/id" },
+    "intent": {
+      "type": "object",
+      "required": ["kind", "domains", "complexity", "risk"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "enum": ["coding", "planning", "review", "research", "ops", "content"] },
+        "domains": { "$ref": "#/$defs/sortedNames" },
+        "complexity": { "enum": ["S", "M", "L"] },
+        "risk": { "enum": ["low", "normal", "high"] }
+      }
+    },
+    "harness": { "enum": ["claude-code", "codex", "cursor", "bedrock"] },
+    "model": {
+      "type": "object",
+      "required": ["primary", "fallbacks"],
+      "additionalProperties": false,
+      "properties": {
+        "primary": { "$ref": "#/$defs/ModelRef" },
+        "fallbacks": { "type": "array", "maxItems": 8, "items": { "$ref": "#/$defs/ModelRef" } },
+        "reasoning_effort": { "enum": ["low", "medium", "high"] }
+      }
+    },
+    "registry": {
+      "type": "object",
+      "required": ["snapshot_digest", "observed_at", "stale"],
+      "additionalProperties": false,
+      "properties": {
+        "snapshot_digest": { "$ref": "#/$defs/digest" },
+        "observed_at": { "type": "string", "format": "date-time" },
+        "stale": { "type": "boolean" }
+      }
+    },
+    "assets": {
+      "description": "Immutable asset references. Each list may be empty: zero optional assets is a valid composition.",
+      "type": "object",
+      "required": ["skills", "mcp_servers", "subagents"],
+      "additionalProperties": false,
+      "properties": {
+        "skills": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/AssetRef" } },
+        "mcp_servers": { "type": "array", "maxItems": 32, "items": { "$ref": "#/$defs/McpAssetRef" } },
+        "subagents": { "type": "array", "maxItems": 32, "items": { "$ref": "#/$defs/AssetRef" } }
+      }
+    },
+    "context": {
+      "type": "object",
+      "required": ["fragments", "memory_bundles", "bundle_digest", "compiler"],
+      "additionalProperties": false,
+      "properties": {
+        "fragments": {
+          "type": "array", "uniqueItems": true, "maxItems": 64,
+          "items": { "$ref": "../../bundle/v1/bundle-request.schema.json#/$defs/fragmentName" }
+        },
+        "memory_bundles": {
+          "type": "array", "maxItems": 64,
+          "items": {
+            "type": "object",
+            "required": ["id", "digest", "reason"],
+            "additionalProperties": false,
+            "properties": {
+              "id": { "$ref": "../../bundle/v1/bundle-request.schema.json#/$defs/memoryBundleId" },
+              "digest": { "$ref": "#/$defs/digest" },
+              "reason": { "type": "string", "minLength": 1, "maxLength": 512 }
+            }
+          }
+        },
+        "bundle_digest": { "$ref": "#/$defs/digest" },
+        "compiler": {
+          "type": "object",
+          "required": ["name", "version", "tokens", "token_method", "chars_per_token"],
+          "additionalProperties": false,
+          "properties": {
+            "name": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$" },
+            "version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
+            "tokens": { "type": "integer", "minimum": 0 },
+            "token_method": { "const": "estimated" },
+            "chars_per_token": { "type": "number", "exclusiveMinimum": 0, "maximum": 16 }
+          }
+        }
+      }
+    },
+    "policy": {
+      "type": "object",
+      "required": ["revision", "permission", "tool_allowlist", "budget"],
+      "additionalProperties": false,
+      "properties": {
+        "revision": {
+          "description": "The workspace policy and digest allowlist revision that authorized this composition (invariant 1). The digest is of the effective policy document, so a later policy edit cannot be mistaken for the one that applied.",
+          "type": "object",
+          "required": ["id", "digest"],
+          "additionalProperties": false,
+          "properties": { "id": { "$ref": "#/$defs/id" }, "digest": { "$ref": "#/$defs/digest" } }
+        },
+        "permission": { "enum": ["auto", "prompt-on-escalation"] },
+        "tool_allowlist": { "$ref": "#/$defs/sortedNames" },
+        "budget": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "max_tokens": { "type": "integer", "minimum": 1 },
+            "max_cost_usd": { "type": "number", "exclusiveMinimum": 0 },
+            "max_runtime_ms": { "type": "integer", "minimum": 1 }
+          }
+        }
+      }
+    },
+    "workspace": {
+      "description": "Opaque ids, never a filesystem path.",
+      "type": "object",
+      "required": ["repository_id", "branch", "worktree_id"],
+      "additionalProperties": false,
+      "properties": {
+        "repository_id": { "$ref": "#/$defs/id" },
+        "branch": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$" },
+        "worktree_id": { "$ref": "#/$defs/id" }
+      }
+    },
+    "provisioning": {
+      "type": "object",
+      "required": ["requested"],
+      "additionalProperties": false,
+      "properties": {
+        "requested": { "enum": ["isolated", "ambient"] },
+        "achieved": { "enum": ["full", "high", "partial", "ambient", "select-only"] },
+        "profile_digest": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "explanation_ref": { "$ref": "#/$defs/id" }
+  },
+  "$defs": {
+    "id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "sortedNames": {
+      "type": "array", "uniqueItems": true, "maxItems": 64,
+      "items": { "type": "string", "minLength": 1, "maxLength": 128 }
+    },
+    "ModelRef": {
+      "type": "object",
+      "required": ["id"],
+      "additionalProperties": false,
+      "properties": { "id": { "type": "string", "minLength": 1, "maxLength": 128 } }
+    },
+    "OptIn": {
+      "description": "An explicit operator opt-in for an asset outside the workspace allowlist. It pins the digest it approved.",
+      "type": "object",
+      "required": ["digest", "actor", "at"],
+      "additionalProperties": false,
+      "properties": {
+        "digest": { "$ref": "#/$defs/digest" },
+        "actor": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "at": { "type": "string", "format": "date-time" }
+      }
+    },
+    "assetRefCore": {
+      "type": "object",
+      "required": ["id", "digest", "allowlisted"],
+      "properties": {
+        "id": { "$ref": "../../registry/v1/registry-snapshot.schema.json#/$defs/assetId" },
+        "digest": { "$ref": "#/$defs/digest" },
+        "allowlisted": { "type": "boolean" },
+        "opt_in": { "$ref": "#/$defs/OptIn" }
+      },
+      "if": { "properties": { "allowlisted": { "const": false } }, "required": ["allowlisted"] },
+      "then": { "required": ["opt_in"] }
+    },
+    "AssetRef": {
+      "description": "An immutable asset reference. The digest IS the revision; there is no version, path, url or 'latest' pointer.",
+      "type": "object",
+      "allOf": [{ "$ref": "#/$defs/assetRefCore" }],
+      "unevaluatedProperties": false
+    },
+    "McpAssetRef": {
+      "type": "object",
+      "allOf": [{ "$ref": "#/$defs/assetRefCore" }],
+      "required": ["tools_allowed", "secret_refs"],
+      "properties": {
+        "tools_allowed": { "$ref": "#/$defs/sortedNames" },
+        "secret_refs": {
+          "type": "array", "maxItems": 128,
+          "items": { "$ref": "../../registry/v1/registry-snapshot.schema.json#/$defs/SecretRef" }
+        }
+      },
+      "unevaluatedProperties": false
+    }
+  }
+}

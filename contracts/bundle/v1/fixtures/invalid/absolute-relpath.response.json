@@ -1,0 +1,69 @@
+{
+  "schemaVersion": "1.0",
+  "files": [
+    {
+      "relPath": "/home/example/.claude/skills/example-review/SKILL.md",
+      "content": "---\nname: example-review\ndescription: Example skill for the composition v1 fixtures.\n---\n\nReview the diff before committing.\n",
+      "digest": "sha256:6b602c77c9c5dbd0d64762f160db4c213431816f0ac8f5bc03177de93a01298c"
+    },
+    {
+      "relPath": ".claude/skills/example-tests/SKILL.md",
+      "content": "---\nname: example-tests\ndescription: Example skill for the composition v1 fixtures.\n---\n\nWrite a failing test first.\n",
+      "digest": "sha256:23b30766f6b452e80f70cea5a4addfab9bdc4cec3d2ed83670b43833f57edca0"
+    },
+    {
+      "relPath": "CLAUDE.md",
+      "content": "# Project context\n\n## typescript-style\n\nUse strict TypeScript. Prefer named exports.\n\n## repo:example\n\nRun the gate before a PR.\n",
+      "digest": "sha256:08a31510b88697695bb136c04376b86b30868619e26ffd69adc689d73d4fdaa0"
+    }
+  ],
+  "manifest": {
+    "harness": "claude-code",
+    "bundleDigest": "sha256:5574c946b6153b1f613cb98c7cdaf05a0e3c8cfacccb92f37d7154b501156595",
+    "compiler": {
+      "name": "cockpit-context-compiler",
+      "version": "1.0.0"
+    },
+    "included": [
+      {
+        "kind": "fragment",
+        "ref": "repo:example",
+        "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "reason": "linked from the repository"
+      },
+      {
+        "kind": "fragment",
+        "ref": "typescript-style",
+        "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "reason": "requested by the composition"
+      },
+      {
+        "kind": "skill",
+        "ref": "claude-skills:example-review",
+        "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "relPath": ".claude/skills/example-review/SKILL.md",
+        "reason": "selected by the composition"
+      },
+      {
+        "kind": "skill",
+        "ref": "claude-skills:example-tests",
+        "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+        "relPath": ".claude/skills/example-tests/SKILL.md",
+        "reason": "selected by the composition"
+      }
+    ],
+    "excluded": [
+      {
+        "kind": "memory_bundle",
+        "ref": "mem-example-notes",
+        "reason": "over the token budget after required fragments"
+      }
+    ],
+    "tokens": {
+      "estimated": 101,
+      "tokenMethod": "estimated",
+      "charsPerToken": 3.7,
+      "budget": 8000
+    }
+  }
+}
