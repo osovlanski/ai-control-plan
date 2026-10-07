@@ -1,0 +1,22 @@
+{
+  "schemaVersion": "1.0",
+  "id": "claude-skills:example-skill",
+  "kind": "skill",
+  "digest": "sha256:55bf48cefe7f83caff9026b173176b7ee8ed6e59484786dee8bf553299d38aff",
+  "files": [
+    {
+      "path": "SKILL.md",
+      "size": 118,
+      "digest": "sha256:06e4bd5e39cbd1239fc1fb7f11efea3edf5f278a3e498f6e6cfaf7a41bfc2262",
+      "encoding": "utf8",
+      "content": "---\nname: example-skill\ndescription: Example skill used by the registry v1 conformance fixtures.\n---\n\n# Example skill\n"
+    },
+    {
+      "path": "references/notes.md",
+      "size": 17,
+      "digest": "sha256:059e63f55fe499a0b2d29ba03c088485250d5bba4f76ebec521bf104d1de3f12",
+      "encoding": "utf8",
+      "content": "Reference notes.\n"
+    }
+  ]
+}
