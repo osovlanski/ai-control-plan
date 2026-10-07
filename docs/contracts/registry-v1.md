@@ -154,12 +154,12 @@ version may only add optional fields or enum-free metadata. Removing or renaming
 the meaning of a field, or adding a value to a closed enum (`kind`, `origin`, `SecretRef.type`)
 needs a new major.
 
-## Distribution (open owner decision, plan §7.7a)
+## Distribution (owner decision, plan §7.7a)
 
-Default for v1: the schema files live in this repository under `contracts/registry/v1/`. Cockpit
+Decided for v1: the schema files live in this repository under `contracts/registry/v1/`. Cockpit
 vendors a copy pinned to a commit SHA of this repository, with a test that checks each vendored
-file's sha256 against a recorded manifest. A moving-branch git dependency is never used. A
-published package or release artifact can replace this once the owner decides §7.7a.
+file's sha256 against a recorded manifest. A moving-branch git dependency is never used. Publishing
+a package or release artifact is revisited at M10.
 
 ## Control Plane consumption (M4)
 
