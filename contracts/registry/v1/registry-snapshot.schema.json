@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-plane.local/contracts/registry/v1/registry-snapshot.schema.json",
+  "title": "RegistrySnapshot",
+  "description": "Cockpit registry v1: a full, deterministically ordered snapshot of installed assets. Normative rules that JSON Schema cannot express (ordering, snapshotDigest, sorted arrays) live in docs/contracts/registry-v1.md.",
+  "type": "object",
+  "required": ["schemaVersion", "snapshotDigest", "assets"],
+  "properties": {
+    "schemaVersion": { "$ref": "#/$defs/schemaVersion" },
+    "snapshotDigest": { "$ref": "#/$defs/digest" },
+    "assets": {
+      "type": "array",
+      "maxItems": 5000,
+      "items": { "$ref": "#/$defs/RegistryAsset" }
+    }
+  },
+  "$defs": {
+    "schemaVersion": { "type": "string", "pattern": "^1\\.(0|[1-9][0-9]*)$" },
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "assetId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._@:+-]{0,255}$" },
+    "assistantId": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,31}$" },
+    "sortedStrings": {
+      "type": "array",
+      "uniqueItems": true,
+      "maxItems": 64,
+      "items": { "type": "string", "minLength": 1, "maxLength": 128 }
+    },
+    "SecretRef": {
+      "description": "A reference to a secret held by the consumer's environment or keychain. Never the secret itself.",
+      "type": "object",
+      "required": ["type", "name"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "enum": ["env", "keychain"] },
+        "name": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_.-]{0,127}$" }
+      }
+    },
+    "noInlineSecret": {
+      "description": "Rejects a recognised inline credential (Bearer token, key=/token=/secret=/password= value, quoted or not, with optional spaces around =) unless it is a ${VAR} placeholder or the redaction marker ***.",
+      "type": "string",
+      "maxLength": 4096,
+      "not": { "pattern": "\\b(?:[Bb][Ee][Aa][Rr][Ee][Rr]\\s+|(?:[Aa][Pp][Ii]_?[Kk][Ee][Yy]|[Tt][Oo][Kk][Ee][Nn]|[Aa][Cc][Cc][Ee][Ss][Ss]_[Tt][Oo][Kk][Ee][Nn]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]|[Kk][Ee][Yy])\\s*=\\s*[\"']?)(?!\\$\\{|\\*\\*\\*)[^\\s&\"']" }
+    },
+    "McpLaunch": {
+      "description": "MCP server launch shape. env values are SecretRefs only: a plain string value is a schema violation.",
+      "type": "object",
+      "required": ["transport", "env"],
+      "properties": {
+        "transport": { "enum": ["stdio", "remote"] },
+        "command": { "$ref": "#/$defs/noInlineSecret" },
+        "args": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/noInlineSecret" } },
+        "url": { "$ref": "#/$defs/noInlineSecret" },
+        "env": {
+          "type": "object",
+          "maxProperties": 128,
+          "propertyNames": { "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}$" },
+          "additionalProperties": { "$ref": "#/$defs/SecretRef" }
+        }
+      }
+    },
+    "RegistryAsset": {
+      "type": "object",
+      "required": [
+        "id", "digest", "kind", "nativeKind", "name", "description", "tags", "targets",
+        "compatibility", "requirements", "conflicts", "lineage", "enabled", "installedAt"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/assetId" },
+        "digest": { "$ref": "#/$defs/digest" },
+        "kind": { "enum": ["skill", "plugin", "agent", "hook", "mcp_server", "rule"] },
+        "nativeKind": { "type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "description": { "type": "string", "maxLength": 2048 },
+        "tags": { "$ref": "#/$defs/sortedStrings" },
+        "targets": {
+          "type": "array", "uniqueItems": true, "maxItems": 16,
+          "items": { "$ref": "#/$defs/assistantId" }
+        },
+        "compatibility": {
+          "type": "object",
+          "required": ["assistants"],
+          "properties": {
+            "assistants": {
+              "type": "array", "uniqueItems": true, "maxItems": 16,
+              "items": { "$ref": "#/$defs/assistantId" }
+            }
+          }
+        },
+        "requirements": {
+          "type": "object",
+          "required": ["secretRefs"],
+          "properties": {
+            "secretRefs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/SecretRef" } },
+            "commands": { "$ref": "#/$defs/sortedStrings" }
+          }
+        },
+        "conflicts": {
+          "type": "array", "uniqueItems": true, "maxItems": 64,
+          "items": { "$ref": "#/$defs/assetId" }
+        },
+        "lineage": {
+          "type": "object",
+          "required": ["origin"],
+          "properties": {
+            "origin": { "enum": ["proposal", "library", "manual", "backfill", "unknown"] },
+            "sourceUrl": { "type": "string", "format": "uri", "maxLength": 2048 }
+          }
+        },
+        "enabled": { "type": "boolean" },
+        "mcp": { "$ref": "#/$defs/McpLaunch" },
+        "installedAt": { "type": "string", "format": "date-time" },
+        "lastUsedAt": { "type": "string", "format": "date-time" },
+        "stats": { "type": "object" }
+      },
+      "if": { "properties": { "kind": { "const": "mcp_server" } }, "required": ["kind"] },
+      "then": { "required": ["mcp"] }
+    }
+  }
+}

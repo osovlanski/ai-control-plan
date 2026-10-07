@@ -1,0 +1,29 @@
+{
+  "schemaVersion": "1.0",
+  "id": "mcp:example-mcp",
+  "kind": "mcp_server",
+  "digest": "sha256:6d6092e44e2ea02d02ddeee7b65cd1ec072cef19225e8ab1e9df341c8673d473",
+  "mcp": {
+    "transport": "stdio",
+    "command": "example-mcp",
+    "args": [
+      "--stdio",
+      "--token=${EXAMPLE_TOKEN}"
+    ],
+    "env": {
+      "EXAMPLE_TOKEN": {
+        "type": "env",
+        "name": "EXAMPLE_TOKEN"
+      }
+    }
+  },
+  "files": [
+    {
+      "path": "server.json",
+      "size": 153,
+      "digest": "sha256:7b09043b8d63e04012088fc4d4533f270f80a28895699760a8883973986f5ce4",
+      "encoding": "utf8",
+      "content": "{\"args\":[\"--stdio\",\"--token=${EXAMPLE_TOKEN}\"],\"command\":\"example-mcp\",\"env\":{\"EXAMPLE_TOKEN\":{\"name\":\"EXAMPLE_TOKEN\",\"type\":\"env\"}},\"transport\":\"stdio\"}"
+    }
+  ]
+}

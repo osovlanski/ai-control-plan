@@ -1,0 +1,6 @@
+{
+  "error": {
+    "code": "unauthenticated",
+    "message": "bearer token required"
+  }
+}

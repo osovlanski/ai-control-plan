@@ -486,3 +486,17 @@ every mode except `auto-approve`: `agent -p` has write and shell access, and `--
 before a process starts, so the legacy path (which has no enforceability check) fails loudly too.
 Still unenforced in the adapter: Bedrock (tools run remotely) and Claude `read-only` allowing
 rule-allowed tools; neither changed here.
+
+## 2026-10-05 — Cockpit registry contract v1 (SHIPPED as a contract; no consumer wired yet)
+
+- **The registry wire authority is JSON Schema in `contracts/registry/v1/`**, normative text in
+  `docs/contracts/registry-v1.md`, reference checks in `apps/api/src/registry-contract.ts`. This is
+  the M0 slice for the registry only; AgentSpec/CompositionDecision schemas are still unwritten.
+- **`snapshotDigest` excludes exactly `installedAt`, `lastUsedAt` and `stats`.** Every other field,
+  including unknown fields from a newer minor, is digested, so objects stay open for additive minors
+  while `SecretRef` and `mcp.env` stay closed. Asset order and sorted arrays are normative but not
+  expressible in JSON Schema; the reference validator enforces them.
+- **MCP env values are `SecretRef` objects, never strings** (schema-enforced), and inline credential
+  shapes in command/args/url must be `${VAR}` or `***`.
+- **Distribution default, pending the owner's §7.7a decision:** Cockpit vendors the schema files
+  pinned to a commit SHA of this repo, with a sha256 manifest test. Never a moving-branch dependency.
