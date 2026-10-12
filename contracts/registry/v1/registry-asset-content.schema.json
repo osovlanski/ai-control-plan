@@ -100,7 +100,7 @@
               "const": "utf8"
             },
             "content": {
-              "$ref": "registry-snapshot.schema.json#/$defs/noInlineSecret"
+              "$ref": "registry-snapshot.schema.json#/$defs/noInlineSecretInJsonText"
             }
           },
           "type": "object"

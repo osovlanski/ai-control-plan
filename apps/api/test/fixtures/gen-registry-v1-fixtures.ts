@@ -62,6 +62,13 @@ const clone = (): typeof snapshot => JSON.parse(JSON.stringify(snapshot)) as typ
 write("valid/snapshot.json", snapshot);
 write("valid/content-skill.json", { schemaVersion: "1.0", id: assets[1]!.id, kind: "skill", digest: assets[1]!.digest, files: skillFiles.map((f) => file(f.path, f.bytes)) });
 write("valid/content-mcp.json", { schemaVersion: "1.0", id: assets[2]!.id, kind: "mcp_server", digest: assets[2]!.digest, mcp, files: [file("server.json", mcpBytes)] });
+// A redacted and a placeholder credential, quoted: server.json carries them JSON-escaped (`\"***\"`).
+const redactedMcp = { ...mcp, args: ["--stdio", '--token="***"', 'token="${TOKEN}"'] };
+const redactedBytes = Buffer.from(canonicalJson(redactedMcp));
+write("valid/content-mcp-redacted.json", {
+  schemaVersion: "1.0", id: assets[2]!.id, kind: "mcp_server", digest: computeAssetDigest([{ path: "server.json", bytes: redactedBytes }]),
+  mcp: redactedMcp, files: [file("server.json", redactedBytes)],
+});
 write("valid/error.json", { error: { code: "unauthenticated", message: "bearer token required" } });
 
 const missingDigest = clone();

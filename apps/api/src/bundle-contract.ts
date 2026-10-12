@@ -12,7 +12,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Ajv2020, type ErrorObject } from "ajv/dist/2020.js";
 import addFormatsImport from "ajv-formats";
-import { canonicalJson, hasLoneSurrogate, isCompatibleVersion, REGISTRY_CONTRACT_DIR, type ContractResult } from "./registry-contract.js";
+import { canonicalJson, hasLoneSurrogate, INLINE_SECRET, isCompatibleVersion, REGISTRY_CONTRACT_DIR, type ContractResult } from "./registry-contract.js";
 
 // ajv-formats is CJS; under bundler resolution its default lands on `.default`.
 const addFormats = ((addFormatsImport as unknown as { default?: unknown }).default ?? addFormatsImport) as (ajv: Ajv2020) => void;
@@ -53,11 +53,6 @@ const HARNESS_PATHS: Record<BundleHarness, RegExp> = {
   codex: /^AGENTS\.md$/,
 };
 const SKILL_PATH = /^\.claude\/skills\/[^/]+\/SKILL\.md$/;
-/** Registry v1's inline-credential shape, read from its schema rather than copied. */
-const INLINE_SECRET = new RegExp(
-  (JSON.parse(readFileSync(join(REGISTRY_CONTRACT_DIR, "registry-snapshot.schema.json"), "utf8")) as { $defs: { noInlineSecret: { not: { pattern: string } } } })
-    .$defs.noInlineSecret.not.pattern,
-);
 /** Guards for the determinism and secret rules. They catch common leaks; the normative rules are the requirement. */
 const CONTENT_GUARDS: Array<[RegExp, string]> = [
   [/\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/, "a timestamp"],
