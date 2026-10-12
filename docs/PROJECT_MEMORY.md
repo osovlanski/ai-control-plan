@@ -16,11 +16,12 @@ AI Agent Control Plane routes work across complete assistant environments (Claud
 - Core flow: task creation → deterministic/explainable route → adapter execution → normalized event stream/SSE → checkpoint/handoff/failover. Parallel compare/race and telemetry-fed routing are implemented.
 - Security constraints: workspace-per-process isolation, repo allowlist, provider credentials remain in provider tooling/environment, redaction before persistence, explicit approval events.
 - Build/test: `pnpm install`, `pnpm dev`, `pnpm typecheck`, `pnpm test`, `pnpm build`.
-- State: implemented prototype through Phase 5. The environment-sensitive probe test was replaced with a deterministic missing-binary test; the full 84-test API suite is green as of 2026-08-29.
-- Integration: `GET /api/meta` publishes version `1.0` and the read-only observability capabilities intended for Cockpit.
-- Weaknesses: large orchestration module, no authenticated remote mode, no frontend tests, limited production packaging/observability.
-- Portfolio: the source of truth for control/execution-plane contracts. `ai-control-plan-agentic-os` was a documentation worktree; its design docs are now tracked here under `docs/`. It is not a separate product. Cockpit is a plausible UX/observability consumer, not currently integrated.
-- Open questions: intended trust boundary for the API; whether remote execution is actually required; ownership/versioning of contracts shared with Cockpit.
+- State: Phases 0–5 plus the kernel-service slices logged below. Suite sizes change every slice; read them from the latest PR body, not from here.
+- Integration: `GET /api/meta` publishes `CONTROL_PLANE_API_VERSION` (`packages/core/src/contracts.ts`) and the capabilities a credential holds. API routes need a bearer credential or a bootstrapped browser session, even on loopback; a route opts out only by declaring `config.auth: null`. Cockpit is a live consumer: its `ControlPlaneClient` speaks API 2.x with a bearer credential read from `controlPlaneCredentialPath` and checks versions per policy (Cockpit #34). It also renders the context gauge (#37) and model catalog (#38).
+- Weaknesses: large orchestration module; the API refuses a non-loopback bind because remote mode is designed but not built (`docs/adr/remote-auth-design.md`); limited production packaging/observability.
+- Portfolio: the source of truth for control/execution-plane contracts. `ai-control-plan-agentic-os` was a documentation worktree; its design docs are now tracked here under `docs/`. It is not a separate product.
+- Contract distribution (plan §7.7a, owner decision 2026-10-06 on #76): JSON Schemas under `contracts/` live in this repo, and Cockpit vendors a copy pinned by commit SHA with a sha256 manifest test. Never use a moving-branch dependency. Revisit publishing a package at M10.
+- Open questions: whether remote execution is actually required.
 
 ## K1 durable dispatch implementation
 
@@ -498,7 +499,7 @@ rule-allowed tools; neither changed here.
   expressible in JSON Schema; the reference validator enforces them.
 - **MCP env values are `SecretRef` objects, never strings** (schema-enforced), and inline credential
   shapes in command/args/url must be `${VAR}` or `***`.
-- **Distribution default, pending the owner's §7.7a decision:** Cockpit vendors the schema files
+- **Distribution (owner decided §7.7a on 2026-10-06):** Cockpit vendors the schema files
   pinned to a commit SHA of this repo, with a sha256 manifest test. Never a moving-branch dependency.
 
 ## 2026-10-05 — Composition and bundle contracts v1 (SHIPPED as contracts; no consumer wired yet)
@@ -520,5 +521,5 @@ rule-allowed tools; neither changed here.
   with `why` is valid. `SecretRef` is `$ref`'d from registry v1.
 - **The bundle bytes are not in AgentSpec**; `context.bundle_digest` binds them. The M1 tables
   (wave 2) must persist the BundleResponse with the revision to keep it replayable.
-- Distribution: same SHA-pinned vendoring default as registry v1 (§7.7a still unanswered).
-  Stacked on #76.
+- Distribution: SHA-pinned vendoring, as for registry v1 (owner decided §7.7a). Composition is
+  plane-internal and not vendored.
