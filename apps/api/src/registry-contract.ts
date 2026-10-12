@@ -63,6 +63,27 @@ const snapshotSchema = ajv.getSchema("registry-snapshot.schema.json")!;
 const contentSchema = ajv.getSchema("registry-asset-content.schema.json")!;
 const errorSchema = ajv.getSchema("registry-error.schema.json")!;
 
+/** The shared inline-credential guard (`noInlineSecret`), read from the schema rather than copied. Judge decoded strings with it, never JSON text. */
+export const INLINE_SECRET = new RegExp(
+  (JSON.parse(readFileSync(join(REGISTRY_CONTRACT_DIR, "registry-snapshot.schema.json"), "utf8")) as { $defs: { noInlineSecret: { not: { pattern: string } } } })
+    .$defs.noInlineSecret.not.pattern,
+);
+
+/** JSON Pointers of the string values in `value` that INLINE_SECRET matches. Object keys are names, not values. Iterative, so depth cannot overflow the stack. */
+function inlineSecretPointers(value: unknown): string[] {
+  const found: string[] = [];
+  const stack: Array<[unknown, string]> = [[value, ""]];
+  while (stack.length) {
+    const [v, pointer] = stack.pop()!;
+    if (typeof v === "string") {
+      if (INLINE_SECRET.test(v)) found.push(pointer || "/");
+    } else if (v && typeof v === "object") {
+      for (const [k, child] of Object.entries(v)) stack.push([child, `${pointer}/${k.replace(/~/g, "~0").replace(/\//g, "~1")}`]);
+    }
+  }
+  return found;
+}
+
 /** An unpaired UTF-16 surrogate: RFC 8785 rejects it, and UTF-8 encoding silently turns it into U+FFFD. */
 export const hasLoneSurrogate = (text: string) => /\p{Cs}/u.test(text);
 
@@ -172,6 +193,14 @@ export function validateContent(body: unknown, supported = REGISTRY_SCHEMA_VERSI
       errors.push(`/mcp is outside the digested value space: ${(err as Error).message}`);
     }
     if (canonical !== undefined && content.files[0]?.content !== canonical) errors.push("/files/0 server.json is not the canonical JSON of /mcp");
+    // The schema can only pattern-match server.json as text; judge the decoded values, where an escaped quote is just a quote.
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(content.files[0]!.content);
+    } catch {
+      errors.push("/files/0 server.json is not valid JSON");
+    }
+    for (const pointer of inlineSecretPointers(parsed)) errors.push(`/files/0 server.json ${pointer} contains an inline credential`);
   }
   const expected = computeAssetDigest(files);
   if (expected !== content.digest) errors.push(`digest ${content.digest} does not match ${expected}`);

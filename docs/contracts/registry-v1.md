@@ -127,6 +127,13 @@ between the two reads; the consumer re-reads the snapshot and never mixes the tw
   recognised inline credential (`Bearer <value>`, `token=`, `api_key=`, `secret=`, `password=`,
   `key=`, case-insensitive, quoted or unquoted, with optional spaces around `=`) unless the value
   is a `${VAR}` placeholder or the redaction marker `***`. The producer replaces any such value with `***` before emitting it.
+- `server.json` is JSON text, so a quote inside one of its strings is escaped: `--token="***"` in
+  `mcp.args` appears as `--token=\"***\"` in the file. The guard judges decoded string values, never
+  escape sequences. The schema can only match text, so it applies `noInlineSecretInJsonText`, which
+  also accepts the escaped `\"***` and `\"${` forms. The reference validator then parses `server.json`
+  and runs the shared `noInlineSecret` guard on every string value. A consumer that validates with
+  the schemas alone misses a credential visible only after decoding (for example a `\t` after
+  `Bearer`); run the decoded check too.
 - Guards only cover recognised shapes. The normative rule above is the requirement; the guards
   catch common violations.
 
@@ -153,6 +160,14 @@ under the user's home directory.
 version may only add optional fields or enum-free metadata. Removing or renaming a field, changing
 the meaning of a field, or adding a value to a closed enum (`kind`, `origin`, `SecretRef.type`)
 needs a new major.
+
+## Fixes
+
+- **2026-10-12, server.json escapes (no version change).** The `server.json` guard ran on the file's
+  JSON text, so a redacted `--token="***"` (stored as `--token=\"***\"`) was read as a credential
+  starting with `\`. `validateContent` rejected a body whose `mcp` passed `validateSnapshot`. The
+  guard now judges decoded values (§Secrets). This only accepts output that was always meant to be
+  valid, so `schemaVersion` stays `1.0`. Fixture: `fixtures/valid/content-mcp-redacted.json`.
 
 ## Distribution (owner decision, plan §7.7a)
 
