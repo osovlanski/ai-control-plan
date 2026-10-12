@@ -189,10 +189,10 @@ describe("registry contract v1 server.json credential guard", () => {
     expect(result.ok ? "" : result.errors.join("\n")).toMatch(/\/files\/0\/content must NOT be valid/);
   });
 
-  it("classifies deeply nested server.json values without overflowing the stack", () => {
+  it("accepts deeply nested server.json values without overflowing the stack", () => {
     let deep: unknown = "x";
     for (let i = 0; i < 1700; i++) deep = [deep];
-    expect(() => validateContent(withMcp({ ...redacted().mcp, note: deep }))).not.toThrow();
+    expect(validateContent(withMcp({ ...redacted().mcp, note: deep }))).toMatchObject({ ok: true });
   });
 
   it("judges decoded server.json values, so an escape the text pattern cannot see is still caught", () => {
