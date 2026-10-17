@@ -136,6 +136,35 @@ describe("CockpitBundleClient", () => {
     } finally { await server.close(); }
   });
 
+  it("checks for the token before validation, raw or JSON-escaped, so no detail can quote it", async () => {
+    const escaped = JSON.stringify({ schemaVersion: TOKEN }).replace(/-/g, "\\u002d");
+    for (const body of [JSON.stringify({ schemaVersion: TOKEN }), escaped]) {
+      const server = await cockpit((_req, _b, res) => { res.writeHead(200, { "content-type": "application/json" }); res.end(body); });
+      try {
+        const err = await new CockpitBundleClient(server.url, tokenPath).render(fixtureRequest()).catch((e: unknown) => e) as BundleRequestError;
+        expect(err).toMatchObject({ reason: "invalid_response", detail: "response contains the bearer token" });
+        expect(JSON.stringify({ m: err.message, d: err.detail })).not.toContain(TOKEN);
+      } finally { await server.close(); }
+    }
+    expect(escaped).not.toContain(TOKEN);
+  });
+
+  it("accepts a conforming bundle at the worst-case encoding under the default cap", async () => {
+    const request = { ...fixtureRequest(), skills: [], memoryBundles: [], tokenBudget: 200_000 };
+    // 256 KiB of C0 control characters: res.json writes each as \u00XX, 6x on the wire.
+    const bundle = assembleBundle({
+      request, rendered: [{ relPath: "CLAUDE.md", content: "\u0001".repeat(256 * 1024) }], compiler: { name: "c", version: "1.0.0" },
+      included: request.fragments.map((ref) => ({ kind: "fragment" as const, ref, digest: `sha256:${"a".repeat(64)}`, reason: "\u0001".repeat(512) })),
+      excluded: [],
+    });
+    const wire = JSON.stringify(bundle);
+    expect(Buffer.byteLength(wire)).toBeGreaterThan(1.5 * 1024 * 1024);
+    const server = await cockpit((_req, _b, res) => { res.writeHead(200, { "content-type": "application/json" }); res.end(wire); });
+    try {
+      expect((await new CockpitBundleClient(server.url, tokenPath).render(request)).manifest.bundleDigest).toBe(bundle.manifest.bundleDigest);
+    } finally { await server.close(); }
+  });
+
   it("refuses a declared Content-Length over the cap before reading", async () => {
     const server = await cockpit((_req, _body, res) => {
       res.writeHead(200, { "content-type": "application/json", "content-length": String(MAX_BUNDLE_RESPONSE_BYTES + 1) });
@@ -162,7 +191,8 @@ describe("CockpitBundleClient", () => {
       pump();
     });
     try {
-      await expect(new CockpitBundleClient(server.url, tokenPath, fetch, 10_000, 256 * 1024).render(fixtureRequest()))
+      // The default cap, on a body with no Content-Length.
+      await expect(new CockpitBundleClient(server.url, tokenPath).render(fixtureRequest()))
         .rejects.toMatchObject({ reason: "payload_too_large" });
     } finally { await server.close(); }
   });
@@ -322,9 +352,25 @@ describe("BundledComposition", () => {
     expect(count(db, "agent_specs")).toBe(0);
   });
 
+  it("refuses a reused revision or decision id, or a missing task, without asking Cockpit", async () => {
+    await new BundledComposition(db, new FakeSource(fixtureResponse()), on).compose(input());
+    const source = new FakeSource(fixtureResponse());
+    expect(await new BundledComposition(db, source, on).compose(input())).toMatchObject({ ok: false, reason: "composition_rejected", detail: expect.stringMatching(/already exists/) });
+    const reusedDecision = input();
+    reusedDecision.spec.composition_revision_id = "CR-0002-2";
+    reusedDecision.decision.composition_revision_id = "CR-0002-2";
+    expect(await new BundledComposition(db, source, on).compose(reusedDecision)).toMatchObject({ ok: false, reason: "composition_rejected", detail: expect.stringMatching(/already explains/) });
+    const noTask = input();
+    noTask.spec.composition_revision_id = "CR-0002-3";
+    noTask.spec.task_id = "AG-9999";
+    expect(await new BundledComposition(db, source, on).compose(noTask)).toMatchObject({ ok: false, reason: "composition_rejected", detail: expect.stringMatching(/does not exist/) });
+    expect(source.requests).toEqual([]);
+    expect(count(db, "agent_specs")).toBe(1);
+  });
+
   it("reports a revision the store refuses, and writes nothing", async () => {
     const draft = input();
-    draft.spec.task_id = "AG-9999";
+    (draft.spec.intent as { complexity: string }).complexity = "XL";  // schema-invalid spec: only the store's full validation catches it
     const result = await new BundledComposition(db, new FakeSource(fixtureResponse()), on).compose(draft);
     expect(result).toMatchObject({ ok: false, reason: "composition_rejected" });
     expect(count(db, "agent_specs")).toBe(0);

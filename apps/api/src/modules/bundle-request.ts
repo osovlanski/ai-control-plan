@@ -18,9 +18,10 @@ import { readBounded, readRegistryToken, RegistrySyncError, type RegistrySyncRea
 
 /**
  * Bound on the encoded response. Content is capped at 256 KiB (bundle-v1.md §Limits), but JSON
- * writes a C0 control character as `\u00XX`, so conforming content can encode to 6x that; the
- * manifest's 384 reasons of up to 512 characters can add about 1 MiB more. 4 MiB holds any
- * conforming bundle and still stops a runaway body before it is buffered whole.
+ * writes a C0 control character as `\u00XX`, so conforming content can encode to 6x that (1.5 MiB);
+ * the manifest's 384 entries, each a ref of up to 256 and a reason of up to 512 characters, can
+ * add about 1.7 MiB more at the same escaping. 4 MiB holds any conforming bundle and still stops
+ * a runaway body before it is buffered whole.
  */
 export const MAX_BUNDLE_RESPONSE_BYTES = 4 * 1024 * 1024;
 const LOOPBACK_HOSTS = ["127.0.0.1", "[::1]", "localhost"];
@@ -78,13 +79,14 @@ export class CockpitBundleClient implements BundleSource {
     try { text = await readBounded(response, this.maxBytes); } catch (err) { throw asBundleError(err); }
     let body: unknown;
     try { body = JSON.parse(text); } catch { throw new BundleRequestError("invalid_response", "not JSON"); }
+    // Before validation, whose errors quote values Cockpit sent; the inline-credential guard knows
+    // shapes, not this value. The decoded form catches a token written with JSON escapes.
+    if (text.includes(token) || JSON.stringify(body).includes(token)) throw new BundleRequestError("invalid_response", "response contains the bearer token");
     const result = validateBundleResponse(body, request);
     if (!result.ok) {
       const unsupported = result.errors.some((e) => e.startsWith("unsupported schemaVersion"));
       throw new BundleRequestError(unsupported ? "unsupported_version" : "invalid_response", result.errors.slice(0, 3).join("; "));
     }
-    // The inline-credential guard knows shapes, not this value; a bundle echoing the bearer token is never persisted.
-    if (text.includes(token)) throw new BundleRequestError("invalid_response", "response contains the bearer token");
     return result.value;
   }
 }
@@ -118,7 +120,7 @@ export type BundledCompositionResult =
 
 interface Logger { warn(obj: object, msg: string): void }
 export interface BundledCompositionOptions {
-  /** `registry.cockpit.enabled`: off means no request is sent, as for registry federation. */
+  /** The caller passes `registry.cockpit.enabled`; off means no request is sent, as for registry federation. */
   enabled: boolean;
   logger?: Logger;
 }
@@ -140,11 +142,20 @@ export function bundleRequestFor(input: BundledCompositionInput): BundleRequest 
 
 export class BundledComposition {
   constructor(
-    db: Db,
+    private readonly db: Db,
     private readonly source: BundleSource,
     private readonly options: BundledCompositionOptions,
     private readonly store = new CompositionStore(db),
   ) {}
+
+  private refusedBeforeRender({ spec, decision }: BundledCompositionInput): string | undefined {
+    if (!this.db.prepare("SELECT 1 FROM tasks WHERE id = ?").get(spec.task_id)) return `task ${spec.task_id} does not exist`;
+    if (this.db.prepare("SELECT 1 FROM agent_specs WHERE composition_revision_id = ?").get(spec.composition_revision_id)) {
+      return `composition revision ${spec.composition_revision_id} already exists; compose a new revision`;
+    }
+    if (this.db.prepare("SELECT 1 FROM composition_decisions WHERE id = ?").get(decision.id)) return `composition decision ${decision.id} already explains another revision`;
+    return undefined;
+  }
 
   /** Requests the bundle, then persists the revision with it. On any failure nothing is written. */
   async compose(input: BundledCompositionInput): Promise<BundledCompositionResult> {
@@ -153,6 +164,9 @@ export class BundledComposition {
     if ("error" in request) return { ok: false, reason: "unsupported_harness", detail: request.error };
     const checked = validateBundleRequest(request);
     if (!checked.ok) return { ok: false, reason: "invalid_request", detail: checked.errors.slice(0, 3).join("; ") };
+    // What the store would refuse regardless of the bundle is refused before Cockpit is asked to render.
+    const refused = this.refusedBeforeRender(input);
+    if (refused) return { ok: false, reason: "composition_rejected", detail: refused };
 
     let response: BundleResponse;
     try {
