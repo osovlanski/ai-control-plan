@@ -1,12 +1,12 @@
 import { closeSync, fsyncSync, lstatSync, openSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { randomBytes } from "node:crypto";
-import { COMMAND_CAPABILITIES, OBSERVABILITY_CAPABILITIES, registerSecret } from "@agent-plane/core";
+import { COMMAND_CAPABILITIES, INGEST_CAPABILITIES, OBSERVABILITY_CAPABILITIES, registerSecret } from "@agent-plane/core";
 
 export interface CredentialSecret { kid: string; secret: string; capabilities: string[]; createdAt: string; notAfter: string | null }
 export interface CredentialFile { version: 1; secrets: CredentialSecret[] }
 export const credentialPath = (dir: string) => join(dir, "api-credential.json");
-const fresh = (now = new Date()): CredentialSecret => ({ kid: `k_${randomBytes(4).toString("hex")}`, secret: randomBytes(32).toString("base64url"), capabilities: [...OBSERVABILITY_CAPABILITIES, ...COMMAND_CAPABILITIES], createdAt: now.toISOString(), notAfter: null });
+const fresh = (now = new Date()): CredentialSecret => ({ kid: `k_${randomBytes(4).toString("hex")}`, secret: randomBytes(32).toString("base64url"), capabilities: [...OBSERVABILITY_CAPABILITIES, ...COMMAND_CAPABILITIES, ...INGEST_CAPABILITIES], createdAt: now.toISOString(), notAfter: null });
 
 export function validateCredentialFile(path: string): void {
   const s = lstatSync(path);
@@ -38,7 +38,7 @@ export function atomicWriteCredential(path: string, value: CredentialFile): void
   writeFileSync(tmp, JSON.stringify(value,null,2)+"\n", { mode: 0o600 }); const fd=openSync(tmp,"r"); fsyncSync(fd); closeSync(fd); renameSync(tmp,path); const dfd=openSync(dirname(path),"r"); fsyncSync(dfd); closeSync(dfd);
 }
 export function rotateCredential(path: string, graceSeconds: number, capabilities?: string[], now = new Date()): CredentialSecret {
-  return withCredentialLock(path, () => { const file=readCredential(path); const active=file.secrets.filter(s=>isActive(s,now)); const cap=capabilities ?? active.at(-1)?.capabilities ?? [...OBSERVABILITY_CAPABILITIES,...COMMAND_CAPABILITIES]; const until=new Date(now.getTime()+graceSeconds*1000).toISOString(); for (const s of active) s.notAfter=until; const next={...fresh(now),capabilities:cap}; file.secrets.push(next); atomicWriteCredential(path,file); registerSecret(next.secret); return next; });
+  return withCredentialLock(path, () => { const file=readCredential(path); const active=file.secrets.filter(s=>isActive(s,now)); const cap=capabilities ?? active.at(-1)?.capabilities ?? [...OBSERVABILITY_CAPABILITIES,...COMMAND_CAPABILITIES,...INGEST_CAPABILITIES]; const until=new Date(now.getTime()+graceSeconds*1000).toISOString(); for (const s of active) s.notAfter=until; const next={...fresh(now),capabilities:cap}; file.secrets.push(next); atomicWriteCredential(path,file); registerSecret(next.secret); return next; });
 }
 
 export class CredentialStore {

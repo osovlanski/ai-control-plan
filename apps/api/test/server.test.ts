@@ -38,7 +38,7 @@ describe("api server", () => {
     const res = await app.inject({ method: "GET", url: "/api/meta", headers: bearer() });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toMatchObject({
-      apiVersion: "2.4",
+      apiVersion: "2.5",
       eventVersion: "1.0",
       authRequired: true,
       capabilities: [
@@ -55,6 +55,7 @@ describe("api server", () => {
         "decisions.read",
         "registry.read",
         "commands.write",
+        "usage.write",
       ],
     });
   });
