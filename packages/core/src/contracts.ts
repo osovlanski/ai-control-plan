@@ -9,7 +9,10 @@
 // normalized event and does not change that contract.
 // 2.3 (additive): default-off session input, receipt/capability reads under
 // `sessions.read`, and input commands under `commands.write`.
-export const CONTROL_PLANE_API_VERSION = "2.3";
+// 2.4 (additive, M4): `registry.read` for `GET /api/registry/assets` and
+// `GET /api/registry/changes` (cached Cockpit registry v1 snapshot). Credentials
+// minted before 2.4 lack it and get 403 there until rotated.
+export const CONTROL_PLANE_API_VERSION = "2.4";
 export const NORMALIZED_EVENT_VERSION = "1.0";
 
 export const OBSERVABILITY_CAPABILITIES = [
@@ -27,6 +30,8 @@ export const OBSERVABILITY_CAPABILITIES = [
   "context.read",
   // K18 (M16): decision-record reads (`GET /api/decisions`).
   "decisions.read",
+  // M4: cached Cockpit registry snapshot reads.
+  "registry.read",
 ] as const;
 
 export const COMMAND_CAPABILITIES = ["commands.write"] as const;

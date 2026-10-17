@@ -1,6 +1,7 @@
 import type { Registry } from "./registry.js";
 import type { EventRetention } from "./retention.js";
 import type { ModelCatalogService } from "./model-catalog.js";
+import type { RegistryFederation } from "./registry-federation.js";
 export function msUntilDailyHour(hour: number, now = new Date()): number {
   const next = new Date(now); next.setHours(hour, 0, 0, 0);
   if (next <= now) next.setDate(next.getDate() + 1);
@@ -27,6 +28,7 @@ export function scheduleDailyJobs(
   retention: EventRetention,
   logger?: JobLogger,
   modelCatalog?: Pick<ModelCatalogService, "refresh">,
+  registryFederation?: Pick<RegistryFederation, "sync">,
 ): () => void {
   let timer: ReturnType<typeof setTimeout>;
   let stopped = false;
@@ -49,6 +51,12 @@ export function scheduleDailyJobs(
       await modelCatalog?.refresh();
     } catch (err) {
       logger?.error({ err: String(err) }, "daily model catalog refresh failed");
+    }
+    try {
+      // Failures are classified and logged inside sync(); this only guards a throw.
+      await registryFederation?.sync();
+    } catch (err) {
+      logger?.error({ err: String(err) }, "daily registry sync failed");
     }
   };
 

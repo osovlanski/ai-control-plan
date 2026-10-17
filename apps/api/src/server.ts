@@ -34,6 +34,7 @@ import { TaskEventBus } from "./modules/sse.js";
 import { Scheduler } from "./modules/scheduler.js";
 import { QuotaProbeService, type QuotaProbeFn } from "./modules/quota-probe.js";
 import { ModelCatalogService, CATALOG_REVISION, type CatalogSource } from "./modules/model-catalog.js";
+import { RegistryFederation } from "./modules/registry-federation.js";
 import { createArtificialAnalysisSource } from "./modules/artificial-analysis.js";
 import { QuotaProjection } from "./modules/quota.js";
 import { readTaskContext } from "./modules/context.js";
@@ -69,6 +70,8 @@ export interface ServerDeps {
   /** Overrides the idle quota probe transport (K3) when `quotaProbes` is not supplied. Test/demo only. */
   quotaProbeFn?: QuotaProbeFn;
   modelCatalog?: ModelCatalogService;
+  /** M4 registry federation; defaults to the Cockpit client built from `config.registry.cockpit`. */
+  registryFederation?: RegistryFederation;
   /** External catalog sources (K7 seam for K8). Empty in production. */
   modelCatalogSources?: CatalogSource[];
   /** Transport handed to those sources. Test/demo only. */
@@ -96,6 +99,7 @@ export interface BuiltServer {
   scheduler: Scheduler;
   quotaProbes: QuotaProbeService;
   modelCatalog: ModelCatalogService;
+  registryFederation: RegistryFederation;
   /** Present only when `sessionInput.enabled` is true. */
   sessionInputs?: SessionInputService;
   /**
@@ -131,6 +135,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   const modelsRead = { config: { auth: { require: "models.read" } } } as const;
   const decisionsRead = { config: { auth: { require: "decisions.read" } } } as const;
   const contextRead = { config: { auth: { require: "context.read" } } } as const;
+  const registryRead = { config: { auth: { require: "registry.read" } } } as const;
   const write = { config: { auth: { require: "commands.write" } } } as const;
 
   // The internal bridge + recovery are wired for every real composition root
@@ -176,6 +181,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     createArtificialAnalysisSource({ apiKey: process.env.AA_API_KEY, now }),
   ];
   const modelCatalog = deps.modelCatalog ?? new ModelCatalogService(db, registry, now, modelCatalogSources, deps.modelCatalogFetch);
+  const registryFederation = deps.registryFederation ?? new RegistryFederation(db, config.registry.cockpit, undefined, now, app.log);
 
   const orchestrator =
     deps.orchestrator ??
@@ -289,6 +295,11 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     // projection so the UI is not handed every source for every model.
     return { ...entry, evidence: modelCatalog.evidenceFor(entry) };
   });
+
+  // M4: the cached Cockpit registry snapshot. Metadata only; no content, and
+  // nothing here is attached to a run.
+  app.get("/api/registry/assets", registryRead, () => registryFederation.read());
+  app.get("/api/registry/changes", registryRead, () => ({ changes: registryFederation.recentChanges() }));
 
   app.post("/api/models/refresh", write, async () => ({ attempts: await modelCatalog.refresh() }));
 
@@ -1168,7 +1179,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     });
   }
 
-  return { app, registry, orchestrator, tasks, bus, checkpoints, cooldowns, telemetry, scheduler, quotaProbes: probes, modelCatalog, sessionInputs, sessionInputRedelivery };
+  return { app, registry, orchestrator, tasks, bus, checkpoints, cooldowns, telemetry, scheduler, quotaProbes: probes, modelCatalog, registryFederation, sessionInputs, sessionInputRedelivery };
 }
 
 function sseHeaders(reply: FastifyReply): void {
