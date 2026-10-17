@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -42,6 +43,12 @@ describe("bundle contract v1 conformance fixtures", () => {
       expect(errorsOf(result)).toMatch(reason);
     });
   }
+
+  it("digests a fragment as the raw bytes of its source file", () => {
+    const { file, digest } = bundleFixture("fragment-digest/expected.json") as { file: string; digest: string };
+    const bytes = readFileSync(join(BUNDLE_CONTRACT_DIR, "fixtures/fragment-digest", file));
+    expect(`sha256:${createHash("sha256").update(bytes).digest("hex")}`).toBe(digest);
+  });
 });
 
 describe("bundle contract v1 rules beyond the schema", () => {
