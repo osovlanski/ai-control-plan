@@ -13,7 +13,7 @@
  * - The bearer token is read from its file per sync, held in memory only, and
  *   registered for log redaction. It is never persisted.
  */
-import { lstatSync, readFileSync } from "node:fs";
+import { closeSync, constants, fstatSync, openSync, readFileSync } from "node:fs";
 import { registerSecret } from "@agent-plane/core";
 import type { ResolvedRegistryConfig } from "../config.js";
 import type { Db } from "../db/index.js";
@@ -35,13 +35,57 @@ export class RegistrySyncError extends Error {
 
 /** Same checks Cockpit applies when it writes the file: regular, same uid, no group/world bits. */
 export function readRegistryToken(path: string): string {
-  let st;
-  try { st = lstatSync(path); } catch { throw new RegistrySyncError("token_file_missing"); }
-  if (!st.isFile() || st.uid !== process.getuid?.() || (st.mode & 0o077) !== 0) throw new RegistrySyncError("token_file_unsafe");
-  const token = readFileSync(path, "utf8").trim();
+  // One fd for check and read, so the path cannot be swapped between them. O_NOFOLLOW makes a
+  // symlink fail the open (ELOOP); O_NONBLOCK keeps a FIFO from blocking before fstat rejects it.
+  let fd: number;
+  try {
+    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code ?? "";
+    throw new RegistrySyncError(["ENOENT", "ENOTDIR"].includes(code) ? "token_file_missing" : "token_file_unsafe");
+  }
+  let token: string;
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile() || st.uid !== process.getuid?.() || (st.mode & 0o077) !== 0) throw new RegistrySyncError("token_file_unsafe");
+    token = readFileSync(fd, "utf8").trim();
+  } finally {
+    closeSync(fd);
+  }
   if (!token) throw new RegistrySyncError("token_file_unsafe", "empty");
   registerSecret(token);
   return token;
+}
+
+/**
+ * Reads the body up to `limit` bytes. A declared Content-Length over the limit is refused before
+ * any read, and the stream is cancelled as soon as the running byte count passes it, so an
+ * oversized body is never buffered whole.
+ */
+async function readBounded(response: Response, limit: number): Promise<string> {
+  const declared = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > limit) {
+    await response.body?.cancel().catch(() => {});
+    throw new RegistrySyncError("payload_too_large");
+  }
+  if (!response.body) return "";
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    let next: Awaited<ReturnType<typeof reader.read>>;
+    try { next = await reader.read(); } catch (err) {
+      throw new RegistrySyncError((err as Error)?.name === "TimeoutError" ? "timeout" : "unreachable");
+    }
+    if (next.done) break;
+    total += next.value.byteLength;
+    if (total > limit) {
+      await reader.cancel().catch(() => {});
+      throw new RegistrySyncError("payload_too_large");
+    }
+    chunks.push(next.value);
+  }
+  return Buffer.concat(chunks, total).toString("utf8");
 }
 
 export interface RegistrySnapshotSource { snapshot(): Promise<RegistrySnapshot> }
@@ -52,6 +96,7 @@ export class CockpitRegistryClient implements RegistrySnapshotSource {
     private readonly tokenPath: string,
     private readonly fetcher: typeof fetch = fetch,
     private readonly timeoutMs = 10_000,
+    private readonly maxBytes = MAX_SNAPSHOT_BYTES,
   ) {}
 
   async snapshot(): Promise<RegistrySnapshot> {
@@ -69,8 +114,7 @@ export class CockpitRegistryClient implements RegistrySnapshotSource {
     if (response.status === 401) throw new RegistrySyncError("unauthenticated");
     if (response.status === 413) throw new RegistrySyncError("payload_too_large");
     if (!response.ok) throw new RegistrySyncError("http_error", String(response.status));
-    const text = await response.text();
-    if (text.length > MAX_SNAPSHOT_BYTES) throw new RegistrySyncError("payload_too_large");
+    const text = await readBounded(response, this.maxBytes);
     let body: unknown;
     try { body = JSON.parse(text); } catch { throw new RegistrySyncError("invalid_response", "not JSON"); }
     const served = response.headers.get(REGISTRY_VERSION_HEADER);

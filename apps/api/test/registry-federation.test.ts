@@ -3,8 +3,9 @@
  * metadata, change rows, and availability semantics (last good snapshot,
  * stale past maxCacheAgeHours, no fallback, no token at rest).
  */
+import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -163,6 +164,42 @@ describe("CockpitRegistryClient", () => {
     expect(await reason(run(respond({}, { status: 500 })))).toBe("http_error");
   });
 
+  it("stops reading an oversized body at the cap instead of buffering it", async () => {
+    writeToken();
+    const path = join(dir, "token");
+    let pulled = 0;
+    let cancelled = false;
+    const endless = new ReadableStream<Uint8Array>({
+      pull(controller) { pulled += 1024; controller.enqueue(new Uint8Array(1024).fill(0x20)); },
+      cancel() { cancelled = true; },
+    });
+    const streaming = vi.fn(async () => new Response(endless, { headers: { "x-cockpit-registry-version": "1.0" } }));
+    const client = new CockpitRegistryClient("http://127.0.0.1:8787", path, streaming as unknown as typeof fetch, 10_000, 64 * 1024);
+    await expect(client.snapshot()).rejects.toMatchObject({ reason: "payload_too_large" });
+    expect(cancelled).toBe(true);
+    expect(pulled).toBeLessThanOrEqual(64 * 1024 + 2 * 1024);
+
+    let read = false;
+    const declared = vi.fn(async () => new Response(new ReadableStream({ pull() { read = true; } }, { highWaterMark: 0 }), {
+      headers: { "content-length": String(64 * 1024 + 1), "x-cockpit-registry-version": "1.0" },
+    }));
+    const declaredClient = new CockpitRegistryClient("http://127.0.0.1:8787", path, declared as unknown as typeof fetch, 10_000, 64 * 1024);
+    await expect(declaredClient.snapshot()).rejects.toMatchObject({ reason: "payload_too_large" });
+    expect(read).toBe(false);
+
+    const atCap = new CockpitRegistryClient("http://127.0.0.1:8787", path, respond(valid()) as unknown as typeof fetch, 10_000, JSON.stringify(valid()).length);
+    expect(await atCap.snapshot()).toEqual(valid());
+  });
+
+  it("refuses a token path that is a FIFO or a directory without blocking", () => {
+    writeToken();
+    expect(() => readRegistryToken(join(dir, "token", "below-a-file"))).toThrow(/token_file_missing/);
+    mkdirSync(join(dir, "tokdir"));
+    expect(() => readRegistryToken(join(dir, "tokdir"))).toThrow(/token_file_unsafe/);
+    execFileSync("mkfifo", ["-m", "600", join(dir, "fifo")]);
+    expect(() => readRegistryToken(join(dir, "fifo"))).toThrow(/token_file_unsafe/);
+  });
+
   it("refuses a missing, symlinked or group-readable token file", () => {
     expect(() => readRegistryToken(join(dir, "token"))).toThrow(/token_file_missing/);
     writeToken(0o640);
@@ -191,6 +228,19 @@ describe("registry config", () => {
     const configFile = join(loadConfig({ AGENT_PLANE_HOME: dir }).dir, "config.yaml");
     writeFileSync(configFile, "registry:\n  cockpit:\n    enabled: true\n    baseUrl: http://example.invalid:8787\n    tokenPath: /tmp/x\n");
     expect(() => loadConfig({ AGENT_PLANE_HOME: dir })).toThrow(/http loopback origin/);
+    // WHATWG URL parsing normalises 127.1, 0x7f.0.0.1 and 2130706433 to 127.0.0.1, so those stay
+    // loopback; everything that resolves elsewhere, or only looks like loopback, is refused.
+    const rejected = ["http://0.0.0.0:8787", "http://10.0.0.1:8787", "http://127.0.0.1.nip.io:8787",
+      "http://localhost.example:8787", "http://127.0.0.1@example.invalid:8787", "https://127.0.0.1:8787",
+      "http://[::ffff:7f00:1]:8787", "http://[::]:8787"];
+    for (const baseUrl of rejected) {
+      writeFileSync(configFile, `registry:\n  cockpit:\n    enabled: true\n    baseUrl: "${baseUrl}"\n    tokenPath: /tmp/x\n`);
+      expect(() => loadConfig({ AGENT_PLANE_HOME: dir }), baseUrl).toThrow(/http loopback origin/);
+    }
+    for (const baseUrl of ["http://127.1:8787", "http://0x7f.0.0.1:8787", "http://2130706433:8787", "http://[::1]:8787", "http://localhost:8787"]) {
+      writeFileSync(configFile, `registry:\n  cockpit:\n    enabled: true\n    baseUrl: "${baseUrl}"\n    tokenPath: /tmp/x\n`);
+      expect(() => loadConfig({ AGENT_PLANE_HOME: dir }), baseUrl).not.toThrow();
+    }
     writeFileSync(configFile, "registry:\n  cockpit:\n    enabled: true\n    tokenPath: relative/token\n");
     expect(() => loadConfig({ AGENT_PLANE_HOME: dir })).toThrow(/tokenPath must be an absolute path/);
   });
