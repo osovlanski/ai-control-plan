@@ -68,6 +68,13 @@ exactly once, in `included` (with the digest of the revision that was rendered) 
 each with a human-readable `reason`. An included pinned input MUST carry the pinned digest.
 `compiler` names the renderer and its semver.
 
+**Fragment digest.** A fragment's `digest` is `sha256:` + lowercase hex sha256 of the raw bytes of
+its source file as stored, frontmatter included and nothing normalized (no line-ending, encoding
+or whitespace change). Cockpit owns the fragment library, so only Cockpit can compute it; the
+plane records it as provenance and cannot verify it. Fixture: `fixtures/fragment-digest/`, a source
+file and the digest it must produce. The fragment digests in `fixtures/valid/*.response.json` are
+placeholders, since those fixtures carry no fragment sources.
+
 **Skills.** An included skill names the file it became in `relPath`. Every
 `.claude/skills/<id>/SKILL.md` file MUST be named by exactly one included skill, and every
 included skill MUST have its file, so a renderer cannot add a skill nobody selected. A harness
@@ -136,6 +143,14 @@ does not exceed its own (the request is closed, so an older server cannot honour
 and answers with the **request's** `schemaVersion`, using only what that version allows. A newer
 server therefore never sends an older client a path its allowlist rejects; widening the allowlist
 is a minor version that a client opts into by asking for it.
+
+## Fixes
+
+- **2026-10-17, fragment digest defined (no version change).** v1 required a `digest` on every
+  included fragment but did not say what it covers, so two renderers could disagree on the same
+  file. It is now the sha256 of the source file's raw bytes (§Manifest), the definition Cockpit's
+  renderer (cockpit #44) already uses. No validator changes and no previously accepted response is
+  rejected, so `schemaVersion` stays `1.0`. Fixture: `fixtures/fragment-digest/`.
 
 ## Distribution (open owner decision, plan §7.7a)
 

@@ -1,0 +1,2 @@
+# Digest fixtures are hashed as raw bytes; never convert their line endings.
+contracts/bundle/v1/fixtures/fragment-digest/*.md -text
