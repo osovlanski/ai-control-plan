@@ -34,6 +34,7 @@ function input(): BundledCompositionInput {
     tokenBudget: 8000,
   };
 }
+const on = { enabled: true };
 const count = (db: Db, table: string) => (db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n;
 
 let dir: string;
@@ -97,6 +98,40 @@ describe("CockpitBundleClient", () => {
       const err = await new CockpitBundleClient(server.url, tokenPath).render(fixtureRequest()).catch((e: unknown) => e);
       expect(err).toBeInstanceOf(BundleRequestError);
       expect((err as BundleRequestError).reason).toBe(reason);
+      expect((err as Error).message).not.toContain(TOKEN);
+    } finally { await server.close(); }
+  });
+
+  it("never reads an error body", async () => {
+    for (const status of [400, 401, 404, 413, 500]) {
+      let cancelled = false;
+      const body = new ReadableStream({ pull() { throw new Error("error body was read"); }, cancel() { cancelled = true; } });
+      const fetcher = (async () => new Response(body, { status })) as typeof fetch;
+      await expect(new CockpitBundleClient("http://127.0.0.1:1", tokenPath, fetcher).render(fixtureRequest())).rejects.toBeInstanceOf(BundleRequestError);
+      expect(cancelled, String(status)).toBe(true);
+    }
+  });
+
+  it("times out a body that stalls after the headers", async () => {
+    const server = await cockpit((_req, _body, res) => { res.writeHead(200, { "content-type": "application/json" }); res.write("{"); });
+    try {
+      await expect(new CockpitBundleClient(server.url, tokenPath, fetch, 100).render(fixtureRequest())).rejects.toMatchObject({ reason: "timeout" });
+    } finally { await server.close(); }
+  });
+
+  it("rejects a response that echoes the bearer token, even in otherwise valid content", async () => {
+    const request = fixtureRequest();
+    const echo = assembleBundle({
+      request: { ...request, skills: [], memoryBundles: [] },
+      rendered: [{ relPath: "CLAUDE.md", content: `token ${TOKEN}` }],
+      compiler: { name: "c", version: "1.0.0" },
+      included: request.fragments.map((ref) => ({ kind: "fragment" as const, ref, digest: `sha256:${"a".repeat(64)}`, reason: "r" })),
+      excluded: [],
+    });
+    const server = await cockpit((_req, _body, res) => send(res, 200, echo));
+    try {
+      const err = await new CockpitBundleClient(server.url, tokenPath).render({ ...request, skills: [], memoryBundles: [] }).catch((e: unknown) => e);
+      expect(err).toMatchObject({ reason: "invalid_response", detail: "response contains the bearer token" });
       expect((err as Error).message).not.toContain(TOKEN);
     } finally { await server.close(); }
   });
@@ -170,6 +205,7 @@ describe("CockpitBundleClient", () => {
         });
       }, "invalid_response"],
       ["a newer major", (r) => ({ ...r, schemaVersion: "2.0" }), "unsupported_version"],
+      ["a newer minor than the request asked for", (r) => ({ ...r, schemaVersion: "1.1" }), "invalid_response"],
     ];
     for (const [name, mutate, reason] of cases) {
       const server = await cockpit((_req, _body, res) => send(res, 200, mutate(fixtureResponse())));
@@ -207,9 +243,35 @@ class FakeSource implements BundleSource {
 }
 
 describe("BundledComposition", () => {
+  it("is gated on registry.cockpit.enabled: off sends nothing", async () => {
+    const source = new FakeSource(fixtureResponse());
+    expect(await new BundledComposition(db, source, { enabled: false }).compose(input())).toEqual({ ok: false, reason: "disabled" });
+    expect(source.requests).toEqual([]);
+  });
+
+  it("codex with selected skills is never final: bundle v1 has no skill path for it", async () => {
+    const draft = input();
+    draft.spec.harness = "codex";
+    const request = bundleRequestFor(draft) as BundleRequest;
+    const fragments = request.fragments.map((ref) => ({ kind: "fragment" as const, ref, digest: `sha256:${"a".repeat(64)}`, reason: "r" }));
+    const bundle = assembleBundle({
+      request, rendered: [{ relPath: "AGENTS.md", content: "# Project context" }], compiler: { name: "c", version: "1.0.0" },
+      included: fragments,
+      excluded: [
+        { kind: "memory_bundle", ref: "mem-example-notes", reason: "over budget" },
+        ...request.skills.map((s) => ({ kind: "skill" as const, ref: s.id, reason: "bundle v1 has no skill path for codex" })),
+      ],
+    });
+    const result = await new BundledComposition(db, new FakeSource(bundle), on).compose(draft);
+    expect(result).toMatchObject({ ok: false, reason: "not_final" });
+    expect((result as { excludedSkills: unknown[] }).excludedSkills).toHaveLength(2);
+    expect(count(db, "agent_specs")).toBe(0);
+  });
+
+  // The fixture excludes its memory bundle as over budget: a non-skill exclusion is final.
   it("builds the request from the draft, and persists Cockpit's bundle with the revision", async () => {
     const source = new FakeSource(fixtureResponse());
-    const result = await new BundledComposition(db, source).compose(input());
+    const result = await new BundledComposition(db, source, on).compose(input());
     expect(source.requests).toEqual([fixtureRequest()]);
     expect(result.ok).toBe(true);
     const stored = new CompositionStore(db).get("CR-0002-1")!;
@@ -222,7 +284,7 @@ describe("BundledComposition", () => {
   it.each(["unauthenticated", "not_found", "payload_too_large", "unreachable", "invalid_response"] as const)(
     "writes nothing and never renders locally when Cockpit fails with %s", async (reason) => {
       const warnings: object[] = [];
-      const result = await new BundledComposition(db, new FakeSource(new BundleRequestError(reason)), { warn: (o) => warnings.push(o) }).compose(input());
+      const result = await new BundledComposition(db, new FakeSource(new BundleRequestError(reason)), { enabled: true, logger: { warn: (o) => warnings.push(o) } }).compose(input());
       expect(result).toEqual({ ok: false, reason });
       expect(count(db, "agent_specs")).toBe(0);
       expect(count(db, "composition_decisions")).toBe(0);
@@ -240,7 +302,7 @@ describe("BundledComposition", () => {
       included: response.manifest.included.filter((e) => e !== skill),
       excluded: [...response.manifest.excluded, { kind: "skill", ref: skill.ref, reason: "over the token budget" }],
     });
-    const result = await new BundledComposition(db, new FakeSource(bundle)).compose(input());
+    const result = await new BundledComposition(db, new FakeSource(bundle), on).compose(input());
     expect(result).toEqual({ ok: false, reason: "not_final", excludedSkills: [{ ref: "claude-skills:example-tests", reason: "over the token budget" }] });
     expect(count(db, "agent_specs")).toBe(0);
   });
@@ -249,13 +311,13 @@ describe("BundledComposition", () => {
     const source = new FakeSource(fixtureResponse());
     const cursor = input();
     cursor.spec.harness = "cursor";
-    expect(await new BundledComposition(db, source).compose(cursor)).toMatchObject({ ok: false, reason: "unsupported_harness" });
+    expect(await new BundledComposition(db, source, on).compose(cursor)).toMatchObject({ ok: false, reason: "unsupported_harness" });
     const unsorted = input();
     unsorted.spec.context.fragments = ["typescript-style", "repo:example"];
-    expect(await new BundledComposition(db, source).compose(unsorted)).toMatchObject({ ok: false, reason: "invalid_request" });
+    expect(await new BundledComposition(db, source, on).compose(unsorted)).toMatchObject({ ok: false, reason: "invalid_request" });
     const overBudget = input();
     overBudget.tokenBudget = 0;
-    expect(await new BundledComposition(db, source).compose(overBudget)).toMatchObject({ ok: false, reason: "invalid_request" });
+    expect(await new BundledComposition(db, source, on).compose(overBudget)).toMatchObject({ ok: false, reason: "invalid_request" });
     expect(source.requests).toEqual([]);
     expect(count(db, "agent_specs")).toBe(0);
   });
@@ -263,7 +325,7 @@ describe("BundledComposition", () => {
   it("reports a revision the store refuses, and writes nothing", async () => {
     const draft = input();
     draft.spec.task_id = "AG-9999";
-    const result = await new BundledComposition(db, new FakeSource(fixtureResponse())).compose(draft);
+    const result = await new BundledComposition(db, new FakeSource(fixtureResponse()), on).compose(draft);
     expect(result).toMatchObject({ ok: false, reason: "composition_rejected" });
     expect(count(db, "agent_specs")).toBe(0);
   });
@@ -272,10 +334,10 @@ describe("BundledComposition", () => {
     const server = await cockpit((_req, _body, res) => send(res, 200, fixtureResponse()));
     const warnings: object[] = [];
     try {
-      const composition = new BundledComposition(db, new CockpitBundleClient(server.url, tokenPath), { warn: (o) => warnings.push(o) });
+      const composition = new BundledComposition(db, new CockpitBundleClient(server.url, tokenPath), { enabled: true, logger: { warn: (o) => warnings.push(o) } });
       const ok = await composition.compose(input());
       expect(ok.ok).toBe(true);
-      const denied = await new BundledComposition(db, new CockpitBundleClient(server.url, join(dir, "absent")), { warn: (o) => warnings.push(o) }).compose(input());
+      const denied = await new BundledComposition(db, new CockpitBundleClient(server.url, join(dir, "absent")), { enabled: true, logger: { warn: (o) => warnings.push(o) } }).compose(input());
       expect(JSON.stringify([ok, denied, warnings])).not.toContain(TOKEN);
     } finally { await server.close(); }
     for (const file of readdirSync(dir).filter((f) => f.startsWith("t.db"))) {

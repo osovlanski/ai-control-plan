@@ -17,11 +17,12 @@ import { CompositionError, CompositionStore, type CompositionRevision } from "./
 import { readBounded, readRegistryToken, RegistrySyncError, type RegistrySyncReason } from "./registry-federation.js";
 
 /**
- * Bound on the encoded response. Content is capped at 256 KiB (bundle-v1.md §Limits); JSON
- * escaping of Markdown roughly doubles that at worst, and the manifest is small, so 1 MiB holds
- * any conforming bundle while stopping a runaway body before it is buffered whole.
+ * Bound on the encoded response. Content is capped at 256 KiB (bundle-v1.md §Limits), but JSON
+ * writes a C0 control character as `\u00XX`, so conforming content can encode to 6x that; the
+ * manifest's 384 reasons of up to 512 characters can add about 1 MiB more. 4 MiB holds any
+ * conforming bundle and still stops a runaway body before it is buffered whole.
  */
-export const MAX_BUNDLE_RESPONSE_BYTES = 1024 * 1024;
+export const MAX_BUNDLE_RESPONSE_BYTES = 4 * 1024 * 1024;
 const LOOPBACK_HOSTS = ["127.0.0.1", "[::1]", "localhost"];
 
 /** Registry federation's reasons, plus the two a render adds: a pin Cockpit cannot honour and a refused request. */
@@ -82,6 +83,8 @@ export class CockpitBundleClient implements BundleSource {
       const unsupported = result.errors.some((e) => e.startsWith("unsupported schemaVersion"));
       throw new BundleRequestError(unsupported ? "unsupported_version" : "invalid_response", result.errors.slice(0, 3).join("; "));
     }
+    // The inline-credential guard knows shapes, not this value; a bundle echoing the bearer token is never persisted.
+    if (text.includes(token)) throw new BundleRequestError("invalid_response", "response contains the bearer token");
     return result.value;
   }
 }
@@ -106,7 +109,7 @@ export interface BundledCompositionInput {
 
 export type BundledCompositionResult =
   | { ok: true; revision: CompositionRevision }
-  | { ok: false; reason: BundleRequestReason; detail?: string }
+  | { ok: false; reason: BundleRequestReason | "disabled"; detail?: string }
   /** Nothing was requested: bundle v1 renders for claude-code and codex only, or the draft makes an invalid request. */
   | { ok: false; reason: "unsupported_harness" | "invalid_request"; detail?: string }
   /** Cockpit excluded a selected skill. Not final (bundle-v1.md §Finalization): the Composer drops it and requests again. */
@@ -114,6 +117,11 @@ export type BundledCompositionResult =
   | { ok: false; reason: "composition_rejected"; detail: string };
 
 interface Logger { warn(obj: object, msg: string): void }
+export interface BundledCompositionOptions {
+  /** `registry.cockpit.enabled`: off means no request is sent, as for registry federation. */
+  enabled: boolean;
+  logger?: Logger;
+}
 
 /** The bundle request a spec draft makes: the same harness, model, fragments and pins, in the same order. */
 export function bundleRequestFor(input: BundledCompositionInput): BundleRequest | { error: string } {
@@ -134,12 +142,13 @@ export class BundledComposition {
   constructor(
     db: Db,
     private readonly source: BundleSource,
-    private readonly logger?: Logger,
+    private readonly options: BundledCompositionOptions,
     private readonly store = new CompositionStore(db),
   ) {}
 
   /** Requests the bundle, then persists the revision with it. On any failure nothing is written. */
   async compose(input: BundledCompositionInput): Promise<BundledCompositionResult> {
+    if (!this.options.enabled) return { ok: false, reason: "disabled" };
     const request = bundleRequestFor(input);
     if ("error" in request) return { ok: false, reason: "unsupported_harness", detail: request.error };
     const checked = validateBundleRequest(request);
@@ -151,7 +160,7 @@ export class BundledComposition {
     } catch (err) {
       const reason = err instanceof BundleRequestError ? err.reason : "unreachable";
       // The reason only: a detail can quote validator output, and the token never reaches an error.
-      this.logger?.warn({ source: "cockpit", reason, revision: input.spec.composition_revision_id }, "bundle request failed; no revision written");
+      this.options.logger?.warn({ source: "cockpit", reason, revision: input.spec.composition_revision_id }, "bundle request failed; no revision written");
       return { ok: false, reason, ...(err instanceof BundleRequestError && err.detail ? { detail: err.detail } : {}) };
     }
     const excludedSkills = response.manifest.excluded.filter((e) => e.kind === "skill").map(({ ref, reason }) => ({ ref, reason }));
