@@ -62,7 +62,7 @@ export function readRegistryToken(path: string): string {
  * any read, and the stream is cancelled as soon as the running byte count passes it, so an
  * oversized body is never buffered whole.
  */
-async function readBounded(response: Response, limit: number): Promise<string> {
+export async function readBounded(response: Response, limit: number): Promise<string> {
   const declared = Number(response.headers.get("content-length"));
   if (Number.isFinite(declared) && declared > limit) {
     await response.body?.cancel().catch(() => {});
