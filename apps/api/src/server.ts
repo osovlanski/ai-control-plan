@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   COMMAND_CAPABILITIES,
+  INGEST_CAPABILITIES,
   CONTROL_PLANE_API_VERSION,
   NORMALIZED_EVENT_VERSION,
   OBSERVABILITY_CAPABILITIES,
@@ -56,6 +57,7 @@ import { renderProgressMd } from "./render/progress.js";
 import { registerAuth, type SessionMap } from "./auth/index.js";
 import { ClaudeAdapter, ClaudeCodeSessionInputAdapter, CodexAdapter, FakeSessionInputAdapter } from "@agent-plane/adapters";
 import { CredentialStore, credentialPath } from "./auth/credential-file.js";
+import { UsageLedger, validateUsageRecord } from "./modules/usage.js";
 
 export interface ServerDeps {
   config: ResolvedConfig;
@@ -137,6 +139,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   const contextRead = { config: { auth: { require: "context.read" } } } as const;
   const registryRead = { config: { auth: { require: "registry.read" } } } as const;
   const write = { config: { auth: { require: "commands.write" } } } as const;
+  const usageWrite = { config: { auth: { require: "usage.write" } } } as const;
 
   // The internal bridge + recovery are wired for every real composition root
   // (extracted to modules/harness/composition.ts so a test factory can build a
@@ -214,7 +217,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     apiVersion: CONTROL_PLANE_API_VERSION,
     eventVersion: NORMALIZED_EVENT_VERSION,
     authRequired: true,
-    capabilities: [...OBSERVABILITY_CAPABILITIES, ...COMMAND_CAPABILITIES],
+    capabilities: [...OBSERVABILITY_CAPABILITIES, ...COMMAND_CAPABILITIES, ...INGEST_CAPABILITIES],
   }));
 
   app.get("/api/health", read.tasks, () => ({
@@ -303,6 +306,19 @@ export function buildServer(deps: ServerDeps): BuiltServer {
 
   app.post("/api/models/refresh", write, async () => ({ attempts: await modelCatalog.refresh() }));
 
+  // ---- Usage ingestion (M1; Cockpit M11 posts into it) ----
+  // Idempotent on (provider, sessionRef, eventId): 201 on first delivery, 200 with the stored
+  // row on an identical replay, 409 when the same key arrives with another body.
+  const usage = new UsageLedger(db, now);
+  app.post("/api/usage/records", usageWrite, (req, reply) => {
+    const parsed = validateUsageRecord(req.body);
+    if (!parsed.ok) return reply.status(400).send({ error: "invalid usage record", details: parsed.errors });
+    const result = usage.ingest(parsed.value);
+    if (result.status === "unknown_run") return reply.status(422).send({ error: `run ${parsed.value.runId} does not exist` });
+    if (result.status === "conflict") return reply.status(409).send({ error: "a different usage record is stored under this provider, sessionRef and eventId", record: result.record });
+    return reply.status(result.status === "created" ? 201 : 200).send({ replayed: result.status === "replayed", record: result.record });
+  });
+
   // ---- Decisions (K18 / M16) ----
   // Read-only. `site` and `limit` are the only filters — the K22 shadow
   // report and this route share the same `listDecisions` query.
@@ -389,7 +405,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
            -- K7: requested and served identity are separate facts; NULL resolved
            -- means the provider reported none, not that it matched the request.
            r.model_requested, r.model_resolved, r.model_resolved_source,
-           a.provider AS serving_provider
+           a.provider AS serving_provider, r.composition_revision_id
          FROM runs r ${effectiveUsageJoin("r")}
          LEFT JOIN assistants a ON a.id = r.assistant_id
          WHERE r.task_id = ? ORDER BY r.started_at`,
@@ -398,8 +414,10 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     return {
       ...row,
       envelope: JSON.parse(row.envelope) as unknown,
-      runs: runs.map(({ model_requested, model_resolved, model_resolved_source, serving_provider, ...r }) => ({
+      runs: runs.map(({ model_requested, model_resolved, model_resolved_source, serving_provider, composition_revision_id, ...r }) => ({
         ...r,
+        // M1: the immutable composition revision this run executed, or null (every pre-M1 run).
+        compositionRevisionId: composition_revision_id ?? null,
         usage: r.usage ? (JSON.parse(r.usage as string) as unknown) : null,
         modelIdentity: {
           requestedSelector: model_requested ?? null,

@@ -273,9 +273,9 @@ describe("GET /api/registry/assets", () => {
     return next.secret;
   };
 
-  it("serves the cached snapshot under registry.read and advertises 2.4", async () => {
+  it("serves the cached snapshot under registry.read and advertises 2.5", async () => {
     const cfgDir = loadConfig({ AGENT_PLANE_HOME: home }).dir;
-    expect(CONTROL_PLANE_API_VERSION).toBe("2.4");
+    expect(CONTROL_PLANE_API_VERSION).toBe("2.5");
     expect(OBSERVABILITY_CAPABILITIES).toContain("registry.read");
     const ok = await built.app.inject({ method: "GET", url: "/api/registry/assets", headers: { authorization: `Bearer ${secretWith(cfgDir, ["registry.read"])}` } });
     expect(ok.statusCode).toBe(200);
