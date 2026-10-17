@@ -3,7 +3,7 @@
  * binding, and the idempotent, provider-qualified UsageRecord ingestion boundary.
  */
 import { randomBytes } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -14,6 +14,7 @@ import { atomicWriteCredential, credentialPath, readCredential } from "../src/au
 import { BUNDLE_CONTRACT_DIR, type BundleRequest, type BundleResponse } from "../src/bundle-contract.js";
 import { COMPOSITION_CONTRACT_DIR, type AgentSpec, type CompositionDecision } from "../src/composition-contract.js";
 import { CompositionError, CompositionStore } from "../src/modules/composition.js";
+import { USAGE_CONTRACT_DIR, validateUsageRecord } from "../src/modules/usage.js";
 import { buildServer, type BuiltServer } from "../src/server.js";
 
 const json = <T>(dir: string, file: string) => JSON.parse(readFileSync(join(dir, "fixtures", file), "utf8")) as T;
@@ -129,7 +130,7 @@ describe("POST /api/usage/records", () => {
   let hdb: Db;
   let built: BuiltServer;
   const record = (over: Record<string, unknown> = {}) => ({
-    eventId: "evt-1", provider: "anthropic", sessionRef: "sess-1", source: "cockpit-import", assistantId: "claude",
+    schemaVersion: "1.0", eventId: "evt-1", provider: "anthropic", sessionRef: "sess-1", source: "cockpit-import", assistantId: "claude",
     model: "claude-opus", accounting: "delta", tokensIn: 100, tokensOut: 20, cachedTokens: 5, costUsd: 0.25,
     apiEquivalentUsd: 0.31, pricingVersion: "p-2026-10", observedAt: "2026-10-17T10:00:00.000Z", ...over,
   });
@@ -174,9 +175,10 @@ describe("POST /api/usage/records", () => {
     const conflict = await post(record({ tokensIn: 101 }));
     expect(conflict.statusCode).toBe(409);
     expect(conflict.json().record.tokensIn).toBe(100);
-    // The key is provider-qualified: the same eventId from another provider is another record.
+    // The key is (provider, sessionRef, eventId): the same eventId from another provider or session is another record.
     expect((await post(record({ provider: "openai" }))).statusCode).toBe(201);
-    expect(count(hdb, "usage_records")).toBe(2);
+    expect((await post(record({ sessionRef: "sess-2" }))).statusCode).toBe(201);
+    expect(count(hdb, "usage_records")).toBe(3);
     expect(() => hdb.prepare("UPDATE usage_records SET tokens_in = 0").run()).toThrow(/immutable/);
     expect(() => hdb.prepare("DELETE FROM usage_records").run()).toThrow(/immutable/);
   });
@@ -185,6 +187,25 @@ describe("POST /api/usage/records", () => {
     const { costUsd: _c, sessionRef: _s, ...bare } = record({ eventId: "evt-2" });
     expect((await post(bare)).statusCode).toBe(201);
     expect((await post({ ...bare, costUsd: null, sessionRef: null, runId: null })).statusCode).toBe(200);
+    // No session is its own key space: NULL does not make a second copy distinct, and a session is another key.
+    expect((await post({ ...bare, tokensIn: 101 })).statusCode).toBe(409);
+    expect((await post({ ...bare, sessionRef: "sess-1" })).statusCode).toBe(201);
+    expect(count(hdb, "usage_records")).toBe(2);
+  });
+
+  it("is the usage v1 contract: its fixtures pass and fail the validator", () => {
+    for (const kind of ["valid", "invalid"] as const) {
+      const dir = join(USAGE_CONTRACT_DIR, "fixtures", kind);
+      const names = readdirSync(dir);
+      expect(names.length).toBeGreaterThan(0);
+      for (const name of names) {
+        const result = validateUsageRecord(JSON.parse(readFileSync(join(dir, name), "utf8")));
+        expect([name, result.ok]).toEqual([name, kind === "valid"]);
+      }
+    }
+    // The envelope version is not part of the stored record.
+    const parsed = validateUsageRecord(record());
+    expect(parsed.ok && "schemaVersion" in parsed.value).toBe(false);
   });
 
   it("replays a retry that re-serialized the record: other key order, other spelling of the same instant", async () => {

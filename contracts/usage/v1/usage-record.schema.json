@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-plane.local/contracts/usage/v1/usage-record.schema.json",
+  "title": "UsageRecord",
+  "description": "Usage v1: one usage observation posted to the Control Plane's ingestion boundary (POST /api/usage/records). Closed: an unknown field is rejected. Idempotent on (provider, sessionRef, eventId); an absent sessionRef is its own key space. Normative text: docs/contracts/usage-v1.md.",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "eventId",
+    "provider",
+    "source",
+    "assistantId",
+    "model",
+    "accounting",
+    "tokensIn",
+    "tokensOut",
+    "cachedTokens",
+    "apiEquivalentUsd",
+    "pricingVersion",
+    "observedAt"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {
+      "type": "string",
+      "pattern": "^1\\.(0|[1-9][0-9]*)$"
+    },
+    "eventId": {
+      "$ref": "#/$defs/id"
+    },
+    "runId": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/id"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "provider": {
+      "$ref": "#/$defs/id"
+    },
+    "sessionRef": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/id"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "source": {
+      "$ref": "#/$defs/id"
+    },
+    "assistantId": {
+      "$ref": "#/$defs/id"
+    },
+    "model": {
+      "$ref": "#/$defs/id"
+    },
+    "accounting": {
+      "enum": [
+        "delta",
+        "cumulative"
+      ]
+    },
+    "tokensIn": {
+      "$ref": "#/$defs/count"
+    },
+    "tokensOut": {
+      "$ref": "#/$defs/count"
+    },
+    "cachedTokens": {
+      "$ref": "#/$defs/count"
+    },
+    "costUsd": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/usd"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "apiEquivalentUsd": {
+      "$ref": "#/$defs/usd"
+    },
+    "pricingVersion": {
+      "$ref": "#/$defs/id"
+    },
+    "observedAt": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "$defs": {
+    "id": {
+      "description": "Carries a non-space character.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "\\S"
+    },
+    "count": {
+      "description": "Exact as a double.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "usd": {
+      "description": "Bounded so one bad import cannot poison a SUM.",
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1000000
+    }
+  }
+}

@@ -307,7 +307,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   app.post("/api/models/refresh", write, async () => ({ attempts: await modelCatalog.refresh() }));
 
   // ---- Usage ingestion (M1; Cockpit M11 posts into it) ----
-  // Idempotent on (provider, eventId): 201 on first delivery, 200 with the stored
+  // Idempotent on (provider, sessionRef, eventId): 201 on first delivery, 200 with the stored
   // row on an identical replay, 409 when the same key arrives with another body.
   const usage = new UsageLedger(db, now);
   app.post("/api/usage/records", usageWrite, (req, reply) => {
@@ -315,7 +315,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     if (!parsed.ok) return reply.status(400).send({ error: "invalid usage record", details: parsed.errors });
     const result = usage.ingest(parsed.value);
     if (result.status === "unknown_run") return reply.status(422).send({ error: `run ${parsed.value.runId} does not exist` });
-    if (result.status === "conflict") return reply.status(409).send({ error: "a different usage record is stored under this provider and eventId", record: result.record });
+    if (result.status === "conflict") return reply.status(409).send({ error: "a different usage record is stored under this provider, sessionRef and eventId", record: result.record });
     return reply.status(result.status === "created" ? 201 : 200).send({ replayed: result.status === "replayed", record: result.record });
   });
 

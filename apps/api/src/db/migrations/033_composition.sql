@@ -63,11 +63,13 @@ BEGIN SELECT RAISE(ABORT, 'asset_usage rows are immutable'); END;
 CREATE TRIGGER asset_usage_undeletable BEFORE DELETE ON asset_usage
 BEGIN SELECT RAISE(ABORT, 'asset_usage rows are immutable'); END;
 
--- The UsageRecord ingestion boundary (plan §3.5, M11 posts into it). The
--- idempotency key is provider-qualified: (provider, event_id), so an eventId
--- MUST be unique per provider, not only within a session. body_digest is
--- the sha256 of the canonical record, so a replay is recognised and a
--- different body under the same key is refused rather than overwritten.
+-- The UsageRecord ingestion boundary (plan §3.7, M11 posts into it;
+-- contracts/usage/v1). The idempotency key is (provider, session_ref,
+-- event_id), so an eventId MUST be unique per provider and session. A record
+-- without a session is keyed under '' (a real sessionRef is never empty), so
+-- NULL cannot make two copies distinct. body_digest is the sha256 of the
+-- canonical record, so a replay is recognised and a different body under the
+-- same key is refused rather than overwritten.
 CREATE TABLE usage_records (
   provider           TEXT NOT NULL,
   event_id           TEXT NOT NULL,
@@ -85,10 +87,9 @@ CREATE TABLE usage_records (
   api_equivalent_usd REAL NOT NULL CHECK(api_equivalent_usd >= 0),
   pricing_version    TEXT NOT NULL,
   observed_at        TEXT NOT NULL,
-  received_at        TEXT NOT NULL,
-  PRIMARY KEY (provider, event_id)
+  received_at        TEXT NOT NULL
 );
-CREATE INDEX idx_usage_records_session ON usage_records(provider, session_ref);
+CREATE UNIQUE INDEX idx_usage_records_key ON usage_records(provider, ifnull(session_ref, ''), event_id);
 CREATE INDEX idx_usage_records_run ON usage_records(run_id);
 CREATE TRIGGER usage_records_immutable BEFORE UPDATE ON usage_records
 BEGIN SELECT RAISE(ABORT, 'usage_records rows are immutable'); END;

@@ -1,0 +1,15 @@
+{
+  "schemaVersion": "1.0",
+  "eventId": "evt-2",
+  "provider": "anthropic",
+  "source": "cockpit-import",
+  "assistantId": "claude",
+  "model": "claude-opus",
+  "accounting": "cumulative",
+  "tokensIn": 100,
+  "tokensOut": 20,
+  "cachedTokens": 5,
+  "apiEquivalentUsd": 0.31,
+  "pricingVersion": "p-2026-10",
+  "observedAt": "2026-10-17T12:00:00+02:00"
+}
