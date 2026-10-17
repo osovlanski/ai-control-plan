@@ -1,6 +1,8 @@
 # Increment 2 Cockpit follow-up
 
-This is the required stage-2 change for the separate Cockpit repository. It is blocked on increment 1a’s compatibility-policy merge. Until it lands, Cockpit is not compatible with the authenticated `2.0` server.
+**Status (2026-10-05): SHIPPED in Cockpit.** `ControlPlaneClient` declares `SUPPORTED_API_VERSION = "2.0"`, reads the bearer credential from `controlPlaneCredentialPath` (set with `CONTROL_PLANE_CREDENTIAL_PATH`) with the file-safety checks below, and applies the version policy (Cockpit #34). Verified against Cockpit main by a local session on 2026-10-05. The rest of this page is the original change request, kept as the record of what was asked.
+
+This was the required stage-2 change for the separate Cockpit repository, blocked at the time on increment 1a’s compatibility-policy merge.
 
 Apply this change to `ControlPlaneClient`:
 

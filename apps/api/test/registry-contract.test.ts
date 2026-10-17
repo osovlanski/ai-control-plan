@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   canonicalJson, computeAssetDigest, computeSnapshotDigest, isCompatibleVersion, MAX_ASSET_CONTENT_BYTES, REGISTRY_CONTRACT_DIR,
-  validateContent, validateError, validateSnapshot, type RegistrySnapshot,
+  validateContent, validateError, validateSnapshot, type RegistryAssetContent, type RegistrySnapshot,
 } from "../src/registry-contract.js";
 
 const fixture = (path: string): unknown => JSON.parse(readFileSync(join(REGISTRY_CONTRACT_DIR, "fixtures", path), "utf8"));
@@ -14,6 +14,7 @@ describe("registry contract v1 conformance fixtures", () => {
     expect(validateSnapshot(fixture("valid/snapshot.json"))).toMatchObject({ ok: true });
     expect(validateContent(fixture("valid/content-skill.json"))).toMatchObject({ ok: true });
     expect(validateContent(fixture("valid/content-mcp.json"))).toMatchObject({ ok: true });
+    expect(validateContent(fixture("valid/content-mcp-redacted.json"))).toMatchObject({ ok: true });
     expect(validateError(fixture("valid/error.json"))).toBe(true);
   });
 
@@ -157,6 +158,59 @@ describe("registry contract v1 secret and size guards", () => {
       { path: "data.bin", bytes: Buffer.alloc(half + 1, 7), encoding: "base64" },
     ]);
     expect(validateContent(overSplit)).toMatchObject({ ok: false, errors: [expect.stringMatching(/^payload_too_large/)] });
+  });
+});
+
+describe("registry contract v1 server.json credential guard", () => {
+  type McpContent = RegistryAssetContent & { mcp: NonNullable<RegistryAssetContent["mcp"]> & Record<string, unknown> };
+  const redacted = () => structuredClone(fixture("valid/content-mcp-redacted.json")) as McpContent;
+  /** Rebuilds server.json and both digests from `mcp`, as a producer would. */
+  const withMcp = (mcp: McpContent["mcp"]): McpContent => {
+    const bytes = Buffer.from(canonicalJson(mcp));
+    const digest = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+    return { ...redacted(), mcp, digest: computeAssetDigest([{ path: "server.json", bytes }]),
+      files: [{ path: "server.json", size: bytes.length, digest, encoding: "utf8", content: bytes.toString("utf8") }] };
+  };
+
+  it("accepts a quoted redaction marker and placeholder, which server.json carries JSON-escaped", () => {
+    const body = redacted();
+    expect(body.files[0]!.content).toContain(String.raw`--token=\"***\"`);
+    expect(body.files[0]!.content).toContain(String.raw`token=\"${"$"}{TOKEN}\"`);
+    expect(validateContent(body)).toMatchObject({ ok: true });
+  });
+
+  it("still rejects a real-looking quoted credential", () => {
+    const quoted = `token="${["fake", "review", "value"].join("-")}"`;
+    // Control: the same quoted shape with a placeholder is accepted, in args and in an open mcp field.
+    expect(validateContent(withMcp({ ...redacted().mcp, args: ["--stdio", 'token="${TOKEN}"'], note: 'token="***"' }))).toMatchObject({ ok: true });
+    expect(validateContent(withMcp({ ...redacted().mcp, args: ["--stdio", quoted] }))).toMatchObject({ ok: false });
+    // An open mcp field has no schema guard of its own; server.json still carries it, escaped.
+    const result = validateContent(withMcp({ ...redacted().mcp, note: quoted }));
+    expect(result.ok ? "" : result.errors.join("\n")).toMatch(/\/files\/0\/content must NOT be valid/);
+  });
+
+  it("accepts deeply nested server.json values without overflowing the stack", () => {
+    let deep: unknown = "x";
+    for (let i = 0; i < 1700; i++) deep = [deep];
+    expect(validateContent(withMcp({ ...redacted().mcp, note: deep }))).toMatchObject({ ok: true });
+  });
+
+  it("judges decoded server.json values, so an escape the text pattern cannot see is still caught", () => {
+    // server.json stores the tab as `\t`, which no `\s` in the text pattern matches; the decoded value has a real tab.
+    const result = validateContent(withMcp({ ...redacted().mcp, note: `Bearer\t${["fake", "review", "value"].join("-")}` }));
+    expect(result.ok).toBe(false);
+    expect(result.ok ? "" : result.errors.join("\n")).toMatch(/\/files\/0 server\.json \/note contains an inline credential/);
+  });
+
+  it("agrees with validateSnapshot on the same entry", () => {
+    const body = redacted();
+    const snapshot = structuredClone(fixture("valid/snapshot.json")) as RegistrySnapshot;
+    const entry = snapshot.assets.find((a) => a.id === body.id)!;
+    entry.mcp = body.mcp;
+    entry.digest = body.digest;
+    snapshot.snapshotDigest = computeSnapshotDigest(snapshot.assets);
+    expect(validateSnapshot(snapshot)).toMatchObject({ ok: true });
+    expect(validateContent(body)).toMatchObject({ ok: true });
   });
 });
 
