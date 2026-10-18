@@ -100,23 +100,41 @@ const asBundleError = (err: unknown) => new BundleRequestError(err instanceof Re
 /** An AgentSpec before its bundle exists: `context.bundle_digest` and `context.compiler` come from the response. */
 export type AgentSpecDraft = Omit<AgentSpec, "context"> & { context: Pick<AgentSpec["context"], "fragments" | "memory_bundles"> };
 
-export interface BundledCompositionInput {
+export interface BundleRenderInput {
   spec: AgentSpecDraft;
-  decision: CompositionDecision;
   /** Per-model estimator ratio (plan §3.3 stage 4). */
   charsPerToken: number;
   /** Estimated-token ceiling for the whole bundle. */
   tokenBudget: number;
 }
 
-export type BundledCompositionResult =
-  | { ok: true; revision: CompositionRevision }
+export interface BundledCompositionInput extends BundleRenderInput {
+  decision: CompositionDecision;
+}
+
+export interface RenderedBundle { request: BundleRequest; response: BundleResponse }
+
+/** Failures shared by `render` and `compose`. On every one of them nothing was written. */
+export type BundleRenderFailure =
   | { ok: false; reason: BundleRequestReason | "disabled"; detail?: string }
   /** Nothing was requested: bundle v1 renders for claude-code and codex only, or the draft makes an invalid request. */
   | { ok: false; reason: "unsupported_harness" | "invalid_request"; detail?: string }
-  /** Cockpit excluded a selected skill. Not final (bundle-v1.md §Finalization): the Composer drops it and requests again. */
-  | { ok: false; reason: "not_final"; excludedSkills: Array<{ ref: string; reason: string }> }
   | { ok: false; reason: "composition_rejected"; detail: string };
+
+export type BundleRenderResult =
+  /** `spec` is the draft with `context.bundle_digest` and `context.compiler` filled from the manifest. */
+  | { ok: true; spec: AgentSpec; bundle: RenderedBundle }
+  /**
+   * Cockpit excluded a selected skill. Not final (bundle-v1.md §Finalization): the Composer drops it
+   * and renders again. The bundle is returned so the decision can record what Cockpit said.
+   */
+  | { ok: false; reason: "not_final"; excludedSkills: Array<{ ref: string; reason: string }>; bundle: RenderedBundle }
+  | BundleRenderFailure;
+
+export type BundledCompositionResult =
+  | { ok: true; revision: CompositionRevision }
+  | BundleRenderFailure
+  | { ok: false; reason: "not_final"; excludedSkills: Array<{ ref: string; reason: string }> };
 
 interface Logger { warn(obj: object, msg: string): void }
 export interface BundledCompositionOptions {
@@ -126,7 +144,7 @@ export interface BundledCompositionOptions {
 }
 
 /** The bundle request a spec draft makes: the same harness, model, fragments and pins, in the same order. */
-export function bundleRequestFor(input: BundledCompositionInput): BundleRequest | { error: string } {
+export function bundleRequestFor(input: BundleRenderInput): BundleRequest | { error: string } {
   const { spec } = input;
   if (spec.harness !== "claude-code" && spec.harness !== "codex") return { error: `bundle v1 has no harness ${spec.harness}` };
   return {
@@ -140,7 +158,15 @@ export function bundleRequestFor(input: BundledCompositionInput): BundleRequest 
   };
 }
 
+/**
+ * `render` asks Cockpit for a bundle and writes nothing, so the Composer can build its decision from
+ * the manifest and preview it. `persistRendered` writes a revision, and only with a bundle this
+ * instance rendered: the plane never persists a bundle it built itself. `compose` is both in one call.
+ */
 export class BundledComposition {
+  /** Bundles this instance got from Cockpit. Anything else is refused by `persistRendered`. */
+  private readonly rendered = new WeakSet<RenderedBundle>();
+
   constructor(
     private readonly db: Db,
     private readonly source: BundleSource,
@@ -148,8 +174,11 @@ export class BundledComposition {
     private readonly store = new CompositionStore(db),
   ) {}
 
-  private refusedBeforeRender({ spec, decision }: BundledCompositionInput): string | undefined {
-    if (!this.db.prepare("SELECT 1 FROM tasks WHERE id = ?").get(spec.task_id)) return `task ${spec.task_id} does not exist`;
+  private missingTask(taskId: string): string | undefined {
+    return this.db.prepare("SELECT 1 FROM tasks WHERE id = ?").get(taskId) ? undefined : `task ${taskId} does not exist`;
+  }
+
+  private reusedId(spec: { composition_revision_id: string }, decision: CompositionDecision): string | undefined {
     if (this.db.prepare("SELECT 1 FROM agent_specs WHERE composition_revision_id = ?").get(spec.composition_revision_id)) {
       return `composition revision ${spec.composition_revision_id} already exists; compose a new revision`;
     }
@@ -157,17 +186,29 @@ export class BundledComposition {
     return undefined;
   }
 
-  /** Requests the bundle, then persists the revision with it. On any failure nothing is written. */
-  async compose(input: BundledCompositionInput): Promise<BundledCompositionResult> {
+  /**
+   * Everything decidable before Cockpit is asked: the gate, the request, and what the store would
+   * refuse regardless of the bundle. `decision` is passed when the caller is about to persist.
+   */
+  private precheck(input: BundleRenderInput, decision?: CompositionDecision): BundleRenderFailure | BundleRequest {
     if (!this.options.enabled) return { ok: false, reason: "disabled" };
     const request = bundleRequestFor(input);
     if ("error" in request) return { ok: false, reason: "unsupported_harness", detail: request.error };
     const checked = validateBundleRequest(request);
     if (!checked.ok) return { ok: false, reason: "invalid_request", detail: checked.errors.slice(0, 3).join("; ") };
-    // What the store would refuse regardless of the bundle is refused before Cockpit is asked to render.
-    const refused = this.refusedBeforeRender(input);
+    const refused = this.missingTask(input.spec.task_id) ?? (decision ? this.reusedId(input.spec, decision) : undefined);
     if (refused) return { ok: false, reason: "composition_rejected", detail: refused };
+    return request;
+  }
 
+  /** Requests the bundle for a draft. Writes nothing, whatever the outcome. */
+  async render(input: BundleRenderInput): Promise<BundleRenderResult> {
+    return this.renderChecked(input, this.precheck(input));
+  }
+
+  private async renderChecked(input: BundleRenderInput, checked: BundleRenderFailure | BundleRequest): Promise<BundleRenderResult> {
+    if ("ok" in checked) return checked;
+    const request = checked;
     let response: BundleResponse;
     try {
       response = await this.source.render(request);
@@ -177,8 +218,11 @@ export class BundledComposition {
       this.options.logger?.warn({ source: "cockpit", reason, revision: input.spec.composition_revision_id }, "bundle request failed; no revision written");
       return { ok: false, reason, ...(err instanceof BundleRequestError && err.detail ? { detail: err.detail } : {}) };
     }
+    // Frozen, so what `persistRendered` later accepts is exactly what Cockpit returned.
+    const bundle = deepFreeze<RenderedBundle>({ request, response });
+    this.rendered.add(bundle);
     const excludedSkills = response.manifest.excluded.filter((e) => e.kind === "skill").map(({ ref, reason }) => ({ ref, reason }));
-    if (excludedSkills.length) return { ok: false, reason: "not_final", excludedSkills };
+    if (excludedSkills.length) return { ok: false, reason: "not_final", excludedSkills, bundle };
 
     const spec: AgentSpec = {
       ...input.spec,
@@ -194,11 +238,40 @@ export class BundledComposition {
         },
       },
     };
+    return { ok: true, spec, bundle };
+  }
+
+  /** Persists a revision with a bundle `render` returned. On any failure nothing is written. */
+  persistRendered(input: { spec: AgentSpec; decision: CompositionDecision; bundle: RenderedBundle }): BundledCompositionResult {
+    if (!this.rendered.has(input.bundle)) {
+      return { ok: false, reason: "composition_rejected", detail: "bundle was not rendered by Cockpit through this composition" };
+    }
+    if (input.bundle.response.manifest.excluded.some((e) => e.kind === "skill")) {
+      return { ok: false, reason: "composition_rejected", detail: "bundle is not final: it excludes a selected skill" };
+    }
+    const refused = this.missingTask(input.spec.task_id) ?? this.reusedId(input.spec, input.decision);
+    if (refused) return { ok: false, reason: "composition_rejected", detail: refused };
     try {
-      return { ok: true, revision: this.store.persist({ spec, decision: input.decision, bundle: { request, response } }) };
+      return { ok: true, revision: this.store.persist(input) };
     } catch (err) {
       if (!(err instanceof CompositionError)) throw err;
       return { ok: false, reason: "composition_rejected", detail: err.errors.slice(0, 5).join("; ") };
     }
   }
+
+  /** Requests the bundle, then persists the revision with it. On any failure nothing is written. */
+  async compose(input: BundledCompositionInput): Promise<BundledCompositionResult> {
+    const rendered = await this.renderChecked(input, this.precheck(input, input.decision));
+    if (rendered.ok) return this.persistRendered({ spec: rendered.spec, decision: input.decision, bundle: rendered.bundle });
+    if (rendered.reason === "not_final") return { ok: false, reason: "not_final", excludedSkills: rendered.excludedSkills };
+    return rendered;
+  }
+}
+
+function deepFreeze<T>(value: T): T {
+  if (value && typeof value === "object" && !Object.isFrozen(value)) {
+    for (const child of Object.values(value)) deepFreeze(child);
+    Object.freeze(value);
+  }
+  return value;
 }
