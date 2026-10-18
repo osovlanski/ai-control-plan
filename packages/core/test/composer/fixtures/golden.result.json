@@ -1,0 +1,407 @@
+{
+  "outcome": {
+    "status": "composed"
+  },
+  "compositionDigest": "sha256:b8246fbd1d5917ee05e896d73f7a50d652c189a614dfd8eee441747c4690707c",
+  "decision": {
+    "schema_version": "1.1",
+    "stages": [
+      {
+        "stage": "intent",
+        "candidates": [
+          {
+            "ref": "complexity:M",
+            "evidence": [
+              "rule complexity-unmeasured: K20 records no complexity"
+            ]
+          },
+          {
+            "ref": "domain:fastify",
+            "evidence": [
+              "marker package.json: dependency fastify"
+            ]
+          },
+          {
+            "ref": "domain:node",
+            "evidence": [
+              "marker package.json"
+            ]
+          },
+          {
+            "ref": "domain:typescript",
+            "evidence": [
+              "marker package.json: dependency typescript",
+              "marker tsconfig.json"
+            ]
+          },
+          {
+            "ref": "domain:vitest",
+            "evidence": [
+              "marker package.json: dependency vitest"
+            ]
+          },
+          {
+            "ref": "kind:coding",
+            "evidence": [
+              "stored classifier v1 label"
+            ]
+          },
+          {
+            "ref": "risk:high",
+            "evidence": [
+              "rule explicit-high-risk: matched 'deploy'"
+            ]
+          }
+        ],
+        "filters": [],
+        "chosen": [
+          "complexity:M",
+          "domain:fastify",
+          "domain:node",
+          "domain:typescript",
+          "domain:vitest",
+          "kind:coding",
+          "risk:high"
+        ],
+        "why": "kind coding (stored classifier v1 label); risk high (rule explicit-high-risk); complexity M (rule complexity-unmeasured); domains fastify, node, typescript, vitest (repository signals at 0123456789abcdef0123456789abcdef01234567)",
+        "override": null
+      },
+      {
+        "stage": "harness_model",
+        "candidates": [
+          {
+            "ref": "personal-claude/example-model",
+            "evidence": [
+              "quota 12% used",
+              "telemetry: 4 runs"
+            ]
+          },
+          {
+            "ref": "personal-claude/example-model-small"
+          },
+          {
+            "ref": "work-codex/example-codex-model"
+          }
+        ],
+        "filters": [
+          {
+            "filter": "quota_blocked",
+            "removed": [
+              "work-codex/example-codex-model"
+            ],
+            "reason": "quota blocked: rate_limit"
+          }
+        ],
+        "chosen": [
+          "personal-claude/example-model"
+        ],
+        "why": "preserve-quota: most headroom; harness claude-code; model example-model from the manifest's first model",
+        "override": null
+      },
+      {
+        "stage": "assets",
+        "candidates": [
+          {
+            "ref": "claude-skills:db-server",
+            "digest": "sha256:9aec5fda26d11e615527c64594a0b5338a20f3a1f278eed7acbc1b2ef81ad6d6",
+            "evidence": [
+              "tags matched: coding",
+              "lineage: library",
+              "not allowlisted"
+            ]
+          },
+          {
+            "ref": "claude-skills:fastify-routes",
+            "digest": "sha256:ffdd96c18fe945fa0189ad02628efb5f3c97f11b9c08c195fa92fc6164096ff4",
+            "evidence": [
+              "tags matched: fastify, typescript",
+              "lineage: library",
+              "allowlisted at digest"
+            ]
+          },
+          {
+            "ref": "claude-skills:old-review",
+            "digest": "sha256:05818f155095b2035abaaa153d53c6908d849438c4a873b824d374684e88a513",
+            "evidence": [
+              "tags matched: typescript",
+              "lineage: library",
+              "not allowlisted"
+            ]
+          },
+          {
+            "ref": "claude-skills:pr-writer",
+            "digest": "sha256:86eb36cee77d77b88b4cd058657b4eff57200a009f26f966e0838a9523751a6e",
+            "evidence": [
+              "tags matched: coding",
+              "lineage: proposal",
+              "allowlisted at digest"
+            ]
+          },
+          {
+            "ref": "claude-skills:random-helper",
+            "digest": "sha256:b7b8e76aca5dc2a5befcd20f8ee9f82940ddb4086428b24068a76ace34c8c3fe",
+            "evidence": [
+              "tags matched: coding",
+              "lineage: library",
+              "not allowlisted"
+            ]
+          },
+          {
+            "ref": "claude-skills:test-writer",
+            "digest": "sha256:e757775d20beeffe174ff878258f0d9b40d545d95428ff76112799d0750b5cdc",
+            "evidence": [
+              "tags matched: coding, vitest",
+              "lineage: library",
+              "opted in at digest"
+            ]
+          },
+          {
+            "ref": "claude-skills:ts-review",
+            "digest": "sha256:825553e926fa979878e1eda3f0164e44d81f3ebe5baa835dc7b10aa10341b502",
+            "evidence": [
+              "tags matched: typescript",
+              "lineage: library",
+              "allowlisted at digest"
+            ]
+          }
+        ],
+        "filters": [
+          {
+            "filter": "kind_not_attachable",
+            "removed": [
+              "claude-skills:db-server"
+            ],
+            "reason": "only skills attach in M2: nothing provisions mcp servers or subagents until M3, and bundle v1 renders no plugin, hook or rule"
+          },
+          {
+            "filter": "disabled_in_producer",
+            "removed": [
+              "claude-skills:old-review"
+            ],
+            "reason": "disabled in the producer"
+          },
+          {
+            "filter": "not_allowlisted",
+            "removed": [
+              "claude-skills:random-helper"
+            ],
+            "reason": "not in the workspace digest allowlist and no opt-in"
+          },
+          {
+            "filter": "excluded_by_renderer",
+            "removed": [
+              "claude-skills:fastify-routes"
+            ],
+            "reason": "excluded by renderer: requires an MCP server this harness lacks"
+          }
+        ],
+        "chosen": [
+          "claude-skills:pr-writer",
+          "claude-skills:test-writer",
+          "claude-skills:ts-review"
+        ],
+        "why": "chose 3 of 7 candidates by tag matches with the intent (kind coding, domains fastify, node, typescript, vitest), at most 3; renderer excluded claude-skills:fastify-routes; re-ranked without it",
+        "override": null
+      },
+      {
+        "stage": "context",
+        "candidates": [
+          {
+            "ref": "bundle:sha256:72cb483882573520543e007e4b8c47b610ce7221b08185eb923b4bdfc4c9465b",
+            "digest": "sha256:72cb483882573520543e007e4b8c47b610ce7221b08185eb923b4bdfc4c9465b",
+            "evidence": [
+              "estimated 812 of 10000 tokens (estimated, 3.5 chars/token)",
+              "compiler cockpit-context-compiler 1.0.0"
+            ]
+          },
+          {
+            "ref": "fragment:repo:example",
+            "evidence": [
+              "configured"
+            ]
+          },
+          {
+            "ref": "fragment:typescript-style",
+            "evidence": [
+              "configured"
+            ]
+          },
+          {
+            "ref": "memory:mem-repo-notes",
+            "digest": "sha256:c16e43f8fad6f4a6367ac9f556123073a31337c5d91e8b427462f40804c3e55c",
+            "evidence": [
+              "pinned in config"
+            ]
+          }
+        ],
+        "filters": [],
+        "chosen": [
+          "fragment:repo:example",
+          "fragment:typescript-style",
+          "memory:mem-repo-notes"
+        ],
+        "why": "rendered bundle for claude-code example-model: 2 of 2 fragments, 1 of 1 memory bundles and 3 skills included; second render, after the renderer excluded a selected skill",
+        "override": null
+      },
+      {
+        "stage": "policy",
+        "candidates": [
+          {
+            "ref": "max_cost_usd:3.75",
+            "evidence": [
+              "cost: advisory until deferral #3 closes",
+              "price evidence k7-fixture-1",
+              "task cap 5, consumed 1.25, remaining 3.75"
+            ]
+          },
+          {
+            "ref": "max_runtime_ms:1800000",
+            "evidence": [
+              "runtime: hard (local clock)"
+            ]
+          },
+          {
+            "ref": "max_tokens:28000",
+            "evidence": [
+              "tokens: advisory (personal-claude declares no usage reporting)",
+              "task cap 40000, consumed 12000, remaining 28000"
+            ]
+          },
+          {
+            "ref": "permission:auto",
+            "evidence": [
+              "workspace approval mode auto-approve"
+            ]
+          },
+          {
+            "ref": "permission:prompt-on-escalation",
+            "evidence": [
+              "risk high maps to prompt-on-escalation"
+            ]
+          },
+          {
+            "ref": "permission:read-only"
+          },
+          {
+            "ref": "provisioning:ambient",
+            "evidence": [
+              "isolation: ambient (M3 not shipped; workspace permits ambient)"
+            ]
+          }
+        ],
+        "filters": [],
+        "chosen": [
+          "max_cost_usd:3.75",
+          "max_runtime_ms:1800000",
+          "max_tokens:28000",
+          "permission:prompt-on-escalation",
+          "provisioning:ambient"
+        ],
+        "why": "permission prompt-on-escalation (stricter of workspace auto-approve and risk high -> prompt-on-escalation); tools: none listed; the approval mode governs; budget: max_tokens:28000, max_runtime_ms:1800000, max_cost_usd:3.75; provisioning ambient (M3 not shipped; workspace permits ambient)",
+        "override": null
+      },
+      {
+        "stage": "confirm",
+        "candidates": [
+          {
+            "ref": "start"
+          }
+        ],
+        "filters": [],
+        "chosen": [],
+        "why": "awaiting confirmation",
+        "override": null
+      }
+    ]
+  },
+  "specDraft": {
+    "schema_version": "1.1",
+    "task_id": "AG-0042",
+    "intent": {
+      "kind": "coding",
+      "domains": [
+        "fastify",
+        "node",
+        "typescript",
+        "vitest"
+      ],
+      "complexity": "M",
+      "risk": "high"
+    },
+    "harness": "claude-code",
+    "model": {
+      "primary": {
+        "id": "example-model"
+      },
+      "fallbacks": []
+    },
+    "registry": {
+      "snapshot_digest": "sha256:16a0eeb0791b6c92451fd284dd9f599e0a7dbe7f6ebea6e2d2d06c7f74aec112",
+      "observed_at": "2026-10-18T08:00:00.000Z",
+      "stale": false
+    },
+    "assets": {
+      "skills": [
+        {
+          "id": "claude-skills:pr-writer",
+          "digest": "sha256:86eb36cee77d77b88b4cd058657b4eff57200a009f26f966e0838a9523751a6e",
+          "allowlisted": true
+        },
+        {
+          "id": "claude-skills:test-writer",
+          "digest": "sha256:e757775d20beeffe174ff878258f0d9b40d545d95428ff76112799d0750b5cdc",
+          "allowlisted": false,
+          "opt_in": {
+            "digest": "sha256:e757775d20beeffe174ff878258f0d9b40d545d95428ff76112799d0750b5cdc",
+            "actor": "operator",
+            "at": "2026-10-18T08:05:00.000Z"
+          }
+        },
+        {
+          "id": "claude-skills:ts-review",
+          "digest": "sha256:825553e926fa979878e1eda3f0164e44d81f3ebe5baa835dc7b10aa10341b502",
+          "allowlisted": true
+        }
+      ],
+      "mcp_servers": [],
+      "subagents": []
+    },
+    "context": {
+      "fragments": [
+        "repo:example",
+        "typescript-style"
+      ],
+      "memory_bundles": [
+        {
+          "id": "mem-repo-notes",
+          "digest": "sha256:c16e43f8fad6f4a6367ac9f556123073a31337c5d91e8b427462f40804c3e55c",
+          "reason": "pinned repository notes"
+        }
+      ],
+      "bundle_digest": "sha256:72cb483882573520543e007e4b8c47b610ce7221b08185eb923b4bdfc4c9465b",
+      "compiler": {
+        "name": "cockpit-context-compiler",
+        "version": "1.0.0",
+        "tokens": 812,
+        "token_method": "estimated",
+        "chars_per_token": 3.5
+      }
+    },
+    "policy": {
+      "revision": {
+        "id": "workspace-policy:personal",
+        "digest": "sha256:9f227e7f1856db1eaa0973716d5c4c4f9a0ae5627b5635ac788d3be5453dd7cc"
+      },
+      "permission": "prompt-on-escalation",
+      "tool_allowlist": [],
+      "budget": {
+        "max_tokens": 28000,
+        "max_cost_usd": 3.75,
+        "max_runtime_ms": 1800000
+      }
+    },
+    "provisioning": {
+      "requested": "ambient"
+    }
+  }
+}

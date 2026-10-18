@@ -1,0 +1,498 @@
+{
+  "inputs": {
+    "task": {
+      "id": "AG-0042",
+      "goal": "Fix the flaky retry test and deploy the fix",
+      "constraints": [
+        "keep the public API"
+      ],
+      "storedKind": "coding"
+    },
+    "repoSignals": {
+      "status": "ok",
+      "baseCommit": "0123456789abcdef0123456789abcdef01234567",
+      "files": [
+        {
+          "relPath": "package.json",
+          "content": "{\"name\":\"fixture\",\"dependencies\":{\"fastify\":\"^5.0.0\"},\"devDependencies\":{\"typescript\":\"^5.9.0\",\"vitest\":\"^3.2.0\"}}",
+          "truncated": false
+        },
+        {
+          "relPath": "tsconfig.json",
+          "content": "{}",
+          "truncated": false
+        }
+      ]
+    },
+    "registry": {
+      "status": "ok",
+      "snapshotDigest": "sha256:16a0eeb0791b6c92451fd284dd9f599e0a7dbe7f6ebea6e2d2d06c7f74aec112",
+      "observedAt": "2026-10-18T08:00:00.000Z",
+      "stale": false,
+      "assets": [
+        {
+          "id": "claude-skills:db-server",
+          "digest": "sha256:9aec5fda26d11e615527c64594a0b5338a20f3a1f278eed7acbc1b2ef81ad6d6",
+          "kind": "mcp_server",
+          "enabled": true,
+          "tags": [
+            "coding"
+          ],
+          "compatibility": {
+            "assistants": [
+              "claude",
+              "codex"
+            ]
+          },
+          "requirements": {
+            "secretRefs": []
+          },
+          "conflicts": [],
+          "lineage": {
+            "origin": "library"
+          }
+        },
+        {
+          "id": "claude-skills:fastify-routes",
+          "digest": "sha256:ffdd96c18fe945fa0189ad02628efb5f3c97f11b9c08c195fa92fc6164096ff4",
+          "kind": "skill",
+          "enabled": true,
+          "tags": [
+            "fastify",
+            "typescript"
+          ],
+          "compatibility": {
+            "assistants": [
+              "claude",
+              "codex"
+            ]
+          },
+          "requirements": {
+            "secretRefs": [
+              {
+                "type": "env",
+                "name": "EXAMPLE_SERVICE_ENV"
+              }
+            ]
+          },
+          "conflicts": [],
+          "lineage": {
+            "origin": "library"
+          }
+        },
+        {
+          "id": "claude-skills:old-review",
+          "digest": "sha256:05818f155095b2035abaaa153d53c6908d849438c4a873b824d374684e88a513",
+          "kind": "skill",
+          "enabled": false,
+          "tags": [
+            "typescript"
+          ],
+          "compatibility": {
+            "assistants": [
+              "claude",
+              "codex"
+            ]
+          },
+          "requirements": {
+            "secretRefs": []
+          },
+          "conflicts": [],
+          "lineage": {
+            "origin": "library"
+          }
+        },
+        {
+          "id": "claude-skills:pr-writer",
+          "digest": "sha256:86eb36cee77d77b88b4cd058657b4eff57200a009f26f966e0838a9523751a6e",
+          "kind": "skill",
+          "enabled": true,
+          "tags": [
+            "coding"
+          ],
+          "compatibility": {
+            "assistants": [
+              "claude",
+              "codex"
+            ]
+          },
+          "requirements": {
+            "secretRefs": []
+          },
+          "conflicts": [],
+          "lineage": {
+            "origin": "proposal"
+          }
+        },
+        {
+          "id": "claude-skills:random-helper",
+          "digest": "sha256:b7b8e76aca5dc2a5befcd20f8ee9f82940ddb4086428b24068a76ace34c8c3fe",
+          "kind": "skill",
+          "enabled": true,
+          "tags": [
+            "coding"
+          ],
+          "compatibility": {
+            "assistants": [
+              "claude",
+              "codex"
+            ]
+          },
+          "requirements": {
+            "secretRefs": []
+          },
+          "conflicts": [],
+          "lineage": {
+            "origin": "library"
+          }
+        },
+        {
+          "id": "claude-skills:test-writer",
+          "digest": "sha256:e757775d20beeffe174ff878258f0d9b40d545d95428ff76112799d0750b5cdc",
+          "kind": "skill",
+          "enabled": true,
+          "tags": [
+            "coding",
+            "vitest"
+          ],
+          "compatibility": {
+            "assistants": [
+              "claude",
+              "codex"
+            ]
+          },
+          "requirements": {
+            "secretRefs": []
+          },
+          "conflicts": [],
+          "lineage": {
+            "origin": "library"
+          }
+        },
+        {
+          "id": "claude-skills:ts-review",
+          "digest": "sha256:825553e926fa979878e1eda3f0164e44d81f3ebe5baa835dc7b10aa10341b502",
+          "kind": "skill",
+          "enabled": true,
+          "tags": [
+            "review",
+            "typescript"
+          ],
+          "compatibility": {
+            "assistants": [
+              "claude",
+              "codex"
+            ]
+          },
+          "requirements": {
+            "secretRefs": []
+          },
+          "conflicts": [],
+          "lineage": {
+            "origin": "library"
+          }
+        }
+      ]
+    },
+    "optIns": [
+      {
+        "assetId": "claude-skills:test-writer",
+        "digest": "sha256:e757775d20beeffe174ff878258f0d9b40d545d95428ff76112799d0750b5cdc",
+        "actor": "operator",
+        "at": "2026-10-18T08:05:00.000Z"
+      }
+    ],
+    "environment": {
+      "envNames": [
+        "EXAMPLE_SERVICE_ENV"
+      ],
+      "commands": []
+    },
+    "config": {
+      "maxSkills": 3,
+      "allowlist": [
+        {
+          "id": "claude-skills:ts-review",
+          "digest": "sha256:825553e926fa979878e1eda3f0164e44d81f3ebe5baa835dc7b10aa10341b502"
+        },
+        {
+          "id": "claude-skills:pr-writer",
+          "digest": "sha256:86eb36cee77d77b88b4cd058657b4eff57200a009f26f966e0838a9523751a6e"
+        },
+        {
+          "id": "claude-skills:fastify-routes",
+          "digest": "sha256:ffdd96c18fe945fa0189ad02628efb5f3c97f11b9c08c195fa92fc6164096ff4"
+        }
+      ],
+      "fragments": [
+        "typescript-style",
+        "repo:example"
+      ],
+      "memoryBundles": [
+        {
+          "id": "mem-repo-notes",
+          "digest": "sha256:c16e43f8fad6f4a6367ac9f556123073a31337c5d91e8b427462f40804c3e55c",
+          "reason": "pinned repository notes"
+        }
+      ],
+      "charsPerToken": 3.5,
+      "tokenBudget": 12000,
+      "policy": {
+        "riskPermission": {
+          "high": "prompt-on-escalation"
+        },
+        "permitAmbient": true
+      },
+      "budget": {
+        "max_tokens": 40000,
+        "max_runtime_ms": 1800000,
+        "max_cost_usd": 5
+      }
+    },
+    "workspacePolicy": {
+      "policyId": "workspace-policy:personal",
+      "approvalMode": "auto-approve",
+      "toolAllowlist": []
+    },
+    "consumed": {
+      "tokens": 12000,
+      "costUsd": 1.25,
+      "costMethod": "estimated",
+      "unknownCostSessions": 0,
+      "sessions": 1,
+      "recordCount": 3
+    },
+    "confirm": {
+      "mode": "preview"
+    },
+    "forbiddenHostnames": [
+      "fixture-host.example",
+      "127.0.0.1"
+    ]
+  },
+  "harnessModel": {
+    "candidates": [
+      {
+        "assistantId": "personal-claude",
+        "modelId": "example-model",
+        "quotaUsedPercent": 12,
+        "telemetryRuns": 4
+      },
+      {
+        "assistantId": "personal-claude",
+        "modelId": "example-model-small"
+      },
+      {
+        "assistantId": "work-codex",
+        "modelId": "example-codex-model"
+      }
+    ],
+    "filters": [
+      {
+        "filter": "quota_blocked",
+        "assistantIds": [
+          "work-codex"
+        ],
+        "kinds": [
+          "rate_limit"
+        ]
+      }
+    ],
+    "chosen": {
+      "assistantId": "personal-claude",
+      "modelId": "example-model",
+      "harness": "claude-code",
+      "modelSource": "manifest-first",
+      "acceptedApprovalModes": [
+        "auto-approve",
+        "prompt-on-escalation",
+        "read-only"
+      ],
+      "usageReporting": false,
+      "price": {
+        "pricingVersion": "k7-fixture-1",
+        "inputPerMtok": 3,
+        "outputPerMtok": 15
+      }
+    },
+    "ruleFired": "preserve-quota: most headroom"
+  },
+  "bundleAnswers": [
+    {
+      "status": "not_final",
+      "response": {
+        "schemaVersion": "1.0",
+        "files": [
+          {
+            "relPath": "CLAUDE.md",
+            "content": "# bundle\nrepo:example\ntypescript-style\nmem-repo-notes\nclaude-skills:pr-writer\nclaude-skills:test-writer\n",
+            "digest": "sha256:ff5667b3cf0a0789cc6341159ccaa20001022cce30705a667d6d40cc4280c9ae"
+          }
+        ],
+        "manifest": {
+          "harness": "claude-code",
+          "bundleDigest": "sha256:7eb0f81b627263f9185f5fa62ee7648054b4cce2e536de4819621e9924487fc9",
+          "compiler": {
+            "name": "cockpit-context-compiler",
+            "version": "1.0.0"
+          },
+          "included": [
+            {
+              "kind": "fragment",
+              "ref": "repo:example",
+              "digest": "sha256:90deb4c4cd6389a3da7e6c3454f02d031ac7233aa38867b60c2357d43411ac63",
+              "reason": "requested"
+            },
+            {
+              "kind": "fragment",
+              "ref": "typescript-style",
+              "digest": "sha256:b809be41a7aa951970355d9cdb352734e0d11b3604639ce605cb46c4647c3842",
+              "reason": "requested"
+            },
+            {
+              "kind": "memory_bundle",
+              "ref": "mem-repo-notes",
+              "digest": "sha256:c16e43f8fad6f4a6367ac9f556123073a31337c5d91e8b427462f40804c3e55c",
+              "reason": "pinned"
+            },
+            {
+              "kind": "skill",
+              "ref": "claude-skills:pr-writer",
+              "digest": "sha256:86eb36cee77d77b88b4cd058657b4eff57200a009f26f966e0838a9523751a6e",
+              "reason": "selected",
+              "relPath": ".claude/skills/pr-writer/SKILL.md"
+            },
+            {
+              "kind": "skill",
+              "ref": "claude-skills:test-writer",
+              "digest": "sha256:e757775d20beeffe174ff878258f0d9b40d545d95428ff76112799d0750b5cdc",
+              "reason": "selected",
+              "relPath": ".claude/skills/test-writer/SKILL.md"
+            }
+          ],
+          "excluded": [
+            {
+              "kind": "skill",
+              "ref": "claude-skills:fastify-routes",
+              "reason": "requires an MCP server this harness lacks"
+            }
+          ],
+          "tokens": {
+            "estimated": 812,
+            "tokenMethod": "estimated",
+            "charsPerToken": 3.5,
+            "budget": 10000
+          }
+        }
+      },
+      "excludedSkills": [
+        {
+          "ref": "claude-skills:fastify-routes",
+          "reason": "requires an MCP server this harness lacks"
+        }
+      ]
+    },
+    {
+      "status": "ok",
+      "request": {
+        "schemaVersion": "1.0",
+        "harness": "claude-code",
+        "fragments": [
+          "repo:example",
+          "typescript-style"
+        ],
+        "memoryBundles": [
+          {
+            "id": "mem-repo-notes",
+            "digest": "sha256:c16e43f8fad6f4a6367ac9f556123073a31337c5d91e8b427462f40804c3e55c"
+          }
+        ],
+        "skills": [
+          {
+            "id": "claude-skills:pr-writer",
+            "digest": "sha256:86eb36cee77d77b88b4cd058657b4eff57200a009f26f966e0838a9523751a6e"
+          },
+          {
+            "id": "claude-skills:test-writer",
+            "digest": "sha256:e757775d20beeffe174ff878258f0d9b40d545d95428ff76112799d0750b5cdc"
+          },
+          {
+            "id": "claude-skills:ts-review",
+            "digest": "sha256:825553e926fa979878e1eda3f0164e44d81f3ebe5baa835dc7b10aa10341b502"
+          }
+        ],
+        "model": {
+          "id": "example-model",
+          "charsPerToken": 3.5
+        },
+        "tokenBudget": 10000
+      },
+      "response": {
+        "schemaVersion": "1.0",
+        "files": [
+          {
+            "relPath": "CLAUDE.md",
+            "content": "# bundle\nrepo:example\ntypescript-style\nmem-repo-notes\nclaude-skills:pr-writer\nclaude-skills:test-writer\nclaude-skills:ts-review\n",
+            "digest": "sha256:0061ab86f8511e0be0d2627a973ed5c86a206b85a555fbf13cde65e9e327eb78"
+          }
+        ],
+        "manifest": {
+          "harness": "claude-code",
+          "bundleDigest": "sha256:72cb483882573520543e007e4b8c47b610ce7221b08185eb923b4bdfc4c9465b",
+          "compiler": {
+            "name": "cockpit-context-compiler",
+            "version": "1.0.0"
+          },
+          "included": [
+            {
+              "kind": "fragment",
+              "ref": "repo:example",
+              "digest": "sha256:90deb4c4cd6389a3da7e6c3454f02d031ac7233aa38867b60c2357d43411ac63",
+              "reason": "requested"
+            },
+            {
+              "kind": "fragment",
+              "ref": "typescript-style",
+              "digest": "sha256:b809be41a7aa951970355d9cdb352734e0d11b3604639ce605cb46c4647c3842",
+              "reason": "requested"
+            },
+            {
+              "kind": "memory_bundle",
+              "ref": "mem-repo-notes",
+              "digest": "sha256:c16e43f8fad6f4a6367ac9f556123073a31337c5d91e8b427462f40804c3e55c",
+              "reason": "pinned"
+            },
+            {
+              "kind": "skill",
+              "ref": "claude-skills:pr-writer",
+              "digest": "sha256:86eb36cee77d77b88b4cd058657b4eff57200a009f26f966e0838a9523751a6e",
+              "reason": "selected",
+              "relPath": ".claude/skills/pr-writer/SKILL.md"
+            },
+            {
+              "kind": "skill",
+              "ref": "claude-skills:test-writer",
+              "digest": "sha256:e757775d20beeffe174ff878258f0d9b40d545d95428ff76112799d0750b5cdc",
+              "reason": "selected",
+              "relPath": ".claude/skills/test-writer/SKILL.md"
+            },
+            {
+              "kind": "skill",
+              "ref": "claude-skills:ts-review",
+              "digest": "sha256:825553e926fa979878e1eda3f0164e44d81f3ebe5baa835dc7b10aa10341b502",
+              "reason": "selected",
+              "relPath": ".claude/skills/ts-review/SKILL.md"
+            }
+          ],
+          "excluded": [],
+          "tokens": {
+            "estimated": 812,
+            "tokenMethod": "estimated",
+            "charsPerToken": 3.5,
+            "budget": 10000
+          }
+        }
+      }
+    }
+  ]
+}
