@@ -14,7 +14,7 @@ import { assembleBundle, BUNDLE_CONTRACT_DIR, type BundleRequest, type BundleRes
 import { COMPOSITION_CONTRACT_DIR, type AgentSpec, type CompositionDecision } from "../src/composition-contract.js";
 import {
   BundledComposition, BundleRequestError, bundleRequestFor, CockpitBundleClient, MAX_BUNDLE_RESPONSE_BYTES,
-  type AgentSpecDraft, type BundleSource, type BundledCompositionInput,
+  type AgentSpecDraft, type BundleRenderInput, type BundleSource, type BundledCompositionInput,
 } from "../src/modules/bundle-request.js";
 import { CompositionStore } from "../src/modules/composition.js";
 
@@ -394,5 +394,94 @@ describe("BundledComposition", () => {
   it("derives the request in the spec's own order and pins", () => {
     const request = bundleRequestFor(input());
     expect(request).toEqual(fixtureRequest());
+  });
+});
+
+describe("BundledComposition.render and persistRendered", () => {
+  const draft = (): BundleRenderInput => { const { decision: _decision, ...rest } = input(); return rest; };
+
+  it("renders without writing, and returns the draft filled from the manifest", async () => {
+    const source = new FakeSource(fixtureResponse());
+    const rendered = await new BundledComposition(db, source, on).render(draft());
+    expect(source.requests).toEqual([fixtureRequest()]);
+    expect(rendered.ok).toBe(true);
+    const { spec, bundle } = rendered as Extract<typeof rendered, { ok: true }>;
+    expect(spec).toEqual(json<AgentSpec>(COMPOSITION_CONTRACT_DIR, "valid/two-skill.agent-spec.json"));
+    expect(bundle).toEqual({ request: fixtureRequest(), response: fixtureResponse() });
+    expect(count(db, "agent_specs")).toBe(0);
+    expect(count(db, "composition_decisions")).toBe(0);
+  });
+
+  it("persists a rendered bundle with a decision built after the render", async () => {
+    const composition = new BundledComposition(db, new FakeSource(fixtureResponse()), on);
+    const rendered = await composition.render(draft());
+    if (!rendered.ok) throw new Error(rendered.reason);
+    const decision = input().decision;
+    const context = decision.stages.find((s) => s.stage === "context")!;
+    context.why = `rendered ${rendered.bundle.response.manifest.bundleDigest}`;
+    const result = composition.persistRendered({ spec: rendered.spec, decision, bundle: rendered.bundle });
+    expect(result.ok).toBe(true);
+    const stored = new CompositionStore(db).get("CR-0002-1")!;
+    expect(stored.bundle.response).toEqual(fixtureResponse());
+    expect(stored.decision.stages.find((s) => s.stage === "context")!.why).toBe(context.why);
+  });
+
+  it("renders a draft whose ids are taken (a preview has none to claim), and refuses them only at persist", async () => {
+    await new BundledComposition(db, new FakeSource(fixtureResponse()), on).compose(input());
+    const composition = new BundledComposition(db, new FakeSource(fixtureResponse()), on);
+    const rendered = await composition.render(draft());
+    expect(rendered.ok).toBe(true);
+    if (!rendered.ok) return;
+    expect(composition.persistRendered({ spec: rendered.spec, decision: input().decision, bundle: rendered.bundle }))
+      .toMatchObject({ ok: false, reason: "composition_rejected", detail: expect.stringMatching(/already exists/) });
+    expect(count(db, "agent_specs")).toBe(1);
+  });
+
+  it("returns Cockpit's manifest when a selected skill is excluded, and will not persist that bundle", async () => {
+    const response = fixtureResponse();
+    const skill = response.manifest.included.find((e) => e.kind === "skill" && e.ref === "claude-skills:example-tests")!;
+    const bundle = assembleBundle({
+      request: fixtureRequest(), rendered: response.files.filter((f) => f.relPath !== skill.relPath), compiler: response.manifest.compiler,
+      included: response.manifest.included.filter((e) => e !== skill),
+      excluded: [...response.manifest.excluded, { kind: "skill", ref: skill.ref, reason: "over the token budget" }],
+    });
+    const composition = new BundledComposition(db, new FakeSource(bundle), on);
+    const rendered = await composition.render(draft());
+    expect(rendered).toMatchObject({ ok: false, reason: "not_final", excludedSkills: [{ ref: skill.ref, reason: "over the token budget" }] });
+    const notFinal = rendered as Extract<typeof rendered, { reason: "not_final" }>;
+    expect(notFinal.bundle.response.manifest.excluded.map((e) => e.ref)).toEqual(bundle.manifest.excluded.map((e) => e.ref));
+    const spec = json<AgentSpec>(COMPOSITION_CONTRACT_DIR, "valid/two-skill.agent-spec.json");
+    expect(composition.persistRendered({ spec, decision: input().decision, bundle: notFinal.bundle }))
+      .toMatchObject({ ok: false, reason: "composition_rejected", detail: expect.stringMatching(/not final/) });
+    expect(count(db, "agent_specs")).toBe(0);
+  });
+
+  it("refuses a bundle it did not render, even a valid one, and writes nothing", async () => {
+    const spec = json<AgentSpec>(COMPOSITION_CONTRACT_DIR, "valid/two-skill.agent-spec.json");
+    const composition = new BundledComposition(db, new FakeSource(fixtureResponse()), on);
+    const assembled = { request: fixtureRequest(), response: fixtureResponse() };
+    expect(composition.persistRendered({ spec, decision: input().decision, bundle: assembled }))
+      .toMatchObject({ ok: false, reason: "composition_rejected", detail: expect.stringMatching(/not rendered/) });
+    const other = await new BundledComposition(db, new FakeSource(fixtureResponse()), on).render(draft());
+    if (!other.ok) throw new Error(other.reason);
+    expect(composition.persistRendered({ spec, decision: input().decision, bundle: other.bundle }))
+      .toMatchObject({ ok: false, reason: "composition_rejected", detail: expect.stringMatching(/not rendered/) });
+    expect(count(db, "agent_specs")).toBe(0);
+  });
+
+  it("freezes what it rendered, so the persisted bundle is what Cockpit returned", async () => {
+    const rendered = await new BundledComposition(db, new FakeSource(fixtureResponse()), on).render(draft());
+    if (!rendered.ok) throw new Error(rendered.reason);
+    expect(() => { (rendered.bundle.response.files[0] as { content: string }).content = "edited"; }).toThrow(TypeError);
+    expect(() => { rendered.bundle.response.manifest.excluded.push({ kind: "skill", ref: "x", reason: "y" }); }).toThrow(TypeError);
+  });
+
+  it("is gated, and refuses a missing task, before Cockpit is asked", async () => {
+    const source = new FakeSource(fixtureResponse());
+    expect(await new BundledComposition(db, source, { enabled: false }).render(draft())).toEqual({ ok: false, reason: "disabled" });
+    const noTask = draft();
+    noTask.spec.task_id = "AG-9999";
+    expect(await new BundledComposition(db, source, on).render(noTask)).toMatchObject({ ok: false, reason: "composition_rejected", detail: expect.stringMatching(/does not exist/) });
+    expect(source.requests).toEqual([]);
   });
 });
