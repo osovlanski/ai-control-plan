@@ -7,7 +7,7 @@ import {
   type BundleRequest, type BundleResponse,
 } from "../src/bundle-contract.js";
 import {
-  checkComposition, COMPOSITION_CONTRACT_DIR, validateAgentSpec, validateCompositionDecision,
+  checkComposition, COMPOSITION_CONTRACT_DIR, COMPOSITION_SCHEMA_VERSION, validateAgentSpec, validateCompositionDecision,
   type AgentSpec, type CompositionDecision,
 } from "../src/composition-contract.js";
 
@@ -225,15 +225,16 @@ describe("bundle contract v1 rules beyond the schema", () => {
 });
 
 describe("composition contract v1 conformance fixtures", () => {
-  for (const name of ["zero-asset", "two-skill"]) {
+  // Each composition fixture names the bundle fixture it was rendered with.
+  for (const [name, bundleName] of [["zero-asset", "zero-asset"], ["two-skill", "two-skill"], ["general-read-only", "zero-asset"]] as const) {
     it(`accepts valid/${name}, and the spec, decision and bundle agree`, () => {
       const spec = validateAgentSpec(compFixture(`valid/${name}.agent-spec.json`));
       const decision = validateCompositionDecision(compFixture(`valid/${name}.decision.json`));
       expect(errorsOf(spec)).toBe("");
       expect(errorsOf(decision)).toBe("");
       const bundle = {
-        request: bundleFixture(`valid/${name}.request.json`) as BundleRequest,
-        response: bundleFixture(`valid/${name}.response.json`) as BundleResponse,
+        request: bundleFixture(`valid/${bundleName}.request.json`) as BundleRequest,
+        response: bundleFixture(`valid/${bundleName}.response.json`) as BundleResponse,
       };
       expect(checkComposition((spec as { value: AgentSpec }).value, (decision as { value: CompositionDecision }).value, bundle)).toEqual([]);
     });
@@ -253,6 +254,7 @@ describe("composition contract v1 conformance fixtures", () => {
     "inline-secret.agent-spec.json": /\/assets\/mcp_servers\/0\/secret_refs\/0 must be object \[.*registry-snapshot\.schema\.json#\/\$defs\/SecretRef\/type\]/,
     "asset-missing-digest.agent-spec.json": /\/assets\/skills\/0 must have required property 'digest'/,
     "mutable-asset-pointer.agent-spec.json": /\/assets\/skills\/0 must NOT have unevaluated properties \(version\)/,
+    "general-read-only-at-1.0.agent-spec.json": /\/intent\/kind general requires schema_version 1\.1 or later; this spec is 1\.0\n\/policy\/permission read-only requires schema_version 1\.1/,
   };
 
   it("has an expectation for every invalid fixture", () => {
@@ -365,8 +367,29 @@ describe("composition contract v1 rules beyond the schema", () => {
     expect(checkComposition(spec, decision, { request, response })).toContain("attached skill claude-skills:example-tests was not rendered into the bundle");
   });
 
-  it("accepts an older stored minor and rejects a newer one", () => {
-    expect(errorsOf(validateAgentSpec({ ...spec, schema_version: "1.1" }))).toMatch(/unsupported schema_version "1.1"/);
-    expect(errorsOf(validateAgentSpec(spec, "1.3"))).toBe("");
+  it("writes 1.1, reads stored 1.0 and 1.1, and rejects a newer minor or another major", () => {
+    expect(COMPOSITION_SCHEMA_VERSION).toBe("1.1");
+    expect(spec.schema_version).toBe("1.0");
+    expect(errorsOf(validateAgentSpec(spec))).toBe("");
+    expect(errorsOf(validateCompositionDecision(decision))).toBe("");
+    expect(errorsOf(validateAgentSpec({ ...spec, schema_version: "1.1" }))).toBe("");
+    // "1.01" passes the minor comparison and then fails the schema pattern: refused either way.
+    expect(errorsOf(validateAgentSpec({ ...spec, schema_version: "1.01" }))).toMatch(/\/schema_version must match pattern/);
+    for (const version of ["1.2", "2.0", 1.1]) {
+      expect(errorsOf(validateAgentSpec({ ...spec, schema_version: version }))).toMatch(/unsupported schema_version .*; reader supports 1\.1/);
+      expect(errorsOf(validateCompositionDecision({ ...decision, schema_version: version }))).toMatch(/unsupported schema_version/);
+    }
+    expect(errorsOf(validateAgentSpec({ ...spec, schema_version: "1.2" }, "1.3"))).toBe("");
+    // A reader pinned to 1.0 does not read a 1.1 spec, even one that uses no 1.1 value.
+    expect(errorsOf(validateAgentSpec({ ...spec, schema_version: "1.1" }, "1.0"))).toMatch(/reader supports 1\.0/);
+  });
+
+  it("admits general and read-only from 1.1 on, each on its own", () => {
+    const at = (version: string, patch: (s: AgentSpec) => void) => specErrors((s) => { s.schema_version = version; patch(s); });
+    expect(at("1.0", (s) => { s.intent.kind = "general"; })).toMatch(/^\/intent\/kind general requires schema_version 1\.1 or later; this spec is 1\.0$/);
+    expect(at("1.0", (s) => { s.policy.permission = "read-only"; })).toMatch(/^\/policy\/permission read-only requires schema_version 1\.1 or later; this spec is 1\.0$/);
+    expect(at("1.1", (s) => { s.intent.kind = "general"; })).toBe("");
+    expect(at("1.1", (s) => { s.policy.permission = "read-only"; })).toBe("");
+    expect(at("1.1", (s) => { (s.intent as { kind: string }).kind = "chat"; })).toMatch(/\/intent\/kind must be equal to one of the allowed values/);
   });
 });

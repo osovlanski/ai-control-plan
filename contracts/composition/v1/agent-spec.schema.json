@@ -18,7 +18,7 @@
       "required": ["kind", "domains", "complexity", "risk"],
       "additionalProperties": false,
       "properties": {
-        "kind": { "enum": ["coding", "planning", "review", "research", "ops", "content"] },
+        "kind": { "description": "general is new in 1.1.", "enum": ["coding", "planning", "review", "research", "ops", "content", "general"] },
         "domains": { "$ref": "#/$defs/sortedNames" },
         "complexity": { "enum": ["S", "M", "L"] },
         "risk": { "enum": ["low", "normal", "high"] }
@@ -105,7 +105,7 @@
           "additionalProperties": false,
           "properties": { "id": { "$ref": "#/$defs/id" }, "digest": { "$ref": "#/$defs/digest" } }
         },
-        "permission": { "enum": ["auto", "prompt-on-escalation"] },
+        "permission": { "description": "read-only is new in 1.1.", "enum": ["auto", "prompt-on-escalation", "read-only"] },
         "tool_allowlist": { "$ref": "#/$defs/sortedNames" },
         "budget": {
           "type": "object",

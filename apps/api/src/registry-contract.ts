@@ -12,6 +12,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import addFormatsImport from "ajv-formats";
+import { hasLoneSurrogate, jcs, type AssetKind, type RegistryAsset, type RegistrySnapshot } from "@agent-plane/core";
 
 // ajv-formats is CJS; under bundler resolution its default lands on `.default`.
 const addFormats = ((addFormatsImport as unknown as { default?: unknown }).default ?? addFormatsImport) as (ajv: Ajv2020) => void;
@@ -26,29 +27,7 @@ export const VOLATILE_ASSET_FIELDS = ["installedAt", "lastUsedAt", "stats"] as c
 
 export const REGISTRY_CONTRACT_DIR = join(dirname(fileURLToPath(import.meta.url)), "../../../contracts/registry/v1");
 
-export type AssetKind = "skill" | "plugin" | "agent" | "hook" | "mcp_server" | "rule";
-export interface SecretRef { type: "env" | "keychain"; name: string }
-export interface RegistryAsset {
-  id: string;
-  digest: string;
-  kind: AssetKind;
-  nativeKind: string;
-  name: string;
-  description: string;
-  tags: string[];
-  targets: string[];
-  compatibility: { assistants: string[] };
-  requirements: { secretRefs: SecretRef[]; commands?: string[] };
-  conflicts: string[];
-  lineage: { origin: string; sourceUrl?: string };
-  enabled: boolean;
-  mcp?: { transport: "stdio" | "remote"; command?: string; args?: string[]; url?: string; env: Record<string, SecretRef> };
-  installedAt: string;
-  lastUsedAt?: string;
-  stats?: Record<string, unknown>;
-  [extra: string]: unknown;
-}
-export interface RegistrySnapshot { schemaVersion: string; snapshotDigest: string; assets: RegistryAsset[] }
+export type { AssetKind, RegistryAsset, RegistrySnapshot, SecretRef } from "@agent-plane/core";
 export interface ContentFile { path: string; size: number; digest: string; encoding: "utf8" | "base64"; content: string }
 export interface RegistryAssetContent { schemaVersion: string; id: string; kind: AssetKind; digest: string; files: ContentFile[]; mcp?: RegistryAsset["mcp"] }
 
@@ -84,22 +63,10 @@ function inlineSecretPointers(value: unknown): string[] {
   return found;
 }
 
-/** An unpaired UTF-16 surrogate: RFC 8785 rejects it, and UTF-8 encoding silently turns it into U+FFFD. */
-export const hasLoneSurrogate = (text: string) => /\p{Cs}/u.test(text);
+export { hasLoneSurrogate } from "@agent-plane/core";
 
 /** RFC 8785 (JCS) for the value space the contract uses: strings, booleans, integers, null, arrays, objects. */
-export function canonicalJson(value: unknown): string {
-  if (value === null || typeof value !== "object") {
-    if (typeof value === "number" && !Number.isSafeInteger(value)) throw new Error("canonicalJson: non-integer numbers are not part of the digested value space");
-    if (typeof value === "string" && hasLoneSurrogate(value)) throw new Error("canonicalJson: strings must not contain an unpaired surrogate");
-    return JSON.stringify(value);
-  }
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
-  const entries = Object.entries(value as Record<string, unknown>)
-    .filter(([, v]) => v !== undefined)
-    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
-  return `{${entries.map(([k, v]) => `${canonicalJson(k)}:${canonicalJson(v)}`).join(",")}}`;
-}
+export const canonicalJson = (value: unknown): string => jcs(value, "integer");
 
 const sha256 = (data: string | Buffer) => createHash("sha256").update(data).digest("hex");
 
