@@ -74,7 +74,11 @@ export async function createTaskWorktree(
   repoPath: string,
   taskId: string,
   worktreesDir: string,
-  opts: { allowDirty?: boolean } = {},
+  /**
+   * `baseCommit` pins the branch point to a full commit id already resolved (the M2 Composer's
+   * repo signals were read there); without it the branch starts at HEAD, as before.
+   */
+  opts: { allowDirty?: boolean; baseCommit?: string } = {},
 ): Promise<TaskWorktree> {
   if (!(await isGitRepo(repoPath))) {
     throw new Error(`${repoPath} is not a git repository`);
@@ -82,11 +86,16 @@ export async function createTaskWorktree(
   if (!opts.allowDirty && (await isDirty(repoPath))) {
     throw new DirtyWorktreeError(repoPath);
   }
+  if (opts.baseCommit !== undefined && !/^[0-9a-f]{40,64}$/.test(opts.baseCommit)) {
+    throw new Error("baseCommit must be a full commit id");
+  }
   const branch = `task/${taskId}`;
-  const baseRef = await git(repoPath, ["rev-parse", "HEAD"]);
+  const baseRef = opts.baseCommit === undefined
+    ? await git(repoPath, ["rev-parse", "HEAD"])
+    : await git(repoPath, ["rev-parse", "--verify", `${opts.baseCommit}^{commit}`]);
   mkdirSync(worktreesDir, { recursive: true });
   const path = join(worktreesDir, taskId);
-  await git(repoPath, ["worktree", "add", "-b", branch, path, "HEAD"]);
+  await git(repoPath, ["worktree", "add", "-b", branch, path, opts.baseCommit === undefined ? "HEAD" : baseRef]);
   return { path, branch, baseRef };
 }
 
