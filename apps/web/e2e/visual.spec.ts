@@ -9,7 +9,7 @@
 import { test, expect } from "@playwright/test";
 import type { AssistantId } from "@agent-plane/core";
 import { FakeAdapter } from "@agent-plane/adapters";
-import { boot, A, B, type Harness } from "./harness.js";
+import { boot, A, B, composerProbe, type Harness } from "./harness.js";
 
 const SLOW = "fake-slow" as AssistantId;
 let h: Harness;
@@ -95,7 +95,7 @@ test("reference screenshots: active workspace, quota wait, laptop, mobile", asyn
 
   const consoleErrors: string[] = [];
   context.on("page", page => {
-    page.on("console", (m) => m.type() === "error" && consoleErrors.push(m.text()));
+    page.on("console", (m) => m.type() === "error" && !composerProbe(m) && consoleErrors.push(m.text()));
     page.on("pageerror", (e) => consoleErrors.push(e.message));
   });
   const page = await h.openApp(context);

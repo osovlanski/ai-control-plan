@@ -1,4 +1,7 @@
-import type { ModelRecommendation, Schedule, ScheduleOccurrence, ScheduleOverlap } from "@agent-plane/core";
+import type {
+  AgentSpec, AgentSpecDraft, BudgetCaps, BudgetOverrunPayload, ComposerOutcome, CompositionDecision, CompositionDecisionDraft,
+  ModelRecommendation, Schedule, ScheduleOccurrence, ScheduleOverlap, SessionSettlement, TaskConsumption, UsageAccountingMode,
+} from "@agent-plane/core";
 export interface Workspace {
   workspace: string;
   assistants: string[];
@@ -219,6 +222,8 @@ export interface TaskDetail {
     usage: Record<string, unknown> | null;
     started_at: string;
     ended_at: string | null;
+    /** M1: the immutable composition revision this run executed, or null (pre-M1 runs and route-only starts). */
+    compositionRevisionId?: string | null;
     /** K7. `resolvedModelId: null` = the provider reported no model identity. */
     modelIdentity?: {
       requestedSelector: string | null;
@@ -287,6 +292,14 @@ export interface CatalogModel {
   }>;
 }
 
+/** A non-2xx answer. `reason` and `body` carry what the plane said beyond the message (M2: `composer_disabled`, `composition_drift`). */
+export class ApiError extends Error {
+  constructor(message: string, readonly status: number, readonly reason: string | undefined, readonly body: unknown) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
 async function req<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, {
     ...init,
@@ -297,9 +310,81 @@ async function req<T>(url: string, init?: RequestInit): Promise<T> {
     if (res.status === 401) { emitAuthExpired(); throw new AuthExpiredError(); }
     const body: unknown = await res.json().catch(() => ({}));
     const detail = (body as { error?: string }).error ?? `HTTP ${res.status}`;
-    throw new Error(detail);
+    const reason = (body as { reason?: unknown }).reason;
+    throw new ApiError(detail, res.status, typeof reason === "string" ? reason : undefined, body);
   }
   return (await res.json()) as T;
+}
+
+// ---- M2 Composer (API 2.6) -------------------------------------------------------------------
+// Served only when the plane runs with `composer.enabled`; otherwise every route below is a 404 with
+// `reason: "composer_disabled"`. Shapes mirror apps/api `PreviewResponse`, `history()` and the S6 budget read.
+
+/** `POST /api/tasks/:id/compose`: stages 1 to 5 over the real route(), nothing persisted but one attempt row. */
+export interface CompositionPreview {
+  decision: CompositionDecisionDraft;
+  /** Null when the pipeline did not compose (`outcome.status` is `failed` or `skipped`). */
+  specDraft: AgentSpecDraft | null;
+  compositionDigest: string | null;
+  outcome: ComposerOutcome;
+  attemptId: string;
+  routingDecisionId: number | null;
+  /** The registry was stale: synced once and recomposed. */
+  resynced: boolean;
+}
+
+export interface CompositionAttempt {
+  id: string;
+  origin: string;
+  routingDecisionId: number | null;
+  compositionDigest: string | null;
+  inputsDigest: string | null;
+  outcome: "persisted" | "previewed" | "failed" | "skipped";
+  reason: string | null;
+  compositionRevisionId: string | null;
+  createdAt: string;
+}
+
+export interface CompositionRevision {
+  compositionRevisionId: string;
+  bundleDigest: string;
+  spec: AgentSpec;
+  decision: CompositionDecision;
+  createdAt: string;
+}
+
+/** `GET /api/tasks/:id/composition`. */
+export interface CompositionHistory {
+  taskId: string;
+  revisions: CompositionRevision[];
+  attempts: CompositionAttempt[];
+  optIns: Array<{ assetId: string; digest: string; actor: string; at: string }>;
+}
+
+export interface BudgetRunSettlement extends SessionSettlement {
+  runId: string;
+  assistantId: string;
+  compositionRevisionId: string | null;
+  model: string | null;
+  accounting: UsageAccountingMode;
+}
+
+/** `GET /api/tasks/:id/composition/budget`. Every figure is provisional: usage records may still arrive. */
+export interface CompositionBudget {
+  taskId: string;
+  provisional: boolean;
+  caps: BudgetCaps;
+  consumed: TaskConsumption;
+  remaining: BudgetCaps;
+  exhausted: Array<"max_tokens" | "max_cost_usd">;
+  latestRevision: null | {
+    compositionRevisionId: string;
+    caps: BudgetCaps;
+    remaining: BudgetCaps;
+    exhausted: Array<"max_tokens" | "max_cost_usd">;
+  };
+  runs: BudgetRunSettlement[];
+  overruns: Array<BudgetOverrunPayload & { runId: string; seq: number }>;
 }
 
 /**
@@ -363,11 +448,22 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ assistantId }),
     }),
-  start: (id: string, assistantId?: string) =>
-    req<{ runId: string; assistantId: string }>(`/api/tasks/${id}/start`, {
+  /**
+   * With the composer on, `compositionDigest` makes the start confirm exactly the composition the
+   * operator was shown: a re-run that does not reproduce it is a 409 `composition_drift`.
+   */
+  start: (id: string, assistantId?: string, compositionDigest?: string) =>
+    req<{ runId: string; assistantId: string; composition?: { outcome: CompositionAttempt["outcome"]; reason: string | null; compositionRevisionId: string | null } | null }>(`/api/tasks/${id}/start`, {
       method: "POST",
-      body: JSON.stringify({ assistantId }),
+      body: JSON.stringify({ assistantId, ...(compositionDigest ? { compositionDigest } : {}) }),
     }),
+  compose: (id: string, assistantId?: string) =>
+    req<CompositionPreview>(`/api/tasks/${id}/compose`, {
+      method: "POST",
+      body: JSON.stringify(assistantId ? { overrides: { harness_model: { assistantId } } } : {}),
+    }),
+  composition: (id: string) => req<CompositionHistory>(`/api/tasks/${id}/composition`),
+  compositionBudget: (id: string) => req<CompositionBudget>(`/api/tasks/${id}/composition/budget`),
   events: (id: string) => req<TaskEvent[]>(`/api/tasks/${id}/events`),
   routing: (id: string) =>
     req<Array<{ chosen: string | null; at: string; explanation: RoutingExplanation }>>(

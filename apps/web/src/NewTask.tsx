@@ -1,6 +1,26 @@
 import { useId, useState } from "react";
-import { api, type RoutingExplanation } from "./api.js";
+import { ApiError, api, type CompositionPreview, type RoutingExplanation } from "./api.js";
+import { DecisionView } from "./Composition.js";
 import { Button, Field, inputStyle, QuotaBar, tokens } from "./ui.jsx";
+
+/**
+ * The composition shown next to the route. `off` is the plane's own answer (404 `composer_disabled`),
+ * not a guess; `error` is any other failure and leaves routing usable.
+ */
+type Composition =
+  | { state: "none" }
+  | { state: "off" }
+  | { state: "ready"; preview: CompositionPreview }
+  | { state: "error"; message: string };
+
+const composeFor = async (taskId: string, assistantId?: string): Promise<Composition> => {
+  try {
+    return { state: "ready", preview: await api.compose(taskId, assistantId) };
+  } catch (e) {
+    if (e instanceof ApiError && e.reason === "composer_disabled") return { state: "off" };
+    return { state: "error", message: (e as Error).message };
+  }
+};
 
 export function NewTask({ onStarted, onPreviewed }: { onStarted: (taskId: string) => void; onPreviewed: () => void }) {
   const inputId = useId();
@@ -11,12 +31,20 @@ export function NewTask({ onStarted, onPreviewed }: { onStarted: (taskId: string
   const [profile, setProfile] = useState("auto");
   const [taskId, setTaskId] = useState<string | null>(null);
   const [explanation, setExplanation] = useState<RoutingExplanation | null>(null);
+  const [composition, setComposition] = useState<Composition>({ state: "none" });
+  /** The assistant the operator asked to compose on instead of the recommended one. */
+  const [target, setTarget] = useState<string | undefined>(undefined);
+  const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const invalidatePreview = () => {
     setTaskId(null);
     setExplanation(null);
+    setComposition({ state: "none" });
+    setTarget(undefined);
+    setNotice(null);
   };
+  const reset = () => { setGoal(""); invalidatePreview(); };
 
   const previewRoute = async () => {
     setError(null);
@@ -34,7 +62,16 @@ export function NewTask({ onStarted, onPreviewed }: { onStarted: (taskId: string
             profile,
           });
       setTaskId(created.taskId);
-      setExplanation(await api.route(created.taskId));
+      setTarget(undefined);
+      setNotice(null);
+      // The composition preview routes the task itself and records that decision, so it is read back
+      // rather than routed a second time. With the composer off, routing is all there is.
+      const composed = await composeFor(created.taskId);
+      setComposition(composed);
+      const recorded = composed.state === "ready" && composed.preview.routingDecisionId !== null
+        ? (await api.routing(created.taskId)).at(-1)?.explanation
+        : undefined;
+      setExplanation(recorded ?? await api.route(created.taskId));
       onPreviewed();
     } catch (e) {
       setError((e as Error).message);
@@ -44,6 +81,7 @@ export function NewTask({ onStarted, onPreviewed }: { onStarted: (taskId: string
   };
 
   const eligible = explanation?.candidates.filter((c) => c.passedFilters) ?? [];
+  const composed = composition.state === "ready" && composition.preview.outcome.status === "composed" ? composition.preview : null;
 
   const startParallel = async (mode: "compare" | "race") => {
     if (!taskId) return;
@@ -52,7 +90,7 @@ export function NewTask({ onStarted, onPreviewed }: { onStarted: (taskId: string
     try {
       await api.startParallel(taskId, eligible.map((c) => c.assistantId), mode);
       onStarted(taskId);
-      setGoal(""); setTaskId(null); setExplanation(null);
+      reset();
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -60,16 +98,40 @@ export function NewTask({ onStarted, onPreviewed }: { onStarted: (taskId: string
     }
   };
 
+  /** Runs what was previewed. With a composition, the digest the operator saw is what the plane must reproduce. */
   const start = async (assistantId?: string) => {
     if (!taskId) return;
     setError(null);
+    setNotice(null);
     setBusy(true);
     try {
-      await api.start(taskId, assistantId);
+      await api.start(taskId, assistantId ?? target, composed?.compositionDigest ?? undefined);
       onStarted(taskId);
-      setGoal(""); setTaskId(null); setExplanation(null);
+      reset();
     } catch (e) {
-      setError((e as Error).message);
+      if (e instanceof ApiError && e.reason === "composition_drift") {
+        // The plane re-ran the pipeline and got a different answer. Nothing started; show the new one.
+        const fresh = (e.body as { preview?: CompositionPreview }).preview;
+        if (fresh) setComposition({ state: "ready", preview: fresh });
+        setNotice("The composition changed since you previewed it, so nothing started. Review the new decision, then run again.");
+      } else {
+        setError((e as Error).message);
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /** Composes on another assistant and shows it, so the operator confirms what will really run. */
+  const composeOn = async (assistantId: string, recommended = false) => {
+    if (!taskId) return;
+    setError(null);
+    setNotice(null);
+    setBusy(true);
+    try {
+      // The recommended route is composed without an override, so it is the plane's own choice again.
+      setComposition(await composeFor(taskId, recommended ? undefined : assistantId));
+      setTarget(recommended ? undefined : assistantId);
     } finally {
       setBusy(false);
     }
@@ -115,10 +177,26 @@ export function NewTask({ onStarted, onPreviewed }: { onStarted: (taskId: string
         <div className="shell-proposal-summary" role="status">
           <div><span className="eyebrow">Proposed route</span><h2>{explanation.chosen ?? "No eligible assistant"}</h2>
             <p>Rule fired: <code>{explanation.ruleFired}</code>{explanation.tieBreaker ? ` · ${explanation.tieBreaker}` : ""}</p>
-            <p className="fine-print">The model will be reported when execution provides evidence.</p>
+            {target && <p>You chose to compose on <strong>{target}</strong> instead of the recommended route; "Run composed" runs it there.</p>}
+            {composed?.specDraft
+              ? <p className="fine-print">Requested model <code>{composed.specDraft.model.primary.id}</code>. The model that served the run is reported when execution provides evidence.</p>
+              : <p className="fine-print">The model will be reported when execution provides evidence.</p>}
           </div>
-          {explanation.chosen && <Button onClick={() => void start()} disabled={busy}>Run recommended</Button>}
+          {explanation.chosen && <Button onClick={() => void start()} disabled={busy}>{composed ? "Run composed" : "Run recommended"}</Button>}
         </div>
+        {notice && <p role="alert" className="shell-drift">{notice}</p>}
+        {composition.state === "off" && <p className="fine-print shell-composer-off">Composer is off for this workspace (<code>composer.enabled</code>): routing only, no composition is recorded.</p>}
+        {composition.state === "error" && <p role="alert" className="error">Composition preview unavailable: {composition.message}</p>}
+        {composition.state === "ready" && (
+          <section className="shell-composition" aria-label="Composition preview">
+            <div className="shell-composition-head">
+              <span className="eyebrow">Composition{target ? ` on ${target}` : ""}</span>
+              <span className="fine-print">Six stages, each with the plane's reason. Nothing is attached until you run.</span>
+            </div>
+            <DecisionView decision={composition.preview.decision} outcome={composition.preview.outcome}
+              spec={composition.preview.specDraft} digest={composition.preview.compositionDigest} resynced={composition.preview.resynced} />
+          </section>
+        )}
         <details className="shell-route-details"><summary>Routing evidence & advanced overrides</summary>
             {explanation.candidates.map((c) => (
               <div
@@ -149,17 +227,29 @@ export function NewTask({ onStarted, onPreviewed }: { onStarted: (taskId: string
                     passed all hard filters
                   </p>
                 )}
+                {c.assistantId === explanation.chosen && target !== undefined && (
+                  <div style={{ marginTop: "0.5rem" }}>
+                    <Button variant="secondary" onClick={() => void composeOn(c.assistantId, true)} disabled={busy}>
+                      Compose on {c.assistantId} (recommended) again
+                    </Button>
+                  </div>
+                )}
                 {c.passedFilters && c.assistantId !== explanation.chosen && (
                   <div style={{ marginTop: "0.5rem" }}>
-                    <Button variant="secondary" onClick={() => void start(c.assistantId)} disabled={busy}>
-                      Run on {c.assistantId} instead
-                    </Button>
+                    {composition.state === "ready"
+                      ? <Button variant="secondary" onClick={() => void composeOn(c.assistantId)} disabled={busy || target === c.assistantId}>
+                        {target === c.assistantId ? `Composed on ${c.assistantId}` : `Compose on ${c.assistantId} instead`}
+                      </Button>
+                      : <Button variant="secondary" onClick={() => void start(c.assistantId)} disabled={busy}>
+                        Run on {c.assistantId} instead
+                      </Button>}
                   </div>
                 )}
               </div>
             ))}
             {eligible.length > 1 && <div className="shell-parallel">
               <p className="fine-print">Parallel execution multiplies quota and token spend. Choose it deliberately.</p>
+              {composition.state === "ready" && <p className="fine-print">Compare and Race start on routing alone: no revision is written and the composition above is not bound to those runs.</p>}
               <Button variant="secondary" disabled={busy} onClick={() => void startParallel("compare")}>Compare {eligible.length}</Button>
               <Button variant="secondary" disabled={busy} onClick={() => void startParallel("race")}>Race {eligible.length}</Button>
             </div>}
