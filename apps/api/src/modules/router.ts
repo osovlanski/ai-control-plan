@@ -299,14 +299,20 @@ export function routeInputs(deps: RouteDeps, taskId: string, origin: RouteOrigin
   return { request, candidates, intent, ...(dispatch ? { dispatch } : {}), ...(continuation ? { continuation } : {}) };
 }
 
-/** CR-30: all Control Plane routing uses current evidence and durable intent. */
-export function routeTask(
+/**
+ * The explanation `routeTask` persists for one `route()` outcome: the outcome, its origin, the
+ * K13 recommendation and the dispatch/continuation provenance. Writes nothing. Shared so a
+ * caller that routes the same inputs more than once (the Composer's stage-2 port) records the
+ * outcome it uses exactly as `routeTask` would have.
+ */
+export function explainRoute(
   deps: RouteDeps,
-  taskId: string, origin: RouteOrigin,
+  inputs: RouteInputs,
+  base: RoutingExplanation,
+  origin: RouteOrigin,
   options: RouteOptions = {},
-) {
-  const { request, candidates, intent, dispatch, continuation } = routeInputs(deps, taskId, origin, options);
-  const base = route(request, candidates);
+): RoutingExplanation & { origin: string } {
+  const { intent, dispatch, continuation } = inputs;
   // K13. Computed AFTER the assistant decision and folded into the same
   // explanation object — it reads `base.candidates` (the router's own hard-filter
   // verdict) and `base.chosen`, and writes neither back. The assistant decision
@@ -318,7 +324,7 @@ export function routeTask(
   const recommendation = deps.catalog
     ? modelRecommendation(deps, deps.catalog, intent, base.candidates, base.chosen)
     : undefined;
-  const explanation: RoutingExplanation & { origin: string } = { ...base, origin,
+  return { ...base, origin,
     ...(recommendation ? { modelRecommendation: recommendation } : {}),
     ...(dispatch ? { dispatchId: options.dispatchId, continuation: dispatch.checkpoint_id ? { kind: 'checkpoint', checkpointId: dispatch.checkpoint_id } : { kind: 'fresh' } } : {}),
     ...(continuation ? { contextContinuation: {
@@ -331,5 +337,15 @@ export function routeTask(
         : base.candidates.find(c => c.assistantId === continuation.previousAssistantId)?.filterFailures.join('; ')
           ?? 'the previous assistant is no longer a configured candidate',
     } } : {}) };
+}
+
+/** CR-30: all Control Plane routing uses current evidence and durable intent. */
+export function routeTask(
+  deps: RouteDeps,
+  taskId: string, origin: RouteOrigin,
+  options: RouteOptions = {},
+) {
+  const inputs = routeInputs(deps, taskId, origin, options);
+  const explanation = explainRoute(deps, inputs, route(inputs.request, inputs.candidates), origin, options);
   return { explanation, routingDecisionId: persistRoutingDecision(deps.db, taskId, explanation) };
 }

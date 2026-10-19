@@ -100,17 +100,35 @@ const asBundleError = (err: unknown) => new BundleRequestError(err instanceof Re
 /** An AgentSpec before its bundle exists: `context.bundle_digest` and `context.compiler` come from the response. */
 export type AgentSpecDraft = Omit<AgentSpec, "context"> & { context: Pick<AgentSpec["context"], "fragments" | "memory_bundles"> };
 
-export interface BundleRenderInput {
-  spec: AgentSpecDraft;
+/**
+ * What a render reads from a spec: the bundle request's inputs (harness, primary model, fragment,
+ * memory-bundle and skill pins) and the task id the precheck looks up. A preview renders before
+ * any id exists, so the revision id, policy, workspace and explanation ref are not required here;
+ * `persistRendered` and `compose` take a complete spec.
+ */
+export type BundleRenderSpec = Pick<AgentSpec, "task_id" | "harness"> & {
+  model: { primary: { id: string } };
+  assets: { skills: ReadonlyArray<Pick<AgentSpec["assets"]["skills"][number], "id" | "digest">> };
+  context: Pick<AgentSpec["context"], "fragments" | "memory_bundles">;
+  /** Logged on a failed render when present. */
+  composition_revision_id?: string;
+};
+
+/** Defaults to a complete draft, as `compose` takes; a preview passes a narrower spec. */
+export interface BundleRenderInput<S extends BundleRenderSpec = AgentSpecDraft> {
+  spec: S;
   /** Per-model estimator ratio (plan §3.3 stage 4). */
   charsPerToken: number;
   /** Estimated-token ceiling for the whole bundle. */
   tokenBudget: number;
 }
 
-export interface BundledCompositionInput extends BundleRenderInput {
+export interface BundledCompositionInput extends BundleRenderInput<AgentSpecDraft> {
   decision: CompositionDecision;
 }
+
+/** A spec with `context.bundle_digest` and `context.compiler` filled from the manifest. */
+export type RenderedSpec<S extends BundleRenderSpec> = Omit<S, "context"> & { context: S["context"] & Pick<AgentSpec["context"], "bundle_digest" | "compiler"> };
 
 export interface RenderedBundle { request: BundleRequest; response: BundleResponse }
 
@@ -121,9 +139,9 @@ export type BundleRenderFailure =
   | { ok: false; reason: "unsupported_harness" | "invalid_request"; detail?: string }
   | { ok: false; reason: "composition_rejected"; detail: string };
 
-export type BundleRenderResult =
+export type BundleRenderResult<S extends BundleRenderSpec = AgentSpecDraft> =
   /** `spec` is the draft with `context.bundle_digest` and `context.compiler` filled from the manifest. */
-  | { ok: true; spec: AgentSpec; bundle: RenderedBundle }
+  | { ok: true; spec: RenderedSpec<S>; bundle: RenderedBundle }
   /**
    * Cockpit excluded a selected skill. Not final (bundle-v1.md §Finalization): the Composer drops it
    * and renders again. The bundle is returned so the decision can record what Cockpit said.
@@ -144,7 +162,7 @@ export interface BundledCompositionOptions {
 }
 
 /** The bundle request a spec draft makes: the same harness, model, fragments and pins, in the same order. */
-export function bundleRequestFor(input: BundleRenderInput): BundleRequest | { error: string } {
+export function bundleRequestFor(input: BundleRenderInput<BundleRenderSpec>): BundleRequest | { error: string } {
   const { spec } = input;
   if (spec.harness !== "claude-code" && spec.harness !== "codex") return { error: `bundle v1 has no harness ${spec.harness}` };
   return {
@@ -190,23 +208,25 @@ export class BundledComposition {
    * Everything decidable before Cockpit is asked: the gate, the request, and what the store would
    * refuse regardless of the bundle. `decision` is passed when the caller is about to persist.
    */
-  private precheck(input: BundleRenderInput, decision?: CompositionDecision): BundleRenderFailure | BundleRequest {
+  private precheck(input: BundleRenderInput<BundleRenderSpec>, decision?: CompositionDecision): BundleRenderFailure | BundleRequest {
     if (!this.options.enabled) return { ok: false, reason: "disabled" };
     const request = bundleRequestFor(input);
     if ("error" in request) return { ok: false, reason: "unsupported_harness", detail: request.error };
     const checked = validateBundleRequest(request);
     if (!checked.ok) return { ok: false, reason: "invalid_request", detail: checked.errors.slice(0, 3).join("; ") };
-    const refused = this.missingTask(input.spec.task_id) ?? (decision ? this.reusedId(input.spec, decision) : undefined);
+    const spec = input.spec;
+    const refused = this.missingTask(spec.task_id)
+      ?? (decision && spec.composition_revision_id !== undefined ? this.reusedId({ composition_revision_id: spec.composition_revision_id }, decision) : undefined);
     if (refused) return { ok: false, reason: "composition_rejected", detail: refused };
     return request;
   }
 
   /** Requests the bundle for a draft. Writes nothing, whatever the outcome. */
-  async render(input: BundleRenderInput): Promise<BundleRenderResult> {
+  async render<S extends BundleRenderSpec>(input: BundleRenderInput<S>): Promise<BundleRenderResult<S>> {
     return this.renderChecked(input, this.precheck(input));
   }
 
-  private async renderChecked(input: BundleRenderInput, checked: BundleRenderFailure | BundleRequest): Promise<BundleRenderResult> {
+  private async renderChecked<S extends BundleRenderSpec>(input: BundleRenderInput<S>, checked: BundleRenderFailure | BundleRequest): Promise<BundleRenderResult<S>> {
     if ("ok" in checked) return checked;
     const request = checked;
     let response: BundleResponse;
@@ -224,7 +244,7 @@ export class BundledComposition {
     const excludedSkills = response.manifest.excluded.filter((e) => e.kind === "skill").map(({ ref, reason }) => ({ ref, reason }));
     if (excludedSkills.length) return { ok: false, reason: "not_final", excludedSkills, bundle };
 
-    const spec: AgentSpec = {
+    const spec: RenderedSpec<S> = {
       ...input.spec,
       context: {
         ...input.spec.context,
