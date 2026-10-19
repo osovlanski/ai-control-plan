@@ -83,6 +83,11 @@ export interface CapabilityManifest {
     approvalIdempotentRedelivery?: boolean;
     processIsolation: "os-sandbox" | "provider-sandbox" | "none";
     provisioningContractVersion?: string;
+    /**
+     * M3: what the adapter's provisioning lifecycle achieves (risk 1). Absent ⇒ `none`: the
+     * adapter has no lifecycle and a composed run sees ambient config.
+     */
+    provisioning?: "full" | "partial" | "none";
   };
   /**
    * M14 context-observation tiers (kernel-services §4.3.1). Optional: absent ⇒

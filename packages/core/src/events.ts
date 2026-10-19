@@ -1,6 +1,7 @@
 import type { RunId } from "./ids.js";
 import type { ActivityPhase } from "./task.js";
 import type { ContextObservation, ContextYieldReason } from "./context.js";
+import type { ProvisioningAmbientPayload, ProvisioningDisposedPayload, ProvisioningVerifiedPayload } from "./provisioning.js";
 
 /**
  * Closed set of normalized event types (revised architecture §4).
@@ -42,6 +43,11 @@ export const EVENT_TYPES = [
   // M2 S6 — a settled or late usage figure took a composition revision past one of its
   // caps. An accounting record on the run's timeline: it never changes the run's state.
   "budget.overrun",
+  // M3 — the per-run profile a revision-bound session launched with (or that it had none), and its
+  // removal once the session ended.
+  "provisioning.verified",
+  "provisioning.ambient",
+  "provisioning.disposed",
 ] as const;
 
 export type NormalizedEventType = (typeof EVENT_TYPES)[number];
@@ -328,6 +334,9 @@ export interface EventPayloads {
   "context.compaction.observed": ContextCompactionObservedPayload;
   "context.yield": ContextYieldPayload;
   "budget.overrun": BudgetOverrunPayload;
+  "provisioning.verified": ProvisioningVerifiedPayload;
+  "provisioning.ambient": ProvisioningAmbientPayload;
+  "provisioning.disposed": ProvisioningDisposedPayload;
 }
 
 /** Compile-time proof `EventPayloads` has an entry for every event type. */

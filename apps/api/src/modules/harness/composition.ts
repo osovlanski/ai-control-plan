@@ -31,7 +31,7 @@ import { WorkspaceAuthority } from "./workspace-authority.js";
 import { VerificationStore } from "./verification-store.js";
 import { VerificationCoordinator } from "../verification-coordinator.js";
 import { planProjectVerification, snapshotProjectVerification } from "../project-verification.js";
-import type { DecisionProvider } from "@agent-plane/core";
+import type { AgentSpec, BundleResponse, DecisionProvider } from "@agent-plane/core";
 import {
   DEFAULT_REDACTION_RULES,
   RulesDecisionProvider,
@@ -268,6 +268,16 @@ export function buildHarnessComposition(deps: HarnessCompositionDeps): HarnessCo
     toolGate,
     processes,
     log: deps.onInfo,
+    // M3: per-run profiles live in the plane's own data dir, one directory per session.
+    provisioning: {
+      root: join(config.dir, "profiles"),
+      load: (compositionRevisionId) => {
+        const row = db.prepare("SELECT spec_json, bundle_response_json FROM agent_specs WHERE composition_revision_id = ?").get(compositionRevisionId) as
+          | { spec_json: string; bundle_response_json: string }
+          | undefined;
+        return row ? { spec: JSON.parse(row.spec_json) as AgentSpec, bundle: JSON.parse(row.bundle_response_json) as BundleResponse } : undefined;
+      },
+    },
   });
   const harnessBridge = new HarnessBridge({ runner, store: sessionStore, approvals, db, onError });
 
