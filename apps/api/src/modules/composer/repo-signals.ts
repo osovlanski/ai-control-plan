@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import type { TaskIntent } from "@agent-plane/core";
+import { REPO_MARKER_FILES, type RepoSignals, type TaskIntent } from "@agent-plane/core";
 import type { ResolvedConfig } from "../../config.js";
 import type { TaskStore } from "../tasks.js";
 
@@ -12,7 +12,7 @@ const exec = promisify(execFile);
  * tree, so a preview before the worktree exists and a start after it see the
  * same bytes.
  */
-export const REPO_SIGNAL_MARKERS = ["Cargo.toml", "go.mod", "package.json", "pnpm-workspace.yaml", "pyproject.toml", "tsconfig.json"] as const;
+export const REPO_SIGNAL_MARKERS = REPO_MARKER_FILES;
 
 /** Content cap per marker file, in bytes. Longer files are cut and flagged. */
 export const REPO_SIGNAL_MAX_BYTES = 64 * 1024;
@@ -22,12 +22,10 @@ const GIT_TOTAL_TIMEOUT_MS = 15_000;
 const GIT_META_MAX_BUFFER = 64 * 1024;
 
 /**
- * Defined locally; S4 switches it to core's identical type. `relPath` is always
- * repo-relative: an absolute path never appears in the output.
+ * Core's Composer input type. `relPath` is always repo-relative: an absolute path never appears
+ * in the output.
  */
-export type RepoSignals =
-  | { status: "ok"; baseCommit: string; files: Array<{ relPath: string; content: string; truncated: boolean }> }
-  | { status: "unavailable"; reason: "no_repository" | "git_unavailable" | "base_unreadable" };
+export type { RepoSignals };
 
 type Unavailable = Extract<RepoSignals, { status: "unavailable" }>["reason"];
 

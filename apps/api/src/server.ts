@@ -36,6 +36,8 @@ import { Scheduler } from "./modules/scheduler.js";
 import { QuotaProbeService, type QuotaProbeFn } from "./modules/quota-probe.js";
 import { ModelCatalogService, CATALOG_REVISION, type CatalogSource } from "./modules/model-catalog.js";
 import { RegistryFederation } from "./modules/registry-federation.js";
+import { BundledComposition, CockpitBundleClient } from "./modules/bundle-request.js";
+import { ComposerService, parseOverrides } from "./modules/composer/service.js";
 import { createArtificialAnalysisSource } from "./modules/artificial-analysis.js";
 import { QuotaProjection } from "./modules/quota.js";
 import { readTaskContext } from "./modules/context.js";
@@ -87,6 +89,8 @@ export interface ServerDeps {
   registerExtraRoutes?: (app: FastifyInstance) => void;
   /** M16 decision providers beyond rules. Test/scratch only — production registers `decisionProviders()` (K19d: the model judge). */
   decisionProviders?: DecisionProvider[];
+  /** M2 Composer: the hostname its text guard refuses. Test only; defaults to `os.hostname()`. */
+  composerHostname?: string;
 }
 
 export interface BuiltServer {
@@ -123,7 +127,8 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   const telemetry = new TelemetryService(db);
   const retention = new EventRetention(db);
   const repositoryIdentities = new RepositoryIdentityRegistry(db);
-  const app = Fastify({ logger: { stream: { write: (line) => process.stdout.write(redactSecrets(line)) }, serializers: { req: (r) => ({ method: r.method, url: String(r.url).split("?")[0] }), res: (r) => ({ statusCode: r.statusCode }) }, redact: ["req.headers.authorization", "req.headers.cookie", "res.headers[\"set-cookie\"]"] } });
+  // pino's default `base` adds the machine's hostname to every line; the plane never logs hostnames.
+  const app = Fastify({ logger: { base: { pid: process.pid }, stream: { write: (line) => process.stdout.write(redactSecrets(line)) }, serializers: { req: (r) => ({ method: r.method, url: String(r.url).split("?")[0] }), res: (r) => ({ statusCode: r.statusCode }) }, redact: ["req.headers.authorization", "req.headers.cookie", "res.headers[\"set-cookie\"]"] } });
   const credentials = new CredentialStore(credentialPath(config.dir), now);
   const authSessions: SessionMap = new Map();
   registerAuth(app, { config, credentials, sessions: authSessions, db, now });
@@ -506,6 +511,48 @@ export function buildServer(deps: ServerDeps): BuiltServer {
       return routed.explanation;
     },
   );
+
+  // M2 Composer preview (API 2.6). With `composer.enabled` false nothing below is built and the
+  // three routes answer 404 `composer_disabled`; every other route is unchanged.
+  const composer = config.composer.enabled
+    ? new ComposerService({
+      db, config, tasks, registry, cooldowns, now, ...(modelCatalog ? { catalog: modelCatalog } : {}),
+      federation: registryFederation,
+      bundled: new BundledComposition(db, new CockpitBundleClient(config.registry.cockpit.baseUrl, config.registry.cockpit.tokenPath), {
+        enabled: config.registry.cockpit.enabled, logger: app.log,
+      }),
+      ...(deps.composerHostname !== undefined ? { hostname: deps.composerHostname } : {}),
+    })
+    : undefined;
+  const composerDisabled = (reply: FastifyReply) =>
+    reply.status(404).send({ error: "the composer is disabled (composer.enabled is false)", reason: "composer_disabled" });
+
+  app.post<{ Params: { id: string }; Body: { overrides?: unknown } | null }>("/api/tasks/:id/compose", write, async (req, reply) => {
+    if (!composer) return composerDisabled(reply);
+    if (!tasks.get(req.params.id)) return reply.status(404).send({ error: "not found" });
+    const body = req.body ?? {};
+    if (typeof body !== "object" || Array.isArray(body) || Object.keys(body).some((k) => k !== "overrides")) {
+      return reply.status(400).send({ error: "body must be { overrides? }" });
+    }
+    const parsed = parseOverrides(body.overrides, registry.list().map((a) => a.id));
+    if (!parsed.ok) return reply.status(400).send({ error: parsed.error });
+    const result = await composer.preview(req.params.id, parsed.overrides);
+    if (!result.ok) return reply.status(result.status).send({ error: result.error, ...(result.reason ? { reason: result.reason } : {}) });
+    return result.preview;
+  });
+
+  app.get<{ Params: { id: string } }>("/api/tasks/:id/composition", read.tasks, (req, reply) => {
+    if (!composer) return composerDisabled(reply);
+    if (!tasks.get(req.params.id)) return reply.status(404).send({ error: "not found" });
+    return composer.history(req.params.id);
+  });
+
+  app.post<{ Params: { id: string }; Body: unknown }>("/api/tasks/:id/composition/opt-ins", write, (req, reply) => {
+    if (!composer) return composerDisabled(reply);
+    const result = composer.addOptIn(req.params.id, req.body);
+    if (!result.ok) return reply.status(result.status).send({ error: result.error });
+    return reply.status(result.created ? 201 : 200).send(result.optIn);
+  });
 
   app.post<{ Params: { id: string }; Body: { assistantId?: AssistantId } }>(
     "/api/tasks/:id/start", write,
