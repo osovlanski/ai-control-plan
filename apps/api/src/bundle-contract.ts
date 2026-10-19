@@ -12,6 +12,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Ajv2020, type ErrorObject } from "ajv/dist/2020.js";
 import addFormatsImport from "ajv-formats";
+import type { BundleFile, BundleHarness, BundleManifest, BundleRequest, BundleResponse, ManifestExcluded, ManifestIncluded } from "@agent-plane/core";
 import { canonicalJson, hasLoneSurrogate, INLINE_SECRET, isCompatibleVersion, REGISTRY_CONTRACT_DIR, type ContractResult } from "./registry-contract.js";
 
 // ajv-formats is CJS; under bundler resolution its default lands on `.default`.
@@ -22,30 +23,9 @@ export const BUNDLE_CONTRACT_DIR = join(dirname(fileURLToPath(import.meta.url)),
 /** Total decoded UTF-8 bytes of all file contents. See "Limits" in the normative doc for why. */
 export const MAX_BUNDLE_BYTES = 256 * 1024;
 
-export type BundleHarness = "claude-code" | "codex";
-export interface PinnedInput { id: string; digest: string }
-export interface BundleRequest {
-  schemaVersion: string;
-  harness: BundleHarness;
-  fragments: string[];
-  memoryBundles: PinnedInput[];
-  skills: PinnedInput[];
-  model: { id: string; charsPerToken: number };
-  tokenBudget: number;
-}
-export interface BundleFile { relPath: string; content: string; digest: string }
-export type InputKind = "fragment" | "memory_bundle" | "skill";
-export interface ManifestIncluded { kind: InputKind; ref: string; digest: string; reason: string; relPath?: string }
-export interface ManifestExcluded { kind: InputKind; ref: string; reason: string }
-export interface BundleManifest {
-  harness: BundleHarness;
-  bundleDigest: string;
-  compiler: { name: string; version: string };
-  included: ManifestIncluded[];
-  excluded: ManifestExcluded[];
-  tokens: { estimated: number; tokenMethod: "estimated"; charsPerToken: number; budget: number };
-}
-export interface BundleResponse { schemaVersion: string; files: BundleFile[]; manifest: BundleManifest }
+export type {
+  BundleFile, BundleHarness, BundleManifest, BundleRequest, BundleResponse, InputKind, ManifestExcluded, ManifestIncluded, PinnedInput,
+} from "@agent-plane/core";
 
 /** The closed allowlist, per harness. The schema pattern is the union; this narrows it. */
 const HARNESS_PATHS: Record<BundleHarness, RegExp> = {

@@ -21,3 +21,5 @@ export * from "./task-classifier.js";
 
 export * from "./scheduler.js";
 export * from "./session-input-opt-in.js";
+export * from "./canonical-json.js";
+export * from "./composition-types.js";

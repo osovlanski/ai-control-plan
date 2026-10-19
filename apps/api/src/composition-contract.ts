@@ -2,55 +2,26 @@
  * Reference implementation of the composition v1 contract (docs/contracts/composition-v1.md):
  * the plane-internal, persisted AgentSpec revision and its CompositionDecision. The JSON
  * Schemas under contracts/composition/v1 are the authority; this module adds the rules a schema
- * cannot express — sort order, opt-in digest pinning, no silent ambient fallback, decision
- * consistency, and agreement between a spec, its decision and the bundle it was composed with.
+ * cannot express — sort order, opt-in digest pinning, no silent ambient fallback, enum values
+ * newer than the stored minor, decision consistency, and agreement between a spec, its decision
+ * and the bundle it was composed with. The types live in @agent-plane/core and are re-exported.
  */
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import addFormatsImport from "ajv-formats";
-import { BUNDLE_CONTRACT_DIR, formatSchemaErrors, type BundleRequest, type BundleResponse } from "./bundle-contract.js";
-import { isCompatibleVersion, REGISTRY_CONTRACT_DIR, type ContractResult, type SecretRef } from "./registry-contract.js";
+import { COMPOSER_STAGES, COMPOSITION_SCHEMA_VERSION, type AgentSpec, type AssetRef, type BundleRequest, type BundleResponse, type CompositionDecision } from "@agent-plane/core";
+import { BUNDLE_CONTRACT_DIR, formatSchemaErrors } from "./bundle-contract.js";
+import { isCompatibleVersion, REGISTRY_CONTRACT_DIR, type ContractResult } from "./registry-contract.js";
 
 const addFormats = ((addFormatsImport as unknown as { default?: unknown }).default ?? addFormatsImport) as (ajv: Ajv2020) => void;
 
-export const COMPOSITION_SCHEMA_VERSION = "1.0";
+export {
+  COMPOSER_STAGES, COMPOSITION_SCHEMA_VERSION,
+  type AgentSpec, type AssetRef, type ComposerStage, type CompositionDecision, type CompositionPermission, type DecisionStage, type IntentKind, type McpAssetRef, type OptIn,
+} from "@agent-plane/core";
 export const COMPOSITION_CONTRACT_DIR = join(dirname(fileURLToPath(import.meta.url)), "../../../contracts/composition/v1");
-export const COMPOSER_STAGES = ["intent", "harness_model", "assets", "context", "policy", "confirm"] as const;
-
-export interface OptIn { digest: string; actor: string; at: string }
-export interface AssetRef { id: string; digest: string; allowlisted: boolean; opt_in?: OptIn }
-export interface McpAssetRef extends AssetRef { tools_allowed: string[]; secret_refs: SecretRef[] }
-export interface AgentSpec {
-  schema_version: string;
-  composition_revision_id: string;
-  task_id: string;
-  intent: { kind: string; domains: string[]; complexity: "S" | "M" | "L"; risk: "low" | "normal" | "high" };
-  harness: "claude-code" | "codex" | "cursor" | "bedrock";
-  model: { primary: { id: string }; fallbacks: Array<{ id: string }>; reasoning_effort?: "low" | "medium" | "high" };
-  registry: { snapshot_digest: string; observed_at: string; stale: boolean };
-  assets: { skills: AssetRef[]; mcp_servers: McpAssetRef[]; subagents: AssetRef[] };
-  context: {
-    fragments: string[];
-    memory_bundles: Array<{ id: string; digest: string; reason: string }>;
-    bundle_digest: string;
-    compiler: { name: string; version: string; tokens: number; token_method: "estimated"; chars_per_token: number };
-  };
-  policy: { revision: { id: string; digest: string }; permission: "auto" | "prompt-on-escalation"; tool_allowlist: string[]; budget: { max_tokens?: number; max_cost_usd?: number; max_runtime_ms?: number } };
-  workspace: { repository_id: string; branch: string; worktree_id: string };
-  provisioning: { requested: "isolated" | "ambient"; achieved?: "full" | "high" | "partial" | "ambient" | "select-only"; profile_digest?: string };
-  explanation_ref: string;
-}
-export interface DecisionStage {
-  stage: (typeof COMPOSER_STAGES)[number];
-  candidates: Array<{ ref: string; digest?: string; evidence?: string[] }>;
-  filters: Array<{ filter: string; removed: string[]; reason: string }>;
-  chosen: string[];
-  why: string;
-  override: null | { actor: string; from: string[]; to: string[]; reason: string };
-}
-export interface CompositionDecision { schema_version: string; id: string; composition_revision_id: string; stages: DecisionStage[] }
 
 const ajv = new Ajv2020({ allErrors: true, strict: true, strictRequired: false });
 addFormats(ajv);
@@ -75,12 +46,22 @@ function versionError(body: unknown, supported: string): string | undefined {
   return `unsupported schema_version ${JSON.stringify(version)}; reader supports ${supported}`;
 }
 
+/** Enum values a minor added. A spec stored at an older minor cannot carry them; its writer could not have meant them. */
+const ADDED_IN_MINOR: ReadonlyArray<[path: string, read: (spec: AgentSpec) => string, value: string, minor: number]> = [
+  ["/intent/kind", (s) => s.intent.kind, "general", 1],
+  ["/policy/permission", (s) => s.policy.permission, "read-only", 1],
+];
+
 export function validateAgentSpec(body: unknown, supported = COMPOSITION_SCHEMA_VERSION): ContractResult<AgentSpec> {
   const versionProblem = versionError(body, supported);
   if (versionProblem) return { ok: false, errors: [versionProblem] };
   if (!specSchema(body)) return { ok: false, errors: formatSchemaErrors(specSchema.errors) };
   const spec = body as AgentSpec;
   const errors: string[] = [];
+  const minor = Number(spec.schema_version.split(".")[1]);
+  for (const [path, read, value, since] of ADDED_IN_MINOR) {
+    if (read(spec) === value && minor < since) errors.push(`${path} ${value} requires schema_version 1.${since} or later; this spec is ${spec.schema_version}`);
+  }
   const sorted = (path: string, values: readonly string[]) => {
     if (!isStrictlySorted(values)) errors.push(`${path} is not sorted`);
   };

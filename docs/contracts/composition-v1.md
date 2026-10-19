@@ -37,13 +37,13 @@ inline secret or any unknown field cannot be persisted. Failover and re-composit
 
 | Field | Meaning |
 |---|---|
-| `intent` | `kind`, sorted `domains`, `complexity` (`S`/`M`/`L`), `risk` (`low`/`normal`/`high`). |
+| `intent` | `kind` (`coding`/`planning`/`review`/`research`/`ops`/`content`; `general` from 1.1), sorted `domains`, `complexity` (`S`/`M`/`L`), `risk` (`low`/`normal`/`high`). |
 | `harness` | `claude-code`, `codex`, `cursor` or `bedrock`. |
 | `model` | `primary`, `fallbacks` (ModelRef `{ id }`), optional `reasoning_effort`. |
 | `registry` | `snapshot_digest` (registry v1 `snapshotDigest`), `observed_at`, `stale`. A stale snapshot is recorded, never hidden. |
 | `assets.*[]` | `{ id, digest, allowlisted, opt_in? }`. The digest **is** the revision (invariant 1). `mcp_servers` add sorted `tools_allowed` and `secret_refs`. |
 | `context` | sorted `fragments`, `memory_bundles` `{ id, digest, reason }`, `bundle_digest` (bundle v1 `bundleDigest`), `compiler { name, version, tokens, token_method: estimated, chars_per_token }`. |
-| `policy` | `revision { id, digest }` of the workspace policy and digest allowlist that authorized the composition (invariant 1), `permission`, sorted `tool_allowlist`, `budget { max_tokens?, max_cost_usd?, max_runtime_ms? }`. |
+| `policy` | `revision { id, digest }` of the workspace policy and digest allowlist that authorized the composition (invariant 1), `permission` (`auto`/`prompt-on-escalation`; `read-only` from 1.1), sorted `tool_allowlist`, `budget { max_tokens?, max_cost_usd?, max_runtime_ms? }`. |
 | `workspace` | `repository_id`, `branch`, `worktree_id`. Opaque ids, never a filesystem path. |
 | `provisioning` | `requested` (`isolated`/`ambient`), `achieved?` (`full`/`high`/`partial`/`ambient`/`select-only`), `profile_digest?`. |
 | `explanation_ref` | The `id` of this revision's CompositionDecision. |
@@ -106,7 +106,20 @@ validation. No field of either document holds a secret value.
 its own and rejects a newer minor or another major. Because objects are closed, any added field is
 a minor version and requires the reader to be upgraded first.
 
+An added enum value is a minor version too, for the same reason. A spec whose `schema_version`
+is older than the minor that added a value it carries is invalid: its writer could not have meant
+that value.
+
+| Version | Change |
+|---|---|
+| 1.0 | Initial. |
+| 1.1 | `intent.kind` adds `general`, the frozen task classifier's fallback kind. `policy.permission` adds `read-only`, the workspace approval mode of that name. CompositionDecision is unchanged and is written at 1.1 with its spec. |
+
+Writers write 1.1 (`COMPOSITION_SCHEMA_VERSION`). Stored 1.0 rows stay valid and are not rewritten.
+
 ## Distribution
 
 Plane-internal: not vendored by Cockpit. The `$ref`s to registry v1 and bundle v1 resolve by `$id`
-inside this repository.
+inside this repository. The TypeScript shapes live in `packages/core/src/composition-types.ts`
+(types only, so the pure Composer can use them); the validators stay in
+`apps/api/src/composition-contract.ts`, which re-exports the types.

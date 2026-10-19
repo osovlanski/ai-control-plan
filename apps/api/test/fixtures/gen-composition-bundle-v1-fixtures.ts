@@ -139,12 +139,35 @@ const twoDecision = stages("CR-0002-1", {
   why: "both match the coding intent; example-tests is outside the allowlist and was opted in by digest",
 });
 
+// 1.1 added intent kind `general` and permission `read-only`. It is rendered with the zero-asset bundle.
+const generalId = "CR-0003-1";
+const generalSpec: AgentSpec = {
+  ...zeroSpec,
+  schema_version: "1.1",
+  composition_revision_id: generalId,
+  task_id: "AG-0003",
+  intent: { ...zeroSpec.intent, kind: "general", domains: [] },
+  policy: { ...zeroSpec.policy, permission: "read-only", tool_allowlist: ["Read"] },
+  workspace: { ...zeroSpec.workspace, branch: "task/AG-0003" },
+  explanation_ref: `${generalId}.decision`,
+};
+const zeroAssets = zeroDecision.stages.find((s) => s.stage === "assets")!;
+const generalDecision: CompositionDecision = {
+  ...stages(generalId, { candidates: zeroAssets.candidates, filters: zeroAssets.filters, chosen: [], why: zeroAssets.why }),
+  schema_version: "1.1",
+};
+generalDecision.stages[0] = { stage: "intent", candidates: [{ ref: "coding" }, { ref: "general" }], filters: [], chosen: ["general"], why: "no coding, review or research signal; the classifier's fallback", override: null };
+generalDecision.stages[4] = { stage: "policy", candidates: [{ ref: "read-only" }], filters: [], chosen: ["read-only"], why: "workspace approval mode is read-only", override: null };
+
 const compDir = join(COMPOSITION_CONTRACT_DIR, "fixtures");
 write(join(compDir, "valid"), "zero-asset.agent-spec.json", zeroSpec);
 write(join(compDir, "valid"), "zero-asset.decision.json", zeroDecision);
 write(join(compDir, "valid"), "two-skill.agent-spec.json", twoSpec);
 write(join(compDir, "valid"), "two-skill.decision.json", twoDecision);
+write(join(compDir, "valid"), "general-read-only.agent-spec.json", generalSpec);
+write(join(compDir, "valid"), "general-read-only.decision.json", generalDecision);
 
+write(join(compDir, "invalid"), "general-read-only-at-1.0.agent-spec.json", { ...generalSpec, schema_version: "1.0" });
 const mcpSpec = (secretRef: unknown) => ({
   ...structuredClone(twoSpec),
   assets: { ...twoSpec.assets, mcp_servers: [{ id: "mcp:example-server", digest: digestOf("3"), allowlisted: true, tools_allowed: ["search"], secret_refs: [secretRef] }] },
