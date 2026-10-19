@@ -240,6 +240,8 @@ export interface ExecutionResult {
     tools: "preventive" | "audit" | "none";
     budget: "bounded" | "advisory" | "none";
     isolation: IsolationTier;
+    /** M3: the provisioning fidelity this session launched with. Absent on runs with no revision. */
+    provisioning?: { fidelity: "full" | "partial" | "none"; profileDigest?: string };
   };
 }
 

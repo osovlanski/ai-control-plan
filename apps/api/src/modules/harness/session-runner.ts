@@ -17,9 +17,12 @@
  * verification stage here is the minimal command runner; Phase 5 hardens it.
  */
 import { StartSlots } from "./start-slots.js";
+import { join } from "node:path";
 import type {
   AdapterContextSample,
   AgentAdapter,
+  AgentSpec,
+  BundleResponse,
   CapabilityManifest,
   ContextObservation,
   ContextPolicy,
@@ -32,15 +35,20 @@ import type {
   HandoffRequest,
   NormalizedEvent,
   ProviderSessionRef,
+  ProvisionedProfile,
+  ProvisioningFidelity,
+  ProvisioningVerifiedPayload,
   RerouteRequest,
   RunHandle,
   ProviderProcess,
   RunSpec,
+  VerifiedProfile,
   TerminalSessionState,
   ToolGateVerdict,
   UsagePayload,
 } from "@agent-plane/core";
-import { DEFAULT_CONTEXT_POLICY, buildContextObservation, evaluationResult, newExecutionSessionId, outcomeOf, redactValue, toolActionFromEvent } from "@agent-plane/core";
+import { DEFAULT_CONTEXT_POLICY, ProvisioningError, buildContextObservation, evaluationResult, newExecutionSessionId, outcomeOf, redactValue, toolActionFromEvent } from "@agent-plane/core";
+import { verifiedProfile } from "@agent-plane/adapters";
 import { evaluateContextGuard } from "./context-guard.js";
 import type { SessionStore } from "./session-store.js";
 import type { ProviderProcessTracker } from "./provider-processes.js";
@@ -144,6 +152,17 @@ export interface RunnerDeps {
   processes?: ProviderProcessTracker;
   /** Spawn → first-event timing and silence reports, per session. */
   log?: (message: string, fields: Record<string, unknown>) => void;
+  /**
+   * M3 provisioning (plan §3.4). For a request bound to a composition revision, the runner asks
+   * the adapter to prepare, provision and verify a per-run profile under `root/<sessionId>` before
+   * `start`, launches with it, and disposes it when the session ends. Absent ⇒ no lifecycle runs.
+   */
+  provisioning?: {
+    /** Plane-owned directory; never the worktree or a machine-global assistant config dir. */
+    root: string;
+    /** The revision's AgentSpec and the BundleResponse it was composed with. */
+    load(compositionRevisionId: string): { spec: AgentSpec; bundle: BundleResponse } | undefined;
+  };
 }
 
 /** How often a session still waiting for its first provider event is reported. */
@@ -248,6 +267,7 @@ export class SessionRunner {
         // already-exited provider reports "gone".
         ctx.releaseStartSlot();
         await this.deps.processes?.terminate(sessionId, "run ended");
+        await ctx.disposeProfile(); // M3: after the provider is gone, never before
         store.releaseLease(sessionId, lease);
       }
     })();
@@ -309,6 +329,10 @@ class RunContext {
   private procExitReported = false;
   /** F2: set once the lease is refused; the run unwinds and recovery owns the result. */
   private fencedReason: string | undefined;
+  /** M3: the profile this session provisioned (disposed when the session ends) and what it launched with. */
+  private profile: { adapter: AgentAdapter; provisioned: ProvisionedProfile } | undefined;
+  private verifiedProfile: VerifiedProfile | undefined;
+  private provisioningOutcome: { fidelity: ProvisioningFidelity; profileDigest?: string } | undefined;
 
   constructor(
     private sessionId: string,
@@ -354,6 +378,11 @@ class RunContext {
     // --- Execute + Observe ---------------------------------------------
     this.transition("PREPARED", "STARTING"); // durable start intent (§9)
     const adapter = this.d.registry.adapter(this.request.assistantId);
+
+    // M3: a revision-bound request launches against a verified per-run profile, or records that it
+    // has none. A profile that cannot be proven fails the session here, before any provider process.
+    const provisioningFailure = await this.provisionProfile(adapter);
+    if (provisioningFailure) return this.finalizeFailure("FAILED", provisioningFailure, "STARTING");
 
     // Heartbeat from session start (F1): hard/idle timeouts and the durable
     // cancel intent must be observed even while `adapter.events()` is stalled,
@@ -1077,7 +1106,101 @@ class RunContext {
           ? { allow: p.tools.allow, deny: p.tools.deny, mode: p.tools.mode }
           : undefined,
       runControl: { executionRequestId: this.request.executionRequestId },
+      ...(this.verifiedProfile ? { profile: this.verifiedProfile } : {}),
     };
+  }
+
+  /**
+   * M3 (plan §3.4): prepare → provision → verify for a revision-bound request. Returns the failure
+   * to settle with, or undefined to continue. Fidelity `none` is never silent: an adapter with no
+   * lifecycle, or one that cannot deliver this revision, records `provisioning.ambient`, and a
+   * revision that requested `isolated` fails instead.
+   */
+  private async provisionProfile(adapter: AgentAdapter): Promise<ExecutionFailure | undefined> {
+    const revisionId = this.request.compositionRevisionId;
+    const deps = this.d.provisioning;
+    if (!revisionId || !deps) return undefined;
+    const unenforceable = (message: string): ExecutionFailure => ({ kind: SessionRunner.UNENFORCEABLE, retryable: false, message });
+    const loaded = deps.load(revisionId);
+    if (!loaded) return unenforceable(`composition revision ${revisionId} is not persisted; nothing to provision from`);
+    const { spec, bundle } = loaded;
+    const ambient = (reason: string): ExecutionFailure | undefined => {
+      if (spec.provisioning.requested === "isolated") return unenforceable(`isolated provisioning was requested but ${reason}`);
+      this.provisioningOutcome = { fidelity: "none" };
+      this.recordEvents([{
+        runId: this.sessionId as never, ts: this.iso(), type: "provisioning.ambient",
+        summary: `no per-run profile: ${reason}; the run sees ambient config`,
+        payload: { compositionRevisionId: revisionId, fidelity: "none", reason },
+      }]);
+      return undefined;
+    };
+    if (!adapter.prepare || !adapter.provision || !adapter.verify || !adapter.dispose) return ambient("the adapter has no provisioning lifecycle");
+
+    let plan;
+    try {
+      plan = await adapter.prepare({ spec, bundle, root: join(deps.root, this.sessionId), sessionId: this.sessionId });
+    } catch (err) {
+      if (err instanceof ProvisioningError && (err.reason === "unsupported_asset" || err.reason === "unsupported_transport")) return ambient(err.message);
+      return unenforceable(`provisioning refused: ${redactMessage(err)}`);
+    }
+    try {
+      this.profile = { adapter, provisioned: await adapter.provision(plan) };
+    } catch (err) {
+      return unenforceable(`provisioning failed: ${redactMessage(err)}`);
+    }
+    let verification;
+    try {
+      verification = await adapter.verify(this.profile.provisioned);
+    } catch (err) {
+      return unenforceable(`profile verification threw: ${redactMessage(err)}`);
+    }
+    if (!verification.ok) {
+      const failed = verification.checks.filter((c) => !c.ok).map((c) => `${c.name} (${c.detail})`);
+      return unenforceable(`profile verification failed: ${failed.join("; ")}`);
+    }
+    // Forward-compatible with M3 S2: a revision that names its profile binds it.
+    const wanted = spec.provisioning;
+    if (wanted.profile_digest !== undefined && wanted.profile_digest !== verification.profileDigest) {
+      return unenforceable(`verified profile ${verification.profileDigest} is not the revision's ${wanted.profile_digest}`);
+    }
+    const rank = { none: 0, ambient: 0, "select-only": 0, partial: 1, high: 1, full: 2 } as const;
+    if (wanted.achieved !== undefined && rank[verification.fidelity] < rank[wanted.achieved]) {
+      return unenforceable(`verified fidelity ${verification.fidelity} is below the revision's ${wanted.achieved}`);
+    }
+    this.verifiedProfile = verifiedProfile(this.profile.provisioned, verification);
+    this.provisioningOutcome = { fidelity: verification.fidelity, profileDigest: verification.profileDigest };
+    const vp = this.verifiedProfile;
+    const payload: ProvisioningVerifiedPayload = {
+      compositionRevisionId: revisionId, harness: vp.harness, fidelity: vp.fidelity, profileDigest: vp.profileDigest,
+      files: vp.files.map((f) => ({ ...f })), visible: [...vp.visible], excluded: [...vp.excluded], checks: vp.checks.map((c) => ({ ...c })),
+    };
+    this.recordEvents([{
+      runId: this.sessionId as never, ts: this.iso(), type: "provisioning.verified",
+      summary: `profile ${vp.profileDigest} verified (${vp.fidelity}, ${vp.harness}): ${vp.files.length} file(s)`,
+      payload: { ...payload },
+    }]);
+    return undefined;
+  }
+
+  /**
+   * M3: remove this session's profile once it has ended, however it ended. Never throws: a failed
+   * dispose is logged and left to the crash sweep (M3 S3), and the session's result stands.
+   */
+  async disposeProfile(): Promise<void> {
+    const owned = this.profile;
+    if (!owned) return;
+    this.profile = undefined;
+    const { plan } = owned.provisioned;
+    try {
+      const { removed } = await owned.adapter.dispose!(owned.provisioned);
+      this.d.recorder.appendSettled(this.sessionId, [{
+        runId: this.sessionId as never, ts: this.iso(), type: "provisioning.disposed",
+        summary: removed ? `profile ${plan.profileDigest} removed` : `profile ${plan.profileDigest} was already gone`,
+        payload: { compositionRevisionId: plan.compositionRevisionId, profileDigest: plan.profileDigest, removed },
+      }]);
+    } catch (err) {
+      this.d.log?.("provisioning dispose failed", { sessionId: this.sessionId, error: redactMessage(err) });
+    }
   }
 
   private async startProvider(adapter: AgentAdapter): Promise<RunHandle> {
@@ -1582,7 +1705,7 @@ class RunContext {
       : declaresSandbox || worktreeDiscipline
         ? "partial"
         : "ambient";
-    return { tools, budget, isolation };
+    return { tools, budget, isolation, ...(this.provisioningOutcome ? { provisioning: this.provisioningOutcome } : {}) };
   }
 
   /**
