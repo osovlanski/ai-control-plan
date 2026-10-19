@@ -321,6 +321,11 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     const result = usage.ingest(parsed.value);
     if (result.status === "unknown_run") return reply.status(422).send({ error: `run ${parsed.value.runId} does not exist` });
     if (result.status === "conflict") return reply.status(409).send({ error: "a different usage record is stored under this provider, sessionRef and eventId", record: result.record });
+    // M2 S6: a first delivery bound to a run may take its revision past a cap. That appends a
+    // `budget.overrun` event and never changes the run; the record's own answer is unchanged.
+    if (result.status === "created" && result.record.runId && composer) {
+      try { composer.lateRecord(result.record.runId); } catch (err) { req.log.warn({ err: message(err) }, "budget overrun check failed"); }
+    }
     return reply.status(result.status === "created" ? 201 : 200).send({ replayed: result.status === "replayed", record: result.record });
   });
 
@@ -524,6 +529,8 @@ export function buildServer(deps: ServerDeps): BuiltServer {
       ...(deps.composerHostname !== undefined ? { hostname: deps.composerHostname } : {}),
     })
     : undefined;
+  // M2 S6: wakes, run-now, failover and handoffs recompose at dispatch; settles record overruns.
+  if (composer) orchestrator.dispatchComposer = composer;
   const composerDisabled = (reply: FastifyReply) =>
     reply.status(404).send({ error: "the composer is disabled (composer.enabled is false)", reason: "composer_disabled" });
 
@@ -545,6 +552,15 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     if (!composer) return composerDisabled(reply);
     if (!tasks.get(req.params.id)) return reply.status(404).send({ error: "not found" });
     return composer.history(req.params.id);
+  });
+
+  // M2 S6 budget settlement (§5): the task's caps, what its runs settled (in-run and late records,
+  // never summed), the remainder, the latest revision's own remainder and the overruns recorded.
+  // Provisional: usage records may still arrive.
+  app.get<{ Params: { id: string } }>("/api/tasks/:id/composition/budget", read.tasks, (req, reply) => {
+    if (!composer) return composerDisabled(reply);
+    if (!tasks.get(req.params.id)) return reply.status(404).send({ error: "not found" });
+    return composer.accounting.budget(req.params.id);
   });
 
   app.post<{ Params: { id: string }; Body: unknown }>("/api/tasks/:id/composition/opt-ins", write, (req, reply) => {

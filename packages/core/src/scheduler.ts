@@ -23,7 +23,9 @@ export type PauseKind = 'limit' | 'provider_unavailable' | 'no_candidate' | 'har
   | 'intervention_required' | 'dependency_failed' | 'unknown'
   /** K11 context-continuation stops. None is wait-eligible (CR-32): each needs an operator. */
   | 'continuation_evidence_missing' | 'continuation_limit_reached' | 'continuation_no_progress'
-  | 'successor_immediately_critical';
+  | 'successor_immediately_critical'
+  /** M2 S6: a recomposition found no budget left under the task's cap. Only an operator continues it. */
+  | 'budget_exhausted';
 
 /** CR-30: audit label on a dispatch and its routing decision; never changes what is routed. */
 export type DispatchOrigin = 'intake' | 'wake' | 'run-now' | 'failover' | 'context-yield';

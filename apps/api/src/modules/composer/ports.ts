@@ -83,6 +83,13 @@ const MAX_RULE_LENGTH = 256;
 interface Routed { inputs: RouteInputs; explanation: RoutingExplanation & { origin: string } }
 
 /**
+ * A route already decided and persisted (S6): a dispatch routed at the grant, a failover or a
+ * manual handoff. Stage 2 projects THAT decision instead of routing again, so the composition and
+ * the run it binds name the same assistant, and the dispatch keeps its one routing row.
+ */
+export interface PinnedRoute { routingDecisionId: number; explanation: RoutingExplanation & { origin: string } }
+
+/**
  * Stage 2 over route(). One instance serves one composition (and its one `not_found` recompose):
  * route() runs at most once per distinct assistant override, so the pipeline's "without, then
  * with, the override" calls and the service's model lookup see one consistent answer. Nothing is
@@ -97,6 +104,7 @@ export class RouteHarnessModelPort implements HarnessModelPort {
     private readonly taskId: string,
     private readonly origin: RouteOrigin,
     private readonly options: RouteOptions = {},
+    private readonly pinned?: PinnedRoute,
   ) {}
 
   private checkTask(taskId: string): void {
@@ -109,7 +117,10 @@ export class RouteHarnessModelPort implements HarnessModelPort {
     if (cached) return cached;
     const options: RouteOptions = { ...this.options, ...(assistantId !== undefined ? { override: assistantId as AssistantId } : {}) };
     const inputs = routeInputs(this.deps, this.taskId, this.origin, options);
-    const explanation = explainRoute(this.deps, inputs, route(inputs.request, inputs.candidates), this.origin, options);
+    // Without an override, a pinned route is the answer; its inputs are re-read only to project it.
+    const explanation = this.pinned && assistantId === undefined
+      ? this.pinned.explanation
+      : explainRoute(this.deps, inputs, route(inputs.request, inputs.candidates), this.origin, options);
     const routed = { inputs, explanation };
     this.routed.set(key, routed);
     return routed;
@@ -134,9 +145,10 @@ export class RouteHarnessModelPort implements HarnessModelPort {
     return this.used?.explanation;
   }
 
-  /** Persists the one routing row for the outcome used, through routeTask's own path. */
+  /** Persists the one routing row for the outcome used, through routeTask's own path. A pinned route is already persisted. */
   persistUsed(): number | undefined {
     if (!this.used) return undefined;
+    if (this.pinned && this.used.explanation === this.pinned.explanation) return this.pinned.routingDecisionId;
     return persistRoutingDecision(this.deps.db, this.taskId, this.used.explanation);
   }
 
@@ -191,29 +203,34 @@ export class RouteHarnessModelPort implements HarnessModelPort {
     return { ...projection, chosen };
   }
 
-  /**
-   * K7 price evidence for the chosen model: the cheapest non-expired row proven to apply to this
-   * assistant's serving provider and account (as K13's cost prior reads it). Never fails routing.
-   */
   private price(assistantId: string, provider: string, selector: string): ModelPrice | undefined {
-    const catalogService = this.deps.catalog;
-    if (!catalogService) return undefined;
-    try {
-      const catalog = catalogService.list();
-      const identity = resolveCandidateIdentity(this.deps.db, { assistantId, provider, selector, catalog, ...(this.deps.now ? { now: this.deps.now } : {}) });
-      const entry = identity.resolvedModelKey ? catalog.find((e) => e.modelKey === identity.resolvedModelKey) : undefined;
-      if (!entry) return undefined;
-      const accountKind = this.deps.config.assistants[assistantId]?.accountKind;
-      const account = { servingProvider: provider, ...(accountKind ? { accountKind } : {}) };
-      const blended = (p: { inputPerMtok: number; outputPerMtok: number }) => COST_REFERENCE_MIX.input * p.inputPerMtok + COST_REFERENCE_MIX.output * p.outputPerMtok;
-      const rows = entry.pricing
-        .filter((p) => p.freshness !== "expired" && priceApplicability(p, account).applicable)
-        .sort((a, b) => blended(a) - blended(b) || (a.pricingVersion < b.pricingVersion ? 1 : a.pricingVersion > b.pricingVersion ? -1 : 0));
-      const best = rows[0];
-      return best ? { pricingVersion: best.pricingVersion, inputPerMtok: best.inputPerMtok, outputPerMtok: best.outputPerMtok } : undefined;
-    } catch {
-      return undefined;
-    }
+    return modelPrice(this.deps, assistantId, provider, selector);
+  }
+}
+
+/**
+ * K7 price evidence for a model: the cheapest non-expired row proven to apply to this assistant's
+ * serving provider and account (as K13's cost prior reads it). Stage 2 reads it for the chosen
+ * model and settlement (composer/accounting.ts) for each run's model. Never throws.
+ */
+export function modelPrice(deps: Pick<RouteDeps, "db" | "config" | "catalog" | "now">, assistantId: string, provider: string, selector: string): ModelPrice | undefined {
+  const catalogService = deps.catalog;
+  if (!catalogService) return undefined;
+  try {
+    const catalog = catalogService.list();
+    const identity = resolveCandidateIdentity(deps.db, { assistantId, provider, selector, catalog, ...(deps.now ? { now: deps.now } : {}) });
+    const entry = identity.resolvedModelKey ? catalog.find((e) => e.modelKey === identity.resolvedModelKey) : undefined;
+    if (!entry) return undefined;
+    const accountKind = deps.config.assistants[assistantId]?.accountKind;
+    const account = { servingProvider: provider, ...(accountKind ? { accountKind } : {}) };
+    const blended = (p: { inputPerMtok: number; outputPerMtok: number }) => COST_REFERENCE_MIX.input * p.inputPerMtok + COST_REFERENCE_MIX.output * p.outputPerMtok;
+    const rows = entry.pricing
+      .filter((p) => p.freshness !== "expired" && priceApplicability(p, account).applicable)
+      .sort((a, b) => blended(a) - blended(b) || (a.pricingVersion < b.pricingVersion ? 1 : a.pricingVersion > b.pricingVersion ? -1 : 0));
+    const best = rows[0];
+    return best ? { pricingVersion: best.pricingVersion, inputPerMtok: best.inputPerMtok, outputPerMtok: best.outputPerMtok } : undefined;
+  } catch {
+    return undefined;
   }
 }
 

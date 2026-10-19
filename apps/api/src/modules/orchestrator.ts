@@ -150,6 +150,36 @@ export interface StartComposition {
   attachRun(runId: string, compositionRevisionId: string): void;
 }
 
+/** The non-interactive starts that recompose at dispatch (plans/m2-composer.md §2 stage 6, I-S1). */
+export type RecomposeOrigin = 'wake' | 'run-now' | 'failover' | 'context-yield';
+
+/**
+ * What a recomposition at dispatch decided. `compose` carries a new revision or, for a K11
+ * continuation on the same assistant, the reused one; `route_only` starts as before (Q3), its
+ * attempt row already written; `blocked` starts nothing and needs an operator (`budget_exhausted`,
+ * or `composer.requireRevision` with no revision possible).
+ */
+export type DispatchComposition =
+  | { kind: 'compose'; composition: StartComposition }
+  | { kind: 'route_only' }
+  | { kind: 'blocked'; reason: string; pauseKind: PauseKind };
+
+/**
+ * M2 S6: the Composer, seen from the run lifecycle. Implemented by the Composer service and set by
+ * the server when `composer.enabled` is on; absent, every start is exactly as before.
+ */
+export interface DispatchComposer {
+  composeForDispatch(input: {
+    taskId: string; assistantId: string; origin: RecomposeOrigin; routingDecisionId: number;
+    /** Why this start can never carry a revision (`compositionUnbindable`); the attempt row says so. */
+    unbindable?: string;
+  }): Promise<DispatchComposition>;
+  /** Binds a replayed dispatch's run to the revision its saved request already names. */
+  attachRun(runId: string, compositionRevisionId: string): void;
+  /** A run settled: append any `budget.overrun` its revision's runs now owe (§5). Never throws. */
+  settled(runId: string): void;
+}
+
 const DEFAULT_MAX_RUNTIME_MS = 30 * 60 * 1000;
 
 /**
@@ -164,6 +194,8 @@ export class Orchestrator {
    */
   private active = new Map<string, ActiveRun>();
   scheduler?: Scheduler;
+  /** M2 S6: recomposition at dispatch and failover, and budget settlement. Absent with the composer off. */
+  dispatchComposer?: DispatchComposer;
   /** K11 thresholds and task-level bounds; injectable for deterministic tests. */
   contextPolicy?: ContextPolicy;
   /**
@@ -459,7 +491,10 @@ export class Orchestrator {
         if (request.context.scratchPath) ensureScratch(this.config.dir, taskId);
         request.runSpec.prompt = this.dispatchPrompt(request, options);
         new SessionStore(this.db).recordRequest(request); // fingerprint witnesses semantic replay
-        return this.executeDispatch(request, options);
+        const replayed = await this.executeDispatch(request, options);
+        // M2 S6: the saved request already names its revision; the replayed run binds to it.
+        if (request.compositionRevisionId) this.dispatchComposer?.attachRun(replayed.runId, request.compositionRevisionId);
+        return replayed;
       }
     }
     const adapter = this.registry.adapter(assistantId);
@@ -522,10 +557,18 @@ export class Orchestrator {
       const taskRow = this.tasks.get(taskId)!;
       const attempt = ((this.db.prepare('SELECT MAX(attempt) m FROM execution_requests WHERE task_id = ?').get(taskId) as { m: number | null }).m ?? 0) + 1;
       const project = envelope.repository && this.projectVerification ? this.projectVerification(workdir) : undefined;
+      // M2 S6: a dispatch recomposed at the grant persists its revision here, after the worktree
+      // identity exists, and the request takes its policy from it, exactly as an operator start does.
+      const composed = this.bindComposition(options.composition, executionTarget, taskRow.branch);
+      const policy = composed
+        ? composedExecutionPolicy(composed.policy, { approvalMode: this.config.policy.approvalMode, maxRuntimeMs: this.maxRuntimeMs },
+          this.registry.manifest(assistantId)?.harness)
+        : undefined;
       const request = buildExecutionRequest({ taskId, dispatchId: options.dispatchId, assistantId, attempt, prompt, workdir, model: this.requestedModel(taskId, assistantId, options.routingDecisionRef),
         worktree: envelope.repository ? { repoPath: envelope.repository.path, branch: taskRow.branch ?? envelope.repository.branch, worktreePath: workdir, baseRef: taskRow.base_ref ?? 'HEAD' } : undefined,
-        scratchPath, target: executionTarget, approvalMode: this.config.policy.approvalMode, maxRuntimeMs: this.maxRuntimeMs,
-        routingDecisionRef: options.routingDecisionRef!, verificationPlan: project?.plan });
+        scratchPath, target: executionTarget, approvalMode: policy?.approvalMode ?? this.config.policy.approvalMode, maxRuntimeMs: policy?.maxRuntimeMs ?? this.maxRuntimeMs,
+        routingDecisionRef: options.routingDecisionRef!, verificationPlan: project?.plan,
+        ...(composed && policy ? { compositionRevisionId: composed.compositionRevisionId, budget: policy.budget } : {}) });
       this.db.transaction(() => {
         const d = this.db.prepare('SELECT phase, origin FROM dispatches WHERE dispatch_id = ?').get(options.dispatchId) as { phase: string; origin: string };
         if (d.phase !== 'reserved' || this.tasks.get(taskId)?.state !== 'ROUTING') throw new Error('Dispatch no longer owns materialization');
@@ -541,7 +584,10 @@ export class Orchestrator {
               fromAssistantId: this.lastAssistant(taskId) ?? assistantId, insertRequest: insert });
         } else { request.runSpec.prompt = this.dispatchPrompt(request, options); insert(); }
       })();
-      return this.executeDispatch(request, options);
+      const started = await this.executeDispatch(request, options);
+      // `runs.composition_revision_id` is written once, here (M1 attachRun).
+      if (composed) options.composition!.attachRun(started.runId, composed.compositionRevisionId);
+      return started;
     }
 
     // Flag-ON single mode: route execution through SessionRunner via the bridge.
@@ -693,6 +739,27 @@ export class Orchestrator {
     if (bound.ok) return bound;
     if (composition.required) throw new Error(`composer.requireRevision is on and no revision was persisted (${bound.reason})`);
     return undefined;
+  }
+
+  /**
+   * M2 S6: recomposes a non-interactive start (scheduler wake, run-now, failover, manual handoff,
+   * K11 continuation) over the route it already made (plans/m2-composer.md §2 stage 6, I-S1).
+   * Undefined without a composer, and for a dispatch whose request is already materialized: its
+   * replay re-executes the committed request, revision included, and must not compose again.
+   */
+  async recompose(taskId: string, assistantId: string, origin: RecomposeOrigin, routingDecisionRef: string | number, dispatchId?: string): Promise<DispatchComposition | undefined> {
+    if (!this.dispatchComposer) return undefined;
+    if (dispatchId && this.db.prepare('SELECT 1 FROM execution_requests WHERE id = ? AND superseded = 0 AND request_json IS NOT NULL').get(dispatchId)) return undefined;
+    const unbindable = this.compositionUnbindable(taskId);
+    try {
+      return await this.dispatchComposer.composeForDispatch({
+        taskId, assistantId, origin, routingDecisionId: Number(routingDecisionRef), ...(unbindable ? { unbindable } : {}),
+      });
+    } catch (err) {
+      // A composer defect must not strand a dispatch; with requireRevision it must not run without one either.
+      this.notice(taskId, "warn", `Recomposition at ${origin} failed: ${message(err)}`);
+      return this.config.composer.requireRevision ? { kind: 'blocked', reason: 'composer_error', pauseKind: 'intervention_required' } : { kind: 'route_only' };
+    }
   }
 
   /**
@@ -1017,6 +1084,15 @@ export class Orchestrator {
     }
 
     const target = explanation.chosen;
+    // M2 S6: a failover is a changed assistant, so it gets a new revision with the task's remainder.
+    const recomposed = await this.recompose(taskId, target, "failover", routingDecisionId);
+    if (!this.canSettle(taskId) || this.tasks.get(taskId)?.state !== "LIMIT_PAUSED") return;
+    if (recomposed?.kind === "blocked") {
+      const envelope = this.tasks.transition(taskId, "WAITING_INPUT", recomposed.pauseKind);
+      this.publishState(taskId, envelope);
+      this.notice(taskId, "warn", `${reasonText}. Failover to ${target} was not started: ${recomposed.reason}. Work is checkpointed and waiting for an operator.`);
+      return;
+    }
     this.tasks.transition(taskId, "HANDING_OFF");
     this.publishState(taskId, this.tasks.envelope(taskId), target);
     this.notice(
@@ -1038,6 +1114,7 @@ export class Orchestrator {
         reason: reasonText,
         fromAssistantId: assistantId,
         routingDecisionRef: String(routingDecisionId),
+        ...(recomposed?.kind === "compose" ? { composition: recomposed.composition } : {}),
       });
       this.db
         .prepare("UPDATE handoffs SET to_run_id = ? WHERE task_id = ? AND to_run_id IS NULL")
@@ -1060,6 +1137,8 @@ export class Orchestrator {
     sessionId: string,
     result: ExecutionResult | null,
   ): Promise<void> {
+    // M2 S6: whatever settles the task, the run's usage is settled against its revision's caps.
+    if (result) this.dispatchComposer?.settled(sessionId);
     if (this.harnessBridge!.consumePlaneOwnsTerminal(sessionId)) return; // cancel / manual handoff owns it
     const row = this.tasks.get(taskId);
     if (!this.canSettle(taskId)) return;
@@ -1332,6 +1411,15 @@ export class Orchestrator {
     if (!explanation.chosen) {
       throw new Error(`No eligible assistant for handoff. ${describeWaits(explanation)}`);
     }
+    // M2 S6: the handoff target is a changed assistant and gets a new revision with the remainder.
+    const recomposed = await this.recompose(taskId, explanation.chosen, "failover", routingDecisionId);
+    if (recomposed?.kind === "blocked") {
+      try {
+        const envelope = this.tasks.transition(taskId, "WAITING_INPUT", recomposed.pauseKind);
+        this.publishState(taskId, envelope);
+      } catch { /* already parked */ }
+      throw new Error(`Handoff to ${explanation.chosen} was not started: ${recomposed.reason}`);
+    }
 
     const state = this.tasks.get(taskId)!.state;
     if (state === "RUNNING" || state === "WAITING_INPUT" || state === "LIMIT_PAUSED") {
@@ -1354,6 +1442,7 @@ export class Orchestrator {
       reason: "A manual handoff was requested by the user.",
       fromAssistantId,
       routingDecisionRef: String(routingDecisionId),
+      ...(recomposed?.kind === "compose" ? { composition: recomposed.composition } : {}),
     });
     this.db
       .prepare("UPDATE handoffs SET to_run_id = ? WHERE task_id = ? AND to_run_id IS NULL")
@@ -1408,6 +1497,15 @@ export class Orchestrator {
     if (!explanation.chosen) {
       throw new Error(`No eligible assistant for handoff. ${describeWaits(explanation)}`);
     }
+    // M2 S6: the handoff target is a changed assistant and gets a new revision with the remainder.
+    const recomposed = await this.recompose(taskId, explanation.chosen, "failover", routingDecisionId);
+    if (recomposed?.kind === "blocked") {
+      try {
+        const envelope = this.tasks.transition(taskId, "WAITING_INPUT", recomposed.pauseKind);
+        this.publishState(taskId, envelope);
+      } catch { /* already parked */ }
+      throw new Error(`Handoff to ${explanation.chosen} was not started: ${recomposed.reason}`);
+    }
 
     const state = this.tasks.get(taskId)!.state;
     if (state === "RUNNING" || state === "WAITING_INPUT" || state === "LIMIT_PAUSED") {
@@ -1430,6 +1528,7 @@ export class Orchestrator {
       reason: "A manual handoff was requested by the user.",
       fromAssistantId,
       routingDecisionRef: String(routingDecisionId),
+      ...(recomposed?.kind === "compose" ? { composition: recomposed.composition } : {}),
     });
     this.db
       .prepare("UPDATE handoffs SET to_run_id = ? WHERE task_id = ? AND to_run_id IS NULL")
