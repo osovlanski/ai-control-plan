@@ -5,24 +5,29 @@
 -- answer without a revision to hang it on. A revision (agent_specs, 033) exists
 -- only when a Cockpit render succeeded; an attempt exists always.
 --   persisted  a revision was written; composition_revision_id names it
+--   previewed  the pipeline composed, nothing was persisted (a preview awaiting confirmation)
 --   failed     the pipeline could not produce a revision; reason says why
 --   skipped    the pipeline did not apply (e.g. an unsupported harness); reason says why
 -- routing_decision_id and composition_digest are NULL when the attempt stopped
--- before routing or before a digest could be computed.
+-- before routing or before a digest could be computed. inputs_digest is the
+-- digest of the pipeline's inputs (plan §4.2), NULL only when inputs could not be gathered.
 CREATE TABLE composition_attempts (
   id                      TEXT PRIMARY KEY,
   task_id                 TEXT NOT NULL REFERENCES tasks(id),
   origin                  TEXT NOT NULL,
   routing_decision_id     INTEGER REFERENCES routing_decisions(id),
   composition_digest      TEXT,
-  outcome                 TEXT NOT NULL CHECK(outcome IN ('persisted', 'failed', 'skipped')),
+  inputs_digest           TEXT,
+  outcome                 TEXT NOT NULL CHECK(outcome IN ('persisted', 'previewed', 'failed', 'skipped')),
   reason                  TEXT,
   composition_revision_id TEXT REFERENCES agent_specs(composition_revision_id),
   created_at              TEXT NOT NULL,
   -- A revision id exists exactly when the attempt persisted one.
   CHECK((outcome = 'persisted') = (composition_revision_id IS NOT NULL)),
-  -- A non-persisted attempt must say why; that is the table's reason to exist.
-  CHECK(outcome = 'persisted' OR (reason IS NOT NULL AND length(reason) > 0))
+  -- A failed or skipped attempt must say why; that is the table's reason to exist.
+  CHECK(outcome IN ('persisted', 'previewed') OR (reason IS NOT NULL AND length(reason) > 0)),
+  -- A composed attempt, previewed or persisted, has a digest.
+  CHECK(outcome NOT IN ('persisted', 'previewed') OR composition_digest IS NOT NULL)
 );
 CREATE INDEX idx_composition_attempts_task ON composition_attempts(task_id);
 
