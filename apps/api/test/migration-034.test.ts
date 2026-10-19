@@ -27,10 +27,10 @@ afterEach(() => {
 const attempt = (over: Record<string, unknown> = {}) => {
   const row = {
     id: "CA-AG-0001-1", task_id: "AG-0001", origin: "intake", routing_decision_id: 1, composition_digest: null,
-    outcome: "failed", reason: "cockpit unreachable", composition_revision_id: null, created_at: "t", ...over,
+    inputs_digest: null, outcome: "failed", reason: "cockpit unreachable", composition_revision_id: null, created_at: "t", ...over,
   };
-  db.prepare(`INSERT INTO composition_attempts (id, task_id, origin, routing_decision_id, composition_digest, outcome, reason, composition_revision_id, created_at)
-    VALUES (@id, @task_id, @origin, @routing_decision_id, @composition_digest, @outcome, @reason, @composition_revision_id, @created_at)`).run(row);
+  db.prepare(`INSERT INTO composition_attempts (id, task_id, origin, routing_decision_id, composition_digest, inputs_digest, outcome, reason, composition_revision_id, created_at)
+    VALUES (@id, @task_id, @origin, @routing_decision_id, @composition_digest, @inputs_digest, @outcome, @reason, @composition_revision_id, @created_at)`).run(row);
 };
 const optIn = (over: Record<string, unknown> = {}) =>
   db.prepare("INSERT INTO composition_opt_ins (task_id, asset_id, digest, actor, at) VALUES (@task_id, @asset_id, @digest, @actor, @at)")
@@ -57,7 +57,15 @@ describe("migration 034", () => {
       ]);
     });
 
-    it("refuses an outcome outside persisted, failed, skipped", () => {
+    it("records a preview with its digests and no reason", () => {
+      attempt({ id: "CA-P", outcome: "previewed", reason: null, composition_digest: "sha256:d", inputs_digest: "sha256:i" });
+      expect(db.prepare("SELECT outcome, composition_digest, inputs_digest FROM composition_attempts WHERE id = 'CA-P'").get())
+        .toEqual({ outcome: "previewed", composition_digest: "sha256:d", inputs_digest: "sha256:i" });
+      expect(() => attempt({ id: "CA-Q", outcome: "previewed", composition_digest: null })).toThrow(/CHECK constraint failed/);
+      expect(() => attempt({ id: "CA-R", outcome: "previewed", composition_revision_id: "CR-AG-0001-1", composition_digest: "sha256:d" })).toThrow(/CHECK constraint failed/);
+    });
+
+    it("refuses an outcome outside persisted, previewed, failed, skipped", () => {
       for (const outcome of ["ok", "PERSISTED", "", "error"]) expect(() => attempt({ outcome })).toThrow(/CHECK constraint failed/);
       expect(count("composition_attempts")).toBe(0);
     });
@@ -76,7 +84,7 @@ describe("migration 034", () => {
     it("enforces its foreign keys and a unique id", () => {
       expect(() => attempt({ task_id: "AG-9999" })).toThrow(/FOREIGN KEY/);
       expect(() => attempt({ routing_decision_id: 999 })).toThrow(/FOREIGN KEY/);
-      expect(() => attempt({ outcome: "persisted", reason: null, composition_revision_id: "CR-nope" })).toThrow(/FOREIGN KEY/);
+      expect(() => attempt({ outcome: "persisted", reason: null, composition_revision_id: "CR-nope", composition_digest: "sha256:d" })).toThrow(/FOREIGN KEY/);
       attempt();
       expect(() => attempt()).toThrow(/UNIQUE|PRIMARY KEY/);
     });
