@@ -10,6 +10,9 @@ import { HandoffService } from './handoff.js';
  * `Orchestrator.settleFromResult`. It never writes `runs`.
  */
 import type {
+  AgentSpec,
+  BudgetPolicy,
+  CapabilityManifest,
   ExecutionRequest,
   ExecutionResult,
   ExecutionTarget,
@@ -49,6 +52,49 @@ export interface BridgeStartInput {
   /** Trusted Control Plane plan; absent during the compatibility window. */
   verification?: VerificationSpec[];
   verificationPlan?: VerificationPlan;
+  /** M2: the AgentSpec revision this request executes. Absent without a persisted revision. */
+  compositionRevisionId?: string;
+  /** M2: token/cost caps from the revision. Absent ⇒ today's `{ enforcement: "advisory" }`, no caps. */
+  budget?: BudgetPolicy;
+}
+
+const APPROVAL_STRICTNESS: Readonly<Record<ApprovalMode, number>> = { "auto-approve": 0, "prompt-on-escalation": 1, "read-only": 2 };
+const SPEC_APPROVAL: Readonly<Record<AgentSpec["policy"]["permission"], ApprovalMode>> = {
+  auto: "auto-approve", "prompt-on-escalation": "prompt-on-escalation", "read-only": "read-only",
+};
+
+/**
+ * M2 S5 (plans/m2-composer.md §5 "Wiring"): the parts of the ExecutionRequest a persisted
+ * revision's `policy` decides. Pure.
+ *
+ * - Approval only tightens: the stricter of the workspace mode and the revision's permission, so
+ *   a revision can never loosen the workspace approval boundary.
+ * - Runtime: the stricter of config and `max_runtime_ms`; `timeout.hardMs` stays the only authority.
+ * - Tokens are `bounded` only where Prepare would accept it (a token cap, a manifest declaring
+ *   usage accounting and a proven `usageReporting`, and no cost cap, since bounded cost caps stay
+ *   refused until deferral #3 closes); otherwise `advisory`. The caps are the revision's remainder.
+ */
+export function composedExecutionPolicy(
+  policy: AgentSpec["policy"],
+  workspace: { approvalMode: ApprovalMode; maxRuntimeMs: number },
+  harness: CapabilityManifest["harness"] | undefined,
+): { approvalMode: ApprovalMode; maxRuntimeMs: number; budget: BudgetPolicy } {
+  const revisionMode = SPEC_APPROVAL[policy.permission];
+  const approvalMode = APPROVAL_STRICTNESS[revisionMode] > APPROVAL_STRICTNESS[workspace.approvalMode] ? revisionMode : workspace.approvalMode;
+  const runtimeCap = policy.budget.max_runtime_ms;
+  const maxRuntimeMs = runtimeCap !== undefined && runtimeCap < workspace.maxRuntimeMs ? runtimeCap : workspace.maxRuntimeMs;
+  const { max_tokens: maxTokens, max_cost_usd: maxCostUsd } = policy.budget;
+  const bounded = maxTokens !== undefined && maxCostUsd === undefined
+    && harness !== undefined && harness.usageAccounting !== "none" && harness.usageReporting !== undefined;
+  return {
+    approvalMode,
+    maxRuntimeMs,
+    budget: {
+      ...(maxTokens !== undefined ? { maxTokens } : {}),
+      ...(maxCostUsd !== undefined ? { maxCostUsd } : {}),
+      enforcement: bounded ? "bounded" : "advisory",
+    },
+  };
 }
 
 /**
@@ -68,6 +114,7 @@ export function buildExecutionRequest(input: BridgeStartInput): ExecutionRequest
     assistantId: input.assistantId as ExecutionRequest["assistantId"],
     routingDecisionRef: input.routingDecisionRef,
     ...(model ? { model } : {}),
+    ...(input.compositionRevisionId ? { compositionRevisionId: input.compositionRevisionId } : {}),
     runSpec: {
       taskId: input.taskId as ExecutionRequest["taskId"],
       prompt: input.prompt,
@@ -77,7 +124,7 @@ export function buildExecutionRequest(input: BridgeStartInput): ExecutionRequest
       env: { redactionRules: DEFAULT_REDACTION_RULES, maxRuntimeMs: input.maxRuntimeMs },
     },
     policy: {
-      budget: { enforcement: "advisory" },
+      budget: input.budget ?? { enforcement: "advisory" },
       timeout: { hardMs: input.maxRuntimeMs },
       approval: { mode: input.approvalMode },
       tools: { mode: "audit" },

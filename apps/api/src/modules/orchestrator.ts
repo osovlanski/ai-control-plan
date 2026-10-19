@@ -1,12 +1,13 @@
 import { SessionStore } from './harness/session-store.js';
 import { HandoffService } from './harness/handoff.js';
-import { buildExecutionRequest } from './harness/control-plane-bridge.js';
+import { buildExecutionRequest, composedExecutionPolicy } from './harness/control-plane-bridge.js';
 import type { ModelCatalogService } from './model-catalog.js';
 import type { ExecutionRequest } from '@agent-plane/core';
 import { QuotaProjection, controllingRetry } from './quota.js';
 import type { Scheduler } from './scheduler.js';
 import { join } from "node:path";
 import type {
+  AgentSpec,
   ContextPolicy,
   ContextYieldRequest,
   Continuation,
@@ -122,6 +123,31 @@ export interface StartOptions {
    * finally happens must claim THAT row rather than opening a second one.
    */
   handoffTrigger?: string;
+  /**
+   * M2 S5: an operator-confirmed composition for THIS start (plans/m2-composer.md §2 stage 6).
+   * Only the non-dispatch Harness path binds it; the worktree branches from `baseCommit`.
+   */
+  composition?: StartComposition;
+}
+
+/** The workspace a revision is persisted with: opaque ids only, known once the worktree identity exists. */
+export interface CompositionWorkspace { repositoryId: string; branch: string; worktreeId: string }
+
+/**
+ * A composed, confirmed composition waiting for its workspace. `bind` persists the revision (and
+ * its attempt row) once the worktree identity exists, or records why it could not; `attachRun`
+ * binds the run it then executes. Implemented by the Composer service; the orchestrator only
+ * calls it, so it imports nothing composer-side.
+ */
+export interface StartComposition {
+  /** The base commit the composition's repo signals were read at; the worktree branches from it. */
+  readonly baseCommit?: string;
+  /** `composer.requireRevision`: a start that cannot persist the revision fails instead of running route-only. */
+  readonly required: boolean;
+  bind(workspace: CompositionWorkspace | undefined):
+    | { ok: true; compositionRevisionId: string; policy: AgentSpec["policy"] }
+    | { ok: false; reason: string };
+  attachRun(runId: string, compositionRevisionId: string): void;
 }
 
 const DEFAULT_MAX_RUNTIME_MS = 30 * 60 * 1000;
@@ -453,6 +479,7 @@ export class Orchestrator {
         envelope.repository.path,
         envelope.taskId,
         join(this.config.dir, "worktrees"),
+        ...(options.composition?.baseCommit !== undefined ? [{ baseCommit: options.composition.baseCommit }] : []),
       );
       workdir = worktree.path;
       this.tasks.setWorktree(taskId, worktree.path, worktree.branch, worktree.baseRef);
@@ -540,6 +567,13 @@ export class Orchestrator {
         ? this.projectVerification(workdir)
         : { warnings: [] };
       for (const warning of projectVerification.warnings) this.notice(taskId, "warn", warning);
+      // M2 S5: the revision is persisted only now, after the worktree identity exists, and the
+      // request's approval mode, runtime and caps come from its policy (tighten only).
+      const composed = this.bindComposition(options.composition, executionTarget, taskRow.branch);
+      const policy = composed
+        ? composedExecutionPolicy(composed.policy, { approvalMode: this.config.policy.approvalMode, maxRuntimeMs: this.maxRuntimeMs },
+          this.registry.manifest(assistantId)?.harness)
+        : undefined;
       const { runId } = this.harnessBridge!.start(
         {
           taskId,
@@ -560,14 +594,17 @@ export class Orchestrator {
             : undefined,
           scratchPath,
           target: executionTarget,
-          approvalMode: this.config.policy.approvalMode,
-          maxRuntimeMs: this.maxRuntimeMs,
+          approvalMode: policy?.approvalMode ?? this.config.policy.approvalMode,
+          maxRuntimeMs: policy?.maxRuntimeMs ?? this.maxRuntimeMs,
           routingDecisionRef,
           verification: projectVerification.plan?.checks ?? [],
           verificationPlan: projectVerification.plan,
+          ...(composed && policy ? { compositionRevisionId: composed.compositionRevisionId, budget: policy.budget } : {}),
         },
         (result, sid) => this.settleFromResult(taskId, assistantId, sid, result),
       );
+      // `runs.composition_revision_id` is written once, here (M1 attachRun).
+      if (composed) options.composition!.attachRun(runId, composed.compositionRevisionId);
       if (options.dispatchId && this.tasks.get(taskId)?.state === "ROUTING") this.tasks.transition(taskId, "RUNNING");
       // A continuation that deferred for a pool slot recorded its handoff row
       // before parking; this start is the one that closes it.
@@ -577,6 +614,9 @@ export class Orchestrator {
       }
       return { runId };
     }
+
+    // The legacy path never carries a revision (plan Q4); the attempt row says so.
+    if (options.composition) this.bindComposition(options.composition, undefined, undefined);
 
     // Same-provider continuation resumes the provider session; cross-provider
     // handoff always starts fresh from the rendered package (arch §7).
@@ -638,6 +678,32 @@ export class Orchestrator {
     this.active.set(handle.runId, run);
     void this.consume(run);
     return { runId: handle.runId };
+  }
+
+  /**
+   * Persists a confirmed composition with the worktree identity, or records why it could not be.
+   * Undefined ⇒ the start runs route-only; with `required` it throws instead.
+   */
+  private bindComposition(composition: StartComposition | undefined, target: ExecutionTarget | undefined, branch: string | null | undefined) {
+    if (!composition) return undefined;
+    const workspace = target?.kind === "worktree" && branch
+      ? { repositoryId: String(target.repositoryId), branch, worktreeId: String(target.worktreeId) }
+      : undefined;
+    const bound = composition.bind(workspace);
+    if (bound.ok) return bound;
+    if (composition.required) throw new Error(`composer.requireRevision is on and no revision was persisted (${bound.reason})`);
+    return undefined;
+  }
+
+  /**
+   * Whether a start of this task can carry a revision (plan Q4: the Harness path only, and a
+   * revision's workspace needs a worktree identity). Undefined when it can; otherwise the reason.
+   */
+  compositionUnbindable(taskId: string): string | undefined {
+    if (!this.harnessRouting(taskId, {})) return "legacy_execution_path";
+    if (!this.tasks.envelope(taskId).repository) return "no_repository";
+    if (!this.repositoryIdentities) return "no_worktree_identity";
+    return undefined;
   }
 
   private dispatchPrompt(request: ExecutionRequest, options: StartOptions): string {

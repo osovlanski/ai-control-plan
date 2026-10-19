@@ -37,7 +37,7 @@ import { QuotaProbeService, type QuotaProbeFn } from "./modules/quota-probe.js";
 import { ModelCatalogService, CATALOG_REVISION, type CatalogSource } from "./modules/model-catalog.js";
 import { RegistryFederation } from "./modules/registry-federation.js";
 import { BundledComposition, CockpitBundleClient } from "./modules/bundle-request.js";
-import { ComposerService, parseOverrides } from "./modules/composer/service.js";
+import { ComposerService, parseOverrides, type StartAttempt, type StartBinding } from "./modules/composer/service.js";
 import { createArtificialAnalysisSource } from "./modules/artificial-analysis.js";
 import { QuotaProjection } from "./modules/quota.js";
 import { readTaskContext } from "./modules/context.js";
@@ -554,7 +554,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     return reply.status(result.created ? 201 : 200).send(result.optIn);
   });
 
-  app.post<{ Params: { id: string }; Body: { assistantId?: AssistantId } }>(
+  app.post<{ Params: { id: string }; Body: { assistantId?: AssistantId; compositionDigest?: unknown; overrides?: unknown } }>(
     "/api/tasks/:id/start", write,
     async (req, reply) => {
       const taskId = req.params.id;
@@ -563,6 +563,8 @@ export function buildServer(deps: ServerDeps): BuiltServer {
       if (row.state !== "CREATED") {
         return reply.status(409).send({ error: `Task is ${row.state}; only CREATED tasks can start` });
       }
+      // M2 S5: with the composer on, start confirms a composition. Off, nothing below it runs.
+      if (composer) return startComposed(taskId, req.body, reply);
       const routed = computeRoute(taskId, req.body?.assistantId);
       const chosen = routed?.explanation.chosen;
       if (!routed || !chosen) {
@@ -589,6 +591,97 @@ export function buildServer(deps: ServerDeps): BuiltServer {
       }
     },
   );
+
+  /**
+   * `POST /api/tasks/:id/start` with the composer on (plans/m2-composer.md §2 stage 6, API 2.6).
+   * Body `{ assistantId?, compositionDigest?, overrides? }`; `assistantId` is the stage-2 override.
+   *
+   * - The pipeline re-runs with the same overrides. A refused override is a 400 and writes nothing.
+   * - A sent `compositionDigest` that the re-run does not reproduce (or no composition at all) is
+   *   drift: 409 with the new preview. No revision and no run.
+   * - Composed: the run starts on the Harness path and the revision is persisted once the
+   *   worktree identity exists, then bound to the run.
+   * - No revision possible: route-only with an attempt row saying why (Q3), or 422 when
+   *   `composer.requireRevision` is on. A start with a digest or overrides that the execution path
+   *   cannot bind (legacy path, no repository) is refused with 422 rather than run without them.
+   */
+  const startComposed = async (taskId: string, rawBody: unknown, reply: FastifyReply) => {
+    const c = composer!;
+    const body = (rawBody ?? {}) as Record<string, unknown>;
+    if (typeof body !== "object" || Array.isArray(body) || Object.keys(body).some((k) => !["assistantId", "compositionDigest", "overrides"].includes(k))) {
+      return reply.status(400).send({ error: "body must be { assistantId?, compositionDigest?, overrides? }" });
+    }
+    const { assistantId, compositionDigest } = body;
+    if (compositionDigest !== undefined && compositionDigest !== null && (typeof compositionDigest !== "string" || !/^sha256:[0-9a-f]{64}$/.test(compositionDigest))) {
+      return reply.status(400).send({ error: "compositionDigest must be sha256:<64 lowercase hex>" });
+    }
+    if (assistantId !== undefined && typeof assistantId !== "string") return reply.status(400).send({ error: "assistantId must be a string" });
+    const parsed = parseOverrides(body.overrides, registry.list().map((a) => a.id));
+    if (!parsed.ok) return reply.status(400).send({ error: parsed.error });
+    let overrides = parsed.overrides;
+    if (assistantId !== undefined) {
+      const named = overrides?.harness_model?.assistantId;
+      if (named !== undefined && named !== assistantId) return reply.status(400).send({ error: "assistantId and overrides.harness_model.assistantId disagree" });
+      if (!registry.list().some((a) => a.id === assistantId)) return reply.status(400).send({ error: `assistantId ${assistantId} is not a configured assistant` });
+      overrides = { ...overrides, harness_model: { ...overrides?.harness_model, assistantId } };
+    }
+    const digest = typeof compositionDigest === "string" ? compositionDigest : undefined;
+    const required = config.composer.requireRevision;
+    const noRevision = (attempt: object, reason: string, extra: object = {}) => reply.status(422).send({
+      error: "no composition revision for this start", reason, composition: attempt, ...extra,
+    });
+
+    // A start that can never carry a revision is not composed (plan Q4).
+    const unbindable = orchestrator.compositionUnbindable(taskId);
+    let chosen: string;
+    let routingDecisionId: number;
+    let explanation: unknown;
+    let binding: StartBinding | undefined;
+    let attempt: StartAttempt | undefined;
+    if (unbindable) {
+      // A confirmed digest or a composition override asks for a composition this start cannot carry.
+      const asked = digest !== undefined || (body.overrides !== undefined && body.overrides !== null);
+      if (asked || required) {
+        const skipped = c.recordSkippedStart(taskId, unbindable, null);
+        return noRevision(skipped, asked ? "revision_unbindable" : unbindable);
+      }
+      const routed = computeRoute(taskId, assistantId as AssistantId | undefined);
+      if (!routed?.explanation.chosen) {
+        return reply.status(422).send({ error: "No eligible assistant", explanation: routed?.explanation, composition: c.recordSkippedStart(taskId, unbindable, routed?.routingDecisionId ?? null) });
+      }
+      chosen = routed.explanation.chosen;
+      routingDecisionId = routed.routingDecisionId;
+      explanation = routed.explanation;
+      attempt = c.recordSkippedStart(taskId, unbindable, routingDecisionId);
+    } else {
+      const started = await c.start(taskId, overrides, digest);
+      if (started.kind === "refused") return reply.status(400).send({ error: started.error, reason: started.reason });
+      if (started.kind === "drift") {
+        return reply.status(409).send({ error: "the composition changed since it was previewed", reason: "composition_drift", preview: started.preview });
+      }
+      if (started.kind === "no_candidate") return reply.status(422).send({ error: "No eligible assistant", explanation: started.explanation, composition: started.attempt });
+      if (started.kind === "route_only" && required) return noRevision(started.attempt, started.attempt.reason ?? "no_revision", { explanation: started.explanation });
+      chosen = started.assistantId;
+      routingDecisionId = started.routingDecisionId;
+      explanation = started.explanation;
+      if (started.kind === "composed") binding = started.binding;
+      else attempt = started.attempt;
+    }
+    try {
+      tasks.transition(taskId, "ROUTING");
+      const { runId } = await orchestrator.startTask(taskId, chosen as AssistantId, {
+        routingDecisionRef: String(routingDecisionId),
+        ...(binding ? { composition: binding } : {}),
+      });
+      return { runId, assistantId: chosen, explanation, composition: binding?.attempt ?? attempt ?? null };
+    } catch (err) {
+      const current = tasks.get(taskId);
+      if (current && current.state !== "FAILED") {
+        try { tasks.transition(taskId, "FAILED"); } catch { /* already terminal */ }
+      }
+      return reply.status(500).send({ error: message(err) });
+    }
+  };
 
   app.post<{
     Params: { id: string };
