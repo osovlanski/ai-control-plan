@@ -1,10 +1,10 @@
 import { HandoffService } from './harness/handoff.js';
 import { randomUUID } from 'node:crypto';
-import { canTransition, isTerminal, redactValue, type ContinuationIntent, type Dispatch, type DispatchOrigin, type TaskState, type OnDependencyFailure, type ResourcePool, type RoutingExplanation, type SchedulerEvent, type WaitInput, type WaitCondition } from '@agent-plane/core';
+import { canTransition, isTerminal, redactValue, type ContinuationIntent, type Dispatch, type DispatchOrigin, type PauseKind, type TaskState, type OnDependencyFailure, type ResourcePool, type RoutingExplanation, type SchedulerEvent, type WaitInput, type WaitCondition } from '@agent-plane/core';
 import type { Db } from '../db/index.js';
 import type { ResolvedConfig } from '../config.js';
 import type { TaskStore } from './tasks.js';
-import type { Orchestrator } from './orchestrator.js';
+import type { Orchestrator, RecomposeOrigin } from './orchestrator.js';
 import type { QuotaProbeService } from './quota-probe.js';
 import { ScheduleService } from './schedules.js';
 import type { TaskEventBus } from './sse.js';
@@ -16,6 +16,15 @@ const DEFAULT_MAX_AUTO_WAKES = 3;
 const DEFAULT_ON_DEPENDENCY_FAILURE: OnDependencyFailure = 'wait-input';
 
 export type Actor = 'timer' | 'event' | 'operator';
+
+/**
+ * The confirm origin a dispatch recomposes under. A continuation deferred for a pool slot is a
+ * failover or a manual handoff whatever wake granted it; otherwise the dispatch's own origin.
+ */
+function recomposeOrigin(origin: DispatchOrigin, intent: ContinuationIntent | undefined): RecomposeOrigin {
+  if (intent) return 'failover';
+  return origin === 'intake' ? 'wake' : origin;
+}
 type WakeResult = { outcome: 'stale'; reason: string } | { outcome: 'dispatched'; dispatchId: string };
 export interface SchedulerDeps {
   db: Db; tasks: TaskStore; orchestrator: Orchestrator; bus: TaskEventBus; config: ResolvedConfig;
@@ -847,10 +856,15 @@ export class Scheduler {
       // Retry from current quota evidence; time waits retain their bounded fallback.
       this.repark(dispatch, 'no_candidate'); return;
     }
+    // M2 S6 (I-S1): a dispatch composes a new revision over the route it just made; a K11
+    // continuation on the same assistant reuses its revision. No composer: nothing changes.
+    const recomposed = await this.d.orchestrator.recompose(taskId, routed.explanation.chosen, recomposeOrigin(dispatch.origin, intent), routed.routingDecisionId, id);
+    if (recomposed?.kind === 'blocked') { this.block(dispatch, recomposed.reason, recomposed.pauseKind); return; }
     try {
       const { runId } = await this.d.orchestrator.startTask(taskId, routed.explanation.chosen, {
         continuation: dispatch.checkpoint_id ? { kind: 'checkpoint', checkpointId: dispatch.checkpoint_id } : { kind: 'fresh' }, dispatchId: id, routingDecisionRef: String(routed.routingDecisionId),
         ...(intent ? { reason: intent.reason, fromAssistantId: intent.from, handoffTrigger: intent.trigger } : {}),
+        ...(recomposed?.kind === 'compose' ? { composition: recomposed.composition } : {}),
         beforeStart: async () => {
           if (this.d.boundary) await this.d.boundary('materialized', this.dispatch(id));
           this.d.db.transaction(() => {
@@ -924,6 +938,25 @@ export class Scheduler {
     // The dispatch no longer owns the task, so it no longer owns the slot. This
     // follows exactly the evidence the re-park itself acted on (no session row, or
     // an operator-confirmed non-start) — it never guesses that a provider is idle.
+    this.releaseSoon(dispatch.task_id, `dispatch ${reason}`);
+  }
+
+  /**
+   * M2 S6: a recomposition at the grant refused to start (no budget left, or no revision possible
+   * under `composer.requireRevision`). Unlike a re-park this is not retried: the dispatch aborts
+   * and the task waits for an operator, its continuation anchor and claim released as a re-park
+   * would release them. The attempt row already says why.
+   */
+  private block(dispatch: Dispatch, reason: string, pauseKind: PauseKind): void {
+    this.d.db.transaction(() => {
+      if (this.dispatch(dispatch.dispatch_id).phase !== 'reserved' || this.d.tasks.get(dispatch.task_id)?.state !== 'ROUTING') return;
+      const claim = this.d.db.prepare("SELECT id, state FROM handoff_envelopes WHERE claimed_by_request_id = ?").get(dispatch.dispatch_id) as { id: string; state: string } | undefined;
+      if (claim?.state === 'claimed') new HandoffService(this.d.db).release(claim.id, dispatch.dispatch_id);
+      this.phase(dispatch.dispatch_id, 'aborted', reason);
+      this.d.tasks.transition(dispatch.task_id, 'WAITING_INPUT', pauseKind);
+      this.record(dispatch.task_id, 'dispatch.aborted', dispatch.condition_generation, dispatch.dispatch_id, { reason });
+    })();
+    this.publish(dispatch.task_id);
     this.releaseSoon(dispatch.task_id, `dispatch ${reason}`);
   }
 

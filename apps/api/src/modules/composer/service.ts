@@ -11,6 +11,11 @@
  * only once the worktree identity exists; anything else starts route-only with an attempt row
  * saying why (Q3), unless `composer.requireRevision` is on.
  *
+ * `composeForDispatch` (S6) recomposes at a scheduler wake, run-now, failover or manual handoff
+ * over the route the dispatch already made, so a changed assistant gets a new revision with the
+ * task's remaining budget. A K11 continuation on the same assistant reuses the revision instead.
+ * A recomposition that finds no budget left blocks the start; any other failure runs route-only.
+ *
  * Inputs are read here and nowhere in core: the registry view (volatile fields dropped, one sync
  * when no snapshot exists), the workspace policy document from config, the task's opt-ins (034),
  * repo signals at the base commit, env var NAMES and commands on PATH that the snapshot's assets
@@ -21,7 +26,7 @@ import { accessSync, constants } from "node:fs";
 import { hostname } from "node:os";
 import { delimiter, join } from "node:path";
 import {
-  composerInputsDigest, NO_CONSUMPTION, OVERRIDE_ACTOR, runComposer, TASK_KINDS, type AgentSpec, type BudgetCaps, type ComposeResult, type ComposerAsset,
+  composerInputsDigest, OVERRIDE_ACTOR, runComposer, TASK_KINDS, type AgentSpec, type BudgetCaps, type ComposeResult, type ComposerAsset,
   type ComposerConfig, type ComposerInputs, type ComposerOptIn, type ComposerOutcome, type ComposerOverrides, type ConfirmInput, type RegistryView,
   type RoutingExplanation, type TaskIntent, type TaskKind,
 } from "@agent-plane/core";
@@ -30,10 +35,11 @@ import type { Db } from "../../db/index.js";
 import type { CompositionDecision } from "../../composition-contract.js";
 import type { BundledComposition } from "../bundle-request.js";
 import { CompositionStore } from "../composition.js";
-import type { CompositionWorkspace, StartComposition } from "../orchestrator.js";
+import type { CompositionWorkspace, DispatchComposer, DispatchComposition, RecomposeOrigin, StartComposition } from "../orchestrator.js";
 import type { RegistryFederation } from "../registry-federation.js";
 import type { RouteDeps } from "../router.js";
-import { CockpitBundlePort, RouteHarnessModelPort } from "./ports.js";
+import { TaskAccounting } from "./accounting.js";
+import { CockpitBundlePort, RouteHarnessModelPort, type PinnedRoute } from "./ports.js";
 import { repoSignalsForTask } from "./repo-signals.js";
 
 /** `policy.revision.id`: the workspace policy comes from config.yaml; its digest tells revisions apart. */
@@ -129,8 +135,16 @@ interface Composed {
   resynced: boolean;
 }
 
-export class ComposerService {
-  constructor(private readonly deps: ComposerServiceDeps) {}
+/** The attempt reason of a K11 continuation that reuses its predecessor's revision. */
+export const REVISION_REUSED = "revision_reused";
+
+export class ComposerService implements DispatchComposer {
+  /** Budget settlement over the task's runs (§5); stage 5's `consumed` input. */
+  readonly accounting: TaskAccounting;
+
+  constructor(private readonly deps: ComposerServiceDeps) {
+    this.accounting = new TaskAccounting(deps);
+  }
 
   private get config(): ResolvedConfig { return this.deps.config; }
   private get db(): Db { return this.deps.db; }
@@ -190,7 +204,7 @@ export class ComposerService {
       routingDecisionId,
       explanation,
       binding: new StartBinding(this, {
-        taskId, routingDecisionId, inputsDigest, compositionDigest: result.compositionDigest, required: this.config.composer.requireRevision,
+        taskId, origin: START_ORIGIN, routingDecisionId, inputsDigest, compositionDigest: result.compositionDigest, required: this.config.composer.requireRevision,
         specDraft: result.specDraft, decision: result.decision, bundle: rendered, ...(baseCommit !== undefined ? { baseCommit } : {}),
       }),
     };
@@ -209,7 +223,7 @@ export class ComposerService {
     | { ok: true; attempt: StartAttempt; compositionRevisionId: string; policy: AgentSpec["policy"] }
     | { ok: false; attempt: StartAttempt; reason: string } {
     if (!workspace) {
-      const attempt = this.insertAttempt({ ...b, origin: START_ORIGIN, compositionDigest: null, outcome: "skipped", reason: "no_worktree_identity" });
+      const attempt = this.insertAttempt({ ...b, compositionDigest: null, outcome: "skipped", reason: "no_worktree_identity" });
       return { ok: false, attempt, reason: "no_worktree_identity" };
     }
     return this.db.transaction(() => {
@@ -226,10 +240,10 @@ export class ComposerService {
       const decision: CompositionDecision = { ...b.decision, id: decisionId, composition_revision_id: compositionRevisionId };
       const persisted = this.deps.bundled.persistRendered({ spec, decision, bundle: b.bundle });
       if (!persisted.ok) {
-        const attempt = this.insertAttempt({ ...b, origin: START_ORIGIN, compositionDigest: null, outcome: "failed", reason: persisted.reason });
+        const attempt = this.insertAttempt({ ...b, compositionDigest: null, outcome: "failed", reason: persisted.reason });
         return { ok: false as const, attempt, reason: persisted.reason };
       }
-      const attempt = this.insertAttempt({ ...b, origin: START_ORIGIN, outcome: "persisted", reason: null, compositionRevisionId });
+      const attempt = this.insertAttempt({ ...b, outcome: "persisted", reason: null, compositionRevisionId });
       return { ok: true as const, attempt, compositionRevisionId, policy: persisted.revision.spec.policy };
     })();
   }
@@ -239,9 +253,91 @@ export class ComposerService {
     new CompositionStore(this.db).attachRun(runId, compositionRevisionId);
   }
 
+  /** A run settled: append the `budget.overrun` events its revision now owes. Never throws. */
+  settled(runId: string): void {
+    try { this.accounting.recordOverruns(runId, "in_run"); } catch { /* accounting never fails a settle */ }
+  }
+
+  /** A late usage record arrived for a run: append the overrun it adds, if any (§5 "Late and post-run"). */
+  lateRecord(runId: string) {
+    return this.accounting.recordOverruns(runId, "late");
+  }
+
+  /**
+   * Stage 6, non-interactive dispatch (S6). The route is the one the dispatch already made and
+   * persisted; stage 2 projects it rather than routing again. Every answer has written its attempt
+   * row, except `compose` with a new revision, whose binding writes it with the revision.
+   */
+  async composeForDispatch(input: {
+    taskId: string; assistantId: string; origin: RecomposeOrigin; routingDecisionId: number; unbindable?: string;
+  }): Promise<DispatchComposition> {
+    const { taskId, assistantId, origin, routingDecisionId } = input;
+    const required = this.config.composer.requireRevision;
+    if (input.unbindable) {
+      this.insertAttempt({ taskId, origin, routingDecisionId, compositionDigest: null, inputsDigest: null, outcome: "skipped", reason: input.unbindable });
+      return required ? { kind: "blocked", reason: input.unbindable, pauseKind: "intervention_required" } : { kind: "route_only" };
+    }
+
+    // A K11 continuation on the same assistant continues the same composition (§2 stage 6).
+    if (origin === "context-yield") {
+      const last = this.db.prepare(
+        "SELECT assistant_id, composition_revision_id FROM runs WHERE task_id = ? ORDER BY started_at DESC, rowid DESC LIMIT 1",
+      ).get(taskId) as { assistant_id: string; composition_revision_id: string | null } | undefined;
+      if (last?.composition_revision_id && last.assistant_id === assistantId) {
+        const revision = last.composition_revision_id;
+        if (this.accounting.revisionRemaining(revision).exhausted.length) {
+          this.insertAttempt({ taskId, origin, routingDecisionId, compositionDigest: null, inputsDigest: null, outcome: "failed", reason: "budget_exhausted" });
+          return { kind: "blocked", reason: "budget_exhausted", pauseKind: "budget_exhausted" };
+        }
+        return { kind: "compose", composition: new ReusedBinding(this, { taskId, origin, routingDecisionId, compositionRevisionId: revision, required }) };
+      }
+    }
+
+    const row = this.db.prepare("SELECT explanation FROM routing_decisions WHERE id = ? AND task_id = ?").get(routingDecisionId, taskId) as { explanation: string } | undefined;
+    if (!row) throw new Error(`composer: routing decision ${routingDecisionId} is not task ${taskId}'s`);
+    const explanation = JSON.parse(row.explanation) as PinnedRoute["explanation"];
+    if (String(explanation.chosen) !== assistantId) throw new Error(`composer: routing decision ${routingDecisionId} chose ${String(explanation.chosen)}, not ${assistantId}`);
+
+    const composed = await this.compose(taskId, undefined, { mode: "start", origin }, { routingDecisionId, explanation });
+    const { result } = composed;
+    const outcome = result.outcome;
+    const inputsDigest = composerInputsDigest(composed.inputs, { sha256 });
+    if (outcome.status !== "composed" || !result.specDraft || !result.compositionDigest) {
+      const [status, reason] = outcome.status === "composed" ? ["failed" as const, "invalid_response"] : [outcome.status, outcome.reason];
+      this.insertAttempt({ taskId, origin, routingDecisionId, compositionDigest: null, inputsDigest, outcome: status, reason });
+      // No budget left is a policy answer, not a missing dependency: running route-only would spend past the cap.
+      if (reason === "budget_exhausted") return { kind: "blocked", reason, pauseKind: "budget_exhausted" };
+      return required ? { kind: "blocked", reason, pauseKind: "intervention_required" } : { kind: "route_only" };
+    }
+    const rendered = composed.bundle.lastRendered();
+    if (!rendered || rendered.response !== result.bundle?.response || rendered.request !== result.bundle?.request) {
+      throw new Error("composer: the composed bundle is not the one Cockpit rendered");
+    }
+    const baseCommit = composed.inputs.repoSignals.status === "ok" ? composed.inputs.repoSignals.baseCommit : undefined;
+    return {
+      kind: "compose",
+      composition: new StartBinding(this, {
+        taskId, origin, routingDecisionId, inputsDigest, compositionDigest: result.compositionDigest, required,
+        specDraft: result.specDraft, decision: result.decision, bundle: rendered, ...(baseCommit !== undefined ? { baseCommit } : {}),
+      }),
+    };
+  }
+
+  /** A reused revision's attempt row and the policy its next run executes under: the revision's caps less what its runs settled. */
+  bindReused(b: ReusedBindingData): { ok: true; attempt: StartAttempt; compositionRevisionId: string; policy: AgentSpec["policy"] } {
+    const spec = this.db.prepare("SELECT spec_json FROM agent_specs WHERE composition_revision_id = ? AND task_id = ?").get(b.compositionRevisionId, b.taskId) as { spec_json: string } | undefined;
+    if (!spec) throw new Error(`composer: revision ${b.compositionRevisionId} is not task ${b.taskId}'s`);
+    const policy = (JSON.parse(spec.spec_json) as AgentSpec).policy;
+    const { remaining } = this.accounting.revisionRemaining(b.compositionRevisionId);
+    const attempt = this.insertAttempt({ taskId: b.taskId, origin: b.origin, routingDecisionId: b.routingDecisionId, compositionDigest: null, inputsDigest: null, outcome: "skipped", reason: REVISION_REUSED });
+    return { ok: true, attempt, compositionRevisionId: b.compositionRevisionId, policy: { ...policy, budget: remaining } };
+  }
+
   /** Runs the pipeline over fresh ports; on a stale pin, one registry sync and one recompose (§2 stage 4). */
-  private async compose(taskId: string, overrides: ComposerOverrides | undefined, confirm: ConfirmInput): Promise<Composed> {
-    const harnessModel = new RouteHarnessModelPort(this.deps, taskId, "intake");
+  private async compose(taskId: string, overrides: ComposerOverrides | undefined, confirm: ConfirmInput, pinned?: PinnedRoute): Promise<Composed> {
+    const harnessModel = pinned
+      ? new RouteHarnessModelPort(this.deps, taskId, confirm.mode === "start" && confirm.origin !== "operator" ? confirm.origin : "intake", {}, pinned)
+      : new RouteHarnessModelPort(this.deps, taskId, "intake");
     const bundle = new CockpitBundlePort(this.deps.bundled);
     const ports = { harnessModel, bundle };
     let inputs = await this.inputs(taskId, overrides, harnessModel, confirm);
@@ -391,8 +487,8 @@ export class ComposerService {
       environment: this.environment(registry),
       config,
       workspacePolicy: { policyId: WORKSPACE_POLICY_ID, approvalMode: this.config.policy.approvalMode, toolAllowlist: [] },
-      // Settlement of what the task already consumed is S6 (composer/accounting.ts).
-      consumed: NO_CONSUMPTION,
+      // What the task's runs have settled so far (S6): a failover revision gets only the remainder.
+      consumed: this.accounting.consumption(taskId),
       ...(overrides ? { overrides } : {}),
       confirm,
       forbiddenHostnames: this.forbiddenHostnames(),
@@ -452,6 +548,8 @@ export class ComposerService {
 /** What a confirmed start carries until the worktree identity exists. */
 interface StartBindingData {
   taskId: string;
+  /** The attempt row's origin: `start` for an operator start, the dispatch origin otherwise. */
+  origin: string;
   routingDecisionId: number;
   inputsDigest: string;
   compositionDigest: string;
@@ -479,6 +577,32 @@ export class StartBinding implements StartComposition {
     const result = this.service.persistStart(this.data, workspace);
     this.recorded = result.attempt;
     return result.ok ? { ok: true, compositionRevisionId: result.compositionRevisionId, policy: result.policy } : { ok: false, reason: result.reason };
+  }
+
+  attachRun(runId: string, compositionRevisionId: string): void {
+    this.service.attachRun(runId, compositionRevisionId);
+  }
+}
+
+interface ReusedBindingData { taskId: string; origin: string; routingDecisionId: number; compositionRevisionId: string; required: boolean }
+
+/**
+ * A K11 continuation on the same assistant (S6): the run binds to its predecessor's revision, and
+ * executes under that revision's caps less what the revision's runs already settled.
+ */
+export class ReusedBinding implements StartComposition {
+  private recorded: StartAttempt | undefined;
+
+  constructor(private readonly service: ComposerService, private readonly data: ReusedBindingData) {}
+
+  get required(): boolean { return this.data.required; }
+  get attempt(): StartAttempt | undefined { return this.recorded; }
+
+  bind(): { ok: true; compositionRevisionId: string; policy: AgentSpec["policy"] } {
+    if (this.recorded) throw new Error("composer: a start composition binds once");
+    const result = this.service.bindReused(this.data);
+    this.recorded = result.attempt;
+    return result;
   }
 
   attachRun(runId: string, compositionRevisionId: string): void {
