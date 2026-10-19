@@ -1,6 +1,7 @@
 import type {
   AdapterContextSample,
   AgentAdapter,
+  AgentSpec,
   AssistantId,
   CapabilityManifest,
   NormalizedEvent,
@@ -69,8 +70,21 @@ function parseContextMarker(prompt: string): FakeRunState["context"] | undefined
   return { unavailable: false, tokens: Math.round(pressure * FAKE_CONTEXT_WINDOW), window: FAKE_CONTEXT_WINDOW };
 }
 
+/** The harness a fake assistant presents itself as (the AgentSpec harness vocabulary). */
+export type FakeHarness = AgentSpec["harness"];
+
+const FAKE_HARNESSES: readonly FakeHarness[] = ["claude-code", "codex", "cursor", "bedrock"];
+
 /** Optional per-assistant knobs, passed straight from workspace `assistants.<id>.options`. */
 export interface FakeOptions {
+  /**
+   * TEST-ONLY. The harness this fake assistant reports in its manifest
+   * (`providerDetail.harness`), so a drive can stand fake assistants in for
+   * Claude Code, Codex, Cursor or Bedrock. Default `claude-code`. Only the fake
+   * provider reads it; no real adapter has this option, and an unknown value
+   * throws at construction rather than being coerced.
+   */
+  harness?: FakeHarness;
   /**
    * Model selectors this fake assistant advertises. Default `[{ id: "fake-1" }]`
    * — unchanged for every existing caller. A demo/test that needs two distinct
@@ -88,12 +102,20 @@ const DEFAULT_MODELS: FakeOptions["models"] = [{ id: "fake-1", displayName: "Fak
  */
 export class FakeAdapter implements AgentAdapter {
   private runs = new Map<string, FakeRunState>();
+  /** The harness this fake presents as. Test-only; see {@link FakeOptions.harness}. */
+  readonly harness: FakeHarness;
 
   constructor(
     readonly id: AssistantId,
     private script: FakeScript = DEFAULT_SCRIPT,
     private options: FakeOptions = {},
-  ) {}
+  ) {
+    const harness = options.harness ?? "claude-code";
+    if (!FAKE_HARNESSES.includes(harness)) {
+      throw new Error(`Unknown fake harness ${JSON.stringify(harness)} for assistant ${id} (expected one of: ${FAKE_HARNESSES.join(", ")})`);
+    }
+    this.harness = harness;
+  }
 
   async describe(): Promise<CapabilityManifest> {
     return {
@@ -124,7 +146,7 @@ export class FakeAdapter implements AgentAdapter {
         autoManagement: "none",
         observesAutoCompaction: true,
       },
-      providerDetail: { runtime: "fake" },
+      providerDetail: { runtime: "fake", harness: this.harness },
       evidence: { source: "runtime-probe", observedAt: new Date().toISOString() },
     };
   }

@@ -238,19 +238,45 @@ function qualityScore(score: AssistantScore | undefined): number | undefined {
   return 0.5 * score.successRate + 0.3 * (score.testPassRate ?? score.successRate) + 0.2 * reliability;
 }
 
-/** CR-30: all Control Plane routing uses current evidence and durable intent. */
-export function routeTask(
-  deps: { db: Db; config: ResolvedConfig; tasks: TaskStore;
-    registry: Registry; cooldowns: CooldownStore; now?: () => Date;
-    /**
-     * K13 model catalog. Optional: without it the routing decision simply
-     * carries no `modelRecommendation`. Routing NEVER waits on, or fails
-     * because of, model intelligence (I-M3).
-     */
-    catalog?: ModelCatalogService },
-  taskId: string, origin: 'intake' | 'wake' | 'run-now' | 'failover' | 'context-yield',
-  options: { exclude?: string; override?: AssistantId; dispatchId?: string } = {},
-) {
+export type RouteOrigin = 'intake' | 'wake' | 'run-now' | 'failover' | 'context-yield';
+
+export interface RouteDeps {
+  db: Db; config: ResolvedConfig; tasks: TaskStore;
+  registry: Registry; cooldowns: CooldownStore; now?: () => Date;
+  /**
+   * K13 model catalog. Optional: without it the routing decision simply
+   * carries no `modelRecommendation`. Routing NEVER waits on, or fails
+   * because of, model intelligence (I-M3).
+   */
+  catalog?: ModelCatalogService;
+}
+
+export interface RouteOptions { exclude?: string; override?: AssistantId; dispatchId?: string }
+
+/**
+ * Everything `route()` needs for one task, plus the durable facts the explanation
+ * is assembled from afterwards. Pure reads: nothing here writes.
+ */
+export interface RouteInputs {
+  /** The `route()` request, exactly as `routeTask` has always built it. */
+  request: RouteRequest;
+  candidates: RouteCandidate[];
+  /** The task's durable intent. */
+  intent: TaskIntent;
+  /** The dispatch's checkpoint anchor; present only when `options.dispatchId` named a dispatch of this task. */
+  dispatch?: { checkpoint_id: string | null };
+  /** K11 provenance, read back from the checkpoint anchor. Present only for the `context-yield` origin. */
+  continuation?: ReturnType<typeof continuationProvenance>;
+}
+
+/**
+ * The input-building half of `routeTask`: reads durable intent, telemetry, quota
+ * projections and the registry, and returns the `route()` request without
+ * routing or persisting anything. Split out so a caller can route the same
+ * inputs more than once (for example with and without an override) and persist
+ * only the outcome it uses.
+ */
+export function routeInputs(deps: RouteDeps, taskId: string, origin: RouteOrigin, options: RouteOptions = {}): RouteInputs {
   const row = deps.tasks.get(taskId);
   if (!row) throw new Error(`Unknown task ${taskId}`);
   const intent = JSON.parse(row.intent_json) as TaskIntent;
@@ -264,12 +290,23 @@ export function routeTask(
   const continuation = origin === 'context-yield' && dispatch?.checkpoint_id
     ? continuationProvenance(deps.db, taskId, dispatch.checkpoint_id)
     : undefined;
-  const base = route({
+  const request: RouteRequest = {
     taskId, profile: intent.profile, needsRepo: !!intent.repository,
     repoPathAllowed: !intent.repository || deps.config.repoAllowlist.some(p => intent.repository!.path === p || intent.repository!.path.startsWith(`${p}/`)),
     cooldowns: new Map(), scores, projections: new Map(deps.registry.list().map(a => [a.id, new QuotaProjection(deps.db, deps.now).for(a.id, a.manifestParsed)])), userOverride: options.override ?? intent.overrides?.assistantId,
     preferSame: continuation?.previousAssistantId as AssistantId | undefined,
-  }, candidates);
+  };
+  return { request, candidates, intent, ...(dispatch ? { dispatch } : {}), ...(continuation ? { continuation } : {}) };
+}
+
+/** CR-30: all Control Plane routing uses current evidence and durable intent. */
+export function routeTask(
+  deps: RouteDeps,
+  taskId: string, origin: RouteOrigin,
+  options: RouteOptions = {},
+) {
+  const { request, candidates, intent, dispatch, continuation } = routeInputs(deps, taskId, origin, options);
+  const base = route(request, candidates);
   // K13. Computed AFTER the assistant decision and folded into the same
   // explanation object — it reads `base.candidates` (the router's own hard-filter
   // verdict) and `base.chosen`, and writes neither back. The assistant decision
