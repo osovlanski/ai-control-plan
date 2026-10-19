@@ -27,8 +27,15 @@ export type RegistrySyncReason =
   | "token_file_missing" | "token_file_unsafe" | "unreachable" | "timeout" | "unauthenticated"
   | "http_error" | "payload_too_large" | "unsupported_version" | "invalid_response";
 
+/**
+ * The only detail an error may carry: a fixed phrase or an HTTP status. Validator output and
+ * response bodies quote what the peer sent, and a peer can echo the bearer token, so they never
+ * reach a message, a log or an API read.
+ */
+export type RegistrySyncDetail = "empty" | "not JSON" | "version header does not match body" | "response contains the bearer token" | `${number}`;
+
 export class RegistrySyncError extends Error {
-  constructor(readonly reason: RegistrySyncReason, detail?: string) {
+  constructor(readonly reason: RegistrySyncReason, detail?: RegistrySyncDetail) {
     super(detail ? `${reason}: ${detail}` : reason);
   }
 }
@@ -113,15 +120,17 @@ export class CockpitRegistryClient implements RegistrySnapshotSource {
     }
     if (response.status === 401) throw new RegistrySyncError("unauthenticated");
     if (response.status === 413) throw new RegistrySyncError("payload_too_large");
-    if (!response.ok) throw new RegistrySyncError("http_error", String(response.status));
+    if (!response.ok) throw new RegistrySyncError("http_error", `${response.status}`);
     const text = await readBounded(response, this.maxBytes);
     let body: unknown;
     try { body = JSON.parse(text); } catch { throw new RegistrySyncError("invalid_response", "not JSON"); }
+    // Before validation, whose errors quote the response. The decoded form catches a token written with JSON escapes.
+    if (text.includes(token) || JSON.stringify(body).includes(token)) throw new RegistrySyncError("invalid_response", "response contains the bearer token");
     const served = response.headers.get(REGISTRY_VERSION_HEADER);
     const result = validateSnapshot(body);
     if (!result.ok) {
       const unsupported = result.errors.some((e) => e.startsWith("unsupported schemaVersion"));
-      throw new RegistrySyncError(unsupported ? "unsupported_version" : "invalid_response", result.errors.slice(0, 3).join("; "));
+      throw new RegistrySyncError(unsupported ? "unsupported_version" : "invalid_response");
     }
     if (served !== result.value.schemaVersion) throw new RegistrySyncError("invalid_response", "version header does not match body");
     return result.value;
