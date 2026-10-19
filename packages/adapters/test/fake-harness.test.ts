@@ -24,12 +24,15 @@ describe("fake adapter harness option", () => {
     expect((await fake.describe()).providerDetail.harness).toBe(harness);
   });
 
-  it("changes nothing else about the manifest", async () => {
+  it("changes nothing else about the manifest but the provisioning tier (M3)", async () => {
     const plain = await new FakeAdapter(id("fake")).describe();
     const codex = await new FakeAdapter(id("fake"), undefined, { harness: "codex" }).describe();
+    expect(plain.harness?.provisioning).toBe("full");
+    expect(codex.harness?.provisioning).toBe("partial");
     const { evidence: plainEvidence, providerDetail: plainDetail, ...plainRest } = plain;
     const { evidence: codexEvidence, providerDetail: codexDetail, ...codexRest } = codex;
-    expect(codexRest).toEqual(plainRest);
+    const tierless = (m: typeof plainRest) => ({ ...m, harness: { ...m.harness!, provisioning: undefined } });
+    expect(tierless(codexRest)).toEqual(tierless(plainRest));
     expect(codexEvidence.source).toBe(plainEvidence.source);
     expect({ ...codexDetail, harness: undefined }).toEqual({ ...plainDetail, harness: undefined });
   });

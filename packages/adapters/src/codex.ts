@@ -4,6 +4,10 @@ import { join } from "node:path";
 import { Codex, type CodexOptions, type Thread, type ThreadEvent, type ThreadItem } from "@openai/codex-sdk";
 import type {
   AgentAdapter,
+  ProvisionedProfile,
+  ProvisioningInput,
+  ProvisioningPlan,
+  ProvisioningVerification,
   AssistantId,
   CapabilityManifest,
   NormalizedEvent,
@@ -12,10 +16,11 @@ import type {
   RunId,
   RunSpec,
 } from "@agent-plane/core";
-import { newRunId, NotSupportedError } from "@agent-plane/core";
+import { newRunId, NotSupportedError, ProvisioningError } from "@agent-plane/core";
 import { CodexAppServerRuntime } from "./codex-app-server-runtime.js";
 import { codexPermissions } from "./codex-permissions.js";
 import { EventQueue } from "./event-queue.js";
+import { codexProvisioningPlan, disposeProfileDir, materializeProfile, requireProfileHarness, verifyProfileOnDisk } from "./provisioning.js";
 
 interface CodexRunState {
   queue: EventQueue<NormalizedEvent>;
@@ -75,6 +80,10 @@ export class CodexAdapter implements AgentAdapter {
         execution: { shell: true, filesystem: true, web: "unknown" },
         auth: detectAuth(this.options.authEnvVars),
       },
+      // M3: the SDK path delivers a profile's instructions but leaves ~/.codex visible
+      // (`codexProvisioningPlan`); the app-server transport delivers nothing yet. The other fields
+      // are the defaults an absent block already meant, so Prepare decides exactly as before.
+      harness: { usageAccounting: "none", toolGating: "none", approvalRelay: false, processIsolation: "none", provisioning: this.appServer ? "none" : "partial" },
       // M14 K9: `turn.completed` token accounting is NOT established as live
       // context occupancy, and this SDK layer exposes no context-usage payload.
       // App Server `thread/compact/start` + `thread/tokenUsage/updated` exist
@@ -100,16 +109,47 @@ export class CodexAdapter implements AgentAdapter {
 
   async start(run: RunSpec): Promise<RunHandle> {
     codexPermissions(run.permissionPolicy); // refuse before any process starts
+    this.refuseProfileOnAppServer(run);
     if (this.appServer) return this.appServer.start(run);
-    const thread = this.codex.startThread(this.threadOptions(run));
+    const thread = this.codexFor(run).startThread(this.threadOptions(run));
     return this.launch(thread, run);
   }
 
   async resume(ref: ProviderSessionRef, run: RunSpec): Promise<RunHandle> {
     codexPermissions(run.permissionPolicy);
+    this.refuseProfileOnAppServer(run);
     if (this.appServer) return this.appServer.start(run, ref);
-    const thread = this.codex.resumeThread(ref, this.threadOptions(run));
+    const thread = this.codexFor(run).resumeThread(ref, this.threadOptions(run));
     return this.launch(thread, run);
+  }
+
+  async prepare(input: ProvisioningInput): Promise<ProvisioningPlan> {
+    if (this.appServer) throw new ProvisioningError("unsupported_transport", "the Codex app-server transport does not take a provisioned profile yet");
+    return codexProvisioningPlan(input);
+  }
+
+  async provision(plan: ProvisioningPlan): Promise<ProvisionedProfile> {
+    return materializeProfile(plan, "codex");
+  }
+
+  async verify(profile: ProvisionedProfile): Promise<ProvisioningVerification> {
+    return verifyProfileOnDisk(profile, "codex");
+  }
+
+  async dispose(profile: ProvisionedProfile): Promise<{ removed: boolean }> {
+    return disposeProfileDir(profile);
+  }
+
+  private refuseProfileOnAppServer(run: RunSpec): void {
+    requireProfileHarness(run.profile, "codex");
+    if (run.profile && this.appServer) throw new NotSupportedError("a provisioned profile on the Codex app-server transport");
+  }
+
+  /** A profile's `--config` overrides need their own Codex instance: the SDK takes config per instance, not per thread. */
+  private codexFor(run: RunSpec): Codex {
+    const launch = run.profile?.launch;
+    if (!launch || launch.harness !== "codex") return this.codex;
+    return new Codex({ ...this.options.codex, config: { ...this.options.codex?.config, ...launch.config } });
   }
 
   private threadOptions(run: RunSpec) {

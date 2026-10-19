@@ -2,11 +2,17 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
 import { query, type McpServerConfig, type Options, type PermissionResult, type Query, type SDKMessage, type SDKUserMessage, type SpawnedProcess, type SpawnOptions } from "@anthropic-ai/claude-agent-sdk";
 import type {
   AdapterContextSample,
   AgentAdapter,
+  ProvisionedProfile,
+  ProvisioningInput,
+  ProvisioningPlan,
+  ProvisioningVerification,
+  VerifiedProfile,
   AssistantId,
   CapabilityManifest,
   NormalizedEvent,
@@ -20,6 +26,7 @@ import type {
 import { newRunId, NotSupportedError } from "@agent-plane/core";
 import type { ClaudeLiveSession } from "./claude-session-input.js";
 import { EventQueue } from "./event-queue.js";
+import { claudeProvisioningPlan, disposeProfileDir, materializeProfile, requireProfileHarness, verifyProfileOnDisk } from "./provisioning.js";
 
 interface ClaudeRunState {
   queue: EventQueue<NormalizedEvent>;
@@ -101,6 +108,10 @@ export class ClaudeAdapter implements AgentAdapter {
         execution: { shell: true, filesystem: true, web: "yes" },
         auth,
       },
+      // M3: per-run profiles exclude user and local settings, user plugins and MCP (see
+      // `claudeProvisioningPlan`). The other fields are the defaults an absent block already
+      // meant (relay follows `send`, which this adapter has), so Prepare decides exactly as before.
+      harness: { usageAccounting: "none", toolGating: "none", approvalRelay: true, processIsolation: "none", provisioning: "full" },
       // M14 K9 — the Agent SDK's `getContextUsage` control request reports live
       // occupancy (`totalTokens`) against the resolved autocompaction window
       // (`rawMaxTokens`), which is a DIFFERENT fact from the model's advertised
@@ -131,7 +142,24 @@ export class ClaudeAdapter implements AgentAdapter {
     return this.launch(run, ref);
   }
 
+  async prepare(input: ProvisioningInput): Promise<ProvisioningPlan> {
+    return claudeProvisioningPlan(input);
+  }
+
+  async provision(plan: ProvisioningPlan): Promise<ProvisionedProfile> {
+    return materializeProfile(plan, "claude-code");
+  }
+
+  async verify(profile: ProvisionedProfile): Promise<ProvisioningVerification> {
+    return verifyProfileOnDisk(profile, "claude-code", [sdkEvidence()]);
+  }
+
+  async dispose(profile: ProvisionedProfile): Promise<{ removed: boolean }> {
+    return disposeProfileDir(profile);
+  }
+
   private async launch(run: RunSpec, resumeRef: ProviderSessionRef | undefined): Promise<RunHandle> {
+    requireProfileHarness(run.profile, "claude-code"); // before any state or process exists
     const runId = newRunId();
     const state: ClaudeRunState = {
       queue: new EventQueue<NormalizedEvent>(),
@@ -167,9 +195,11 @@ export class ClaudeAdapter implements AgentAdapter {
         resume: resumeRef,
         abortController: state.abort,
         spawnClaudeCodeProcess: (options) => this.spawnProvider(options, state),
-        ...(this.options.profile
-          ? { settings: profileSettings(this.options.profile), strictMcpConfig: true, mcpServers: this.options.profile.mcpServers }
-          : {}),
+        ...(run.profile
+          ? provisionedOptions(run.profile)
+          : this.options.profile
+            ? { settings: profileSettings(this.options.profile), strictMcpConfig: true, mcpServers: this.options.profile.mcpServers }
+            : {}),
         permissionMode: run.permissionPolicy.mode === "auto-approve" ? "bypassPermissions" : "default",
         allowDangerouslySkipPermissions: run.permissionPolicy.mode === "auto-approve" ? true : undefined,
         canUseTool:
@@ -575,6 +605,37 @@ export interface ClaudeLaunchProfile {
  * (`allowedMcpServers` cannot carry the MCP list: from flag settings the CLI
  * treats it as allowing nothing, whatever the names — hence strict config.)
  */
+/**
+ * M3: launch options for a verified per-run profile. They replace the curated `providerProfile`
+ * launch: user and local settings are not loaded at all, so there is nothing to override.
+ */
+export function provisionedOptions(profile: VerifiedProfile): Pick<Options, "settingSources" | "plugins" | "strictMcpConfig" | "mcpServers" | "settings" | "systemPrompt"> {
+  const launch = profile.launch;
+  if (launch.harness !== "claude-code") throw new NotSupportedError(`a ${launch.harness} profile on Claude Code`);
+  return {
+    settingSources: [...launch.settingSources],
+    ...(launch.pluginDir ? { plugins: [{ type: "local" as const, path: launch.pluginDir, skipMcpDiscovery: true }] } : {}),
+    strictMcpConfig: launch.strictMcpConfig,
+    mcpServers: {},
+    settings: { disableClaudeAiConnectors: launch.disableClaudeAiConnectors },
+    ...(launch.systemPromptAppend !== undefined
+      ? { systemPrompt: { type: "preset" as const, preset: "claude_code" as const, append: launch.systemPromptAppend } }
+      : {}),
+  };
+}
+
+/** The SDK version the profile was verified against, recorded as evidence (risk 1: these surfaces move). */
+function sdkEvidence() {
+  let version = "unknown";
+  try {
+    const entry = createRequire(import.meta.url).resolve("@anthropic-ai/claude-agent-sdk");
+    version = (JSON.parse(readFileSync(join(dirname(entry), "package.json"), "utf8")) as { version: string }).version;
+  } catch {
+    // Not resolvable through exports: recorded as unknown rather than guessed.
+  }
+  return { name: "sdk", ok: true, detail: `@anthropic-ai/claude-agent-sdk ${version}` };
+}
+
 export function profileSettings(profile: ClaudeLaunchProfile, userSettingsPath = claudeUserSettingsPath()): NonNullable<Options["settings"]> {
   const keep = new Set(profile.plugins);
   const enabledPlugins: Record<string, boolean> = {};
