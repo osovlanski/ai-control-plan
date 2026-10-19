@@ -14,7 +14,7 @@ import {
 } from "../bundle-contract.js";
 import type { AgentSpec, CompositionDecision } from "../composition-contract.js";
 import { CompositionError, CompositionStore, type CompositionRevision } from "./composition.js";
-import { readBounded, readRegistryToken, RegistrySyncError, type RegistrySyncReason } from "./registry-federation.js";
+import { readBounded, readRegistryToken, RegistrySyncError, type RegistrySyncDetail, type RegistrySyncReason } from "./registry-federation.js";
 
 /**
  * Bound on the encoded response. Content is capped at 256 KiB (bundle-v1.md §Limits), but JSON
@@ -30,7 +30,7 @@ const LOOPBACK_HOSTS = ["127.0.0.1", "[::1]", "localhost"];
 export type BundleRequestReason = RegistrySyncReason | "not_found" | "bad_request";
 
 export class BundleRequestError extends Error {
-  constructor(readonly reason: BundleRequestReason, readonly detail?: string) {
+  constructor(readonly reason: BundleRequestReason, readonly detail?: RegistrySyncDetail) {
     super(detail ? `${reason}: ${detail}` : reason);
   }
 }
@@ -73,7 +73,7 @@ export class CockpitBundleClient implements BundleSource {
     }
     if (!response.ok) {
       await response.body?.cancel().catch(() => {});
-      throw new BundleRequestError("http_error", String(response.status));
+      throw new BundleRequestError("http_error", `${response.status}`);
     }
     let text: string;
     try { text = await readBounded(response, this.maxBytes); } catch (err) { throw asBundleError(err); }
@@ -85,7 +85,8 @@ export class CockpitBundleClient implements BundleSource {
     const result = validateBundleResponse(body, request);
     if (!result.ok) {
       const unsupported = result.errors.some((e) => e.startsWith("unsupported schemaVersion"));
-      throw new BundleRequestError(unsupported ? "unsupported_version" : "invalid_response", result.errors.slice(0, 3).join("; "));
+      // The reason only: validator errors quote values from the response.
+      throw new BundleRequestError(unsupported ? "unsupported_version" : "invalid_response");
     }
     return result.value;
   }
