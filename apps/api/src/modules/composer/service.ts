@@ -16,7 +16,7 @@ import { accessSync, constants } from "node:fs";
 import { hostname } from "node:os";
 import { delimiter, join } from "node:path";
 import {
-  NO_CONSUMPTION, OVERRIDE_ACTOR, runComposer, TASK_KINDS, type BudgetCaps, type ComposeResult, type ComposerAsset,
+  composerInputsDigest, NO_CONSUMPTION, OVERRIDE_ACTOR, runComposer, TASK_KINDS, type BudgetCaps, type ComposeResult, type ComposerAsset,
   type ComposerConfig, type ComposerInputs, type ComposerOptIn, type ComposerOutcome, type ComposerOverrides, type RegistryView,
   type TaskIntent, type TaskKind,
 } from "@agent-plane/core";
@@ -32,8 +32,6 @@ import { repoSignalsForTask } from "./repo-signals.js";
 export const WORKSPACE_POLICY_ID = "workspace-policy:config";
 /** The attempt row's origin for a preview. */
 export const PREVIEW_ORIGIN = "preview";
-/** A composed preview persists no revision; 034 requires a non-persisted attempt to say why. */
-export const PREVIEW_REASON = "preview: not persisted; awaiting confirmation";
 
 const ASSET_ID = /^[A-Za-z0-9][A-Za-z0-9._@:+-]{0,255}$/;
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
@@ -68,7 +66,8 @@ export interface AttemptRow {
   origin: string;
   routingDecisionId: number | null;
   compositionDigest: string | null;
-  outcome: "persisted" | "failed" | "skipped";
+  inputsDigest: string | null;
+  outcome: "persisted" | "previewed" | "failed" | "skipped";
   reason: string | null;
   compositionRevisionId: string | null;
   createdAt: string;
@@ -90,13 +89,15 @@ export class ComposerService {
     const bundle = new CockpitBundlePort(this.deps.bundled);
     const ports = { harnessModel, bundle };
 
-    let result = await runComposer(await this.inputs(taskId, overrides, harnessModel), ports, { sha256 });
+    let inputs = await this.inputs(taskId, overrides, harnessModel);
+    let result = await runComposer(inputs, ports, { sha256 });
     let resynced = false;
     // A stale pin (Cockpit 404): one registry sync, then recompose once (§2 stage 4).
     if (result.outcome.status === "failed" && result.outcome.reason === "not_found" && this.config.registry.cockpit.enabled) {
       await this.deps.federation.sync();
       resynced = true;
-      result = await runComposer(await this.inputs(taskId, overrides, harnessModel), ports, { sha256 });
+      inputs = await this.inputs(taskId, overrides, harnessModel);
+      result = await runComposer(inputs, ports, { sha256 });
     }
     if (result.outcome.status === "failed" && result.outcome.reason === "override_refused") {
       // Refused overrides are never recorded (§3): no routing row, no attempt.
@@ -107,11 +108,12 @@ export class ComposerService {
     const attempt = this.db.transaction(() => {
       const routingDecisionId = harnessModel.persistUsed() ?? null;
       const id = this.nextAttemptId(taskId);
-      const reason = outcome.status === "composed" ? PREVIEW_REASON : outcome.reason;
+      // A composed preview is `previewed` and needs no reason; a stopped pipeline says why.
+      const [status, reason] = outcome.status === "composed" ? ["previewed", null] : [outcome.status, outcome.reason];
       this.db.prepare(
-        `INSERT INTO composition_attempts (id, task_id, origin, routing_decision_id, composition_digest, outcome, reason, composition_revision_id, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
-      ).run(id, taskId, PREVIEW_ORIGIN, routingDecisionId, result.compositionDigest ?? null, outcome.status === "failed" ? "failed" : "skipped", reason, this.now().toISOString());
+        `INSERT INTO composition_attempts (id, task_id, origin, routing_decision_id, composition_digest, inputs_digest, outcome, reason, composition_revision_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
+      ).run(id, taskId, PREVIEW_ORIGIN, routingDecisionId, result.compositionDigest ?? null, composerInputsDigest(inputs, { sha256 }), status, reason, this.now().toISOString());
       return { id, routingDecisionId };
     })();
     return {
@@ -149,12 +151,12 @@ export class ComposerService {
         createdAt: r.created_at,
       }));
     const attempts: AttemptRow[] = (this.db.prepare(
-      `SELECT id, origin, routing_decision_id, composition_digest, outcome, reason, composition_revision_id, created_at
+      `SELECT id, origin, routing_decision_id, composition_digest, inputs_digest, outcome, reason, composition_revision_id, created_at
          FROM composition_attempts WHERE task_id = ? ORDER BY rowid`,
-    ).all(taskId) as Array<{ id: string; origin: string; routing_decision_id: number | null; composition_digest: string | null; outcome: AttemptRow["outcome"]; reason: string | null; composition_revision_id: string | null; created_at: string }>)
+    ).all(taskId) as Array<{ id: string; origin: string; routing_decision_id: number | null; composition_digest: string | null; inputs_digest: string | null; outcome: AttemptRow["outcome"]; reason: string | null; composition_revision_id: string | null; created_at: string }>)
       .map((r) => ({
         id: r.id, origin: r.origin, routingDecisionId: r.routing_decision_id, compositionDigest: r.composition_digest,
-        outcome: r.outcome, reason: r.reason, compositionRevisionId: r.composition_revision_id, createdAt: r.created_at,
+        inputsDigest: r.inputs_digest, outcome: r.outcome, reason: r.reason, compositionRevisionId: r.composition_revision_id, createdAt: r.created_at,
       }));
     return { taskId, revisions, attempts, optIns: this.optIns(taskId) };
   }

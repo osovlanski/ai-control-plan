@@ -18,7 +18,7 @@ import { validateAgentSpec, validateCompositionDecision } from "../src/compositi
 import { loadConfig, type ResolvedConfig } from "../src/config.js";
 import { openDb, type Db } from "../src/db/index.js";
 import { HARNESS_APPROVAL_MODES, harnessOf } from "../src/modules/composer/ports.js";
-import { PREVIEW_REASON, type PreviewResponse } from "../src/modules/composer/service.js";
+import type { PreviewResponse } from "../src/modules/composer/service.js";
 import { computeSnapshotDigest, REGISTRY_VERSION_HEADER, type RegistryAsset } from "../src/registry-contract.js";
 import { buildServer, type BuiltServer } from "../src/server.js";
 
@@ -249,13 +249,19 @@ describe("POST /api/tasks/:id/compose", () => {
     const attempts = db.prepare("SELECT * FROM composition_attempts").all() as Array<Record<string, unknown>>;
     expect(attempts).toEqual([expect.objectContaining({
       id: `CA-${id}-1`, task_id: id, origin: "preview", routing_decision_id: body.routingDecisionId, composition_digest: body.compositionDigest,
-      outcome: "skipped", reason: PREVIEW_REASON, composition_revision_id: null,
+      inputs_digest: expect.stringMatching(/^sha256:[0-9a-f]{64}$/), outcome: "previewed", reason: null, composition_revision_id: null,
     })]);
     expect(body.attemptId).toBe(`CA-${id}-1`);
 
     const history = await built!.app.inject({ method: "GET", url: `/api/tasks/${id}/composition`, headers: auth() });
     expect(history.statusCode).toBe(200);
-    expect(history.json()).toMatchObject({ taskId: id, revisions: [], attempts: [{ id: `CA-${id}-1`, outcome: "skipped", compositionDigest: body.compositionDigest }], optIns: [] });
+    expect(history.json()).toMatchObject({ taskId: id, revisions: [], attempts: [{ id: `CA-${id}-1`, outcome: "previewed", compositionDigest: body.compositionDigest, inputsDigest: attempts[0]!.inputs_digest }], optIns: [] });
+
+    // The same inputs again: the same inputs digest and composition digest, a second attempt row.
+    const again = await compose(id);
+    expect(again.body.compositionDigest).toBe(body.compositionDigest);
+    const digests = db.prepare("SELECT inputs_digest FROM composition_attempts ORDER BY rowid").all() as Array<{ inputs_digest: string }>;
+    expect(digests.map((d) => d.inputs_digest)).toEqual([attempts[0]!.inputs_digest, attempts[0]!.inputs_digest]);
   });
 
   it("records chosen: [] with a why when no skill fits (zero asset)", async () => {
