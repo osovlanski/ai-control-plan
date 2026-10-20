@@ -1,9 +1,9 @@
-export { ClaudeAdapter, profileSettings, type ClaudeAdapterOptions, type ClaudeLaunchProfile } from "./claude.js";
+export { ClaudeAdapter, profileSettings, provisionedOptions, type ClaudeAdapterOptions, type ClaudeLaunchProfile } from "./claude.js";
 export { CodexAdapter, type CodexAdapterOptions } from "./codex.js";
 export { OpenRouterCodexAdapter, type OpenRouterOptions } from "./openrouter.js";
 export { CursorAdapter, CursorSchemaError, mapCursorLine, calibrateFromSamples, type CursorOptions } from "./cursor.js";
 export { BedrockAdapter, parseAgentOutput, type BedrockOptions } from "./bedrock.js";
-export { FakeAdapter, type FakeScript, type FakeOptions } from "./fake.js";
+export { FakeAdapter, type FakeScript, type FakeOptions, type FakeHarness } from "./fake.js";
 export { EventQueue } from "./event-queue.js";
 export {
   FakeSessionInputAdapter,
@@ -18,3 +18,11 @@ export {
   type ClaudeSessionInputOptions,
 } from "./claude-session-input.js";
 export { CodexSessionInputAdapter } from "./codex-session-input.js";
+export {
+  PROFILE_MARKER,
+  assertProfileRoot,
+  claudeProvisioningPlan,
+  codexProvisioningPlan,
+  computeProfileDigest,
+  verifiedProfile,
+} from "./provisioning.js";

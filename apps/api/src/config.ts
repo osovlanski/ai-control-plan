@@ -97,6 +97,40 @@ export interface WorkspaceConfig {
     };
   };
   /**
+   * M2 Composer. Everything is off or empty by default: with `enabled` false
+   * nothing reads, writes or branches on any other key here, so intake, start,
+   * the scheduler and failover behave exactly as before the Composer existed.
+   * Unknown keys inside this section are a config error (a typo in a policy
+   * key must not silently fall back to a default).
+   */
+  composer?: {
+    enabled?: boolean;
+    /** When true, a start that cannot produce a composition revision is refused (422) instead of running route-only. */
+    requireRevision?: boolean;
+    assets?: {
+      /** Positive integer; default 3. */
+      maxSkills?: number;
+      /** Registry assets the workspace pre-approves, pinned by digest (`sha256:<64 hex>`). Default []. */
+      allowlist?: Array<{ id: string; digest: string }>;
+    };
+    context?: {
+      fragments?: { default?: string[]; byRepository?: Record<string, string[]> };
+      /** Pinned memory bundles. Default []. */
+      memoryBundles?: Array<{ id: string; digest: string; reason: string }>;
+      /** Characters per token used to ESTIMATE context size; `default` 3.5, each value > 0 and <= 16. */
+      charsPerToken?: { default?: number; byModel?: Record<string, number> };
+      /** Positive integer; default 12000. */
+      tokenBudget?: number;
+    };
+    policy?: {
+      /** Approval mode a task of each risk class must run under. Default { high: "prompt-on-escalation" }; user keys overlay it. */
+      riskPermission?: Partial<Record<"low" | "normal" | "high", ApprovalMode>>;
+      /** Whether a revision may request ambient (non-isolated) provisioning. Default false. */
+      permitAmbient?: boolean;
+      budget?: { maxTokens?: number; maxCostUsd?: number; maxRuntimeMs?: number };
+    };
+  };
+  /**
    * M12 model intelligence (K13). The catalog, its benchmark evidence and the
    * shadow recommendations are always readable; this block only controls
    * whether a recommendation may ever become an execution decision.
@@ -225,8 +259,27 @@ export interface ResolvedRegistryConfig {
   cockpit: { enabled: boolean; baseUrl: string; tokenPath: string; maxCacheAgeHours: number };
 }
 
-export interface ResolvedConfig extends Omit<WorkspaceConfig, "execution" | "models" | "decisions" | "sessionInput" | "registry"> {
+export interface ResolvedComposerConfig {
+  enabled: boolean;
+  requireRevision: boolean;
+  assets: { maxSkills: number; allowlist: Array<{ id: string; digest: string }> };
+  context: {
+    fragments: { default: string[]; byRepository: Record<string, string[]> };
+    memoryBundles: Array<{ id: string; digest: string; reason: string }>;
+    charsPerToken: { default: number; byModel: Record<string, number> };
+    tokenBudget: number;
+  };
+  policy: {
+    riskPermission: Partial<Record<"low" | "normal" | "high", ApprovalMode>>;
+    permitAmbient: boolean;
+    budget: { maxTokens?: number; maxCostUsd?: number; maxRuntimeMs?: number };
+  };
+}
+
+export interface ResolvedConfig extends Omit<WorkspaceConfig, "execution" | "models" | "decisions" | "sessionInput" | "registry" | "composer"> {
   registry: ResolvedRegistryConfig;
+  /** Always present; `enabled` is false unless the workspace turns it on. */
+  composer: ResolvedComposerConfig;
   execution: ResolvedExecutionConfig;
   models: ResolvedModelsConfig;
   decisions: ResolvedDecisionsConfig;
@@ -357,6 +410,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ResolvedConfig
   const decisions = resolveDecisions(file.decisions, configPath);
   const sessionInput = resolveSessionInput(file.sessionInput, configPath);
   const registry = resolveRegistry(file.registry, configPath);
+  const composer = resolveComposer(file.composer, configPath);
 
   const config: WorkspaceConfig = {
     workspace: file.workspace ?? workspace,
@@ -382,7 +436,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ResolvedConfig
   }
   ensureCredential(dir);
 
-  return { ...config, execution, models, decisions, sessionInput, registry, dir, dbPath: join(dir, "agent-plane.db"), warnings };
+  return { ...config, execution, models, decisions, sessionInput, registry, composer, dir, dbPath: join(dir, "agent-plane.db"), warnings };
 }
 
 /**
@@ -624,6 +678,150 @@ function resolveRegistry(file: WorkspaceConfig["registry"], configPath: string):
   if (cockpit.enabled && !isAbsolute(cockpit.tokenPath)) problems.push("registry.cockpit.tokenPath must be an absolute path when enabled");
   if (problems.length) throw new Error(`Invalid config at ${configPath}:\n  - ${problems.join("\n  - ")}`);
   return { cockpit };
+}
+
+const APPROVAL_MODES: readonly ApprovalMode[] = ["auto-approve", "prompt-on-escalation", "read-only"];
+const RISK_CLASSES = ["low", "normal", "high"] as const;
+// The same shapes the bundle, registry and composition contracts accept, so a bad value fails at boot, not at the first render.
+const SHA256_DIGEST = /^sha256:[0-9a-f]{64}$/;
+const REGISTRY_ASSET_ID = /^[A-Za-z0-9][A-Za-z0-9._@:+-]{0,255}$/;
+const FRAGMENT_NAME = /^[a-z0-9][a-z0-9._:-]{0,127}$/;
+const MEMORY_BUNDLE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const MAX_LISTED = 64;
+
+const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+const isPositiveInteger = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v > 0;
+const isCharsPerToken = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v) && v > 0 && v <= 16;
+
+/**
+ * Resolve `composer`. Fail-closed: nothing is on unless a key says so, and a
+ * malformed section is a boot error listing every problem, in the same style
+ * as `resolveRegistry`.
+ */
+function resolveComposer(file: unknown, configPath: string): ResolvedComposerConfig {
+  const problems: string[] = [];
+  const section = (value: unknown, path: string, known: readonly string[]): Record<string, unknown> => {
+    if (value === undefined) return {};
+    if (!isRecord(value)) { problems.push(`${path} must be a mapping`); return {}; }
+    for (const key of Object.keys(value)) if (!known.includes(key)) problems.push(`${path}.${key} is not a known key`);
+    return value;
+  };
+  const bool = (value: unknown, path: string): boolean | undefined => {
+    if (value === undefined) return undefined;
+    if (typeof value !== "boolean") { problems.push(`${path} must be a boolean`); return undefined; }
+    return value;
+  };
+  const names = (value: unknown, path: string, pattern: RegExp): string[] => {
+    if (value === undefined) return [];
+    if (!Array.isArray(value)) { problems.push(`${path} must be a list of names`); return []; }
+    if (value.length > MAX_LISTED) problems.push(`${path} may list at most ${MAX_LISTED} entries`);
+    const out: string[] = [];
+    for (const [i, item] of value.entries()) {
+      if (typeof item !== "string" || !pattern.test(item)) { problems.push(`${path}[${i}] is not a valid name: ${JSON.stringify(item)}`); continue; }
+      if (out.includes(item)) problems.push(`${path}[${i}] duplicates ${JSON.stringify(item)}`);
+      else out.push(item);
+    }
+    return out;
+  };
+  const pinned = <T extends { id: string; digest: string }>(value: unknown, path: string, idPattern: RegExp, extra: (item: Record<string, unknown>, at: string) => Omit<T, "id" | "digest"> | undefined, keys: readonly string[], max = Infinity): T[] => {
+    if (value === undefined) return [];
+    if (!Array.isArray(value)) { problems.push(`${path} must be a list`); return []; }
+    if (value.length > max) problems.push(`${path} may list at most ${max} entries`);
+    const out: T[] = [];
+    for (const [i, item] of value.entries()) {
+      const at = `${path}[${i}]`;
+      if (!isRecord(item)) { problems.push(`${at} must be a mapping`); continue; }
+      for (const key of Object.keys(item)) if (!keys.includes(key)) problems.push(`${at}.${key} is not a known key`);
+      const idOk = typeof item.id === "string" && idPattern.test(item.id);
+      const digestOk = typeof item.digest === "string" && SHA256_DIGEST.test(item.digest);
+      if (!idOk) problems.push(`${at}.id is not a valid id: ${JSON.stringify(item.id)}`);
+      if (!digestOk) problems.push(`${at}.digest must be sha256:<64 lowercase hex>, got ${JSON.stringify(item.digest)}`);
+      const rest = extra(item, at);
+      if (!idOk || !digestOk || !rest) continue;
+      if (out.some((o) => o.id === item.id && o.digest === item.digest)) { problems.push(`${at} duplicates ${String(item.id)} at ${String(item.digest)}`); continue; }
+      out.push({ id: item.id as string, digest: item.digest as string, ...rest } as T);
+    }
+    return out;
+  };
+  const nullProto = <V>(): Record<string, V> => Object.create(null) as Record<string, V>;
+
+  if (file !== undefined && !isRecord(file)) {
+    throw new Error(`Invalid config at ${configPath}:\n  - composer must be a mapping`);
+  }
+  const c = section(file, "composer", ["enabled", "requireRevision", "assets", "context", "policy"]);
+  const enabled = bool(c.enabled, "composer.enabled") ?? false;
+  const requireRevision = bool(c.requireRevision, "composer.requireRevision") ?? false;
+
+  const a = section(c.assets, "composer.assets", ["maxSkills", "allowlist"]);
+  if (a.maxSkills !== undefined && !isPositiveInteger(a.maxSkills)) problems.push("composer.assets.maxSkills must be a positive integer");
+  const maxSkills = isPositiveInteger(a.maxSkills) ? a.maxSkills : 3;
+  const allowlist = pinned<{ id: string; digest: string }>(a.allowlist, "composer.assets.allowlist", REGISTRY_ASSET_ID, () => ({}), ["id", "digest"]);
+
+  const x = section(c.context, "composer.context", ["fragments", "memoryBundles", "charsPerToken", "tokenBudget"]);
+  const f = section(x.fragments, "composer.context.fragments", ["default", "byRepository"]);
+  const fragmentsDefault = names(f.default, "composer.context.fragments.default", FRAGMENT_NAME);
+  const byRepository = nullProto<string[]>();
+  if (f.byRepository !== undefined) {
+    if (!isRecord(f.byRepository)) problems.push("composer.context.fragments.byRepository must be a mapping of repository id to fragment names");
+    else for (const [repo, list] of Object.entries(f.byRepository)) {
+      if (repo.length === 0) problems.push("composer.context.fragments.byRepository has an empty repository id");
+      byRepository[repo] = names(list, `composer.context.fragments.byRepository.${repo}`, FRAGMENT_NAME);
+    }
+  }
+  const memoryBundles = pinned<{ id: string; digest: string; reason: string }>(x.memoryBundles, "composer.context.memoryBundles", MEMORY_BUNDLE_ID, (item, at) => {
+    if (typeof item.reason !== "string" || item.reason.length === 0 || item.reason.length > 512) { problems.push(`${at}.reason must be a string of 1 to 512 characters`); return undefined; }
+    return { reason: item.reason };
+  }, ["id", "digest", "reason"], MAX_LISTED);
+  const cpt = section(x.charsPerToken, "composer.context.charsPerToken", ["default", "byModel"]);
+  if (cpt.default !== undefined && !isCharsPerToken(cpt.default)) problems.push("composer.context.charsPerToken.default must be a number greater than 0 and at most 16");
+  const charsDefault = isCharsPerToken(cpt.default) ? cpt.default : 3.5;
+  const byModel = nullProto<number>();
+  if (cpt.byModel !== undefined) {
+    if (!isRecord(cpt.byModel)) problems.push("composer.context.charsPerToken.byModel must be a mapping of model id to a number");
+    else for (const [model, value] of Object.entries(cpt.byModel)) {
+      if (model.length === 0) problems.push("composer.context.charsPerToken.byModel has an empty model id");
+      if (!isCharsPerToken(value)) problems.push(`composer.context.charsPerToken.byModel.${model} must be a number greater than 0 and at most 16`);
+      else byModel[model] = value;
+    }
+  }
+  if (x.tokenBudget !== undefined && !isPositiveInteger(x.tokenBudget)) problems.push("composer.context.tokenBudget must be a positive integer");
+  const tokenBudget = isPositiveInteger(x.tokenBudget) ? x.tokenBudget : 12_000;
+
+  const p = section(c.policy, "composer.policy", ["riskPermission", "permitAmbient", "budget"]);
+  const riskPermission: ResolvedComposerConfig["policy"]["riskPermission"] = { high: "prompt-on-escalation" };
+  const rp = section(p.riskPermission, "composer.policy.riskPermission", RISK_CLASSES);
+  for (const risk of RISK_CLASSES) {
+    const mode = rp[risk];
+    if (mode === undefined) continue;
+    if (typeof mode !== "string" || !APPROVAL_MODES.includes(mode as ApprovalMode)) problems.push(`composer.policy.riskPermission.${risk} must be one of ${APPROVAL_MODES.join(", ")}`);
+    else riskPermission[risk] = mode as ApprovalMode;
+  }
+  const permitAmbient = bool(p.permitAmbient, "composer.policy.permitAmbient") ?? false;
+  const b = section(p.budget, "composer.policy.budget", ["maxTokens", "maxCostUsd", "maxRuntimeMs"]);
+  const budget: ResolvedComposerConfig["policy"]["budget"] = {};
+  for (const key of ["maxTokens", "maxRuntimeMs"] as const) {
+    if (b[key] === undefined) continue;
+    if (!isPositiveInteger(b[key])) problems.push(`composer.policy.budget.${key} must be a positive integer`);
+    else budget[key] = b[key];
+  }
+  if (b.maxCostUsd !== undefined) {
+    if (typeof b.maxCostUsd !== "number" || !Number.isFinite(b.maxCostUsd) || !(b.maxCostUsd > 0)) problems.push("composer.policy.budget.maxCostUsd must be a positive number");
+    else budget.maxCostUsd = b.maxCostUsd;
+  }
+
+  if (problems.length) throw new Error(`Invalid config at ${configPath}:\n  - ${problems.join("\n  - ")}`);
+  return {
+    enabled,
+    requireRevision,
+    assets: { maxSkills, allowlist },
+    context: {
+      fragments: { default: fragmentsDefault, byRepository },
+      memoryBundles,
+      charsPerToken: { default: charsDefault, byModel },
+      tokenBudget,
+    },
+    policy: { riskPermission, permitAmbient, budget },
+  };
 }
 
 function validateModels(models: ResolvedModelsConfig, path: string): void {

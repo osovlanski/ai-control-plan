@@ -16,7 +16,12 @@
 // idempotent UsageRecord ingestion boundary, and `runs[].compositionRevisionId`
 // on `GET /api/tasks/:id` (null for runs with no composition). Credentials
 // minted before 2.5 lack `usage.write` and get 403 there until rotated.
-export const CONTROL_PLANE_API_VERSION = "2.5";
+// 2.6 (additive, M2 Composer preview): `POST /api/tasks/:id/compose` and
+// `POST /api/tasks/:id/composition/opt-ins` under `commands.write`, and
+// `GET /api/tasks/:id/composition` under `tasks.read`. No new capability. With
+// `composer.enabled` false (the default) the three routes answer 404
+// `composer_disabled` and every other route is unchanged.
+export const CONTROL_PLANE_API_VERSION = "2.6";
 export const NORMALIZED_EVENT_VERSION = "1.0";
 
 export const OBSERVABILITY_CAPABILITIES = [

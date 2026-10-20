@@ -1,17 +1,25 @@
 import type {
   AdapterContextSample,
   AgentAdapter,
+  AgentSpec,
   AssistantId,
   CapabilityManifest,
   NormalizedEvent,
+  ProvisionedProfile,
+  ProvisioningInput,
+  ProvisioningPlan,
+  ProvisioningVerification,
   ProviderSessionRef,
   RunHandle,
   RunId,
   RunInput,
   RunSpec,
 } from "@agent-plane/core";
-import { newRunId, NotSupportedError } from "@agent-plane/core";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { newRunId, NotSupportedError, ProvisioningError } from "@agent-plane/core";
 import { EventQueue } from "./event-queue.js";
+import { claudeProvisioningPlan, codexProvisioningPlan, disposeProfileDir, materializeProfile, sha256, verifyProfileOnDisk } from "./provisioning.js";
 
 type EmittedEvent = Omit<NormalizedEvent, "runId" | "ts">;
 
@@ -69,8 +77,21 @@ function parseContextMarker(prompt: string): FakeRunState["context"] | undefined
   return { unavailable: false, tokens: Math.round(pressure * FAKE_CONTEXT_WINDOW), window: FAKE_CONTEXT_WINDOW };
 }
 
+/** The harness a fake assistant presents itself as (the AgentSpec harness vocabulary). */
+export type FakeHarness = AgentSpec["harness"];
+
+const FAKE_HARNESSES: readonly FakeHarness[] = ["claude-code", "codex", "cursor", "bedrock"];
+
 /** Optional per-assistant knobs, passed straight from workspace `assistants.<id>.options`. */
 export interface FakeOptions {
+  /**
+   * TEST-ONLY. The harness this fake assistant reports in its manifest
+   * (`providerDetail.harness`), so a drive can stand fake assistants in for
+   * Claude Code, Codex, Cursor or Bedrock. Default `claude-code`. Only the fake
+   * provider reads it; no real adapter has this option, and an unknown value
+   * throws at construction rather than being coerced.
+   */
+  harness?: FakeHarness;
   /**
    * Model selectors this fake assistant advertises. Default `[{ id: "fake-1" }]`
    * — unchanged for every existing caller. A demo/test that needs two distinct
@@ -88,12 +109,20 @@ const DEFAULT_MODELS: FakeOptions["models"] = [{ id: "fake-1", displayName: "Fak
  */
 export class FakeAdapter implements AgentAdapter {
   private runs = new Map<string, FakeRunState>();
+  /** The harness this fake presents as. Test-only; see {@link FakeOptions.harness}. */
+  readonly harness: FakeHarness;
 
   constructor(
     readonly id: AssistantId,
     private script: FakeScript = DEFAULT_SCRIPT,
     private options: FakeOptions = {},
-  ) {}
+  ) {
+    const harness = options.harness ?? "claude-code";
+    if (!FAKE_HARNESSES.includes(harness)) {
+      throw new Error(`Unknown fake harness ${JSON.stringify(harness)} for assistant ${id} (expected one of: ${FAKE_HARNESSES.join(", ")})`);
+    }
+    this.harness = harness;
+  }
 
   async describe(): Promise<CapabilityManifest> {
     return {
@@ -114,7 +143,9 @@ export class FakeAdapter implements AgentAdapter {
       // gates nothing else — declaring it lets the Execution Harness's
       // token-usage telemetry (deferral-#5-adjacent, increment 3) see the same
       // numbers the legacy path reads straight off the raw event payload.
-      harness: { usageAccounting: "cumulative", toolGating: "none", approvalRelay: true, processIsolation: "none" },
+      // M3: a fake standing in for Claude Code or Codex runs that harness's real provisioning plan
+      // (files, digest, verify, dispose); only the launch is fake. Cursor and Bedrock have none.
+      harness: { usageAccounting: "cumulative", toolGating: "none", approvalRelay: true, processIsolation: "none", provisioning: FAKE_PROVISIONING[this.harness] },
       // K9: `observeContext` returns whatever `[FAKE:CONTEXT:…]` scripted. No
       // compaction control is exposed (that is K10) — `compact: "none"`.
       context: {
@@ -124,12 +155,39 @@ export class FakeAdapter implements AgentAdapter {
         autoManagement: "none",
         observesAutoCompaction: true,
       },
-      providerDetail: { runtime: "fake" },
+      providerDetail: { runtime: "fake", harness: this.harness },
       evidence: { source: "runtime-probe", observedAt: new Date().toISOString() },
     };
   }
 
+  async prepare(input: ProvisioningInput): Promise<ProvisioningPlan> {
+    if (this.harness === "claude-code") return claudeProvisioningPlan(input);
+    if (this.harness === "codex") return codexProvisioningPlan(input);
+    throw new ProvisioningError("unsupported_transport", `a fake ${this.harness} has no provisioning mechanism`);
+  }
+
+  async provision(plan: ProvisioningPlan): Promise<ProvisionedProfile> {
+    return materializeProfile(plan, this.provisionedHarness());
+  }
+
+  async verify(profile: ProvisionedProfile): Promise<ProvisioningVerification> {
+    return verifyProfileOnDisk(profile, this.provisionedHarness());
+  }
+
+  async dispose(profile: ProvisionedProfile): Promise<{ removed: boolean }> {
+    return disposeProfileDir(profile);
+  }
+
+  /** The harness this fake provisions as; a plan for any other is refused like a real adapter would. */
+  private provisionedHarness() {
+    if (this.harness !== "claude-code" && this.harness !== "codex") throw new ProvisioningError("unsupported_transport", `a fake ${this.harness} has no provisioning mechanism`);
+    return this.harness;
+  }
+
   async start(run: RunSpec): Promise<RunHandle> {
+    if (run.profile && run.profile.harness !== this.harness) {
+      throw new ProvisioningError("harness_mismatch", `run carries a ${run.profile.harness} profile; this fake presents as ${this.harness}`);
+    }
     const runId = newRunId();
     const state: FakeRunState = {
       queue: new EventQueue<NormalizedEvent>(),
@@ -161,6 +219,7 @@ export class FakeAdapter implements AgentAdapter {
       summary: "Fake run started",
       payload: { providerSessionRef: handle.providerSessionRef, model: run.model?.id ?? "fake-1" },
     });
+    if (run.profile) emit(launchedWith(run.profile));
 
     // Prompt-driven scenario switches (used by dev UI walkthroughs).
     const wantsApproval = this.script.approvalAfter !== undefined || run.prompt.includes("[FAKE:APPROVAL]");
@@ -288,6 +347,25 @@ export class FakeAdapter implements AgentAdapter {
       }
     }
   }
+}
+
+const FAKE_PROVISIONING: Record<FakeHarness, "full" | "partial" | "none"> = { "claude-code": "full", codex: "partial", cursor: "none", bedrock: "none" };
+
+/**
+ * What a provider would have seen at launch: each profile file read back from disk and checked
+ * against its digest. A drive reads this to show the profile existed when the run started.
+ */
+function launchedWith(profile: NonNullable<RunSpec["profile"]>): EmittedEvent {
+  const files = profile.files.map((f) => {
+    const abs = join(profile.root, f.relPath);
+    return { relPath: f.relPath, present: existsSync(abs) && sha256(readFileSync(abs, "utf8")) === f.digest };
+  });
+  const seen = files.filter((f) => f.present).length;
+  return {
+    type: "message",
+    summary: `Fake launched with profile ${profile.profileDigest} (${profile.fidelity}): ${seen}/${files.length} files present`,
+    payload: { text: `launched with profile ${profile.profileDigest}`, profile: { digest: profile.profileDigest, fidelity: profile.fidelity, files } },
+  };
 }
 
 function sleep(ms: number): Promise<void> {

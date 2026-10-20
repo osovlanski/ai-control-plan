@@ -1,6 +1,7 @@
 import type { RunId } from "./ids.js";
 import type { ActivityPhase } from "./task.js";
 import type { ContextObservation, ContextYieldReason } from "./context.js";
+import type { ProvisioningAmbientPayload, ProvisioningDisposedPayload, ProvisioningVerifiedPayload } from "./provisioning.js";
 
 /**
  * Closed set of normalized event types (revised architecture §4).
@@ -39,6 +40,14 @@ export const EVENT_TYPES = [
   // M14 K11 — the session settled YIELDED(context): a healthy, checkpoint-backed
   // clean-session continuation point. Not a fault, not a limit, not a handoff.
   "context.yield",
+  // M2 S6 — a settled or late usage figure took a composition revision past one of its
+  // caps. An accounting record on the run's timeline: it never changes the run's state.
+  "budget.overrun",
+  // M3 — the per-run profile a revision-bound session launched with (or that it had none), and its
+  // removal once the session ended.
+  "provisioning.verified",
+  "provisioning.ambient",
+  "provisioning.disposed",
 ] as const;
 
 export type NormalizedEventType = (typeof EVENT_TYPES)[number];
@@ -258,6 +267,24 @@ export interface ContextYieldPayload {
 }
 
 /**
+ * Payload for `budget.overrun` (M2 S6, plans/m2-composer.md §5): the runs bound to a composition
+ * revision settled past one of its caps. `amount` is what this event adds beyond earlier overrun
+ * events of the same revision and cap. Append-only; it never changes a run's state or verdict.
+ */
+export interface BudgetOverrunPayload {
+  compositionRevisionId: string;
+  cap: "max_tokens" | "max_cost_usd";
+  capValue: number;
+  /** The revision's settled total for that cap when the event was written. */
+  settled: number;
+  amount: number;
+  /** `in_run`: found when the run settled; `late`: a usage record arrived afterwards. */
+  source: "in_run" | "late";
+  /** `tokens`, or the cost method (`measured`, `estimated`, `unknown`). */
+  method: string;
+}
+
+/**
  * Payload for `recovery.decision` — an append-only witness of what boot
  * reconcile / the lease sweeper / directive replay / approval settlement did to
  * a session after a crash (§9). Durable so Cockpit can tell "orphaned" from
@@ -306,6 +333,10 @@ export interface EventPayloads {
   "context.observed": ContextObservedPayload;
   "context.compaction.observed": ContextCompactionObservedPayload;
   "context.yield": ContextYieldPayload;
+  "budget.overrun": BudgetOverrunPayload;
+  "provisioning.verified": ProvisioningVerifiedPayload;
+  "provisioning.ambient": ProvisioningAmbientPayload;
+  "provisioning.disposed": ProvisioningDisposedPayload;
 }
 
 /** Compile-time proof `EventPayloads` has an entry for every event type. */

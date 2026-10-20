@@ -20,3 +20,4 @@ import "./styles/applications.css";
 import "./styles/mission-shell.css";
 
 import "./styles/standalone-shell.css";
+import "./styles/composition.css";

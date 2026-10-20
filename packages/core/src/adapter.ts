@@ -3,6 +3,7 @@ import type { AdapterContextSample } from "./context.js";
 import type { NormalizedEvent } from "./events.js";
 import type { AssistantId, ProviderSessionRef, TaskId } from "./ids.js";
 import type { ModelRef } from "./capabilities.js";
+import type { ProvisionedProfile, ProvisioningInput, ProvisioningPlan, ProvisioningVerification, VerifiedProfile } from "./provisioning.js";
 
 /**
  * The 6-method adapter contract (revised architecture §4).
@@ -45,6 +46,21 @@ export interface AgentAdapter {
   providerProcess?(handle: RunHandle): ProviderProcess | undefined;
 
   cancel(handle: RunHandle): Promise<void>;
+
+  /**
+   * M3 provisioning lifecycle (plan §3.4). All four or none. The plane calls them in order for a
+   * revision-bound run, before `start`, and `dispose` once the session has ended.
+   *
+   * `prepare` computes an inspectable plan and writes nothing; it throws `ProvisioningError` when
+   * the revision cannot be provisioned here (another harness, an asset it cannot deliver).
+   */
+  prepare?(input: ProvisioningInput): Promise<ProvisioningPlan>;
+  /** Atomically materialize the plan under its root, with an ownership marker. Idempotent for the same plan. */
+  provision?(plan: ProvisioningPlan): Promise<ProvisionedProfile>;
+  /** Prove the profile on disk is exactly the plan, before `start`. Never throws for a failed check. */
+  verify?(profile: ProvisionedProfile): Promise<ProvisioningVerification>;
+  /** Remove the profile. Idempotent; refuses a directory it does not own. */
+  dispose?(profile: ProvisionedProfile): Promise<{ removed: boolean }>;
 }
 
 export interface ProviderProcess {
@@ -82,6 +98,12 @@ export interface RunSpec {
    * and the Harness drops them right after.
    */
   secretEnv?: Record<string, string>;
+  /**
+   * M3: the verified per-run profile this launch must use, deep-frozen. Set by the plane after
+   * `verify`, never part of the request fingerprint. An adapter given a profile for another
+   * harness refuses to start rather than launch against it (risk 9).
+   */
+  profile?: VerifiedProfile;
 }
 
 export type PermissionPolicy =

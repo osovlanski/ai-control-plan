@@ -1,7 +1,7 @@
 import { FakeAdapter } from "@agent-plane/adapters";
 import { writeFileSync } from "node:fs";
 import { test, expect } from "@playwright/test";
-import { boot, A, type Harness } from "./harness.js";
+import { boot, A, composerProbe, type Harness } from "./harness.js";
 
 let h: Harness;
 let consoleErrors: string[];
@@ -10,7 +10,7 @@ test.beforeEach(async ({ context }, info) => {
   consoleErrors = [];
   expectedReadFailures = false;
   context.on("page", page => {
-    page.on("console", m => { if (m.type() === "error") consoleErrors.push(m.text()); });
+    page.on("console", m => { if (m.type() === "error" && !composerProbe(m)) consoleErrors.push(m.text()); });
     page.on("pageerror", e => consoleErrors.push(e.message));
   });
   h = await boot(4179, "pr26-review", { [A]: { provider: "fake" } }, undefined, (config) => {

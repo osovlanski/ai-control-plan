@@ -72,6 +72,37 @@ export class EventRecorder {
     return redactEvent(event, this.redactionRules);
   }
 
+  /**
+   * Append witness events to a session that has already settled (M3 `provisioning.disposed`), the
+   * way accounting appends `budget.overrun`. Redacted like every batch, with the next seq; no
+   * session CAS, because a settled session's row no longer moves and this must not move it.
+   */
+  appendSettled(sessionId: string, events: NormalizedEvent[]): DurableEvent[] {
+    if (events.length === 0) return [];
+    const insert = this.db.prepare(
+      "INSERT INTO events (run_id, seq, ts, type, phase, summary, payload, raw) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    );
+    let committed: DurableEvent[] = [];
+    this.db.transaction(() => {
+      let seq = (this.db.prepare("SELECT COALESCE(MAX(seq), 0) AS maxSeq FROM events WHERE run_id = ?").get(sessionId) as { maxSeq: number }).maxSeq;
+      committed = events.map((raw) => {
+        seq += 1;
+        const safe = this.toDurableView({ ...raw, runId: sessionId as never });
+        insert.run(sessionId, seq, safe.ts, safe.type, safe.phase ?? null, safe.summary,
+          safe.payload ? JSON.stringify(safe.payload) : null, safe.raw !== undefined ? JSON.stringify(safe.raw) : null);
+        return Object.freeze({ seq, event: Object.freeze({ ...safe, seq }) });
+      });
+    })();
+    if (this.publish) {
+      try {
+        this.publish(sessionId, committed);
+      } catch (err) {
+        this.onPublishError?.(err);
+      }
+    }
+    return committed;
+  }
+
   recordBatch(input: RecordBatchInput): RecordBatchResult {
     if (input.events.length === 0) {
       return { committed: [], newVersion: input.expectedVersion };
