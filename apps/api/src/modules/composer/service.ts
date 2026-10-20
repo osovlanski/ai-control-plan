@@ -468,6 +468,20 @@ export class ComposerService implements DispatchComposer {
       ...(b.maxCostUsd !== undefined ? { max_cost_usd: b.maxCostUsd } : {}),
       ...(b.maxRuntimeMs !== undefined ? { max_runtime_ms: b.maxRuntimeMs } : {}),
     };
+    if (confirm.mode === "start" && confirm.origin !== "operator") {
+      const previous = this.db.prepare(
+        "SELECT spec_json FROM agent_specs WHERE task_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1",
+      ).get(taskId) as { spec_json: string } | undefined;
+      if (previous) {
+        // Only config and a persisted revision may supply caps. Preserve every prior tightening,
+        // even if config raises or removes a cap; stage 5 then subtracts task consumption.
+        const priorCaps = (JSON.parse(previous.spec_json) as AgentSpec).policy.budget;
+        for (const key of ["max_tokens", "max_cost_usd", "max_runtime_ms"] as const) {
+          const priorCap = priorCaps[key];
+          if (priorCap !== undefined) budget[key] = Math.min(budget[key] ?? priorCap, priorCap);
+        }
+      }
+    }
     const config: ComposerConfig = {
       maxSkills: composer.assets.maxSkills,
       maxMcpServers: composer.assets.maxMcpServers,
