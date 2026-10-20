@@ -98,7 +98,8 @@ describe("prepare", () => {
     tampered.bundle.files[0]!.content += "x";
     expect(await refusal(claude().prepare(tampered))).toBe("invalid_bundle");
     const withMcp = { ...i, spec: spec("claude-code", i.bundle, { mcp_servers: [{ id: "m", digest: `sha256:${"2".repeat(64)}`, allowlisted: true, tools_allowed: [], secret_refs: [{ type: "env", name: "FAKE_TOKEN" }] }] }) };
-    expect(await refusal(claude().prepare(withMcp))).toBe("unsupported_asset");
+    // An attached server with no registry launch shape is refused (M3 S4), never silently dropped.
+    expect(await refusal(claude().prepare(withMcp))).toBe("digest_mismatch");
     const stray = bundle("claude-code", [["notes.md", "x"]]);
     expect(await refusal(claude().prepare({ ...i, bundle: stray, spec: spec("claude-code", stray) }))).toBe("invalid_bundle");
     expect(await refusal(new CodexAdapter("codex" as AssistantId, { appServerInput: true }).prepare(input("codex")))).toBe("unsupported_transport");

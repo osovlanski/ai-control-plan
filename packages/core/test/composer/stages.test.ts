@@ -5,7 +5,7 @@ import { effectiveTokenBudget } from "../../src/composer/context.js";
 import { policyStage } from "../../src/composer/policy.js";
 import { harnessModelStage } from "../../src/composer/harness-model.js";
 import { finalizeStage } from "../../src/composer/explain.js";
-import { createTextGuard, harnessForProvider, type ComposedIntent, type ComposerAsset, type ComposerInputs, type HarnessModelChoice } from "../../src/index.js";
+import { createTextGuard, harnessForProvider, type ComposedIntent, type ComposerAsset, type ComposerInputs, type Harness, type HarnessModelChoice, type McpLaunch } from "../../src/index.js";
 import { baseInputs, deps, digestOf, fakeHarnessModel, projection, skill } from "./helpers.js";
 
 const guard = createTextGuard([]);
@@ -129,7 +129,7 @@ describe("stage 2: harness and model", () => {
 describe("stage 3: assets, hard filters in fixed order", () => {
   const intent: ComposedIntent = { kind: "coding", domains: ["typescript"], complexity: "M", risk: "normal" };
   const table: Array<[string, ComposerAsset, Partial<ComposerInputs>, string]> = [
-    ["mcp server", skill("srv", { kind: "mcp_server", tags: ["coding"] }), {}, "kind_not_attachable"],
+    ["mcp server with no launch shape", skill("srv", { kind: "mcp_server", tags: ["coding"] }), {}, "mcp_not_provisionable"],
     ["agent", skill("agt", { kind: "agent", tags: ["coding"] }), {}, "kind_not_attachable"],
     ["disabled", skill("off", { enabled: false, tags: ["coding"] }), {}, "disabled_in_producer"],
     ["incompatible", skill("cur", { compatibility: { assistants: ["cursor"] }, tags: ["coding"] }), {}, "incompatible_harness"],
@@ -146,6 +146,55 @@ describe("stage 3: assets, hard filters in fixed order", () => {
     const s = finalizeStage(r.stage, guard);
     expect(s.filters.map((f) => [f.filter, f.removed])).toEqual([[filter, [asset.id]]]);
     expect(s.chosen).toEqual([]);
+  });
+
+  describe("MCP servers (M3 S4)", () => {
+    const launch = (over: Partial<McpLaunch> = {}): McpLaunch => ({ transport: "stdio", command: "example-mcp", args: ["--stdio"], env: { EXAMPLE_TOKEN: { type: "env", name: "EXAMPLE_TOKEN" } }, ...over });
+    const server = (name: string, mcp: McpLaunch | undefined = launch(), over: Partial<ComposerAsset> = {}) =>
+      skill(name, { kind: "mcp_server", tags: ["coding"], requirements: { secretRefs: [{ type: "env", name: "EXAMPLE_TOKEN" }] }, ...(mcp ? { mcp } : {}), ...over });
+    const run = (assets: ComposerAsset[], harness: Harness = "claude-code", over: Partial<ComposerInputs> = {}) =>
+      assetsStage(baseInputs({ registry: okRegistry(assets), config: { ...baseInputs().config, allowlist: allow(...assets) }, environment: { envNames: ["EXAMPLE_TOKEN"], commands: [] }, ...over }), intent, harness, []);
+
+    it.each(["claude-code", "codex"] as const)("attaches a stdio server on %s with its secret refs by name, apart from the skills", (harness) => {
+      const srv = server("db");
+      const r = run([srv], harness);
+      expect(r.skills).toEqual([]);
+      expect(r.mcpServers).toEqual([{ id: srv.id, digest: srv.digest, allowlisted: true, tools_allowed: [], secret_refs: [{ type: "env", name: "EXAMPLE_TOKEN" }] }]);
+      expect(finalizeStage(r.stage, guard).chosen).toEqual([srv.id]);
+    });
+
+    it.each([
+      ["a remote transport", launch({ transport: "remote", command: undefined, url: "https://mcp.example.invalid/" }), /transport remote/],
+      ["a secret interpolated into argv", launch({ args: ["--token=${EXAMPLE_TOKEN}"] }), /never in argv/],
+      ["a keychain reference", launch({ env: { EXAMPLE_TOKEN: { type: "keychain", name: "fake-item" } } }), /keychain/],
+      ["no command", launch({ command: undefined }), /no command/],
+    ])("is not provisionable with %s, and says why", (_name, mcp, why) => {
+      const srv = server("bad", mcp);
+      const s = finalizeStage(run([srv]).stage, guard);
+      expect(s.filters.map((f) => [f.filter, f.removed])).toEqual([["mcp_not_provisionable", [srv.id]]]);
+      expect(s.candidates[0]!.evidence![0]).toMatch(why);
+    });
+
+    it("no_mcp_path for a harness without an MCP lifecycle", () => {
+      const srv = server("db", launch(), { compatibility: { assistants: ["cursor"] } });
+      const s = finalizeStage(run([srv], "cursor").stage, guard);
+      expect(s.filters.map((f) => f.filter)).toEqual(["no_mcp_path"]);
+    });
+
+    it("a launch env secret that is unset is a missing requirement, even when requirements omit it", () => {
+      const srv = server("db", launch(), { requirements: { secretRefs: [] } });
+      const s = finalizeStage(run([srv], "claude-code", { environment: { envNames: [], commands: [] } }).stage, guard);
+      expect(s.filters.map((f) => f.filter)).toEqual(["missing_requirement"]);
+      expect(s.candidates[0]!.evidence).toContain("missing requirement: env EXAMPLE_TOKEN is unset");
+    });
+
+    it("caps MCP servers at maxMcpServers, apart from maxSkills", () => {
+      const assets = [server("a-srv"), server("b-srv"), skill("one", { tags: ["coding"] })];
+      const r = run(assets, "claude-code", { config: { ...baseInputs().config, maxSkills: 1, maxMcpServers: 1, allowlist: allow(...assets) } });
+      expect(r.skills.map((x) => x.id)).toEqual(["claude-skills:one"]);
+      expect(r.mcpServers.map((x) => x.id)).toEqual(["claude-skills:a-srv"]);
+      expect(finalizeStage(r.stage, guard).filters).toEqual([{ filter: "over_max_mcp_servers", removed: ["claude-skills:b-srv"], reason: "ranked below the top 1 (composer.assets.maxMcpServers)" }]);
+    });
   });
 
   it("no_skill_path for codex, after harness compatibility", () => {

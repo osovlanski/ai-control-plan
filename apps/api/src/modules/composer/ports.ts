@@ -275,7 +275,7 @@ const PREDICT_REVISION = "composer-predict";
 export class AdapterProvisioningPort implements ProvisioningPort {
   constructor(private readonly deps: Pick<RouteDeps, "registry" | "config">) {}
 
-  async predict({ assistantId, spec, bundle }: ProvisioningPredictRequest): Promise<ProvisioningPrediction> {
+  async predict({ assistantId, spec, bundle, mcpServers }: ProvisioningPredictRequest): Promise<ProvisioningPrediction> {
     let adapter;
     try {
       adapter = this.deps.registry.adapter(assistantId);
@@ -295,7 +295,7 @@ export class AdapterProvisioningPort implements ProvisioningPort {
       explanation_ref: "",
     } satisfies AgentSpec;
     try {
-      const plan = await adapter.prepare({ spec: draftSpec, bundle, root: join(this.deps.config.dir, "profiles", PREDICT_SESSION), sessionId: PREDICT_SESSION });
+      const plan = await adapter.prepare({ spec: draftSpec, bundle, root: join(this.deps.config.dir, "profiles", PREDICT_SESSION), sessionId: PREDICT_SESSION, mcpServers });
       if (plan.fidelity === "none") return { status: "unavailable", reason: `${assistantId} prepares a profile with fidelity none` };
       return { status: "planned", harness: plan.harness, fidelity: plan.fidelity, profileDigest: plan.profileDigest, visible: [...plan.visible] };
     } catch (err) {

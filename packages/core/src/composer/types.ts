@@ -10,6 +10,7 @@ import type { PermissionPolicy } from "../adapter.js";
 import type {
   AgentSpec, BundleHarness, BundleRequest, BundleResponse, CompositionDecision, CompositionPermission, IntentKind, RegistryAsset,
 } from "../composition-types.js";
+import type { ProvisioningMcpServer } from "../provisioning.js";
 import type { TaskKind } from "../task-classifier.js";
 import type { TaskConsumption } from "./accounting.js";
 
@@ -47,7 +48,7 @@ export interface ComposerTask {
  * A registry asset as stage 3 sees it: the volatile fields (`installedAt`, `lastUsedAt`, `stats`)
  * are dropped, and `name`/`description` are never read, so third-party prose cannot enter a decision.
  */
-export type ComposerAsset = Pick<RegistryAsset, "id" | "digest" | "kind" | "enabled" | "tags" | "compatibility" | "requirements" | "conflicts" | "lineage">;
+export type ComposerAsset = Pick<RegistryAsset, "id" | "digest" | "kind" | "enabled" | "tags" | "compatibility" | "requirements" | "conflicts" | "lineage" | "mcp">;
 
 export type RegistryView =
   /** Registry federation is off (`registry.cockpit.enabled: false`); bundles are off with it. */
@@ -67,6 +68,8 @@ export interface BudgetCaps { max_tokens?: number; max_cost_usd?: number; max_ru
 export interface ComposerConfig {
   /** `composer.assets.maxSkills`. */
   maxSkills: number;
+  /** `composer.assets.maxMcpServers` (M3 S4). Absent means {@link DEFAULT_MAX_MCP_SERVERS}. */
+  maxMcpServers?: number;
   /** The workspace digest allowlist. */
   allowlist: readonly PinnedAsset[];
   /** `composer.context.fragments`, already resolved for the task's repository. */
@@ -220,6 +223,8 @@ export interface ProvisioningPredictRequest {
   assistantId: string;
   spec: Omit<AgentSpecDraft, "policy" | "provisioning">;
   bundle: BundleResponse;
+  /** The launch shape of each MCP server the spec attaches, from the registry at its digest (M3 S4). */
+  mcpServers: ProvisioningMcpServer[];
 }
 
 /**

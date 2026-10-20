@@ -80,7 +80,7 @@ export async function runComposer(inputs: ComposerInputs, ports: ComposerPorts, 
     harness,
     model: { primary: { id: choice.modelId }, fallbacks: [] },
     registry: { snapshot_digest: registry.snapshotDigest, observed_at: registry.observedAt, stale: registry.stale },
-    assets: { skills: assets.skills, mcp_servers: [], subagents: [] },
+    assets: { skills: assets.skills, mcp_servers: assets.mcpServers, subagents: [] },
     context: { fragments: plan.fragments, memory_bundles: plan.memoryBundles.map(({ id, digest, reason }) => ({ id, digest, reason })) },
   });
   const options = { charsPerToken: plan.charsPerToken, tokenBudget: plan.tokenBudget };
@@ -126,8 +126,11 @@ export async function runComposer(inputs: ComposerInputs, ports: ComposerPorts, 
       chars_per_token: response.manifest.tokens.charsPerToken,
     },
   };
+  // Stage 3 kept only MCP servers whose launch shape it read from this snapshot.
+  const launches = new Map(registry.assets.map((a) => [a.id, a]));
+  const mcpServers = assets.mcpServers.map((ref) => ({ ref, launch: launches.get(ref.id)!.mcp! }));
   const prediction = ports.provisioning
-    ? await ports.provisioning.predict({ assistantId: choice.assistantId, spec: { ...draft(), context: composedContext }, bundle: response })
+    ? await ports.provisioning.predict({ assistantId: choice.assistantId, spec: { ...draft(), context: composedContext }, bundle: response, mcpServers })
     : { status: "unavailable" as const, reason: "no provisioning port" };
   const policy = policyStage(inputs, intent.intent, intent.computed, choice, deps, prediction);
   stages.push(policy.stage);

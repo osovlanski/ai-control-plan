@@ -2,7 +2,7 @@
   "outcome": {
     "status": "composed"
   },
-  "compositionDigest": "sha256:6ecf0643c17e5e395b9846e4af7969eeaf6bd2bf89dc1c7f038fa1065662b727",
+  "compositionDigest": "sha256:e85695f7062f7863542cb3de12778067bbcc45f3eeb3295a9438a82bd0b87318",
   "decision": {
     "schema_version": "1.1",
     "stages": [
@@ -105,6 +105,7 @@
             "ref": "claude-skills:db-server",
             "digest": "sha256:9aec5fda26d11e615527c64594a0b5338a20f3a1f278eed7acbc1b2ef81ad6d6",
             "evidence": [
+              "not provisionable: the registry recorded no launch shape",
               "tags matched: coding",
               "lineage: library",
               "not allowlisted"
@@ -167,18 +168,18 @@
         ],
         "filters": [
           {
-            "filter": "kind_not_attachable",
-            "removed": [
-              "claude-skills:db-server"
-            ],
-            "reason": "only skills attach in M2: nothing provisions mcp servers or subagents until M3, and bundle v1 renders no plugin, hook or rule"
-          },
-          {
             "filter": "disabled_in_producer",
             "removed": [
               "claude-skills:old-review"
             ],
             "reason": "disabled in the producer"
+          },
+          {
+            "filter": "mcp_not_provisionable",
+            "removed": [
+              "claude-skills:db-server"
+            ],
+            "reason": "the launch shape cannot be provisioned: only stdio servers whose secrets are env-var references outside the command line"
           },
           {
             "filter": "not_allowlisted",
@@ -200,7 +201,7 @@
           "claude-skills:test-writer",
           "claude-skills:ts-review"
         ],
-        "why": "chose 3 of 7 candidates by tag matches with the intent (kind coding, domains fastify, node, typescript, vitest), at most 3; renderer excluded claude-skills:fastify-routes; re-ranked without it",
+        "why": "chose 3 of 7 candidates by tag matches with the intent (kind coding, domains fastify, node, typescript, vitest), at most 3 skill(s) and 2 MCP server(s); renderer excluded claude-skills:fastify-routes; re-ranked without it",
         "override": null
       },
       {

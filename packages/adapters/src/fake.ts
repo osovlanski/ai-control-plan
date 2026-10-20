@@ -19,7 +19,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { newRunId, NotSupportedError, ProvisioningError } from "@agent-plane/core";
 import { EventQueue } from "./event-queue.js";
-import { claudeProvisioningPlan, codexProvisioningPlan, disposeProfileDir, materializeProfile, sha256, verifyProfileOnDisk } from "./provisioning.js";
+import { claudeProvisioningPlan, codexProvisioningPlan, disposeProfileDir, materializeProfile, mcpSecretEnv, sha256, verifyProfileOnDisk } from "./provisioning.js";
 
 type EmittedEvent = Omit<NormalizedEvent, "runId" | "ts">;
 
@@ -53,6 +53,8 @@ interface FakeRunState {
   context?: { unavailable: boolean; tokens?: number; window?: number };
   /** Set once a scripted `[FAKE:COMPACT]` boundary has fired — later samples show relief. */
   compacted?: boolean;
+  /** Env var names an MCP secret was resolved into at launch (M3 S4). Never values. */
+  mcpSecretsDelivered?: string[];
 }
 
 const FAKE_CONTEXT_WINDOW = 200_000;
@@ -188,11 +190,15 @@ export class FakeAdapter implements AgentAdapter {
     if (run.profile && run.profile.harness !== this.harness) {
       throw new ProvisioningError("harness_mismatch", `run carries a ${run.profile.harness} profile; this fake presents as ${this.harness}`);
     }
+    // Like a real adapter, refuse a launch whose MCP secrets were not resolved. Only the names of
+    // the delivered env vars are kept: the values go out of scope here.
+    const delivered = Object.keys(mcpSecretEnv(run.profile, run.secretEnv)).sort();
     const runId = newRunId();
     const state: FakeRunState = {
       queue: new EventQueue<NormalizedEvent>(),
       cancelled: false,
       context: parseContextMarker(run.prompt),
+      mcpSecretsDelivered: delivered,
     };
     this.runs.set(runId, state);
     const handle: RunHandle = {
@@ -219,7 +225,7 @@ export class FakeAdapter implements AgentAdapter {
       summary: "Fake run started",
       payload: { providerSessionRef: handle.providerSessionRef, model: run.model?.id ?? "fake-1" },
     });
-    if (run.profile) emit(launchedWith(run.profile));
+    if (run.profile) emit(launchedWith(run.profile, state.mcpSecretsDelivered ?? []));
 
     // Prompt-driven scenario switches (used by dev UI walkthroughs).
     const wantsApproval = this.script.approvalAfter !== undefined || run.prompt.includes("[FAKE:APPROVAL]");
@@ -355,7 +361,7 @@ const FAKE_PROVISIONING: Record<FakeHarness, "full" | "partial" | "none"> = { "c
  * What a provider would have seen at launch: each profile file read back from disk and checked
  * against its digest. A drive reads this to show the profile existed when the run started.
  */
-function launchedWith(profile: NonNullable<RunSpec["profile"]>): EmittedEvent {
+function launchedWith(profile: NonNullable<RunSpec["profile"]>, mcpSecretsDelivered: string[]): EmittedEvent {
   const files = profile.files.map((f) => {
     const abs = join(profile.root, f.relPath);
     return { relPath: f.relPath, present: existsSync(abs) && sha256(readFileSync(abs, "utf8")) === f.digest };
@@ -364,7 +370,12 @@ function launchedWith(profile: NonNullable<RunSpec["profile"]>): EmittedEvent {
   return {
     type: "message",
     summary: `Fake launched with profile ${profile.profileDigest} (${profile.fidelity}): ${seen}/${files.length} files present`,
-    payload: { text: `launched with profile ${profile.profileDigest}`, profile: { digest: profile.profileDigest, fidelity: profile.fidelity, files } },
+    payload: {
+      text: `launched with profile ${profile.profileDigest}`,
+      profile: { digest: profile.profileDigest, fidelity: profile.fidelity, files },
+      // Names only: which MCP servers launched and which env vars received a resolved secret.
+      mcp: { servers: Object.keys(profile.launch.mcpServers ?? {}).sort(), secretsDelivered: mcpSecretsDelivered },
+    },
   };
 }
 

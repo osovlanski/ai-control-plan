@@ -13,10 +13,32 @@
  * This is NOT `ExecutionPolicy.isolation`, which is about process sandboxing.
  */
 
-import type { AgentSpec, BundleResponse } from "./composition-types.js";
+import type { AgentSpec, BundleResponse, McpAssetRef, McpLaunch } from "./composition-types.js";
 
 export type ProvisioningFidelity = "full" | "partial" | "none";
 export type ProvisionedHarness = "claude-code" | "codex";
+
+/**
+ * An MCP server the revision attaches, with the launch shape the registry recorded at its digest
+ * (M3 S4). The plane resolves it; bundle bytes do not carry it.
+ */
+export interface ProvisioningMcpServer {
+  ref: McpAssetRef;
+  launch: McpLaunch;
+}
+
+/**
+ * An MCP server as a profile launches it. `envRefs` maps the env var the server reads to the
+ * secret reference NAME that fills it; the value is resolved in memory at launch and travels only
+ * in the provider process environment, never in a file, argv, a digest or an event (risk 10).
+ */
+export interface ProfileMcpServer {
+  /** The registry asset this server came from. */
+  asset: { id: string; digest: string };
+  command: string;
+  args: string[];
+  envRefs: Record<string, string>;
+}
 
 /** What the plane hands `prepare`. The plane picks `root`; an adapter never chooses where it writes. */
 export interface ProvisioningInput {
@@ -27,6 +49,8 @@ export interface ProvisioningInput {
   root: string;
   /** The session the profile belongs to; written to the ownership marker. */
   sessionId: string;
+  /** One entry per `spec.assets.mcp_servers` ref. Absent means none were resolved. */
+  mcpServers?: ProvisioningMcpServer[];
 }
 
 /** A file the profile owns, relative to the profile root. */
@@ -48,13 +72,16 @@ export type ProfileLaunch =
       /** The bundle's CLAUDE.md, appended to the preset system prompt. */
       systemPromptAppend?: string;
       strictMcpConfig: true;
-      mcpServers: Record<string, never>;
+      /** The only MCP servers the run loads, by server name. */
+      mcpServers: Record<string, ProfileMcpServer>;
       disableClaudeAiConnectors: true;
     }
   | {
       harness: "codex";
       /** `--config` overrides; values are bundle content, never a secret. */
       config: { developer_instructions?: string };
+      /** Delivered as `mcp_servers.<name>` overrides, secrets by `env_vars` name only. Absent when none. */
+      mcpServers?: Record<string, ProfileMcpServer>;
     };
 
 /** `prepare`'s output: inspectable, deterministic, and nothing written yet. */
@@ -110,6 +137,8 @@ export interface VerifiedProfile {
   readonly launch: Readonly<ProfileLaunch>;
   readonly visible: readonly string[];
   readonly excluded: readonly string[];
+  /** Secret reference names the launch resolves in memory for the profile's MCP servers. */
+  readonly secretRefs: readonly string[];
   readonly checks: readonly ProvisioningCheck[];
 }
 
@@ -164,6 +193,29 @@ export interface ProvisioningSweptPayload {
   compositionRevisionId: string;
   profileDigest: string;
   staging: boolean;
+}
+
+/**
+ * Why an MCP launch shape cannot be provisioned, or undefined when it can (M3 S4). The Composer
+ * filters on it and `prepare` refuses on it, so the two never disagree. Only stdio servers with a
+ * plain command line and env-var secrets: a secret interpolated into argv would be visible in the
+ * process table (risk 10), and a keychain reference has no resolver.
+ */
+export function mcpLaunchProblem(launch: McpLaunch | undefined): string | undefined {
+  if (!launch) return "the registry recorded no launch shape";
+  if (launch.transport !== "stdio") return `transport ${launch.transport} is not provisioned; only stdio`;
+  if (!launch.command) return "a stdio server with no command";
+  if ([launch.command, ...(launch.args ?? [])].some((a) => a.includes("${"))) {
+    return "its command line interpolates an environment variable, and a secret travels only in the environment, never in argv";
+  }
+  if (Object.values(launch.env).some((r) => r.type !== "env")) return "a keychain secret reference has no resolver at launch";
+  return undefined;
+}
+
+/** The secret references an MCP launch names, sorted by name, without duplicates. */
+export function mcpSecretRefs(launch: McpLaunch): Array<{ type: "env" | "keychain"; name: string }> {
+  const byKey = new Map(Object.values(launch.env).map((r) => [`${r.type}:${r.name}`, { type: r.type, name: r.name }]));
+  return [...byKey.values()].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : a.type < b.type ? -1 : a.type > b.type ? 1 : 0));
 }
 
 /** Map a verified fidelity onto AgentSpec `provisioning.achieved`. */

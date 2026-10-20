@@ -275,3 +275,15 @@ export class RegistryFederation {
     ).all(limit);
   }
 }
+
+/**
+ * M3 S4: the MCP launch shape the registry recorded for an asset at one digest. `registry_assets`
+ * is content-addressed and never rewritten, so a revision's pinned digest always finds the shape
+ * it was composed with, whatever the latest snapshot says.
+ */
+export function mcpLaunchAt(db: Db, assetId: string, digest: string): RegistryAsset["mcp"] | undefined {
+  const row = db.prepare("SELECT metadata FROM registry_assets WHERE asset_id = ? AND digest = ?").get(assetId, digest) as { metadata: string } | undefined;
+  if (!row) return undefined;
+  const asset = JSON.parse(row.metadata) as RegistryAsset;
+  return asset.kind === "mcp_server" && asset.digest === digest ? asset.mcp : undefined;
+}
