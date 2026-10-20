@@ -156,6 +156,16 @@ export interface ProvisioningDisposedPayload {
   removed: boolean;
 }
 
+/**
+ * Payload of `provisioning.swept`: the boot sweep removed a profile whose session had ended
+ * without disposing it (a crash). `staging` marks a half-written profile.
+ */
+export interface ProvisioningSweptPayload {
+  compositionRevisionId: string;
+  profileDigest: string;
+  staging: boolean;
+}
+
 /** Map a verified fidelity onto AgentSpec `provisioning.achieved`. */
 export function achievedTier(fidelity: ProvisioningFidelity): NonNullable<AgentSpec["provisioning"]["achieved"]> {
   return fidelity === "none" ? "ambient" : fidelity;
