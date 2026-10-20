@@ -242,6 +242,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     // Advertised so a client can tell "capability off" from "request failed"
     // without probing a route that does not exist.
     sessionInput: { enabled: config.sessionInput.enabled },
+    composer: { enabled: config.composer.enabled, requireRevision: config.composer.requireRevision },
   }));
 
   // ---- Assistants / registry ----

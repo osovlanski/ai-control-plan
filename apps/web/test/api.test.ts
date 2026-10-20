@@ -2,10 +2,42 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiError, api } from "../src/api.js";
 import { AuthExpiredError, onAuthExpired } from "../src/auth.js";
 import { openTaskEventStream } from "../src/TaskDetail.jsx";
+import { composeFor } from "../src/NewTask.js";
 
 afterEach(() => vi.unstubAllGlobals());
 
 describe("web API client", () => {
+  it("skips composition requests when the workspace advertises composer disabled", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ composer: { enabled: false, requireRevision: false } })));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(composeFor("AG-1")).resolves.toEqual({ state: "off" });
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(["/api/workspace"]);
+  });
+
+  it.each([
+    { composer: { enabled: true, requireRevision: false } },
+    {},
+  ])("keeps the legacy composer_disabled fallback for workspace %j", async (workspace) => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(workspace)))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "Composer is off", reason: "composer_disabled" }), { status: 404 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(composeFor("AG-1")).resolves.toEqual({ state: "off" });
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(["/api/workspace", "/api/tasks/AG-1/compose"]);
+  });
+
+  it("still probes composition when the workspace read fails", async () => {
+    const fetchMock = vi.fn()
+      .mockRejectedValueOnce(new Error("Workspace unavailable"))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "Composition unavailable" }), { status: 503 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(composeFor("AG-1")).resolves.toMatchObject({ state: "error" });
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(["/api/workspace", "/api/tasks/AG-1/compose"]);
+  });
+
   it("returns workspace data from the versioned local API", async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ workspace: "personal" }), {
       status: 200,

@@ -4,7 +4,7 @@ import { DecisionView } from "./Composition.js";
 import { Button, Field, inputStyle, QuotaBar, tokens } from "./ui.jsx";
 
 /**
- * The composition shown next to the route. `off` is the plane's own answer (404 `composer_disabled`),
+ * The composition shown next to the route. `off` is advertised by the plane (or a legacy 404 `composer_disabled`),
  * not a guess; `error` is any other failure and leaves routing usable.
  */
 type Composition =
@@ -13,7 +13,9 @@ type Composition =
   | { state: "ready"; preview: CompositionPreview }
   | { state: "error"; message: string };
 
-const composeFor = async (taskId: string, assistantId?: string): Promise<Composition> => {
+export const composeFor = async (taskId: string, assistantId?: string): Promise<Composition> => {
+  const workspace = await api.workspace().catch(() => undefined);
+  if (workspace?.composer?.enabled === false) return { state: "off" };
   try {
     return { state: "ready", preview: await api.compose(taskId, assistantId) };
   } catch (e) {

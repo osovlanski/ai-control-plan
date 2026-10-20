@@ -1,5 +1,5 @@
 import { WaitingSummary } from "./WaitingSummary.js";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ComponentProps } from "react";
 import {
   api,
   type Comparison,
@@ -23,6 +23,25 @@ interface Notice {
   level: "info" | "warn";
   text: string;
   at: string;
+}
+
+/** Mounted on open; wait for the capability read before allowing the legacy probe. */
+export function WorkspaceCompositionPanel(props: ComponentProps<typeof CompositionPanel>) {
+  const [enabled, setEnabled] = useState<boolean | undefined | "loading">("loading");
+  useEffect(() => {
+    let active = true;
+    void api.workspace().then(
+      (workspace) => { if (active) setEnabled(workspace.composer?.enabled); },
+      () => { if (active) setEnabled(undefined); },
+    );
+    return () => { active = false; };
+  }, []);
+
+  if (enabled === "loading") return <p role="status" className="fine-print">Reading composition capability…</p>;
+  if (enabled === false) {
+    return <p className="comp-off" role="status">The Composer is off for this workspace (<code>composer.enabled</code> is false), so this task has no composition revision and runs on routing alone.</p>;
+  }
+  return <CompositionPanel {...props} />;
 }
 
 export function openTaskEventStream(taskId: string, onMessage: (message: MessageEvent<string>) => void): EventSource {
@@ -324,7 +343,7 @@ export function TaskDetail({ taskId, onBack }: { taskId: string; onBack: () => v
 
       {tab === "composition" && (
         <Card>
-          <CompositionPanel taskId={taskId} runs={detail.runs} refreshKey={`${state}:${detail.runs.length}`} />
+          <WorkspaceCompositionPanel taskId={taskId} runs={detail.runs} refreshKey={`${state}:${detail.runs.length}`} />
         </Card>
       )}
 

@@ -9,6 +9,8 @@ export interface Workspace {
   failover: { auto: boolean; softThresholdPct: number; triggers: string[] };
   /** Absent on a plane that predates the session-input contract — treat as off. */
   sessionInput?: { enabled: boolean };
+  /** Absent on older planes — unknown, so composition reads still probe. */
+  composer?: { enabled: boolean; requireRevision: boolean };
 }
 
 /** One durable session-addressed input, exactly as the plane records it. */

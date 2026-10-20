@@ -3,7 +3,7 @@ import { api } from "../api.js";
 import { actualLifecycle, describeState, modelIdentityView, nextStep, observedModel, resourceNextStep, waitKindLabel } from "../orbital.js";
 import { QuotaReadout, ContextReadout, ModelRecommendationReadout, DecisionSummary, ScheduleQueueReadout } from "./readouts.js";
 import { executionRead, missionState, type Mission } from "./execution.js";
-import { CompositionPanel } from "../Composition.js";
+import { WorkspaceCompositionPanel } from "../TaskDetail.js";
 
 export type { Snapshot } from "./useMissionSnapshot.js";
 import { useMissionSnapshot, type Snapshot } from "./useMissionSnapshot.js";
@@ -307,9 +307,9 @@ export function Inspector({
           </details>
           <details onToggle={(e) => setCompositionOpen(e.currentTarget.open)}>
             <summary>Composition</summary>
-            {/* Mounted on open: with the Composer off this is a read that answers 404. */}
+            {/* Mounted on open: check the workspace capability before reading composition. */}
             {compositionOpen && snapshot && (
-              <CompositionPanel taskId={task.id} runs={snapshot.detail.runs}
+              <WorkspaceCompositionPanel taskId={task.id} runs={snapshot.detail.runs}
                 refreshKey={`${snapshot.detail.state}:${snapshot.detail.runs.length}`} />
             )}
             <p className="fine-print">
