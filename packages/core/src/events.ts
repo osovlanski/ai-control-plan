@@ -1,7 +1,7 @@
 import type { RunId } from "./ids.js";
 import type { ActivityPhase } from "./task.js";
 import type { ContextObservation, ContextYieldReason } from "./context.js";
-import type { ProvisioningAmbientPayload, ProvisioningDisposedPayload, ProvisioningVerifiedPayload } from "./provisioning.js";
+import type { ProvisioningAmbientPayload, ProvisioningDisposedPayload, ProvisioningSweptPayload, ProvisioningVerifiedPayload } from "./provisioning.js";
 
 /**
  * Closed set of normalized event types (revised architecture §4).
@@ -48,6 +48,8 @@ export const EVENT_TYPES = [
   "provisioning.verified",
   "provisioning.ambient",
   "provisioning.disposed",
+  // M3 S3 — a profile a dead incarnation left behind, removed by the boot sweep.
+  "provisioning.swept",
 ] as const;
 
 export type NormalizedEventType = (typeof EVENT_TYPES)[number];
@@ -337,6 +339,7 @@ export interface EventPayloads {
   "provisioning.verified": ProvisioningVerifiedPayload;
   "provisioning.ambient": ProvisioningAmbientPayload;
   "provisioning.disposed": ProvisioningDisposedPayload;
+  "provisioning.swept": ProvisioningSweptPayload;
 }
 
 /** Compile-time proof `EventPayloads` has an entry for every event type. */
