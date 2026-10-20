@@ -127,6 +127,8 @@ export interface WorkspaceConfig {
       riskPermission?: Partial<Record<"low" | "normal" | "high", ApprovalMode>>;
       /** Whether a revision may request ambient (non-isolated) provisioning. Default false. */
       permitAmbient?: boolean;
+      /** M3 S2: whether a revision may bind a `partial` profile (machine-global config stays visible). Default false; `permitAmbient` implies it. */
+      permitPartial?: boolean;
       budget?: { maxTokens?: number; maxCostUsd?: number; maxRuntimeMs?: number };
     };
   };
@@ -272,6 +274,7 @@ export interface ResolvedComposerConfig {
   policy: {
     riskPermission: Partial<Record<"low" | "normal" | "high", ApprovalMode>>;
     permitAmbient: boolean;
+    permitPartial: boolean;
     budget: { maxTokens?: number; maxCostUsd?: number; maxRuntimeMs?: number };
   };
 }
@@ -787,7 +790,7 @@ function resolveComposer(file: unknown, configPath: string): ResolvedComposerCon
   if (x.tokenBudget !== undefined && !isPositiveInteger(x.tokenBudget)) problems.push("composer.context.tokenBudget must be a positive integer");
   const tokenBudget = isPositiveInteger(x.tokenBudget) ? x.tokenBudget : 12_000;
 
-  const p = section(c.policy, "composer.policy", ["riskPermission", "permitAmbient", "budget"]);
+  const p = section(c.policy, "composer.policy", ["riskPermission", "permitAmbient", "permitPartial", "budget"]);
   const riskPermission: ResolvedComposerConfig["policy"]["riskPermission"] = { high: "prompt-on-escalation" };
   const rp = section(p.riskPermission, "composer.policy.riskPermission", RISK_CLASSES);
   for (const risk of RISK_CLASSES) {
@@ -797,6 +800,7 @@ function resolveComposer(file: unknown, configPath: string): ResolvedComposerCon
     else riskPermission[risk] = mode as ApprovalMode;
   }
   const permitAmbient = bool(p.permitAmbient, "composer.policy.permitAmbient") ?? false;
+  const permitPartial = bool(p.permitPartial, "composer.policy.permitPartial") ?? false;
   const b = section(p.budget, "composer.policy.budget", ["maxTokens", "maxCostUsd", "maxRuntimeMs"]);
   const budget: ResolvedComposerConfig["policy"]["budget"] = {};
   for (const key of ["maxTokens", "maxRuntimeMs"] as const) {
@@ -820,7 +824,7 @@ function resolveComposer(file: unknown, configPath: string): ResolvedComposerCon
       charsPerToken: { default: charsDefault, byModel },
       tokenBudget,
     },
-    policy: { riskPermission, permitAmbient, budget },
+    policy: { riskPermission, permitAmbient, permitPartial, budget },
   };
 }
 

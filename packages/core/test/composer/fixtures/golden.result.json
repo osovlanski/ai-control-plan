@@ -2,7 +2,7 @@
   "outcome": {
     "status": "composed"
   },
-  "compositionDigest": "sha256:b8246fbd1d5917ee05e896d73f7a50d652c189a614dfd8eee441747c4690707c",
+  "compositionDigest": "sha256:6ecf0643c17e5e395b9846e4af7969eeaf6bd2bf89dc1c7f038fa1065662b727",
   "decision": {
     "schema_version": "1.1",
     "stages": [
@@ -285,19 +285,35 @@
           {
             "ref": "provisioning:ambient",
             "evidence": [
-              "isolation: ambient (M3 not shipped; workspace permits ambient)"
+              "workspace permits ambient"
+            ]
+          },
+          {
+            "ref": "provisioning:isolated",
+            "digest": "sha256:5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e",
+            "evidence": [
+              "personal-claude prepares a full claude-code profile",
+              "3 machine-global or workspace scope(s) stay visible"
             ]
           }
         ],
-        "filters": [],
+        "filters": [
+          {
+            "filter": "profile_planned",
+            "removed": [
+              "provisioning:ambient"
+            ],
+            "reason": "the revision binds a verified profile; it does not run ambient"
+          }
+        ],
         "chosen": [
           "max_cost_usd:3.75",
           "max_runtime_ms:1800000",
           "max_tokens:28000",
           "permission:prompt-on-escalation",
-          "provisioning:ambient"
+          "provisioning:isolated"
         ],
-        "why": "permission prompt-on-escalation (stricter of workspace auto-approve and risk high -> prompt-on-escalation); tools: none listed; the approval mode governs; budget: max_tokens:28000, max_runtime_ms:1800000, max_cost_usd:3.75; provisioning ambient (M3 not shipped; workspace permits ambient)",
+        "why": "permission prompt-on-escalation (stricter of workspace auto-approve and risk high -> prompt-on-escalation); tools: none listed; the approval mode governs; budget: max_tokens:28000, max_runtime_ms:1800000, max_cost_usd:3.75; provisioning isolated: full claude-code profile sha256:5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e",
         "override": null
       },
       {
@@ -390,7 +406,7 @@
     "policy": {
       "revision": {
         "id": "workspace-policy:personal",
-        "digest": "sha256:9f227e7f1856db1eaa0973716d5c4c4f9a0ae5627b5635ac788d3be5453dd7cc"
+        "digest": "sha256:d753227c5ec0cfbd30bbd099fbc9dc5466f0f63a19a6e37e0146e6d5352e7748"
       },
       "permission": "prompt-on-escalation",
       "tool_allowlist": [],
@@ -401,7 +417,9 @@
       }
     },
     "provisioning": {
-      "requested": "ambient"
+      "requested": "isolated",
+      "achieved": "full",
+      "profile_digest": "sha256:5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e"
     }
   }
 }

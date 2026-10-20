@@ -231,7 +231,7 @@ describe("stage 5: policy", () => {
     ["read-only", "prompt-on-escalation", "high", "read-only"],
     ["prompt-on-escalation", "auto-approve", "high", "prompt-on-escalation"],
   ] as const)("workspace %s, risk map %s for %s risk → %s", (mode, riskMode, risk, permission) => {
-    const config = { ...baseInputs().config, policy: { riskPermission: riskMode ? { [risk]: riskMode } : {}, permitAmbient: true } };
+    const config = { ...baseInputs().config, policy: { riskPermission: riskMode ? { [risk]: riskMode } : {}, permitAmbient: true, permitPartial: false } };
     const goal = risk === "high" ? "deploy it" : "fix it";
     const r = run({ config, workspacePolicy: { ...baseInputs().workspacePolicy, approvalMode: mode }, task: { id: "AG-1", goal, constraints: [], storedKind: "coding" } });
     expect(r.policy!.permission).toBe(permission);
@@ -246,8 +246,66 @@ describe("stage 5: policy", () => {
   });
 
   it("isolation_unavailable without permitAmbient (invariant 3)", () => {
-    const r = run({ config: { ...baseInputs().config, policy: { riskPermission: {}, permitAmbient: false } } });
+    const r = run({ config: { ...baseInputs().config, policy: { riskPermission: {}, permitAmbient: false, permitPartial: false } } });
     expect(r.failure).toBe("isolation_unavailable");
+  });
+
+  describe("provisioning (M3 S2)", () => {
+    const digest = `sha256:${"ab".repeat(32)}`;
+    const planned = (fidelity: "full" | "partial", harness = choice.harness as "claude-code" | "codex") =>
+      ({ status: "planned" as const, harness, fidelity, profileDigest: digest, visible: ["managed policy settings"] });
+    const policy = (permitAmbient: boolean, permitPartial: boolean) => ({ config: { ...baseInputs().config, policy: { riskPermission: {}, permitAmbient, permitPartial } } });
+    const runWith = (over: Partial<ComposerInputs>, prediction: Parameters<typeof policyStage>[5], ch: HarnessModelChoice = choice) => {
+      const inputs = baseInputs(over);
+      const computed = intentStage(inputs).computed;
+      return policyStage(inputs, computed, computed, ch, deps, prediction);
+    };
+
+    it("a planned full profile binds requested isolated, achieved full and its digest, even where ambient is not permitted", () => {
+      const r = runWith(policy(false, false), planned("full"));
+      expect(r.failure).toBeUndefined();
+      expect(r.provisioning).toEqual({ requested: "isolated", achieved: "full", profile_digest: digest });
+      const s = finalizeStage(r.stage, guard);
+      expect(s.chosen).toContain("provisioning:isolated");
+      expect(s.candidates.find((c) => c.ref === "provisioning:isolated")).toMatchObject({ digest });
+      expect(s.filters).toContainEqual(expect.objectContaining({ filter: "profile_planned", removed: ["provisioning:ambient"] }));
+      expect(s.why).toContain(`provisioning isolated: full ${choice.harness} profile ${digest}`);
+    });
+
+    it.each([
+      [true, false, "isolated"], [false, true, "isolated"], [false, false, "isolation_unavailable"],
+    ] as const)("partial with permitAmbient %s, permitPartial %s → %s", (permitAmbient, permitPartial, expected) => {
+      const r = runWith(policy(permitAmbient, permitPartial), planned("partial"));
+      if (expected === "isolated") {
+        expect(r.provisioning).toEqual({ requested: "isolated", achieved: "partial", profile_digest: digest });
+      } else {
+        expect(r.failure).toBe("isolation_unavailable");
+        const s = finalizeStage(r.stage, guard);
+        expect(s.filters.map((f) => f.filter)).toEqual(["partial_not_permitted", "isolation_unavailable"]);
+        expect(s.why).toContain("the profile is partial and partial is not permitted");
+      }
+    });
+
+    it("no profile is ambient only when the workspace permits it, and the decision says why", () => {
+      const prediction = { status: "unavailable" as const, reason: "unsupported_transport: no lifecycle" };
+      const ok = runWith(policy(true, false), prediction);
+      expect(ok.provisioning).toEqual({ requested: "ambient" });
+      expect(finalizeStage(ok.stage, guard).why).toContain("provisioning ambient: no profile (unsupported_transport: no lifecycle); workspace permits ambient");
+      expect(runWith(policy(false, true), prediction).failure).toBe("isolation_unavailable");
+    });
+
+    it("a profile planned for another harness is not this composition's (risk 9)", () => {
+      const other = choice.harness === "codex" ? "claude-code" : "codex";
+      const r = runWith(policy(true, true), planned("full", other));
+      expect(r.provisioning).toEqual({ requested: "ambient" });
+      expect(finalizeStage(r.stage, guard).why).toContain(`adapter planned a ${other} profile for a ${choice.harness} composition`);
+    });
+
+    it("permitPartial changes the policy revision digest", () => {
+      const a = runWith(policy(false, false), planned("full"));
+      const b = runWith(policy(false, true), planned("full"));
+      expect(a.policy!.revision.digest).not.toBe(b.policy!.revision.digest);
+    });
   });
 
   it("the budget is the task cap minus consumption; at zero it is exhausted", () => {
@@ -303,6 +361,6 @@ describe("stage 5: policy", () => {
     const a = run({});
     const reversed = { ...baseInputs().config, allowlist: [...baseInputs().config.allowlist].reverse() };
     expect(run({ config: reversed }).policy!.revision.digest).toBe(a.policy!.revision.digest);
-    expect(run({ config: { ...baseInputs().config, policy: { riskPermission: {}, permitAmbient: true } } }).policy!.revision.digest).not.toBe(a.policy!.revision.digest);
+    expect(run({ config: { ...baseInputs().config, policy: { riskPermission: {}, permitAmbient: true, permitPartial: false } } }).policy!.revision.digest).not.toBe(a.policy!.revision.digest);
   });
 });

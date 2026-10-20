@@ -61,7 +61,7 @@ export function baseInputs(over: Partial<ComposerInputs> = {}): ComposerInputs {
       memoryBundles: [],
       charsPerToken: 3.5,
       tokenBudget: 12000,
-      policy: { riskPermission: { high: "prompt-on-escalation" }, permitAmbient: true },
+      policy: { riskPermission: { high: "prompt-on-escalation" }, permitAmbient: true, permitPartial: false },
       budget: { max_tokens: 200000, max_runtime_ms: 1800000 },
     },
     workspacePolicy: { policyId: "workspace-policy:personal", approvalMode: "auto-approve", toolAllowlist: [] },

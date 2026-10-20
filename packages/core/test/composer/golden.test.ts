@@ -7,13 +7,13 @@
  * and review the diff of `fixtures/golden.result.json` before committing it.
  */
 import { describe, expect, it } from "vitest";
-import { jcs, runComposer, type BundlePortResult, type ComposerInputs, type HarnessModelProjection } from "../../src/index.js";
+import { jcs, runComposer, type BundlePortResult, type ComposerInputs, type HarnessModelProjection, type ProvisioningPrediction } from "../../src/index.js";
 import golden from "./fixtures/golden.input.json";
 import pinned from "./fixtures/golden.result.json";
 import { checkDecision, checkSpec, deps, clone } from "./helpers.js";
 
 const env = (globalThis as unknown as { process: { env: Record<string, string | undefined> } }).process.env;
-const fixture = golden as unknown as { inputs: ComposerInputs; harnessModel: HarnessModelProjection; bundleAnswers: BundlePortResult[] };
+const fixture = golden as unknown as { inputs: ComposerInputs; harnessModel: HarnessModelProjection; bundleAnswers: BundlePortResult[]; provisioningAnswer: ProvisioningPrediction };
 
 async function composeGolden() {
   const answers = clone(fixture.bundleAnswers);
@@ -28,6 +28,7 @@ async function composeGolden() {
         return answer;
       },
     },
+    provisioning: { predict: async () => clone(fixture.provisioningAnswer) },
   }, deps);
   return { result, drafts, unused: answers.length };
 }
