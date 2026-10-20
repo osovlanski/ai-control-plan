@@ -102,7 +102,8 @@ test.describe("Composer on", () => {
     await expect(spec.locator("div", { has: page.locator("dt", { hasText: /^Token cap$/ }) }).first()).toContainText("50,000");
     await expect(spec.locator("div", { has: page.locator("dt", { hasText: /^Complexity$/ }) }).first().locator(".method-guessed")).toHaveText("guessed");
     await expect(spec.locator("div", { has: page.locator("dt", { hasText: /^Context$/ }) }).first().locator(".method-estimated")).toHaveText("estimated");
-    await expect(spec.locator("div", { has: page.locator("dt", { hasText: /^Provisioning$/ }) }).first().locator(".method-unknown")).toHaveText("unknown");
+    // M3 predicts the profile during preview; this harness prepares a full isolated profile.
+    await expect(spec.locator("div", { has: page.locator("dt", { hasText: /^Provisioning$/ }) }).first()).toContainText("full (requested isolated)");
     await expect(page.getByRole("region", { name: "Routing recommendation" }).getByRole("button", { name: "Run composed", exact: true })).toBeVisible();
     // A preview wrote an attempt, never a revision.
     const api = await h.privileged();
@@ -227,6 +228,10 @@ test.describe("Composer off", () => {
 
   test("New Task and the Composition tab say the Composer is off, and routing still runs", async ({ context }) => {
     const page = await h.openApp(context);
+    const compositionRequests: string[] = [];
+    page.on("request", (request) => {
+      if (/\/compose(?:$|\?)|\/composition(?:\/|$|\?)/.test(new URL(request.url()).pathname)) compositionRequests.push(request.url());
+    });
     await preview(page);
     const proposal = page.getByRole("region", { name: "Routing recommendation" });
     await expect(proposal.getByText(/Composer is off for this workspace/)).toBeVisible();
@@ -234,8 +239,13 @@ test.describe("Composer off", () => {
     await proposal.getByRole("button", { name: "Run recommended", exact: true }).click();
     const task = h.built.tasks.list().find((t) => t.goal === GOAL)!;
     await h.waitForState(task.id, "COMPLETED");
+    const inspector = page.getByRole("region", { name: "Selected task inspector" });
+    await inspector.getByRole("button", { name: "Decision", exact: true }).click();
+    await inspector.getByText("Composition", { exact: true }).click();
+    await expect(inspector.getByRole("status").filter({ hasText: "The Composer is off for this workspace" })).toBeVisible();
     await page.getByRole("button", { name: "Open mission controls" }).click();
     await page.getByRole("button", { name: "Composition", exact: true }).click();
     await expect(page.getByRole("status").filter({ hasText: "The Composer is off for this workspace" })).toBeVisible();
+    expect(compositionRequests).toEqual([]);
   });
 });

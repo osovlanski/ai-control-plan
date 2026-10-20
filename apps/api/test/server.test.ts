@@ -22,8 +22,9 @@ afterEach(async () => {
   rmSync(home, { recursive: true, force: true });
 });
 
-function makeApp(): BuiltServer {
+function makeApp(composer?: { enabled: boolean; requireRevision: boolean }): BuiltServer {
   const config = loadConfig({ AGENT_PLANE_HOME: home });
+  if (composer) Object.assign(config.composer, composer);
   db = openDb(config.dbPath);
   built = buildServer({ config, db });
   built.registry.init();
@@ -77,6 +78,18 @@ describe("api server", () => {
     expect(body.failover.softThresholdPct).toBe(85);
     expect(body.assistants).toEqual(["personal-claude", "personal-codex"]);
     expect(JSON.stringify(body)).not.toMatch(/key|token|secret/i);
+  });
+
+  it.each([
+    { enabled: false, requireRevision: false },
+    { enabled: false, requireRevision: true },
+    { enabled: true, requireRevision: false },
+    { enabled: true, requireRevision: true },
+  ])("advertises composer config %j in workspace", async (composer) => {
+    const { app } = makeApp(composer);
+    const res = await app.inject({ method: "GET", url: "/api/workspace", headers: bearer() });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().composer).toEqual(composer);
   });
 
   it("seeds default assistants from config", async () => {
