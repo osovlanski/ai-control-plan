@@ -114,25 +114,29 @@ export async function runComposer(inputs: ComposerInputs, ports: ComposerPorts, 
   const { request, response } = rendered;
   stages.push(contextStage(plan, response, renders, harness, choice.modelId));
 
-  // Stage 5.
-  const policy = policyStage(inputs, intent.intent, intent.computed, choice, deps);
+  // Stage 5. The adapter's `prepare` (no write) predicts the profile the revision binds (M3 S2).
+  const composedContext = {
+    ...draft().context,
+    bundle_digest: response.manifest.bundleDigest,
+    compiler: {
+      name: response.manifest.compiler.name,
+      version: response.manifest.compiler.version,
+      tokens: response.manifest.tokens.estimated,
+      token_method: response.manifest.tokens.tokenMethod,
+      chars_per_token: response.manifest.tokens.charsPerToken,
+    },
+  };
+  const prediction = ports.provisioning
+    ? await ports.provisioning.predict({ assistantId: choice.assistantId, spec: { ...draft(), context: composedContext }, bundle: response })
+    : { status: "unavailable" as const, reason: "no provisioning port" };
+  const policy = policyStage(inputs, intent.intent, intent.computed, choice, deps, prediction);
   stages.push(policy.stage);
   if (policy.refused) return refusal(policy.refused, "policy");
   if (policy.failure || !policy.policy || !policy.provisioning) return stop({ status: "failed", reason: policy.failure ?? "policy_unenforceable" }, "policy");
 
   const specDraft: AgentSpecDraft = {
     ...draft(),
-    context: {
-      ...draft().context,
-      bundle_digest: response.manifest.bundleDigest,
-      compiler: {
-        name: response.manifest.compiler.name,
-        version: response.manifest.compiler.version,
-        tokens: response.manifest.tokens.estimated,
-        token_method: response.manifest.tokens.tokenMethod,
-        chars_per_token: response.manifest.tokens.charsPerToken,
-      },
-    },
+    context: composedContext,
     policy: policy.policy,
     provisioning: policy.provisioning,
   };

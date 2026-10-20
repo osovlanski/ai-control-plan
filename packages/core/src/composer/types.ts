@@ -80,6 +80,11 @@ export interface ComposerConfig {
     /** `composer.policy` risk map, in config vocabulary. */
     riskPermission: Partial<Record<IntentRisk, ApprovalMode>>;
     permitAmbient: boolean;
+    /**
+     * M3 S2: whether a revision may bind a `partial` profile (machine-global config stays visible).
+     * A workspace that permits ambient accepts partial too, since partial is strictly more isolated.
+     */
+    permitPartial: boolean;
   };
   /** Per-task caps. */
   budget: BudgetCaps;
@@ -210,7 +215,26 @@ export type BundlePortResult =
 /** Stage 4 over #85's `BundledComposition.render`. Writes nothing. Failures are answers (`status: "failure"`); a throw rejects runComposer. */
 export interface BundlePort { render(draft: BundleRenderDraft, options: { charsPerToken: number; tokenBudget: number }): Promise<BundlePortResult> }
 
-export interface ComposerPorts { harnessModel: HarnessModelPort; bundle: BundlePort }
+/** What stage 5 hands the provisioning port: the spec as far as stage 4 knows it, and the rendered bundle. */
+export interface ProvisioningPredictRequest {
+  assistantId: string;
+  spec: Omit<AgentSpecDraft, "policy" | "provisioning">;
+  bundle: BundleResponse;
+}
+
+/**
+ * M3 S2: what the chosen adapter's `prepare` says it would provision for this composition. Writes
+ * nothing. `planned` carries the profile digest the run must verify; `unavailable` is an answer
+ * (no lifecycle, an unsupported asset or transport), never a throw.
+ */
+export type ProvisioningPrediction =
+  | { status: "planned"; harness: BundleHarness; fidelity: "full" | "partial"; profileDigest: string; visible: string[] }
+  | { status: "unavailable"; reason: string };
+
+export interface ProvisioningPort { predict(request: ProvisioningPredictRequest): Promise<ProvisioningPrediction> }
+
+/** `provisioning` is optional: without it every composition is ambient, as in M2. */
+export interface ComposerPorts { harnessModel: HarnessModelPort; bundle: BundlePort; provisioning?: ProvisioningPort }
 /** `sha256` returns 64 lowercase hex characters of the UTF-8 encoding of `text`. */
 export interface ComposerDeps { sha256(text: string): string }
 

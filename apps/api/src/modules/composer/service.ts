@@ -39,7 +39,7 @@ import type { CompositionWorkspace, DispatchComposer, DispatchComposition, Recom
 import type { RegistryFederation } from "../registry-federation.js";
 import type { RouteDeps } from "../router.js";
 import { TaskAccounting } from "./accounting.js";
-import { CockpitBundlePort, RouteHarnessModelPort, type PinnedRoute } from "./ports.js";
+import { AdapterProvisioningPort, CockpitBundlePort, RouteHarnessModelPort, type PinnedRoute } from "./ports.js";
 import { repoSignalsForTask } from "./repo-signals.js";
 
 /** `policy.revision.id`: the workspace policy comes from config.yaml; its digest tells revisions apart. */
@@ -339,7 +339,7 @@ export class ComposerService implements DispatchComposer {
       ? new RouteHarnessModelPort(this.deps, taskId, confirm.mode === "start" && confirm.origin !== "operator" ? confirm.origin : "intake", {}, pinned)
       : new RouteHarnessModelPort(this.deps, taskId, "intake");
     const bundle = new CockpitBundlePort(this.deps.bundled);
-    const ports = { harnessModel, bundle };
+    const ports = { harnessModel, bundle, provisioning: new AdapterProvisioningPort(this.deps) };
     let inputs = await this.inputs(taskId, overrides, harnessModel, confirm);
     let result = await runComposer(inputs, ports, { sha256 });
     let resynced = false;
@@ -475,7 +475,7 @@ export class ComposerService implements DispatchComposer {
       memoryBundles: composer.context.memoryBundles.map(({ id, digest, reason }) => ({ id, digest, reason })),
       charsPerToken,
       tokenBudget: composer.context.tokenBudget,
-      policy: { riskPermission: { ...composer.policy.riskPermission }, permitAmbient: composer.policy.permitAmbient },
+      policy: { riskPermission: { ...composer.policy.riskPermission }, permitAmbient: composer.policy.permitAmbient, permitPartial: composer.policy.permitPartial },
       budget,
     };
     const storedKind = row.task_kind !== null && (TASK_KINDS as readonly string[]).includes(row.task_kind) ? (row.task_kind as TaskKind) : undefined;

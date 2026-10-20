@@ -241,7 +241,8 @@
         "riskPermission": {
           "high": "prompt-on-escalation"
         },
-        "permitAmbient": true
+        "permitAmbient": true,
+        "permitPartial": false
       },
       "budget": {
         "max_tokens": 40000,
@@ -494,5 +495,16 @@
         }
       }
     }
-  ]
+  ],
+  "provisioningAnswer": {
+    "status": "planned",
+    "harness": "claude-code",
+    "fidelity": "full",
+    "profileDigest": "sha256:5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e",
+    "visible": [
+      "the worktree's project settings, CLAUDE.md, skills and agents (.claude/)",
+      "managed policy settings",
+      "provider authentication"
+    ]
+  }
 }
