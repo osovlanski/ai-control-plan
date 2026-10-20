@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { api } from "../src/api.js";
+import { ApiError, api } from "../src/api.js";
 import { AuthExpiredError, onAuthExpired } from "../src/auth.js";
 import { openTaskEventStream } from "../src/TaskDetail.jsx";
 
@@ -93,5 +93,49 @@ describe("web API client", () => {
     })));
 
     await expect(api.start("task-1")).rejects.toThrow("No eligible assistant");
+  });
+});
+
+describe("composer reads (API 2.6)", () => {
+  const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+
+  it("keeps the plane's reason on a refusal so a disabled composer is told apart from a failure", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(json(404, { error: "the composer is disabled (composer.enabled is false)", reason: "composer_disabled" })));
+    const err = await api.compose("AG-1").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect(err).toMatchObject({ status: 404, reason: "composer_disabled", message: "the composer is disabled (composer.enabled is false)" });
+  });
+
+  it("carries the new preview of a 409 composition_drift", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(json(409, { error: "the composition changed since it was previewed", reason: "composition_drift", preview: { compositionDigest: "sha256:new" } })));
+    const err = await api.start("AG-1", undefined, `sha256:${"0".repeat(64)}`).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).reason).toBe("composition_drift");
+    expect(((err as ApiError).body as { preview: { compositionDigest: string } }).preview.compositionDigest).toBe("sha256:new");
+  });
+
+  it("sends the confirmed digest on start, and the assistant override as a stage-2 override on compose", async () => {
+    const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(json(200, {})));
+    vi.stubGlobal("fetch", fetchMock);
+    const digest = `sha256:${"a".repeat(64)}`;
+    await api.start("AG-1", "fake-b", digest);
+    await api.start("AG-2");
+    await api.compose("AG-1", "fake-b");
+    await api.compose("AG-1");
+    const bodies = fetchMock.mock.calls.map(([, init]) => JSON.parse((init as RequestInit).body as string) as unknown);
+    expect(bodies).toEqual([
+      { assistantId: "fake-b", compositionDigest: digest },
+      {},
+      { overrides: { harness_model: { assistantId: "fake-b" } } },
+      {},
+    ]);
+  });
+
+  it("reads history and budget from the composition routes", async () => {
+    const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(json(200, {})));
+    vi.stubGlobal("fetch", fetchMock);
+    await api.composition("AG-1");
+    await api.compositionBudget("AG-1");
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(["/api/tasks/AG-1/composition", "/api/tasks/AG-1/composition/budget"]);
   });
 });

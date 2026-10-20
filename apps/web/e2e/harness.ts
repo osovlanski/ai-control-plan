@@ -4,7 +4,7 @@
  * an injected clock and an injected K3 probe transport — deterministic, no
  * provider credentials, no wall-clock waits.
  */
-import { expect, request, type APIRequestContext, type BrowserContext, type Page } from "@playwright/test";
+import { expect, request, type APIRequestContext, type BrowserContext, type ConsoleMessage, type Page } from "@playwright/test";
 import { createServer, type Server } from "node:http";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -19,6 +19,15 @@ import type { QuotaProbeFn, ProbeOutcome } from "../../api/src/modules/quota-pro
 import type { SessionInputAdapterResolver } from "../../api/src/modules/session-input.js";
 import { credentialPath, readCredential } from "../../api/src/auth/credential-file.js";
 import { mintBootstrapToken } from "../../api/src/auth/bootstrap-token.js";
+
+/**
+ * With the Composer off the plane answers the composition routes with a 404 `composer_disabled`:
+ * the documented signal, and the only one, because `/api/workspace` does not advertise it. The
+ * browser logs that 404 as a console error. It is the page probing, not a defect, so specs that
+ * assert a clean console skip exactly this message.
+ */
+export const composerProbe = (m: ConsoleMessage) =>
+  /status of 404/.test(m.text()) && /\/api\/tasks\/[^/]+\/(compose|composition(\/budget)?)$/.test(m.location().url);
 
 export const A = "fake-a" as AssistantId;
 export const B = "fake-b" as AssistantId;

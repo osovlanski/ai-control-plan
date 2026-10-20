@@ -580,6 +580,13 @@ rule-allowed tools; neither changed here.
 - **Defect, not fixed here:** a revision composed at dispatch takes its caps from `composer.policy.budget` minus the task's consumption. A tighter budget override the operator gave at start is therefore not carried into later revisions, which is a loosening. A fix has to read the previous revision's caps or the start's overrides.
 - **`pnpm demo:a5` runs with the composer off.** It shows park → wake semantics but no revision; the wake → new revision path is covered by `composer-dispatch.test.ts` and was driven live against Cockpit.
 
+## 2026-10-19 — Composition UI, M7 (SHIPPED; apps/web only, no server change)
+
+- **New Task shows the whole CompositionDecision** (six stages, each with the plane's `why`, chosen refs with digests and evidence, the spec it would bind, budget and policy). "Run composed" sends the previewed `compositionDigest`, so a re-run that differs is a 409 `composition_drift` and the page shows the new decision instead of starting. **Task Detail has a Composition tab** (and the Inspector's Decision tab section) for the bound revision, attempts and budget.
+- **The web has no way to ask whether the Composer is on.** `/api/workspace` does not advertise it (unlike `sessionInput`), so the page probes and reads the 404 `composer_disabled` as "off". The browser logs that 404 as a console error; e2e specs that assert a clean console skip it through `composerProbe` in `e2e/harness.ts`. A `composer: { enabled }` field on `/api/workspace` would remove the probe, and has to land in the plane first.
+- **Compare and Race are not composed**: `POST /api/tasks/:id/parallel` writes no revision and no attempt row, so the UI says so rather than implying the shown composition binds.
+- Every derived number carries `guessed`, `estimated`, `measured` or `unknown`. A run whose assistant reports no usage accounting is unknown tokens, not zero, and an unknown-cost session makes the cost remainder an upper bound.
+
 ## 2026-10-19 — M3 S1 provisioning lifecycle (SHIPPED; composed runs only; the revision does not bind the profile yet)
 
 - **A revision-bound session now launches against a verified per-run profile.** The Harness `SessionRunner` runs `prepare → provision → verify` in STARTING, before `start`, and `dispose` after the provider is terminated, however the session ended. Profiles live in `<plane dir>/profiles/<sessionId>/`, never the worktree, with an ownership marker; dispose refuses a directory without it. Nothing changes with the composer off: only requests carrying `compositionRevisionId` provision.

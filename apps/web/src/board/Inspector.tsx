@@ -3,6 +3,7 @@ import { api } from "../api.js";
 import { actualLifecycle, describeState, modelIdentityView, nextStep, observedModel, resourceNextStep, waitKindLabel } from "../orbital.js";
 import { QuotaReadout, ContextReadout, ModelRecommendationReadout, DecisionSummary, ScheduleQueueReadout } from "./readouts.js";
 import { executionRead, missionState, type Mission } from "./execution.js";
+import { CompositionPanel } from "../Composition.js";
 
 export type { Snapshot } from "./useMissionSnapshot.js";
 import { useMissionSnapshot, type Snapshot } from "./useMissionSnapshot.js";
@@ -17,6 +18,7 @@ export function Inspector({
   onSnapshot?: (s: Snapshot | null) => void;
 }) {
   const [tab, setTab] = useState("execution");
+  const [compositionOpen, setCompositionOpen] = useState(false);
   const [runId, setRunId] = useState("");
   const [nonce, setNonce] = useState(0);
   const { snapshot, error } = useMissionSnapshot(task.id, nonce);
@@ -303,20 +305,14 @@ export function Inspector({
               recommendation={routing?.explanation.modelRecommendation}
             />
           </details>
-          <details>
-            <summary>
-              Composition{" "}
-              <span className="planned">Planned</span>
-            </summary>
-            <p>
-              Prompt → intent → harness → model → skills/MCP → context/memory →
-              policy → execution.
-            </p>
-            <p>
-              Asset attachment and CompositionDecision await the Composer.
-              Ambient tooling is not evidence of attachment.
-            </p>
-            <p>
+          <details onToggle={(e) => setCompositionOpen(e.currentTarget.open)}>
+            <summary>Composition</summary>
+            {/* Mounted on open: with the Composer off this is a read that answers 404. */}
+            {compositionOpen && snapshot && (
+              <CompositionPanel taskId={task.id} runs={snapshot.detail.runs}
+                refreshKey={`${snapshot.detail.state}:${snapshot.detail.runs.length}`} />
+            )}
+            <p className="fine-print">
               Current profile: {task.profile}. K13 scores the three dimensions
               above; the remaining M12 dimensions (architecture, frontend,
               review, reasoning, long-context, tool-use) arrive only once both a

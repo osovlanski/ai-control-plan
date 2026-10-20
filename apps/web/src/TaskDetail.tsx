@@ -9,9 +9,10 @@ import {
   type TaskDetail as Detail,
   type TaskEvent,
 } from "./api.js";
+import { CompositionPanel } from "./Composition.js";
 import { Button, Card, StateBadge, tokens } from "./ui.jsx";
 
-type Tab = "activity" | "usage" | "routing" | "progress" | "handoff" | "compare" | "sessions";
+type Tab = "activity" | "usage" | "routing" | "composition" | "progress" | "handoff" | "compare" | "sessions";
 
 interface PendingApproval {
   requestId: string;
@@ -237,7 +238,7 @@ export function TaskDetail({ taskId, onBack }: { taskId: string; onBack: () => v
       )}
 
       <div style={{ display: "flex", flexWrap: "wrap", gap: "0.4rem", marginBottom: "0.9rem" }}>
-        {(["activity", "usage", "routing", "progress", "handoff", "compare", "sessions"] as Tab[]).map((t) => (
+        {(["activity", "usage", "routing", "composition", "progress", "handoff", "compare", "sessions"] as Tab[]).map((t) => (
           <Button key={t} variant={tab === t ? "primary" : "secondary"} onClick={() => setTab(t)}>
             {t[0]!.toUpperCase() + t.slice(1)}
           </Button>
@@ -318,6 +319,12 @@ export function TaskDetail({ taskId, onBack }: { taskId: string; onBack: () => v
                 ))}
             </div>
           ))}
+        </Card>
+      )}
+
+      {tab === "composition" && (
+        <Card>
+          <CompositionPanel taskId={taskId} runs={detail.runs} refreshKey={`${state}:${detail.runs.length}`} />
         </Card>
       )}
 
