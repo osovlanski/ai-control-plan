@@ -30,7 +30,7 @@ import type {
 import { jcs, mcpLaunchProblem, ProvisioningError } from "@agent-plane/core";
 
 export const PROFILE_MARKER = ".agent-plane-profile.json";
-const PLUGIN_NAME = "agent-plane-profile";
+export const PLUGIN_NAME = "agent-plane-profile";
 const SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 const SKILL_PATH = /^\.claude\/skills\/([A-Za-z0-9][A-Za-z0-9_.-]*)\/SKILL\.md$/;
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;

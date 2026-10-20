@@ -142,6 +142,17 @@ export interface VerifiedProfile {
   readonly checks: readonly ProvisioningCheck[];
 }
 
+/**
+ * M3 S5: what the provider itself reported at startup, judged against the verified profile.
+ * An adapter that can observe this carries it on `run.started` as `payload.profileEvidence`;
+ * a `full` profile without it, or with `ok: false`, fails the session before RUNNING. Names only.
+ */
+export interface ProfileRuntimeEvidence {
+  ok: boolean;
+  profileDigest: string;
+  checks: ProvisioningCheck[];
+}
+
 /** Refusal reasons `prepare` and `provision` throw with (as `ProvisioningError.reason`). */
 export type ProvisioningRefusal =
   | "harness_mismatch"

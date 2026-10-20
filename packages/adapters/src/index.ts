@@ -28,3 +28,4 @@ export {
   mcpServerName,
   verifiedProfile,
 } from "./provisioning.js";
+export { claudeInitEvidence, profileSkillNames, type ClaudeInitInventory } from "./profile-evidence.js";

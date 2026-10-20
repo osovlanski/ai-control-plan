@@ -26,6 +26,7 @@ import type {
 import { newRunId, NotSupportedError } from "@agent-plane/core";
 import type { ClaudeLiveSession } from "./claude-session-input.js";
 import { EventQueue } from "./event-queue.js";
+import { claudeInitEvidence } from "./profile-evidence.js";
 import { claudeProvisioningPlan, disposeProfileDir, materializeProfile, mcpSecretEnv, requireProfileHarness, verifyProfileOnDisk } from "./provisioning.js";
 
 interface ClaudeRunState {
@@ -41,6 +42,8 @@ interface ClaudeRunState {
   live?: LiveInputChannel;
   /** The CLI process this adapter spawned for the run (kernel liveness, F1/F2). */
   process?: { child: ChildProcess; spawnedAt: string; stderrTail: string };
+  /** The verified profile this run launched with (M3), judged against `system/init` (S5). */
+  profile?: VerifiedProfile;
 }
 
 /** Bounded stderr tail kept for provider error events (the SDK keeps its own only for its default spawn). */
@@ -168,6 +171,7 @@ export class ClaudeAdapter implements AgentAdapter {
       abort: new AbortController(),
       pendingApprovals: new Map(),
       pendingTools: new Map(),
+      ...(run.profile ? { profile: run.profile } : {}),
     };
     this.runs.set(runId, state);
 
@@ -306,6 +310,10 @@ export class ClaudeAdapter implements AgentAdapter {
               model: msg.model,
               tools: msg.tools,
               version: msg.claude_code_version,
+              // M3 S5: the runner fails a `full` profile whose init does not match before RUNNING.
+              ...(state.profile
+                ? { profileEvidence: claudeInitEvidence(state.profile, { skills: msg.skills ?? [], plugins: msg.plugins ?? [], mcpServers: msg.mcp_servers ?? [] }) }
+                : {}),
             },
             raw: msg,
           });
