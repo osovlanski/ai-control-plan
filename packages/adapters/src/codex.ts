@@ -20,7 +20,7 @@ import { newRunId, NotSupportedError, ProvisioningError } from "@agent-plane/cor
 import { CodexAppServerRuntime } from "./codex-app-server-runtime.js";
 import { codexPermissions } from "./codex-permissions.js";
 import { EventQueue } from "./event-queue.js";
-import { codexProvisioningPlan, disposeProfileDir, materializeProfile, requireProfileHarness, verifyProfileOnDisk } from "./provisioning.js";
+import { codexProvisioningPlan, disposeProfileDir, materializeProfile, mcpSecretEnv, requireProfileHarness, verifyProfileOnDisk } from "./provisioning.js";
 
 interface CodexRunState {
   queue: EventQueue<NormalizedEvent>;
@@ -145,11 +145,26 @@ export class CodexAdapter implements AgentAdapter {
     if (run.profile && this.appServer) throw new NotSupportedError("a provisioned profile on the Codex app-server transport");
   }
 
-  /** A profile's `--config` overrides need their own Codex instance: the SDK takes config per instance, not per thread. */
+  /**
+   * A profile's `--config` overrides need their own Codex instance: the SDK takes config per
+   * instance, not per thread. MCP servers name their secrets in `env_vars`; the values go only into
+   * this instance's process environment, which Codex forwards to just those servers.
+   */
   private codexFor(run: RunSpec): Codex {
     const launch = run.profile?.launch;
     if (!launch || launch.harness !== "codex") return this.codex;
-    return new Codex({ ...this.options.codex, config: { ...this.options.codex?.config, ...launch.config } });
+    const servers = launch.mcpServers ?? {};
+    const secretEnv = mcpSecretEnv(run.profile, run.secretEnv);
+    const mcp_servers = Object.fromEntries(Object.entries(servers).map(([name, server]) => [name, {
+      command: server.command,
+      args: [...server.args],
+      ...(Object.keys(server.envRefs).length > 0 ? { env_vars: Object.keys(server.envRefs) } : {}),
+    }]));
+    return new Codex({
+      ...this.options.codex,
+      config: { ...this.options.codex?.config, ...launch.config, ...(Object.keys(servers).length > 0 ? { mcp_servers } : {}) },
+      ...(Object.keys(secretEnv).length > 0 ? { env: { ...(this.options.codex?.env ?? inheritedEnv()), ...secretEnv } } : {}),
+    });
   }
 
   private threadOptions(run: RunSpec) {
@@ -350,4 +365,9 @@ function classifyLimit(text: string): boolean {
 function truncate(text: string, max = 200): string {
   const oneLine = text.replace(/\s+/g, " ").trim();
   return oneLine.length > max ? `${oneLine.slice(0, max - 1)}…` : oneLine;
+}
+
+/** `process.env` without unset entries: the SDK's `env` replaces the inherited environment. */
+function inheritedEnv(): Record<string, string> {
+  return Object.fromEntries(Object.entries(process.env).filter((e): e is [string, string] => e[1] !== undefined));
 }

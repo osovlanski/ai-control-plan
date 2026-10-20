@@ -34,7 +34,7 @@ describe("composer config defaults", () => {
     expect(load().composer).toEqual({
       enabled: false,
       requireRevision: false,
-      assets: { maxSkills: 3, allowlist: [] },
+      assets: { maxSkills: 3, maxMcpServers: 2, allowlist: [] },
       context: {
         fragments: { default: [], byRepository: {} },
         memoryBundles: [],
@@ -60,6 +60,7 @@ describe("composer config values", () => {
   requireRevision: true
   assets:
     maxSkills: 5
+    maxMcpServers: 1
     allowlist:
       - { id: "claude-skills:ts-review", digest: "${d("a")}" }
       - { id: "claude-skills:ts-review", digest: "${d("b")}" }
@@ -82,7 +83,7 @@ describe("composer config values", () => {
     expect(c).toMatchObject({
       enabled: true,
       requireRevision: true,
-      assets: { maxSkills: 5, allowlist: [{ id: "claude-skills:ts-review", digest: d("a") }, { id: "claude-skills:ts-review", digest: d("b") }] },
+      assets: { maxSkills: 5, maxMcpServers: 1, allowlist: [{ id: "claude-skills:ts-review", digest: d("a") }, { id: "claude-skills:ts-review", digest: d("b") }] },
       context: {
         fragments: { default: ["house-style", "safety.base"], byRepository: { "repo-1": ["monorepo-notes"] } },
         memoryBundles: [{ id: "mem:team", digest: d("c"), reason: "pinned team notes" }],
@@ -130,8 +131,9 @@ describe("composer config validation", () => {
 
   it("requires positive integers for counts and budgets", () => {
     for (const bad of ["0", "-1", "2.5", "'3'", "null"]) {
-      expect(problems(`composer:\n  assets:\n    maxSkills: ${bad}\n  context:\n    tokenBudget: ${bad}\n  policy:\n    budget: { maxTokens: ${bad}, maxRuntimeMs: ${bad} }\n`)).toEqual([
+      expect(problems(`composer:\n  assets:\n    maxSkills: ${bad}\n    maxMcpServers: ${bad}\n  context:\n    tokenBudget: ${bad}\n  policy:\n    budget: { maxTokens: ${bad}, maxRuntimeMs: ${bad} }\n`)).toEqual([
         "composer.assets.maxSkills must be a positive integer",
+        "composer.assets.maxMcpServers must be a positive integer",
         "composer.context.tokenBudget must be a positive integer",
         "composer.policy.budget.maxTokens must be a positive integer",
         "composer.policy.budget.maxRuntimeMs must be a positive integer",

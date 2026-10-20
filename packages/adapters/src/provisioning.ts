@@ -17,6 +17,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type {
   BundleResponse,
   ProfileFile,
+  ProfileMcpServer,
   ProfileLaunch,
   ProvisionedHarness,
   ProvisionedProfile,
@@ -26,12 +27,13 @@ import type {
   ProvisioningVerification,
   VerifiedProfile,
 } from "@agent-plane/core";
-import { jcs, ProvisioningError } from "@agent-plane/core";
+import { jcs, mcpLaunchProblem, ProvisioningError } from "@agent-plane/core";
 
 export const PROFILE_MARKER = ".agent-plane-profile.json";
 const PLUGIN_NAME = "agent-plane-profile";
 const SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 const SKILL_PATH = /^\.claude\/skills\/([A-Za-z0-9][A-Za-z0-9_.-]*)\/SKILL\.md$/;
+const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
 
 export const sha256 = (text: string) => `sha256:${createHash("sha256").update(text, "utf8").digest("hex")}`;
 
@@ -61,12 +63,70 @@ function checkedBundle(input: ProvisioningInput, harness: ProvisionedHarness): B
   for (const f of bundle.files) {
     if (sha256(f.content) !== f.digest) throw new ProvisioningError("invalid_bundle", `bundle file ${f.relPath} does not match its digest`);
   }
-  if (spec.assets.mcp_servers.length > 0) throw new ProvisioningError("unsupported_asset", "MCP servers are not provisioned yet (M3 S4)");
   if (spec.assets.subagents.length > 0) throw new ProvisioningError("unsupported_asset", "subagents are not provisioned yet");
   if (!SESSION_ID.test(input.sessionId)) throw new ProvisioningError("invalid_root", "session id is not a safe directory name");
   assertProfileRoot(input.root);
   return bundle;
 }
+
+/**
+ * The server name an MCP asset launches under: its id without the `mcp:` prefix, with anything
+ * outside `[A-Za-z0-9_-]` replaced, so it is a valid Claude server name and a bare Codex TOML key.
+ */
+export function mcpServerName(assetId: string): string {
+  return assetId.replace(/^mcp:/, "").replace(/[^A-Za-z0-9_-]/g, "_");
+}
+
+/**
+ * M3 S4: the revision's MCP servers as the profile launches them, and the secret reference names
+ * the launch resolves. Every attached server needs the launch shape the registry recorded at its
+ * digest; nothing else is accepted. No value is read here: `envRefs` maps env var to ref name.
+ */
+function profileMcpServers(input: ProvisioningInput): { servers: Record<string, ProfileMcpServer>; secretRefs: string[] } {
+  const attached = input.spec.assets.mcp_servers;
+  const given = input.mcpServers ?? [];
+  const servers: Record<string, ProfileMcpServer> = {};
+  const varRef = new Map<string, string>();
+  for (const extra of given) {
+    if (!attached.some((r) => r.id === extra.ref.id && r.digest === extra.ref.digest)) {
+      throw new ProvisioningError("digest_mismatch", `MCP launch shape for ${extra.ref.id} is not attached by revision ${input.spec.composition_revision_id}`);
+    }
+  }
+  for (const ref of attached) {
+    const entry = given.find((m) => m.ref.id === ref.id && m.ref.digest === ref.digest);
+    if (!entry) throw new ProvisioningError("digest_mismatch", `no launch shape for MCP server ${ref.id} at ${ref.digest}`);
+    const problem = mcpLaunchProblem(entry.launch);
+    if (problem) {
+      throw new ProvisioningError(entry.launch.transport === "stdio" ? "unsupported_asset" : "unsupported_transport", `MCP server ${ref.id}: ${problem}`);
+    }
+    const launchRefs = Object.values(entry.launch.env).map((r) => `${r.type}:${r.name}`).sort();
+    const specRefs = ref.secret_refs.map((r) => `${r.type}:${r.name}`).sort();
+    if ([...new Set(launchRefs)].join("\n") !== [...new Set(specRefs)].join("\n")) {
+      throw new ProvisioningError("digest_mismatch", `MCP server ${ref.id}: the revision's secret_refs are not the launch shape's`);
+    }
+    const name = mcpServerName(ref.id);
+    if (servers[name]) throw new ProvisioningError("invalid_bundle", `MCP servers ${servers[name]!.asset.id} and ${ref.id} launch under the same name ${name}`);
+    const envRefs: Record<string, string> = {};
+    for (const envVar of Object.keys(entry.launch.env).sort()) {
+      if (!ENV_NAME.test(envVar)) throw new ProvisioningError("invalid_bundle", `MCP server ${ref.id}: env name is not a plain variable name`);
+      const refName = entry.launch.env[envVar]!.name;
+      // One provider process environment carries every server's secrets: a name means one value.
+      if (varRef.has(envVar) && varRef.get(envVar) !== refName) {
+        throw new ProvisioningError("unsupported_asset", `MCP servers read ${envVar} from different secret references`);
+      }
+      varRef.set(envVar, refName);
+      envRefs[envVar] = refName;
+    }
+    servers[name] = { asset: { id: ref.id, digest: ref.digest }, command: entry.launch.command!, args: [...(entry.launch.args ?? [])], envRefs };
+  }
+  return { servers, secretRefs: [...new Set(varRef.values())].sort() };
+}
+
+/** What the launch shape says about MCP, for a profile's `visible` list. */
+const mcpVisible = (secretRefs: readonly string[], harness: ProvisionedHarness) =>
+  secretRefs.length === 0 ? [] : [harness === "claude-code"
+    ? "MCP secret values in the provider process environment, which every MCP server and tool the run starts inherits"
+    : "MCP secret values in the Codex process environment, forwarded by name to the servers that list them"];
 
 const file = (relPath: string, content: string): ProfileFile => ({ relPath, content, digest: sha256(content) });
 const byPath = (a: { relPath: string }, b: { relPath: string }) => (a.relPath < b.relPath ? -1 : a.relPath > b.relPath ? 1 : 0);
@@ -87,6 +147,7 @@ function launchShape(launch: ProfileLaunch, root: string): unknown {
   return {
     harness: launch.harness,
     config: Object.fromEntries(Object.entries(launch.config).map(([k, v]) => [k, v === undefined ? undefined : sha256(v)])),
+    mcpServers: launch.mcpServers,
   };
 }
 
@@ -99,7 +160,7 @@ export function computeProfileDigest(plan: Pick<ProvisioningPlan, "harness" | "f
   }, "integer"));
 }
 
-function plan(input: ProvisioningInput, rest: Omit<ProvisioningPlan, "schemaVersion" | "compositionRevisionId" | "sessionId" | "root" | "secretRefs" | "profileDigest">): ProvisioningPlan {
+function plan(input: ProvisioningInput, secretRefs: string[], rest: Omit<ProvisioningPlan, "schemaVersion" | "compositionRevisionId" | "sessionId" | "root" | "secretRefs" | "profileDigest">): ProvisioningPlan {
   const base = {
     schemaVersion: 1 as const,
     compositionRevisionId: input.spec.composition_revision_id,
@@ -107,7 +168,7 @@ function plan(input: ProvisioningInput, rest: Omit<ProvisioningPlan, "schemaVers
     root: input.root,
     ...rest,
     files: [...rest.files].sort(byPath),
-    secretRefs: [],
+    secretRefs,
   };
   return { ...base, profileDigest: computeProfileDigest(base) };
 }
@@ -119,6 +180,7 @@ function plan(input: ProvisioningInput, rest: Omit<ProvisioningPlan, "schemaVers
  */
 export function claudeProvisioningPlan(input: ProvisioningInput): ProvisioningPlan {
   const bundle = checkedBundle(input, "claude-code");
+  const mcp = profileMcpServers(input);
   const files: ProfileFile[] = [];
   let systemPromptAppend: string | undefined;
   const skills: string[] = [];
@@ -142,7 +204,7 @@ export function claudeProvisioningPlan(input: ProvisioningInput): ProvisioningPl
       description: "Skills the agent plane composed for one run",
     }, null, 2)}\n`));
   }
-  return plan(input, {
+  return plan(input, mcp.secretRefs, {
     harness: "claude-code",
     files,
     launch: {
@@ -151,7 +213,7 @@ export function claudeProvisioningPlan(input: ProvisioningInput): ProvisioningPl
       ...(skills.length > 0 ? { pluginDir: join(input.root, "plugin") } : {}),
       ...(systemPromptAppend !== undefined ? { systemPromptAppend } : {}),
       strictMcpConfig: true,
-      mcpServers: {},
+      mcpServers: mcp.servers,
       disableClaudeAiConnectors: true,
     },
     fidelity: "full",
@@ -159,6 +221,7 @@ export function claudeProvisioningPlan(input: ProvisioningInput): ProvisioningPl
       "the worktree's project settings, CLAUDE.md, skills and agents (.claude/)",
       "managed policy settings",
       "provider authentication",
+      ...mcpVisible(mcp.secretRefs, "claude-code"),
     ],
     excluded: [
       "user settings and CLAUDE.md (~/.claude)",
@@ -176,6 +239,7 @@ export function claudeProvisioningPlan(input: ProvisioningInput): ProvisioningPl
  */
 export function codexProvisioningPlan(input: ProvisioningInput): ProvisioningPlan {
   const bundle = checkedBundle(input, "codex");
+  const mcp = profileMcpServers(input);
   const files: ProfileFile[] = [];
   let instructions: string | undefined;
   for (const f of bundle.files) {
@@ -183,16 +247,21 @@ export function codexProvisioningPlan(input: ProvisioningInput): ProvisioningPla
     instructions = f.content;
     files.push(file("AGENTS.md", f.content));
   }
-  return plan(input, {
+  return plan(input, mcp.secretRefs, {
     harness: "codex",
     files,
-    launch: { harness: "codex", config: instructions !== undefined ? { developer_instructions: instructions } : {} },
+    launch: {
+      harness: "codex",
+      config: instructions !== undefined ? { developer_instructions: instructions } : {},
+      ...(Object.keys(mcp.servers).length > 0 ? { mcpServers: mcp.servers } : {}),
+    },
     fidelity: "partial",
     visible: [
       "~/.codex/config.toml (model, MCP servers, profiles, features)",
       "~/.codex/AGENTS.md",
       "~/.codex/skills",
       "the worktree's AGENTS.md files",
+      ...mcpVisible(mcp.secretRefs, "codex"),
     ],
     excluded: [],
   });
@@ -300,18 +369,35 @@ export function verifyProfileOnDisk(profile: ProvisionedProfile, harness: Provis
   } catch (err) {
     check("root", false, err instanceof Error ? err.message : String(err));
   }
+  const servers = p.launch.mcpServers ?? {};
   if (p.launch.harness === "claude-code") {
     const l = p.launch;
-    check("launch_scope", l.settingSources.every((s) => s === "project") && l.strictMcpConfig && Object.keys(l.mcpServers).length === 0 && l.disableClaudeAiConnectors,
-      "settingSources excludes user and local; strict MCP with no servers; claude.ai connectors off");
+    check("launch_scope", l.settingSources.every((s) => s === "project") && l.strictMcpConfig && l.disableClaudeAiConnectors,
+      `settingSources excludes user and local; strict MCP with only the profile's ${Object.keys(servers).length} server(s); claude.ai connectors off`);
     check("launch_paths", l.pluginDir === undefined || l.pluginDir === join(p.root, "plugin"), "plugin directory is inside the profile root");
   } else {
     const keys = Object.keys(p.launch.config);
     check("launch_scope", keys.every((k) => k === "developer_instructions"), `config overrides: ${keys.join(", ") || "none"}`);
   }
+  check("mcp_secrets", mcpSecretsByReference(servers, p.secretRefs),
+    `${Object.keys(servers).length} MCP server(s); secrets by reference only (${p.secretRefs.length}), none on a command line`);
   checks.push(...evidence);
   const ok = checks.every((c) => c.ok);
   return { ok, fidelity: ok ? p.fidelity : "none", profileDigest: p.profileDigest, checks };
+}
+
+/** Every server's secrets are references the plan names, and no command line interpolates one. */
+function mcpSecretsByReference(servers: Record<string, ProfileMcpServer>, secretRefs: readonly string[]): boolean {
+  const refs = new Set(secretRefs);
+  const used = new Set<string>();
+  for (const server of Object.values(servers)) {
+    if ([server.command, ...server.args].some((a) => a.includes("${"))) return false;
+    for (const [envVar, ref] of Object.entries(server.envRefs)) {
+      if (!ENV_NAME.test(envVar) || !refs.has(ref)) return false;
+      used.add(ref);
+    }
+  }
+  return used.size === refs.size;
 }
 
 /** Remove a profile this plane owns. Idempotent; refuses a symlink or a directory without its marker. */
@@ -351,8 +437,27 @@ export function verifiedProfile(profile: ProvisionedProfile, verification: Provi
     launch: p.launch,
     visible: p.visible,
     excluded: p.excluded,
+    secretRefs: p.secretRefs,
     checks: verification.checks,
   }));
+}
+
+/**
+ * M3 S4: the provider process environment entries a profile's MCP servers read, built from the
+ * values the SecretBroker resolved for this launch. The result holds secret values: it goes into
+ * a spawn's env and nowhere else. Throws, naming the reference and never a value, when the
+ * launch did not resolve a reference the profile needs.
+ */
+export function mcpSecretEnv(profile: VerifiedProfile | undefined, secretEnv: Readonly<Record<string, string>> | undefined): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const server of Object.values(profile?.launch.mcpServers ?? {})) {
+    for (const [envVar, ref] of Object.entries(server.envRefs)) {
+      const value = secretEnv?.[ref];
+      if (value === undefined || value === "") throw new ProvisioningError("unsupported_asset", `MCP server ${server.asset.id} needs secret reference ${ref}, which the launch did not resolve`);
+      env[envVar] = value;
+    }
+  }
+  return env;
 }
 
 /** An adapter given a profile for another harness refuses before any process starts (risk 9). */

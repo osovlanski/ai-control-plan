@@ -44,6 +44,7 @@ import {
   toolGateFloorHits,
 } from "@agent-plane/core";
 import { DecisionService, decisionProviders, insertDecisionRecord } from "../decision.js";
+import { mcpLaunchAt } from "../registry-federation.js";
 
 /** Legacy `applyEvent` snapshots quota on exactly these event types. */
 const QUOTA_EVENT_TYPES = new Set(["usage.updated", "limit.approaching", "limit.hit"]);
@@ -285,8 +286,19 @@ export function buildHarnessComposition(deps: HarnessCompositionDeps): HarnessCo
         const row = db.prepare("SELECT spec_json, bundle_response_json FROM agent_specs WHERE composition_revision_id = ?").get(compositionRevisionId) as
           | { spec_json: string; bundle_response_json: string }
           | undefined;
-        return row ? { spec: JSON.parse(row.spec_json) as AgentSpec, bundle: JSON.parse(row.bundle_response_json) as BundleResponse } : undefined;
+        if (!row) return undefined;
+        const spec = JSON.parse(row.spec_json) as AgentSpec;
+        // M3 S4: each attached MCP server's launch shape at its pinned digest. A shape that is gone
+        // is left out, and `prepare` refuses the revision for it.
+        const mcpServers = spec.assets.mcp_servers.flatMap((ref) => {
+          const launch = mcpLaunchAt(db, ref.id, ref.digest);
+          return launch ? [{ ref, launch }] : [];
+        });
+        return { spec, bundle: JSON.parse(row.bundle_response_json) as BundleResponse, mcpServers };
       },
+      // Only the references a verified profile's MCP servers name, from the plane's own
+      // environment, at launch, in memory only (§3). Request-level secretRefs stay unwired.
+      resolveSecret: (ref) => process.env[ref],
     },
   });
   const harnessBridge = new HarnessBridge({ runner, store: sessionStore, approvals, db, onError });

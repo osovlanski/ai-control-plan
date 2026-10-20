@@ -26,7 +26,7 @@ import type {
 import { newRunId, NotSupportedError } from "@agent-plane/core";
 import type { ClaudeLiveSession } from "./claude-session-input.js";
 import { EventQueue } from "./event-queue.js";
-import { claudeProvisioningPlan, disposeProfileDir, materializeProfile, requireProfileHarness, verifyProfileOnDisk } from "./provisioning.js";
+import { claudeProvisioningPlan, disposeProfileDir, materializeProfile, mcpSecretEnv, requireProfileHarness, verifyProfileOnDisk } from "./provisioning.js";
 
 interface ClaudeRunState {
   queue: EventQueue<NormalizedEvent>;
@@ -160,6 +160,8 @@ export class ClaudeAdapter implements AgentAdapter {
 
   private async launch(run: RunSpec, resumeRef: ProviderSessionRef | undefined): Promise<RunHandle> {
     requireProfileHarness(run.profile, "claude-code"); // before any state or process exists
+    // MCP secret values travel only in the provider's environment: `--mcp-config` is argv.
+    const secretEnv = mcpSecretEnv(run.profile, run.secretEnv);
     const runId = newRunId();
     const state: ClaudeRunState = {
       queue: new EventQueue<NormalizedEvent>(),
@@ -194,6 +196,7 @@ export class ClaudeAdapter implements AgentAdapter {
         model: run.model?.id,
         resume: resumeRef,
         abortController: state.abort,
+        ...(Object.keys(secretEnv).length > 0 ? { env: { ...process.env, ...secretEnv } } : {}),
         spawnClaudeCodeProcess: (options) => this.spawnProvider(options, state),
         ...(run.profile
           ? provisionedOptions(run.profile)
@@ -616,7 +619,13 @@ export function provisionedOptions(profile: VerifiedProfile): Pick<Options, "set
     settingSources: [...launch.settingSources],
     ...(launch.pluginDir ? { plugins: [{ type: "local" as const, path: launch.pluginDir, skipMcpDiscovery: true }] } : {}),
     strictMcpConfig: launch.strictMcpConfig,
-    mcpServers: {},
+    mcpServers: Object.fromEntries(Object.entries(launch.mcpServers).map(([name, server]) => [name, {
+      type: "stdio" as const,
+      command: server.command,
+      args: [...server.args],
+      // A reference the CLI expands from its own environment, never the value: this config is argv.
+      env: Object.fromEntries(Object.keys(server.envRefs).map((envVar) => [envVar, `\${${envVar}}`])),
+    }])),
     settings: { disableClaudeAiConnectors: launch.disableClaudeAiConnectors },
     ...(launch.systemPromptAppend !== undefined
       ? { systemPrompt: { type: "preset" as const, preset: "claude_code" as const, append: launch.systemPromptAppend } }

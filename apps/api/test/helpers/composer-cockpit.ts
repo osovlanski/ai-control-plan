@@ -23,7 +23,7 @@ const SKILL_BODY = "---\nname: ts-review\n---\nReview TypeScript.\n";
 
 interface FakeCockpit { url: string; renders: number; close(): Promise<void> }
 
-async function fakeCockpit(): Promise<FakeCockpit> {
+async function fakeCockpit(extraAssets: readonly RegistryAsset[] = []): Promise<FakeCockpit> {
   const asset: RegistryAsset = {
     id: TS_REVIEW, digest: fileDigest(SKILL_BODY), kind: "skill", nativeKind: "claude-skills", name: "ts-review", description: "a skill",
     tags: ["coding", "typescript"], targets: ["claude"], compatibility: { assistants: ["claude", "codex"] },
@@ -40,7 +40,8 @@ async function fakeCockpit(): Promise<FakeCockpit> {
       };
       if (req.headers.authorization !== `Bearer ${COCKPIT_TOKEN}`) return send(401, { error: { code: "unauthenticated", message: "no" } });
       if (req.method === "GET" && req.url === "/api/v1/registry/assets") {
-        return send(200, { schemaVersion: "1.0", snapshotDigest: computeSnapshotDigest([asset]), assets: [asset] }, { [REGISTRY_VERSION_HEADER]: "1.0" });
+        const assets = [asset, ...extraAssets];
+        return send(200, { schemaVersion: "1.0", snapshotDigest: computeSnapshotDigest(assets), assets }, { [REGISTRY_VERSION_HEADER]: "1.0" });
       }
       if (req.method === "POST" && req.url === "/api/v1/registry/bundle") {
         state.renders++;
@@ -85,6 +86,8 @@ export interface RigOptions {
   enabled?: boolean;
   now?: () => Date;
   configure?: (config: ResolvedConfig) => void;
+  /** More registry assets the stand-in Cockpit serves beside ts-review (M3 S4: MCP servers). */
+  extraAssets?: RegistryAsset[];
 }
 
 const GIT_ENV = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.invalid", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.invalid" };
@@ -105,7 +108,7 @@ export async function bootRig(options: RigOptions = {}): Promise<Rig> {
   git("add", ".");
   git("commit", "-q", "-m", "init");
 
-  const cockpit = await fakeCockpit();
+  const cockpit = await fakeCockpit(options.extraAssets);
   const config = loadConfig({ AGENT_PLANE_HOME: plane });
   config.assistants = options.assistants ?? { "fake-claude": { provider: "fake" } };
   config.repoAllowlist = [repo];

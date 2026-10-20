@@ -470,6 +470,7 @@ export class ComposerService implements DispatchComposer {
     };
     const config: ComposerConfig = {
       maxSkills: composer.assets.maxSkills,
+      maxMcpServers: composer.assets.maxMcpServers,
       allowlist: composer.assets.allowlist.map(({ id, digest }) => ({ id, digest })),
       fragments: [...new Set(fragments)],
       memoryBundles: composer.context.memoryBundles.map(({ id, digest, reason }) => ({ id, digest, reason })),
@@ -519,7 +520,7 @@ export class ComposerService implements DispatchComposer {
     }
     const assets: ComposerAsset[] = view.assets.map((a) => ({
       id: a.id, digest: a.digest, kind: a.kind, enabled: a.enabled, tags: a.tags, compatibility: a.compatibility,
-      requirements: a.requirements, conflicts: a.conflicts, lineage: a.lineage,
+      requirements: a.requirements, conflicts: a.conflicts, lineage: a.lineage, ...(a.mcp ? { mcp: a.mcp } : {}),
     }));
     return { status: "ok", snapshotDigest: view.snapshotDigest, observedAt: view.observedAt!, stale: view.stale, assets };
   }

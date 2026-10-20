@@ -37,6 +37,7 @@ import type {
   ProviderSessionRef,
   ProvisionedProfile,
   ProvisioningFidelity,
+  ProvisioningMcpServer,
   ProvisioningVerifiedPayload,
   RerouteRequest,
   RunHandle,
@@ -58,7 +59,7 @@ import type { HandoffService } from "./handoff.js";
 import type { Db } from "../../db/index.js";
 import type { WorkspaceAuthority } from "./workspace-authority.js";
 import { WorkspaceError } from "./workspace-authority.js";
-import { SecretBroker, type SecretResolver } from "./secret-broker.js";
+import { SecretBroker, SecretResolutionError, type SecretResolver } from "./secret-broker.js";
 import {
   accumulateTokens,
   evaluateGuards,
@@ -160,8 +161,17 @@ export interface RunnerDeps {
   provisioning?: {
     /** Plane-owned directory; never the worktree or a machine-global assistant config dir. */
     root: string;
-    /** The revision's AgentSpec and the BundleResponse it was composed with. */
-    load(compositionRevisionId: string): { spec: AgentSpec; bundle: BundleResponse } | undefined;
+    /**
+     * The revision's AgentSpec, the BundleResponse it was composed with and, for each MCP server it
+     * attaches, the registry launch shape at that server's digest (M3 S4).
+     */
+    load(compositionRevisionId: string): { spec: AgentSpec; bundle: BundleResponse; mcpServers?: ProvisioningMcpServer[] } | undefined;
+    /**
+     * Resolves the secret references a verified profile's MCP servers name (M3 S4), and only
+     * those: the profile's `secretRefs` are the broker's allowed set. Absent ⇒ a profile that
+     * names any fails before start.
+     */
+    resolveSecret?: SecretResolver;
   };
 }
 
@@ -1123,7 +1133,7 @@ class RunContext {
     const unenforceable = (message: string): ExecutionFailure => ({ kind: SessionRunner.UNENFORCEABLE, retryable: false, message });
     const loaded = deps.load(revisionId);
     if (!loaded) return unenforceable(`composition revision ${revisionId} is not persisted; nothing to provision from`);
-    const { spec, bundle } = loaded;
+    const { spec, bundle, mcpServers } = loaded;
     const ambient = (reason: string): ExecutionFailure | undefined => {
       if (spec.provisioning.requested === "isolated") return unenforceable(`isolated provisioning was requested but ${reason}`);
       this.provisioningOutcome = { fidelity: "none" };
@@ -1138,7 +1148,7 @@ class RunContext {
 
     let plan;
     try {
-      plan = await adapter.prepare({ spec, bundle, root: join(deps.root, this.sessionId), sessionId: this.sessionId });
+      plan = await adapter.prepare({ spec, bundle, root: join(deps.root, this.sessionId), sessionId: this.sessionId, ...(mcpServers ? { mcpServers } : {}) });
     } catch (err) {
       if (err instanceof ProvisioningError && (err.reason === "unsupported_asset" || err.reason === "unsupported_transport")) return ambient(err.message);
       return unenforceable(`provisioning refused: ${redactMessage(err)}`);
@@ -1166,6 +1176,9 @@ class RunContext {
     const rank = { none: 0, ambient: 0, "select-only": 0, partial: 1, high: 1, full: 2 } as const;
     if (wanted.achieved !== undefined && rank[verification.fidelity] < rank[wanted.achieved]) {
       return unenforceable(`verified fidelity ${verification.fidelity} is below the revision's ${wanted.achieved}`);
+    }
+    if (this.profile.provisioned.plan.secretRefs.length > 0 && !deps.resolveSecret) {
+      return unenforceable(`the profile's MCP servers name secret references (${this.profile.provisioned.plan.secretRefs.join(", ")}) but no secret resolver is configured to resolve them at launch`);
     }
     this.verifiedProfile = verifiedProfile(this.profile.provisioned, verification);
     this.provisioningOutcome = { fidelity: verification.fidelity, profileDigest: verification.profileDigest };
@@ -1213,11 +1226,19 @@ class RunContext {
     // `broker.dispose()` (the broker also clears partial state on a failed
     // resolve). `secretRefs` with no resolver is rejected at Prepare.
     const refs = this.request.context.secretRefs ?? [];
+    // M3 S4: a verified profile's MCP servers name their own references, resolved by their own
+    // broker, which may resolve nothing else.
+    const profileRefs = [...(this.verifiedProfile?.secretRefs ?? [])];
     let broker: SecretBroker | undefined;
+    let profileBroker: SecretBroker | undefined;
     try {
       if (refs.length > 0 && this.d.secretResolver) {
         broker = new SecretBroker(this.d.secretResolver, refs);
         spec.secretEnv = broker.resolve(refs);
+      }
+      if (profileRefs.length > 0 && this.d.provisioning?.resolveSecret) {
+        profileBroker = new SecretBroker(this.d.provisioning.resolveSecret, profileRefs);
+        spec.secretEnv = { ...spec.secretEnv, ...profileBroker.resolve(profileRefs) };
       }
       if (this.request.origin.kind === "resume") {
         const prior = this.d.store.get(this.request.origin.sessionId as string);
@@ -1229,6 +1250,7 @@ class RunContext {
       return await adapter.start(spec);
     } finally {
       broker?.dispose();
+      profileBroker?.dispose();
       delete spec.secretEnv;
     }
   }
@@ -1763,6 +1785,11 @@ function contextSummary(o: ContextObservation): string {
 
 function normalizeStartError(err: unknown): ExecutionFailure {
   const message = redactMessage(err);
+  // A secret the launch could not resolve, or a profile the adapter refused at launch, will not
+  // resolve itself on a retry: the run cannot be launched as composed (M3 S4).
+  if (err instanceof SecretResolutionError || err instanceof ProvisioningError) {
+    return { kind: SessionRunner.UNENFORCEABLE, retryable: false, message };
+  }
   if (/auth|unauthor|credential|token expired/i.test(message)) {
     return { kind: "auth", retryable: false, message };
   }

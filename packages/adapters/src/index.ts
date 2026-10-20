@@ -24,5 +24,7 @@ export {
   claudeProvisioningPlan,
   codexProvisioningPlan,
   computeProfileDigest,
+  mcpSecretEnv,
+  mcpServerName,
   verifiedProfile,
 } from "./provisioning.js";

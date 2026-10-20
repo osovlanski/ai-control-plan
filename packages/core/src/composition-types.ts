@@ -9,6 +9,8 @@
 
 export type AssetKind = "skill" | "plugin" | "agent" | "hook" | "mcp_server" | "rule";
 export interface SecretRef { type: "env" | "keychain"; name: string }
+/** registry v1 `McpLaunch`: how an MCP server starts. `env` values are secret references, never values. */
+export interface McpLaunch { transport: "stdio" | "remote"; command?: string; args?: string[]; url?: string; env: Record<string, SecretRef> }
 export interface RegistryAsset {
   id: string;
   digest: string;
@@ -23,7 +25,7 @@ export interface RegistryAsset {
   conflicts: string[];
   lineage: { origin: string; sourceUrl?: string };
   enabled: boolean;
-  mcp?: { transport: "stdio" | "remote"; command?: string; args?: string[]; url?: string; env: Record<string, SecretRef> };
+  mcp?: McpLaunch;
   installedAt: string;
   lastUsedAt?: string;
   stats?: Record<string, unknown>;

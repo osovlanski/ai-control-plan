@@ -110,6 +110,8 @@ export interface WorkspaceConfig {
     assets?: {
       /** Positive integer; default 3. */
       maxSkills?: number;
+      /** Positive integer; default 2. MCP servers attached per revision (M3 S4). */
+      maxMcpServers?: number;
       /** Registry assets the workspace pre-approves, pinned by digest (`sha256:<64 hex>`). Default []. */
       allowlist?: Array<{ id: string; digest: string }>;
     };
@@ -264,7 +266,7 @@ export interface ResolvedRegistryConfig {
 export interface ResolvedComposerConfig {
   enabled: boolean;
   requireRevision: boolean;
-  assets: { maxSkills: number; allowlist: Array<{ id: string; digest: string }> };
+  assets: { maxSkills: number; maxMcpServers: number; allowlist: Array<{ id: string; digest: string }> };
   context: {
     fragments: { default: string[]; byRepository: Record<string, string[]> };
     memoryBundles: Array<{ id: string; digest: string; reason: string }>;
@@ -755,9 +757,11 @@ function resolveComposer(file: unknown, configPath: string): ResolvedComposerCon
   const enabled = bool(c.enabled, "composer.enabled") ?? false;
   const requireRevision = bool(c.requireRevision, "composer.requireRevision") ?? false;
 
-  const a = section(c.assets, "composer.assets", ["maxSkills", "allowlist"]);
+  const a = section(c.assets, "composer.assets", ["maxSkills", "maxMcpServers", "allowlist"]);
   if (a.maxSkills !== undefined && !isPositiveInteger(a.maxSkills)) problems.push("composer.assets.maxSkills must be a positive integer");
   const maxSkills = isPositiveInteger(a.maxSkills) ? a.maxSkills : 3;
+  if (a.maxMcpServers !== undefined && !isPositiveInteger(a.maxMcpServers)) problems.push("composer.assets.maxMcpServers must be a positive integer");
+  const maxMcpServers = isPositiveInteger(a.maxMcpServers) ? a.maxMcpServers : 2;
   const allowlist = pinned<{ id: string; digest: string }>(a.allowlist, "composer.assets.allowlist", REGISTRY_ASSET_ID, () => ({}), ["id", "digest"]);
 
   const x = section(c.context, "composer.context", ["fragments", "memoryBundles", "charsPerToken", "tokenBudget"]);
@@ -817,7 +821,7 @@ function resolveComposer(file: unknown, configPath: string): ResolvedComposerCon
   return {
     enabled,
     requireRevision,
-    assets: { maxSkills, allowlist },
+    assets: { maxSkills, maxMcpServers, allowlist },
     context: {
       fragments: { default: fragmentsDefault, byRepository },
       memoryBundles,

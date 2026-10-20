@@ -4,7 +4,7 @@ export { createTextGuard, guarded, WITHHELD, type TextGuard } from "./text-guard
 export { compositionDigest, OVERRIDE_ACTOR, OVERRIDE_REASON } from "./explain.js";
 export { INTENT_KINDS } from "./intent.js";
 export { candidateRef, harnessForProvider } from "./harness-model.js";
-export { ASSET_FILTERS, type AssetFilterName } from "./assets.js";
+export { ASSET_FILTERS, DEFAULT_MAX_MCP_SERVERS, type AssetFilterName } from "./assets.js";
 export { BUNDLE_HARNESSES, effectiveTokenBudget, isBundleHarness } from "./context.js";
 export { PERMISSIONS, policyDocument, toApprovalMode, toPermission } from "./policy.js";
 export * from "./accounting.js";
