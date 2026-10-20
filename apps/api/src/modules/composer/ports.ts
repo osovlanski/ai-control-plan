@@ -7,9 +7,12 @@
  * - Stage 4, `CockpitBundlePort`: #85's `BundledComposition.render`, which writes nothing. The
  *   Composer never builds a bundle itself (plan risk 6): nothing in this directory imports the
  *   bundle contract module, where the plane's reference renderer lives.
+ * - Stage 5, `AdapterProvisioningPort` (M3 S2): the chosen adapter's `prepare`, which writes
+ *   nothing, predicts the profile digest the revision binds and the run later verifies.
  */
+import { join } from "node:path";
 import {
-  harnessForProvider, type ApprovalMode, type AssistantId, type BundlePort, type BundlePortResult, type BundleRenderDraft,
+  harnessForProvider, ProvisioningError, type AgentSpec, type ProvisioningPort, type ProvisioningPredictRequest, type ProvisioningPrediction, type ApprovalMode, type AssistantId, type BundlePort, type BundlePortResult, type BundleRenderDraft,
   type CapabilityManifest, type Harness, type HarnessModelCandidate, type HarnessModelChoice, type HarnessModelFilter,
   type HarnessModelPort, type HarnessModelProjection, type HarnessModelRequest, type ModelPrice, type RoutingExplanation,
 } from "@agent-plane/core";
@@ -256,5 +259,48 @@ export class CockpitBundlePort implements BundlePort {
     }
     if (result.reason === "not_final") return { status: "not_final", response: result.bundle.response, excludedSkills: result.excludedSkills };
     return { status: "failure", reason: result.reason };
+  }
+}
+
+/** Placeholder ids a prediction plans under. Neither reaches the profile digest, which carries no path or id. */
+const PREDICT_SESSION = "composer-predict";
+const PREDICT_REVISION = "composer-predict";
+
+/**
+ * Stage 5 over the chosen adapter's `prepare`. Writes nothing: `prepare` only plans, and the plan
+ * is discarded. The profile digest is content-addressed (harness, files, launch shape; no root, no
+ * session, no revision), so the one predicted here is the one the run's `verify` must reproduce.
+ * A refusal is an answer, never a throw.
+ */
+export class AdapterProvisioningPort implements ProvisioningPort {
+  constructor(private readonly deps: Pick<RouteDeps, "registry" | "config">) {}
+
+  async predict({ assistantId, spec, bundle }: ProvisioningPredictRequest): Promise<ProvisioningPrediction> {
+    let adapter;
+    try {
+      adapter = this.deps.registry.adapter(assistantId);
+    } catch {
+      return { status: "unavailable", reason: `assistant ${assistantId} has no adapter` };
+    }
+    if (!adapter.prepare || !adapter.provision || !adapter.verify || !adapter.dispose) {
+      return { status: "unavailable", reason: `${assistantId} has no provisioning lifecycle` };
+    }
+    // The fields `prepare` reads; the rest are filled at persist and are not in the digest.
+    const draftSpec = {
+      ...spec,
+      composition_revision_id: PREDICT_REVISION,
+      policy: { revision: { id: "", digest: "" }, permission: "read-only", tool_allowlist: [], budget: {} },
+      provisioning: { requested: "isolated" },
+      workspace: { repository_id: "", branch: "", worktree_id: "" },
+      explanation_ref: "",
+    } satisfies AgentSpec;
+    try {
+      const plan = await adapter.prepare({ spec: draftSpec, bundle, root: join(this.deps.config.dir, "profiles", PREDICT_SESSION), sessionId: PREDICT_SESSION });
+      if (plan.fidelity === "none") return { status: "unavailable", reason: `${assistantId} prepares a profile with fidelity none` };
+      return { status: "planned", harness: plan.harness, fidelity: plan.fidelity, profileDigest: plan.profileDigest, visible: [...plan.visible] };
+    } catch (err) {
+      const reason = err instanceof ProvisioningError ? `${err.reason}: ${err.message}` : "prepare failed";
+      return { status: "unavailable", reason };
+    }
   }
 }

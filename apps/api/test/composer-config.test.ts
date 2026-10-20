@@ -41,7 +41,7 @@ describe("composer config defaults", () => {
         charsPerToken: { default: 3.5, byModel: {} },
         tokenBudget: 12000,
       },
-      policy: { riskPermission: { high: "prompt-on-escalation" }, permitAmbient: false, budget: {} },
+      policy: { riskPermission: { high: "prompt-on-escalation" }, permitAmbient: false, permitPartial: false, budget: {} },
     });
   });
 

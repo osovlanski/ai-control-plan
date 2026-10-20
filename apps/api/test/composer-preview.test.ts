@@ -231,12 +231,13 @@ describe("POST /api/tasks/:id/compose", () => {
     expect(assets.chosen).toEqual([TS_REVIEW]);
     expect(assets.filters.map((f) => f.filter)).toEqual(["kind_not_attachable", "not_allowlisted"]);
     expect(stage(body, "context").chosen).toEqual(["fragment:typescript-style"]);
-    expect(stage(body, "policy").chosen).toEqual(["permission:auto", "provisioning:ambient"]);
+    // M3 S2: the fake claude-code adapter's `prepare` plans a full profile, so the revision binds it.
+    expect(stage(body, "policy").chosen).toEqual(["permission:auto", "provisioning:isolated"]);
     expect(stage(body, "confirm")).toMatchObject({ chosen: [], why: "awaiting confirmation" });
     expect(body.specDraft).toMatchObject({
       task_id: id, harness: "claude-code", model: { primary: { id: "fake-1" }, fallbacks: [] },
       assets: { skills: [{ id: TS_REVIEW, digest: digestOf(cockpit.skills.get(TS_REVIEW)!.body), allowlisted: true }], mcp_servers: [], subagents: [] },
-      policy: { permission: "auto", tool_allowlist: [], budget: {} }, provisioning: { requested: "ambient" },
+      policy: { permission: "auto", tool_allowlist: [], budget: {} }, provisioning: { requested: "isolated", achieved: "full", profile_digest: expect.stringMatching(/^sha256:[0-9a-f]{64}$/) },
     });
     // The draft is a valid AgentSpec and decision once the api fills its ids at persist.
     const full = filled(id, body);
@@ -386,7 +387,7 @@ describe("POST /api/tasks/:id/compose", () => {
     expect(res).toMatchObject({ status: 400, body: { error: "override refused", reason: expect.stringMatching(/would loosen/) } });
     const tighter = await compose(id, { overrides: { policy: { permission: "read-only" } } });
     expect(tighter.status).toBe(200);
-    expect(stage(tighter.body, "policy")).toMatchObject({ override: { from: ["permission:prompt-on-escalation", "provisioning:ambient"], to: ["permission:read-only", "provisioning:ambient"] } });
+    expect(stage(tighter.body, "policy")).toMatchObject({ override: { from: ["permission:prompt-on-escalation", "provisioning:isolated"], to: ["permission:read-only", "provisioning:isolated"] } });
     expect({ routing: count("routing_decisions"), attempts: count("composition_attempts") }).toEqual({ routing: 1, attempts: 1 });
   });
 

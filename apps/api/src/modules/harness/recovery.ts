@@ -67,6 +67,8 @@ export interface RecoveryDeps {
   processes?: ProviderProcessTracker;
   /** F2: boot reap of provider processes a dead incarnation left behind. Runs before any session is decided. */
   reapStrays?: () => Promise<unknown>;
+  /** M3 S3: boot sweep of per-run profiles. Runs after every live session is decided, so a session this boot terminalized is swept. */
+  sweepProfiles?: () => unknown;
 }
 
 export type RecoveryAction =
@@ -104,6 +106,7 @@ export class HarnessRecovery {
       out.push(await this.recoverSession(s.sessionId));
     }
     this.deps.store.reconcileHandoffClaims();
+    this.deps.sweepProfiles?.();
     return out;
   }
 

@@ -4,14 +4,18 @@
  * Permission only tightens: it is the stricter of the workspace approval mode and the risk map.
  * When the chosen harness refuses that mode the attempt fails `policy_unenforceable`; the Composer
  * never loosens permission to make a route work. An override may only tighten permission or a
- * cap. The budget is the task cap minus what the task consumed. Provisioning is `ambient` in M2,
- * so the workspace must permit ambient (invariant 3).
+ * cap. The budget is the task cap minus what the task consumed.
+ *
+ * Provisioning (M3 S2): when the chosen adapter's `prepare` plans a profile, the revision requests
+ * `isolated` and binds its fidelity and profile digest, which the run must then verify. A `partial`
+ * profile needs `permitPartial` (or `permitAmbient`, which accepts less). With no profile the
+ * revision is `ambient`, and only when the workspace permits ambient (invariant 3).
  */
 import { jcs } from "../canonical-json.js";
 import type { AgentSpec, CompositionPermission } from "../composition-types.js";
 import { remainingBudget, roundUsd } from "./accounting.js";
 import { byCodeUnit, overrideWhy, sha256Digest, sortedUnique, type RawCandidate, type RawFilter, type RawStage } from "./explain.js";
-import type { ApprovalMode, BudgetCaps, ComposedIntent, ComposerDeps, ComposerInputs, HarnessModelChoice, IntentRisk } from "./types.js";
+import type { ApprovalMode, BudgetCaps, ComposedIntent, ComposerDeps, ComposerInputs, HarnessModelChoice, IntentRisk, ProvisioningPrediction } from "./types.js";
 
 const STRICTNESS: Readonly<Record<CompositionPermission, number>> = { auto: 0, "prompt-on-escalation": 1, "read-only": 2 };
 export const PERMISSIONS: readonly CompositionPermission[] = ["auto", "prompt-on-escalation", "read-only"];
@@ -39,6 +43,7 @@ export function policyDocument(inputs: ComposerInputs) {
     allowlist: [...inputs.config.allowlist].map(({ id, digest }) => ({ id, digest })).sort((a, b) => byCodeUnit(a.id, b.id) || byCodeUnit(a.digest, b.digest)),
     risk_permission: Object.fromEntries((["low", "normal", "high"] as const).flatMap((r) => (risk[r] ? [[r, risk[r]]] : []))),
     permit_ambient: inputs.config.policy.permitAmbient,
+    permit_partial: inputs.config.policy.permitPartial,
     budget: { ...inputs.config.budget },
     tool_allowlist: sortedUnique(inputs.workspacePolicy.toolAllowlist),
   };
@@ -80,6 +85,7 @@ export function policyStage(
   computedIntent: ComposedIntent,
   choice: HarnessModelChoice,
   deps: ComposerDeps,
+  prediction: ProvisioningPrediction = { status: "unavailable", reason: "no provisioning port" },
 ): PolicyStageResult {
   const { config, consumed, workspacePolicy } = inputs;
   const override = inputs.overrides?.policy;
@@ -137,26 +143,50 @@ export function policyStage(
       : []),
   ];
   const ambient = config.policy.permitAmbient;
+  const partialOk = config.policy.permitPartial || ambient;
+  // A prediction for another harness is not this composition's profile (risk 9).
+  const planned = prediction.status === "planned" && prediction.harness === choice.harness ? prediction : undefined;
+  const noProfile = planned ? undefined : prediction.status === "unavailable" ? prediction.reason : `adapter planned a ${prediction.harness} profile for a ${choice.harness} composition`;
+  const isolatedCandidates: RawCandidate[] = planned
+    ? [{
+      ref: "provisioning:isolated",
+      digest: planned.profileDigest,
+      evidence: [
+        `${choice.assistantId} prepares a ${planned.fidelity} ${planned.harness} profile`,
+        // Counted, not listed: the scopes name home paths, which the text guard withholds. The
+        // run's `provisioning.verified` event lists them.
+        `${planned.visible.length} machine-global or workspace scope(s) stay visible`,
+      ],
+    }]
+    : [];
   const provisioningCandidate: RawCandidate = {
     ref: "provisioning:ambient",
-    evidence: [ambient ? "isolation: ambient (M3 not shipped; workspace permits ambient)" : "isolation: unavailable (M3 not shipped; workspace does not permit ambient)"],
+    evidence: [ambient ? "workspace permits ambient" : "workspace does not permit ambient", ...(noProfile ? [`no profile: ${noProfile}`] : [])],
   };
+  const partialRefused = planned?.fidelity === "partial" && !partialOk;
+  const provisioningRef = planned && !partialRefused ? "provisioning:isolated" : "provisioning:ambient";
+  const isolationUnavailable = provisioningRef === "provisioning:ambient" && !ambient;
   const permissionRef = `permission:${permission}`;
   const refused = !choice.acceptedApprovalModes.includes(toApprovalMode(permission));
   if (refused) permissionCandidates.find((c) => c.ref === permissionRef)!.evidence = [
     ...(permissionCandidates.find((c) => c.ref === permissionRef)!.evidence ?? []),
     `harness ${choice.harness} (${choice.assistantId}) does not enforce ${toApprovalMode(permission)}`,
   ];
-  const candidates = [...permissionCandidates, ...capCandidates(config.budget, computedBudget.remaining), ...capCandidates(tightened.caps, budget.remaining), provisioningCandidate];
+  const candidates = [
+    ...permissionCandidates, ...capCandidates(config.budget, computedBudget.remaining), ...capCandidates(tightened.caps, budget.remaining),
+    ...isolatedCandidates, provisioningCandidate,
+  ];
 
   const filters: RawFilter[] = [
     ...(refused ? [{ filter: "harness_refuses", removed: [permissionRef], reason: `harness ${choice.harness} refuses approval mode ${toApprovalMode(permission)}` }] : []),
-    ...(!ambient ? [{ filter: "isolation_unavailable", removed: ["provisioning:ambient"], reason: "nothing provisions isolation until M3 and the workspace does not permit ambient" }] : []),
+    ...(partialRefused ? [{ filter: "partial_not_permitted", removed: ["provisioning:isolated"], reason: `the ${planned!.harness} profile is partial and the workspace permits neither partial nor ambient` }] : []),
+    ...(provisioningRef === "provisioning:isolated" ? [{ filter: "profile_planned", removed: ["provisioning:ambient"], reason: "the revision binds a verified profile; it does not run ambient" }] : []),
+    ...(isolationUnavailable ? [{ filter: "isolation_unavailable", removed: ["provisioning:ambient"], reason: `no profile can be bound${partialRefused ? " at a permitted fidelity" : ""} and the workspace does not permit ambient` }] : []),
     ...(budget.exhausted.length
       ? [{ filter: "budget_exhausted", removed: capRefs(budget.remaining).filter((r) => budget.exhausted.some((k) => r.startsWith(`${k}:`))), reason: "the task has no budget remaining under its cap" }]
       : []),
   ];
-  const failure: PolicyFailure | undefined = refused ? "policy_unenforceable" : !ambient ? "isolation_unavailable" : budget.exhausted.length ? "budget_exhausted" : undefined;
+  const failure: PolicyFailure | undefined = refused ? "policy_unenforceable" : isolationUnavailable ? "isolation_unavailable" : budget.exhausted.length ? "budget_exhausted" : undefined;
 
   const permissionWhy = `permission ${permission} (stricter of workspace ${workspacePolicy.approvalMode} and risk ${intent.risk} -> ${actual.riskMode ?? "no risk-map entry"}${override?.permission ? `; tightened by override from ${actual.permission}` : ""})`;
   const why = [
@@ -164,12 +194,16 @@ export function policyStage(
     `tools: ${workspacePolicy.toolAllowlist.length ? sortedUnique(workspacePolicy.toolAllowlist).join(", ") : "none listed; the approval mode governs"}`,
     `budget: ${capRefs(budget.remaining).join(", ") || "no caps"}`,
     ...(budget.remaining.max_cost_usd !== undefined && !choice.price ? ["no price evidence; cost is not computed"] : []),
-    ambient ? "provisioning ambient (M3 not shipped; workspace permits ambient)" : "isolation unavailable: the workspace does not permit ambient",
+    provisioningRef === "provisioning:isolated"
+      ? `provisioning isolated: ${planned!.fidelity} ${planned!.harness} profile ${planned!.profileDigest}`
+      : isolationUnavailable
+        ? `isolation unavailable: ${partialRefused ? "the profile is partial and partial is not permitted" : `no profile (${noProfile})`}; the workspace does not permit ambient`
+        : `provisioning ambient: ${partialRefused ? "partial profile not permitted" : `no profile (${noProfile})`}; workspace permits ambient`,
     ...(failure ? [`failed: ${failure}`] : []),
   ].join("; ");
 
-  const computedChosen = [`permission:${actual.permission}`, ...capRefs(computedBudget.remaining), "provisioning:ambient"];
-  const chosen = failure ? [] : [permissionRef, ...capRefs(budget.remaining), "provisioning:ambient"];
+  const computedChosen = [`permission:${actual.permission}`, ...capRefs(computedBudget.remaining), provisioningRef];
+  const chosen = failure ? [] : [permissionRef, ...capRefs(budget.remaining), provisioningRef];
   const overridden = override !== undefined && (override.permission !== undefined || override.budget !== undefined);
   const stage: RawStage = {
     stage: "policy", candidates, filters, chosen,
@@ -185,6 +219,8 @@ export function policyStage(
       tool_allowlist: sortedUnique(workspacePolicy.toolAllowlist),
       budget: budget.remaining,
     },
-    provisioning: { requested: "ambient" },
+    provisioning: provisioningRef === "provisioning:isolated"
+      ? { requested: "isolated", achieved: planned!.fidelity, profile_digest: planned!.profileDigest }
+      : { requested: "ambient" },
   };
 }

@@ -490,7 +490,7 @@ describe("POST /api/tasks/:id/start with the composer on", () => {
     expect(res.status).toBe(200);
     expect(executionRequest(id).policy.approval).toEqual({ mode: "read-only" });
     const decision = (await history(id)).revisions[0]!.decision;
-    expect(stage(decision, "policy").override).toMatchObject({ actor: "operator", to: ["permission:read-only", "provisioning:ambient"] });
+    expect(stage(decision, "policy").override).toMatchObject({ actor: "operator", to: ["permission:read-only", "provisioning:isolated"] });
     // The same digest without the override is a different composition.
     const other = task("Add a typed helper to the parser module");
     const otherPreview = await compose(other, { overrides });

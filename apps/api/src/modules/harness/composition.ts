@@ -27,6 +27,7 @@ import { ProviderProcessTracker, markIncarnation, reapStrayProviders } from "./p
 import { HarnessRecovery } from "./recovery.js";
 import { SessionRunner, type RunnerDeps } from "./session-runner.js";
 import { SessionStore } from "./session-store.js";
+import { sweepProfiles } from "./profile-sweep.js";
 import { WorkspaceAuthority } from "./workspace-authority.js";
 import { VerificationStore } from "./verification-store.js";
 import { VerificationCoordinator } from "../verification-coordinator.js";
@@ -94,6 +95,8 @@ export function buildHarnessComposition(deps: HarnessCompositionDeps): HarnessCo
   const { db, config, tasks, bus, checkpoints, registry, onError } = deps;
 
   const sessionStore = new SessionStore(db);
+  // M3: per-run profiles live in the plane's own data dir, one directory per session.
+  const profilesRoot = join(config.dir, "profiles");
   const approvals = new ApprovalService(db);
   const verificationStore = new VerificationStore(db);
   // F2: stamp this incarnation before any provider can be spawned, so a later
@@ -109,6 +112,14 @@ export function buildHarnessComposition(deps: HarnessCompositionDeps): HarnessCo
     shouldTerminalizeOnRecovery: (sessionId) => shouldTerminalizeOnRecovery(db, config, sessionId),
     processes,
     reapStrays: () => reapStrayProviders(config.dir, { log: deps.onInfo }),
+    sweepProfiles: () => {
+      const swept = sweepProfiles({
+        root: profilesRoot,
+        sessionState: (sid) => sessionStore.get(sid)?.state,
+        record: (sid, events) => recorder.appendSettled(sid, events),
+      });
+      if (swept.removed.length || swept.unowned.length) deps.onInfo?.("profile sweep", { removed: swept.removed.length, retained: swept.retained.length, unowned: swept.unowned });
+    },
   });
 
   const sessionTaskCache = new Map<string, string>();
@@ -268,9 +279,8 @@ export function buildHarnessComposition(deps: HarnessCompositionDeps): HarnessCo
     toolGate,
     processes,
     log: deps.onInfo,
-    // M3: per-run profiles live in the plane's own data dir, one directory per session.
     provisioning: {
-      root: join(config.dir, "profiles"),
+      root: profilesRoot,
       load: (compositionRevisionId) => {
         const row = db.prepare("SELECT spec_json, bundle_response_json FROM agent_specs WHERE composition_revision_id = ?").get(compositionRevisionId) as
           | { spec_json: string; bundle_response_json: string }
