@@ -91,6 +91,42 @@ export class TaskAccounting {
   }
 
   /**
+   * The task caps the task's latest revision was composed against, before stage 5 subtracted
+   * consumption, or undefined when the task has no revision. Its persisted `policy.budget` is the
+   * remainder, so carrying that and subtracting consumption again would count it twice. Stage 5
+   * records each cap as "task cap C, consumed U, remaining R" on the chosen `max_*:R` candidate;
+   * C is read back only when C - U is R. Runtime is never consumed, so its remainder is its cap. A
+   * cap whose line is missing or inconsistent carries the remainder: tighter, never looser.
+   */
+  latestTaskCaps(taskId: string): BudgetCaps | undefined {
+    const row = this.d.db.prepare(
+      `SELECT s.spec_json, d.decision_json FROM agent_specs s
+         JOIN composition_decisions d ON d.composition_revision_id = s.composition_revision_id
+        WHERE s.task_id = ? ORDER BY s.created_at DESC, s.rowid DESC LIMIT 1`,
+    ).get(taskId) as { spec_json: string; decision_json: string } | undefined;
+    if (!row) return undefined;
+    const remaining = (JSON.parse(row.spec_json) as AgentSpec).policy.budget;
+    const policy = (JSON.parse(row.decision_json) as { stages?: Array<{ stage: string; candidates?: Array<{ ref: string; evidence?: string[] }> }> })
+      .stages?.find((s) => s.stage === "policy");
+    const taskCap = (key: "max_tokens" | "max_cost_usd", left: number): number => {
+      const evidence = policy?.candidates?.find((c) => c.ref === `${key}:${left}`)?.evidence ?? [];
+      const caps = evidence.flatMap((line) => {
+        const m = /^task cap (\S+), consumed (\S+), remaining (\S+)$/.exec(line);
+        if (!m) return [];
+        const [cap, used, rest] = [Number(m[1]), Number(m[2]), Number(m[3])];
+        const exact = key === "max_cost_usd" ? roundUsd(cap - used) === left : cap - used === left;
+        return Number.isFinite(cap) && Number.isFinite(used) && rest === left && exact && cap >= left ? [cap] : [];
+      });
+      return caps.length ? Math.min(...caps) : left;
+    };
+    return {
+      ...(remaining.max_tokens !== undefined ? { max_tokens: taskCap("max_tokens", remaining.max_tokens) } : {}),
+      ...(remaining.max_cost_usd !== undefined ? { max_cost_usd: taskCap("max_cost_usd", remaining.max_cost_usd) } : {}),
+      ...(remaining.max_runtime_ms !== undefined ? { max_runtime_ms: remaining.max_runtime_ms } : {}),
+    };
+  }
+
+  /**
    * What remains under one revision's caps after the runs bound to it. A same-assistant K11
    * continuation that reuses the revision runs on this, so a reuse cannot reset spending.
    */
