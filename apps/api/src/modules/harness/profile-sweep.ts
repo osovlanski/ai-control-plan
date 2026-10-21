@@ -5,6 +5,8 @@
  * recovery, this removes each profile the plane owns whose session is no
  * longer live: terminal, or gone from the database. A live session keeps its profile (a K11
  * continuation or resume provisions again under its own session, with the same digest).
+ * A terminal session whose runner is still tearing down (it finalizes, then terminates the
+ * provider, disposes the profile and releases its lease last) also keeps it; a later pass takes it.
  *
  * Ownership is the profile's marker, never the directory name: an entry without a marker naming
  * this session, a symlink or a plain file is reported and left alone. A half-written profile
@@ -25,13 +27,15 @@ export interface ProfileSweepDeps {
   sessionState(sessionId: string): ExecutionSessionState | undefined;
   /** Append to a session that has settled (`EventRecorder.appendSettled`). */
   record(sessionId: string, events: NormalizedEvent[]): void;
+  /** True while a runner may still use the profile: an unexpired lease or a tracked provider process. */
+  inUse?(sessionId: string): boolean;
   now?: () => Date;
 }
 
 export interface ProfileSweepResult {
   /** Entries removed, by name. */
   removed: string[];
-  /** Profiles of live sessions, kept. */
+  /** Profiles of live sessions, or of sessions a runner still holds, kept. */
   retained: string[];
   /** Entries the plane cannot prove it owns, left in place. */
   unowned: string[];
@@ -80,7 +84,7 @@ export function sweepProfiles(deps: ProfileSweepDeps): ProfileSweepResult {
     // This check and removal are synchronous. STARTING/RUNNING are non-terminal, so a live
     // runner keeps its profile, including a marked staging directory during provisioning.
     const state = deps.sessionState(sessionId);
-    if (state !== undefined && !isSessionTerminal(state)) {
+    if ((state !== undefined && !isSessionTerminal(state)) || deps.inUse?.(sessionId)) {
       result.retained.push(name);
       continue;
     }
