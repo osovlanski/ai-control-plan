@@ -1563,13 +1563,21 @@ export class Orchestrator {
   async respondApproval(taskId: string, requestId: string, approved: boolean): Promise<void> {
     this.assertNoMixedOwnership(taskId);
     if (this.harnessOwns(taskId)) {
-      const sid = this.harnessBridge!.liveSessionId(taskId);
-      if (!sid) throw new Error(`No live harness session for task ${taskId}`);
+      const live = this.liveHarnessSessions(taskId);
+      if (live.length === 0) throw new Error(`No live harness session for task ${taskId}`);
       // ApprovalService.answer validates the (session, provider_request_id) row
       // exists and is answerable — loud on a mismatch. The runner's
-      // AWAITING_APPROVAL poll delivers it via adapter.send.
-      this.harnessBridge!.answerApproval(sid, requestId, approved);
-      return;
+      // AWAITING_APPROVAL poll delivers it via adapter.send. A composed
+      // comparison has several live sessions; the request id names one of them.
+      if (live.length === 1) return this.harnessBridge!.answerApproval(live[0]!, requestId, approved);
+      for (const sid of live) {
+        try {
+          return this.harnessBridge!.answerApproval(sid, requestId, approved);
+        } catch {
+          // Not this candidate's pending approval; try the next one.
+        }
+      }
+      throw new Error(`No session of task ${taskId} is waiting on approval ${requestId}`);
     }
     const runs = this.runsOfTask(taskId);
     if (runs.length === 0) throw new Error(`No active run for task ${taskId}`);
@@ -1597,8 +1605,8 @@ export class Orchestrator {
       for (const claim of claims) new HandoffService(this.db).release(claim.id, claim.claimed_by_request_id);
       this.db.prepare(`UPDATE execution_requests SET superseded = 1 WHERE id IN (SELECT dispatch_id FROM dispatches WHERE task_id = ? AND phase = 'cancelled')
         AND NOT EXISTS (SELECT 1 FROM runs WHERE execution_request_id = execution_requests.id)`).run(taskId);
-      const sid = this.harnessBridge?.latestSessionId(taskId);
-      if (sid) this.harnessBridge!.requestCancel(sid);
+      // A composed comparison has a live session per candidate; every one is cancelled.
+      for (const sid of this.sessionsToCancel(taskId)) this.harnessBridge!.requestCancel(sid);
       this.tasks.transition(taskId, "CANCELLED");
       const condition = this.db.prepare('SELECT generation FROM wait_conditions WHERE task_id = ? ORDER BY generation DESC LIMIT 1').get(taskId) as { generation: number } | undefined;
       if (condition) this.db.prepare("INSERT INTO scheduler_events(task_id,generation,type,at,payload) VALUES(?,?,'wait.cancelled',?,'{}')").run(taskId, condition.generation, new Date().toISOString());
@@ -1608,8 +1616,7 @@ export class Orchestrator {
       // observes the intent, settles the session terminal CANCELLED (+ a
       // checkpoint attempt), and its settleFromResult callback finds the task
       // already terminal and no-ops it (PLAN.md 8c.3, R1 #3).
-      const sid = this.harnessBridge!.latestSessionId(taskId);
-      if (sid) this.harnessBridge!.requestCancel(sid);
+      for (const sid of this.sessionsToCancel(taskId)) this.harnessBridge!.requestCancel(sid);
       const envelope = this.tasks.envelope(taskId);
       this.publishState(taskId, envelope);
       return;
@@ -1700,6 +1707,32 @@ export class Orchestrator {
     }
 
     if (this.db.prepare("SELECT 1 FROM dispatches WHERE task_id = ? AND phase IN ('reserved','start_attempted')").get(taskId)) throw new Error("Scheduler owns task; parallel starts are not allowed");
+
+    // With the composer on, every candidate composes its own revision before anything starts, so
+    // a blocked candidate (no budget left, requireRevision) starts none and leaves the task fresh.
+    const unbindable = this.parallelUnbindable(taskId);
+    if (unbindable && this.dispatchComposer && this.config.composer.requireRevision) {
+      throw new Error(`composer.requireRevision is on and a ${mode} start cannot carry a revision (${unbindable})`);
+    }
+    const plans = new Map<string, { routingDecisionRef: string; composition?: StartComposition }>();
+    if (this.dispatchComposer && !unbindable) {
+      for (const assistantId of assistantIds) {
+        const routingDecisionId = persistRoutingDecision(this.db, taskId, {
+          candidates: [],
+          ruleFired: `${mode} candidate (chosen by the operator)`,
+          chosen: assistantId,
+        });
+        // `run-now`: an operator start over a route already made, with no preview to confirm. The
+        // routing decision's rule names the comparison; a distinct origin would be a core contract change.
+        const composed = await this.dispatchComposer.composeForDispatch({ taskId, assistantId, origin: "run-now", routingDecisionId });
+        if (composed.kind === "blocked") throw new Error(`${assistantId} cannot start: ${composed.reason}`);
+        plans.set(assistantId, {
+          routingDecisionRef: String(routingDecisionId),
+          ...(composed.kind === "compose" ? { composition: composed.composition } : {}),
+        });
+      }
+    }
+
     this.tasks.setMode(taskId, mode);
     if (row.state === "CREATED") this.tasks.transition(taskId, "ROUTING");
     const envelope = this.tasks.envelope(taskId);
@@ -1723,12 +1756,16 @@ export class Orchestrator {
     }
 
     const started: Array<{ runId: string; assistantId: string }> = [];
-    for (const assistantId of assistantIds) {
-      const { runId } = await this.startTask(taskId, assistantId, {
-        parallel: true,
-        worktree: worktrees.get(assistantId),
-      });
-      started.push({ runId, assistantId });
+    if (plans.size > 0) {
+      started.push(...(await this.startComposedCandidates(taskId, mode, assistantIds, plans, worktrees)));
+    } else {
+      for (const assistantId of assistantIds) {
+        const { runId } = await this.startTask(taskId, assistantId, {
+          parallel: true,
+          worktree: worktrees.get(assistantId),
+        });
+        started.push({ runId, assistantId });
+      }
     }
     this.notice(
       taskId,
@@ -1738,9 +1775,121 @@ export class Orchestrator {
     return { runs: started };
   }
 
+  /**
+   * Why compare/race candidates of this task cannot run composed, or undefined when they can: the
+   * Harness path (single mode on, bridge wired), a repository and its worktree identity. Read
+   * before the task's mode is set, since `compositionUnbindable` treats compare/race as legacy.
+   */
+  private parallelUnbindable(taskId: string): string | undefined {
+    if (!this.config.execution?.harnessModes?.single || !this.harnessBridge) return "legacy_execution_path";
+    if (!this.tasks.envelope(taskId).repository) return "no_repository";
+    if (!this.repositoryIdentities) return "no_worktree_identity";
+    return undefined;
+  }
+
+  /** The newest Harness session (it may be settling) and every live one. */
+  private sessionsToCancel(taskId: string): string[] {
+    const latest = this.harnessBridge?.latestSessionId(taskId);
+    return [...new Set([...(latest ? [latest] : []), ...(this.harnessBridge ? this.liveHarnessSessions(taskId) : [])])];
+  }
+
+  /** Live Harness sessions of the task; a composed comparison has one per candidate. */
+  private liveHarnessSessions(taskId: string): string[] {
+    return (this.db
+      .prepare("SELECT id FROM runs WHERE task_id = ? AND execution_request_id IS NOT NULL AND ended_at IS NULL")
+      .all(taskId) as Array<{ id: string }>).map((r) => r.id);
+  }
+
+  /**
+   * Composed compare/race: each candidate is its own Harness session in its own worktree, bound to
+   * its own revision, so the runner provisions, verifies and disposes that harness's profile for
+   * it alone (M3). Every revision is persisted before any session starts.
+   */
+  private async startComposedCandidates(
+    taskId: string,
+    mode: "compare" | "race",
+    assistantIds: AssistantId[],
+    plans: Map<string, { routingDecisionRef: string; composition?: StartComposition }>,
+    worktrees: Map<string, { worktreePath: string; branch: string; baseRef: string }>,
+  ): Promise<Array<{ runId: string; assistantId: string }>> {
+    const envelope = this.tasks.envelope(taskId);
+    const repository = envelope.repository!;
+    const bound = [];
+    for (const assistantId of assistantIds) {
+      const plan = plans.get(assistantId)!;
+      const wt = worktrees.get(assistantId)!;
+      const identity = await this.repositoryIdentities!.resolve(wt.worktreePath);
+      const target: ExecutionTarget = {
+        kind: "worktree",
+        workspaceId: identity.workspaceId,
+        repositoryId: identity.repositoryId,
+        worktreeId: identity.worktreeId,
+      };
+      const composed = this.bindComposition(plan.composition, target, wt.branch);
+      const policy = composed
+        ? composedExecutionPolicy(composed.policy, { approvalMode: this.config.policy.approvalMode, maxRuntimeMs: this.maxRuntimeMs },
+          this.registry.manifest(assistantId)?.harness)
+        : undefined;
+      bound.push({ assistantId, plan, wt, target, composed, policy });
+    }
+
+    this.publishState(taskId, this.tasks.transition(taskId, "RUNNING"));
+    const prompt = renderTaskPrompt(envelope);
+    const started: Array<{ runId: string; assistantId: string }> = [];
+    for (const { assistantId, plan, wt, target, composed, policy } of bound) {
+      const attempt = ((this.db.prepare("SELECT MAX(attempt) AS m FROM execution_requests WHERE task_id = ?").get(taskId) as { m: number | null }).m ?? 0) + 1;
+      const project = this.projectVerification ? this.projectVerification(wt.worktreePath) : { warnings: [] };
+      for (const warning of project.warnings) this.notice(taskId, "warn", warning);
+      const { runId } = this.harnessBridge!.start(
+        {
+          taskId,
+          assistantId,
+          model: this.requestedModel(taskId, assistantId, plan.routingDecisionRef),
+          attempt,
+          prompt,
+          workdir: wt.worktreePath,
+          worktree: { repoPath: repository.path, branch: wt.branch, worktreePath: wt.worktreePath, baseRef: wt.baseRef },
+          target,
+          approvalMode: policy?.approvalMode ?? this.config.policy.approvalMode,
+          maxRuntimeMs: policy?.maxRuntimeMs ?? this.maxRuntimeMs,
+          routingDecisionRef: plan.routingDecisionRef,
+          verification: project.plan?.checks ?? [],
+          verificationPlan: project.plan,
+          ...(composed && policy ? { compositionRevisionId: composed.compositionRevisionId, budget: policy.budget } : {}),
+        },
+        (result, sid) => this.settleParallelSession(mode, taskId, assistantId, sid, result),
+      );
+      // The comparison diffs and merges by the run's own worktree and branch.
+      this.db.prepare("UPDATE runs SET worktree_path = ?, branch = ? WHERE id = ?").run(wt.worktreePath, wt.branch, runId);
+      if (composed) plan.composition!.attachRun(runId, composed.compositionRevisionId);
+      started.push({ runId, assistantId });
+    }
+    return started;
+  }
+
+  /** A composed candidate's session settled. Its profile is already disposed by the runner. */
+  private async settleParallelSession(
+    mode: "compare" | "race",
+    taskId: string,
+    assistantId: string,
+    sessionId: string,
+    result: ExecutionResult | null,
+  ): Promise<void> {
+    if (result) this.dispatchComposer?.settled(sessionId);
+    if (this.harnessBridge!.consumePlaneOwnsTerminal(sessionId)) return; // race loser or task cancel
+    if (!this.canSettle(taskId) || this.tasks.get(taskId)?.state !== "RUNNING") return;
+    const ok = result?.outcome === "completed" && result.verification?.passed !== false;
+    if (!ok) {
+      const why = result?.failure?.message ?? (result ? result.outcome : "execution harness error");
+      this.notice(taskId, "warn", `${assistantId} did not finish: ${why}`);
+    }
+    await this.settleParallelRun(mode, { taskId, runId: sessionId, assistantId }, ok);
+  }
+
   /** A competitor finished. Decide whether the task itself is done. */
-  private async settleParallelRun(mode: string, run: ActiveRun, ok: boolean): Promise<void> {
-    const siblingsRunning = this.runsOfTask(run.taskId).length > 0;
+  private async settleParallelRun(mode: string, run: Pick<ActiveRun, "taskId" | "runId" | "assistantId">, ok: boolean): Promise<void> {
+    const liveSiblings = this.liveHarnessSessions(run.taskId).filter((id) => id !== run.runId);
+    const siblingsRunning = this.runsOfTask(run.taskId).length > 0 || liveSiblings.length > 0;
 
     if (mode === "race" && ok) {
       // First success takes it; the rest are cancelled to stop burning quota.
@@ -1749,6 +1898,11 @@ export class Orchestrator {
         other.handingOff = true;
         this.db.prepare("UPDATE runs SET outcome = 'rejected' WHERE id = ?").run(other.runId);
         await other.adapter.cancel(other.handle);
+      }
+      for (const sid of liveSiblings) {
+        this.harnessBridge!.markPlaneOwnsTerminal(sid);
+        this.db.prepare("UPDATE runs SET outcome = 'rejected' WHERE id = ?").run(sid);
+        this.harnessBridge!.requestCancel(sid);
       }
       await this.finishComparison(run.taskId, run.runId, "race", `${run.assistantId} finished first`);
       return;
