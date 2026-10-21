@@ -27,6 +27,8 @@ export interface DecisionServiceConfig {
   typesafeApiKeyRef?: string;
   /** Which endpoint serves Jev (`decisions.typesafeRoute`); default `direct`. */
   typesafeRoute?: "direct" | "openrouter";
+  /** The Jev model id to send; default `DEFAULT_TYPESAFE_MODEL` (`jev-latest`). Floor discovery pins a version. */
+  typesafeModel?: string;
   /** Consecutive failures before a provider's circuit opens. */
   circuitBreakerThreshold?: number;
   /** How long an open circuit stays open before the next attempt is allowed. */
@@ -346,6 +348,7 @@ export function decisionProviders(config: DecisionServiceConfig): DecisionProvid
       apiKey: ref ? () => brokeredSecret(ref) : () => undefined,
       ...(ref ? { keyRef: ref } : {}),
       baseUrl: TYPESAFE_ROUTES[config.typesafeRoute ?? "direct"],
+      ...(config.typesafeModel ? { model: config.typesafeModel } : {}),
     }),
   ];
 }
