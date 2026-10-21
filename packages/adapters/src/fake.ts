@@ -5,6 +5,7 @@ import type {
   AssistantId,
   CapabilityManifest,
   NormalizedEvent,
+  ProfileRuntimeEvidence,
   ProvisionedProfile,
   ProvisioningInput,
   ProvisioningPlan,
@@ -19,7 +20,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { newRunId, NotSupportedError, ProvisioningError } from "@agent-plane/core";
 import { EventQueue } from "./event-queue.js";
-import { claudeProvisioningPlan, codexProvisioningPlan, disposeProfileDir, materializeProfile, mcpSecretEnv, sha256, verifyProfileOnDisk } from "./provisioning.js";
+import { claudeInitEvidence, profileSkillNames } from "./profile-evidence.js";
+import { claudeProvisioningPlan, codexProvisioningPlan, disposeProfileDir, materializeProfile, mcpSecretEnv, PLUGIN_NAME, sha256, verifyProfileOnDisk } from "./provisioning.js";
 
 type EmittedEvent = Omit<NormalizedEvent, "runId" | "ts">;
 
@@ -223,7 +225,11 @@ export class FakeAdapter implements AgentAdapter {
     emit({
       type: "run.started",
       summary: "Fake run started",
-      payload: { providerSessionRef: handle.providerSessionRef, model: run.model?.id ?? "fake-1" },
+      payload: {
+        providerSessionRef: handle.providerSessionRef,
+        model: run.model?.id ?? "fake-1",
+        ...(run.profile && this.harness === "claude-code" ? fakeInitEvidence(run.profile, run.prompt) : {}),
+      },
     });
     if (run.profile) emit(launchedWith(run.profile, state.mcpSecretsDelivered ?? []));
 
@@ -377,6 +383,23 @@ function launchedWith(profile: NonNullable<RunSpec["profile"]>, mcpSecretsDelive
       mcp: { servers: Object.keys(profile.launch.mcpServers ?? {}).sort(), secretsDelivered: mcpSecretsDelivered },
     },
   };
+}
+
+/**
+ * What Claude Code's `system/init` would report for this profile, read back from disk, judged
+ * like the real adapter judges it (M3 S5). `[FAKE:INIT:<drift>]` scripts a mismatch for drives:
+ * `extra-plugin`, `missing-skill`, `mcp-failed`, or `none` (no inventory reported at all).
+ */
+function fakeInitEvidence(profile: NonNullable<RunSpec["profile"]>, prompt: string): { profileEvidence?: ProfileRuntimeEvidence } {
+  const drift = /\[FAKE:INIT:([a-z-]+)\]/.exec(prompt)?.[1];
+  if (drift === "none" || profile.launch.harness !== "claude-code") return {};
+  const pluginDir = profile.launch.pluginDir;
+  const plugins = pluginDir && existsSync(pluginDir) ? [{ name: PLUGIN_NAME, path: pluginDir }] : [];
+  if (drift === "extra-plugin") plugins.push({ name: "user-plugin", path: "/fake/user-plugin" });
+  const skills = profileSkillNames(profile).filter((s) => existsSync(join(profile.root, "plugin", "skills", s.slice(PLUGIN_NAME.length + 1), "SKILL.md")));
+  if (drift === "missing-skill") skills.pop();
+  const mcpServers = Object.keys(profile.launch.mcpServers).map((name) => ({ name, status: drift === "mcp-failed" ? "failed" : "connected" }));
+  return { profileEvidence: claudeInitEvidence(profile, { skills: ["fake-bundled-skill", ...skills], plugins, mcpServers }) };
 }
 
 function sleep(ms: number): Promise<void> {

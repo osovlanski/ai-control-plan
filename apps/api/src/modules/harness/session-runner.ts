@@ -43,6 +43,7 @@ import type {
   RunHandle,
   ProviderProcess,
   RunSpec,
+  ProfileRuntimeEvidence,
   VerifiedProfile,
   TerminalSessionState,
   ToolGateVerdict,
@@ -505,6 +506,19 @@ class RunContext {
         if (step.done || this.tickPlan) break;
         const event = step.value;
         if (firstEvent) {
+          const unproven = this.profileRuntimeProblem(event);
+          if (unproven) {
+            // M3 S5: the provider's own startup inventory contradicts (or never stated) the
+            // verified profile. Recorded for the operator, then failed before RUNNING.
+            this.recordEvents([event]);
+            clearInterval(heartbeat);
+            await safeCancel(adapter, handle);
+            const cp = await this.attemptCheckpoint("cancel");
+            return this.finalize("STARTING", "FAILED", {
+              failure: { kind: SessionRunner.UNENFORCEABLE, retryable: false, message: unproven },
+              checkpoint: cp,
+            });
+          }
           this.transition("STARTING", "RUNNING", { providerStartAcked: true });
           this.releaseStartSlot();
           firstEvent = false;
@@ -1253,6 +1267,29 @@ class RunContext {
       profileBroker?.dispose();
       delete spec.secretEnv;
     }
+  }
+
+  /**
+   * M3 S5: a `full` profile must be confirmed by the provider's first event — `run.started`
+   * carrying `profileEvidence` for this profile digest with every check passing. `partial` and
+   * `none` profiles promise no runtime proof, so they are not judged here.
+   */
+  private profileRuntimeProblem(event: NormalizedEvent): string | undefined {
+    const profile = this.verifiedProfile;
+    if (!profile || profile.fidelity !== "full") return undefined;
+    // A provider that failed before reporting (auth, quota, spawn) ran nothing under the profile;
+    // its own failure decides the outcome, so a quota hit still fails over rather than reading as policy.
+    if (event.type === "error" || event.type === "limit.hit" || event.type === "run.ended") return undefined;
+    const evidence = event.type === "run.started"
+      ? (event.payload as { profileEvidence?: ProfileRuntimeEvidence } | undefined)?.profileEvidence
+      : undefined;
+    if (!evidence) return `the provider reported no startup inventory, so the full profile ${profile.profileDigest} is unproven`;
+    if (evidence.profileDigest !== profile.profileDigest) {
+      return `the startup inventory was judged against profile ${evidence.profileDigest}, not ${profile.profileDigest}`;
+    }
+    if (evidence.ok) return undefined;
+    const failed = evidence.checks.filter((c) => !c.ok).map((c) => `${c.name}: ${c.detail}`);
+    return `the provider's startup inventory does not match the profile (${failed.join("; ")})`;
   }
 
   private observe(event: NormalizedEvent): void {
