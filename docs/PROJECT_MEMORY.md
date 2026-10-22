@@ -454,7 +454,7 @@ branch is unchanged. Evidence, limits and verification:
   - Jev, through OpenRouter, ran at p50 303 ms and cost $0.047 per 1,000 decisions. Haiku ran at p50 1,152 ms and cost $1.87.
   - Jev agrees with all 29 corpus floors; Haiku agrees with 25.
   - Detail: plan §4.2.
-- **Verdict (PROPOSED, owner decides):** Jev replaces Haiku for floor discovery, pinned to `jev-1.13`, with Haiku kept behind it in the chain. The discovery job still hard-codes `model`; do not switch it without the owner.
+- **Verdict (PROPOSED, owner decides):** Jev replaces Haiku for floor discovery, pinned to `jev-1.13`, with Haiku kept behind it in the chain. Owner said yes on 2026-10-21; see the 2026-10-21 section.
 - **Not measured.** Jev on operator traffic (it sends the operator's tool calls to a third party), the direct route, and K20 replay (not built).
 - **Billing.** OpenRouter billed $0.0738 for the 5 runs (1,570 decisions), which agrees with the token-based $0.047 per 1,000. Its usage figure lagged by about a run. The account holds no credit (`total_credits` 0, free tier), so add credit before the next multi-run.
 
@@ -463,7 +463,6 @@ branch is unchanged. Evidence, limits and verification:
 - **The soak is mostly an audit log, and it is thin.** Since T0 the operator DB holds 3 tool-gate rows from one task: 2 `post-start` (audit) and 1 `pre-exec`. The `pre-exec` row is the same call as one of the `post-start` rows. A Claude call that needs permission writes both rows, so the row count double-counts it. `toolGateSoakCheck` would still pass §7.1(1) on 2026-10-09 on n = 3, because "≥ 14 days and one row" passes on the clock. Plan §7.4 now bars `shadowReviewedAt`/`promptRateReviewedAt` until the check counts distinct `pre-exec` calls for the adapter and mode being activated.
 - **Pre-exec exists only on Claude under `prompt-on-escalation`, and only for calls the CLI routes to `canUseTool`.** Claude under `auto-approve`, Codex, OpenRouter, Cursor and Bedrock are audit-only or unreachable. Codex file changes and MCP calls never reach the gate. Hooks and MCP server processes are outside the gate everywhere. The legacy path, compare/race and parallel runs have no gate.
 - **The live server sends no decision state to any vendor.** This was driven with `provider: typesafe`, through both harness modes and the legacy path, and made 0 outbound requests. Its `DecisionService` is used only for `activation()`.
-- **Config cannot put Jev on discovery.** The bin hard-codes `model` and reads no `decisions.*` provider key. Nothing pins `jev-1.13`, because every path sends `jev-latest`. Discovery counts a degraded outcome as unjudged, so a Haiku fallback behind Jev adds nothing. Any switch needs code and an owner decision. The smallest proposal is `decisions.discoveryProvider` plus a pinned model, read only by the bin.
 - On the operator's running build (`2e3c9f4`), `provider: typesafe` still fails at startup, because Jev is not registered there.
 - Detail, matrices, search log and ranked fixes are in `plans/gate-reachability.md`.
 ## 2026-10-04 — stage 2 remote browser auth boundary (PROPOSED)
@@ -628,6 +627,12 @@ rule-allowed tools; neither changed here.
 - **`CodexAdapter` option `probePromptInput`** (default off) makes `verify` also run `codex debug prompt-input` with the profile's own `--config` overrides (`codexProfileConfig` in `packages/adapters/src/codex-probe.ts`, which the launch uses too) and adds `prompt_input_*` checks: exit 0, the output parses, `developer_instructions` are the first developer input verbatim, and the bundle text appears exactly there and nowhere else. A failed check fails verification like any other (fidelity `none`). The probe proves delivery, not isolation: `~/.codex` is still visible to the real run, so the profile stays `partial`.
 - **Probe fact (codex 0.154.0):** `debug prompt-input` starts every configured MCP server. The probe therefore leaves `mcp_servers` out and says so in a `prompt_input_mcp` check; verify never runs a server's command. It runs with a scratch CODEX_HOME, HOME and cwd (the cwd's AGENTS.md is read otherwise) and an env of only PATH, HOME and CODEX_HOME, and needs no credentials.
 - The SDK does not export its `--config` serializer; `codexConfigArgs` mirrors it and a test pins it against the argv the SDK spawns. Recheck that test when `@openai/codex-sdk` moves.
+
+## 2026-10-21 — Jev judges floor discovery (SHIPPED; owner decision; live call not driven, egress blocked in the build container)
+
+- **`decisions.discoveryProvider: typesafe | model`**, read only by `decision:floor-discovery`. Default `typesafe` when `typesafeApiKeyRef` is named, else `model`; `typesafe` without the reference fails at load. The chain is `typesafe` (pinned `jev-1.13`, `DISCOVERY_TYPESAFE_MODEL`) → `model` → rules.
+- **I-D7 keys on the input, not just the config.** Jev sees only calls from the personal workspace's own DB. `--actions`, or `--db` of any other path, goes to `model` unless `--input-workspace personal` declares the origin; the file header and stderr say why.
+- **Defect fixed: a fallback answer was unreadable.** `resolveToolGate` prompts on any `degraded` outcome before it reads an answer, so a model answer after a Jev failure became a candidate whatever it said. Discovery now counts `provider === "rules"` as unjudged, strips `degraded` from a judge's answer before resolving it, and reports fallbacks separately (`judgedBy`, `fallbacks`, per-candidate `judge`/`fallbackFrom`).
 
 ## 2026-10-21 — M3 parallel-run lifecycle: compare and race candidates own their profiles (SHIPPED; composer on only)
 

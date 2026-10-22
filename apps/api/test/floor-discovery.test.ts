@@ -5,10 +5,18 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { DecisionOutcome, DecisionRequest } from "@agent-plane/core";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { DecisionOutcome, DecisionProvider, DecisionRequest } from "@agent-plane/core";
 import { openDb, type Db } from "../src/db/index.js";
-import { discoverFloorCandidates, readRecentToolActions, renderCandidates, type RecentToolAction } from "../src/modules/floor-discovery.js";
+import { DecisionService, decisionProviders } from "../src/modules/decision.js";
+import {
+  DISCOVERY_TYPESAFE_MODEL,
+  discoverFloorCandidates,
+  discoveryJudge,
+  readRecentToolActions,
+  renderCandidates,
+  type RecentToolAction,
+} from "../src/modules/floor-discovery.js";
 
 const WT = "/wt/AG-1";
 const bash = (commandText: string, seenAt = "2026-09-23T00:00:00.000Z"): RecentToolAction => ({
@@ -21,7 +29,7 @@ const bash = (commandText: string, seenAt = "2026-09-23T00:00:00.000Z"): RecentT
 });
 
 const noul = (value: number) => ({ kind: "noul" as const, value });
-const judged = (risk: string, destructive = 0): DecisionOutcome => ({
+const judged = (risk: string, destructive = 0, provider: DecisionOutcome["provider"] = "model"): DecisionOutcome => ({
   answers: {
     risk: { kind: "score", value: risk, probabilities: { [risk]: 1 }, confidence: 1 },
     destructive: noul(destructive),
@@ -29,7 +37,7 @@ const judged = (risk: string, destructive = 0): DecisionOutcome => ({
     exfiltration: noul(0),
     credential_reach: noul(0),
   },
-  provider: "model",
+  provider,
   latencyMs: 1,
 });
 
@@ -62,6 +70,7 @@ describe("discoverFloorCandidates", () => {
         occurrences: 2,
         lastSeen: "2026-09-23T02:00:00.000Z",
         judgeReason: "judged: risk=medium",
+        judge: "model",
       },
     ]);
     const md = renderCandidates(report, "2026-09-23T03:00:00.000Z");
@@ -75,6 +84,120 @@ describe("discoverFloorCandidates", () => {
     expect(report).toMatchObject({ judged: 0, unjudged: 1, candidates: [] });
     expect(renderCandidates(report, "t")).toContain("**No judgement ran** (no judging provider in the chain)");
   });
+});
+
+describe("discoveryJudge (decisions.discoveryProvider)", () => {
+  const optedIn = { discoveryProvider: "typesafe" as const, typesafeApiKeyRef: "TS_KEY", typesafeRoute: "openrouter" as const };
+
+  it("personal workspace, personal input: Jev first, pinned, on the configured route", () => {
+    expect(discoveryJudge({ workspace: "personal", decisions: optedIn, inputWorkspace: "personal" })).toEqual({
+      first: "typesafe",
+      config: { provider: "typesafe", typesafeApiKeyRef: "TS_KEY", typesafeRoute: "openrouter", typesafeModel: "jev-1.13" },
+    });
+    expect(DISCOVERY_TYPESAFE_MODEL).toBe("jev-1.13");
+  });
+
+  it("I-D7: input from another workspace, or of unknown origin, is judged by model and says why", () => {
+    const work = discoveryJudge({ workspace: "personal", decisions: optedIn, inputWorkspace: "work" });
+    expect(work).toMatchObject({ first: "model", config: { provider: "model" } });
+    expect(work.config).not.toHaveProperty("typesafeApiKeyRef");
+    expect(work.note).toMatch(/from workspace "work" may not be sent to TypeSafe \(I-D7/);
+    const unknown = discoveryJudge({ workspace: "personal", decisions: optedIn, inputWorkspace: undefined });
+    expect(unknown).toMatchObject({ first: "model", config: { provider: "model" } });
+    expect(unknown.note).toMatch(/of unknown workspace/);
+  });
+
+  it("I-D7: a non-personal workspace never reaches typesafe, even if its decisions say so", () => {
+    expect(discoveryJudge({ workspace: "work", decisions: optedIn, inputWorkspace: "work" })).toMatchObject({ first: "model", config: { provider: "model" } });
+  });
+
+  it("discoveryProvider: model, or no reference, is model alone", () => {
+    expect(discoveryJudge({ workspace: "personal", decisions: { discoveryProvider: "model", typesafeApiKeyRef: "TS_KEY" }, inputWorkspace: "personal" })).toEqual({
+      first: "model",
+      config: { provider: "model" },
+    });
+    expect(discoveryJudge({ workspace: "personal", decisions: { discoveryProvider: "typesafe" }, inputWorkspace: "personal" })).toMatchObject({ first: "model" });
+  });
+});
+
+describe("floor discovery with a typesafe → model chain (injected providers)", () => {
+  const fake = (id: DecisionProvider["id"], decide: (req: DecisionRequest) => Promise<DecisionOutcome>): DecisionProvider => ({
+    id,
+    describe: () => ({ reachable: true, egress: id === "model" ? "byo-account" : "third-party" }),
+    decide,
+  });
+
+  it("names which judge answered each candidate and counts the fallbacks", async () => {
+    // The fallback judge's own answer decides: a degraded note alone would make the gate prompt on everything.
+    const service = new DecisionService({ provider: "typesafe" }, [
+      fake("typesafe", async (req) => {
+        if (/^(curl|ls)/.test(String(req.state.commandText))) throw new Error("typesafe provider 503");
+        return judged("medium", 0, "typesafe");
+      }),
+      fake("model", async (req) => judged(String(req.state.commandText).startsWith("ls") ? "none" : "high")),
+    ]);
+    const report = await discoverFloorCandidates(
+      [bash("git commit --amend", "2026-09-23T02:00:00.000Z"), bash("curl example.test", "2026-09-23T01:00:00.000Z"), bash("ls src")],
+      (req) => service.decide(req),
+    );
+    expect(report).toMatchObject({ judged: 3, unjudged: 0, judgedBy: { typesafe: 1, model: 2 }, fallbacks: 2, fallbackReasons: ["typesafe provider 503"] });
+    expect(report.candidates.map((c) => [c.commandText, c.judge, c.fallbackFrom])).toEqual([
+      ["git commit --amend", "typesafe", undefined],
+      ["curl example.test", "model", "typesafe"],
+    ]);
+    const md = renderCandidates(report, "t", { first: "typesafe" });
+    expect(md).toContain("Judge chain: typesafe (jev-1.13) → model → rules.");
+    expect(md).toContain("Judged by typesafe 1, model 2; 2 fallbacks (typesafe provider 503).");
+    expect(md).toContain("Judge (typesafe): judged: risk=medium");
+    expect(md).toMatch(/^Judge \(model fallback from typesafe\): judged: risk=high/m);
+  });
+
+  it("both judges failing is unjudged, with the first judge's reason", async () => {
+    const service = new DecisionService({ provider: "typesafe" }, [
+      fake("typesafe", async () => {
+        throw new Error("typesafe provider 401 unauthorized");
+      }),
+      fake("model", async () => {
+        throw new Error("model provider has no credential (ANTHROPIC_API_KEY unset)");
+      }),
+    ]);
+    const report = await discoverFloorCandidates([bash("ls src")], (req) => service.decide(req));
+    expect(report).toMatchObject({ judged: 0, unjudged: 1, fallbacks: 0, unjudgedReasons: ["typesafe provider 401 unauthorized"] });
+    const md = renderCandidates(report, "t", { first: "model", note: "input of unknown workspace may not be sent to TypeSafe (I-D7, personal only); judging with model" });
+    expect(md).toContain("Judge chain: model → rules. input of unknown workspace may not be sent");
+    expect(md).toContain("**No judgement ran** (typesafe provider 401 unauthorized)");
+  });
+});
+
+describe("the pinned Jev model reaches the wire (decisionProviders, stubbed fetch, no network)", () => {
+  const REF = "FAKE_FLOOR_DISCOVERY_TS_REF";
+  beforeEach(() => {
+    process.env[REF] = "FAKE-typesafe-not-real";
+  });
+  afterEach(() => {
+    delete process.env[REF];
+    vi.unstubAllGlobals();
+  });
+
+  it("sends model jev-1.13, and a vendor failure falls back to model", async () => {
+    const bodies: Array<{ model: string }> = [];
+    vi.stubGlobal("fetch", async (_url: string, init: RequestInit) => {
+      bodies.push(JSON.parse(String(init.body)));
+      return new Response(JSON.stringify({ detail: { error_type: "overloaded_error" } }), { status: 503 });
+    });
+    const judge = discoveryJudge({ workspace: "personal", decisions: { discoveryProvider: "typesafe", typesafeApiKeyRef: REF }, inputWorkspace: "personal" });
+    const model = fake("model", async () => judged("high"));
+    const providers = [...decisionProviders(judge.config).filter((p) => p.id !== "model"), model];
+    const service = new DecisionService(judge.config, providers);
+    const report = await discoverFloorCandidates([bash("curl example.test")], (req) => service.decide(req));
+    expect(bodies.length).toBeGreaterThan(0);
+    expect(new Set(bodies.map((b) => b.model))).toEqual(new Set(["jev-1.13"]));
+    expect(report).toMatchObject({ judgedBy: { typesafe: 0, model: 1 }, fallbacks: 1, fallbackReasons: ["typesafe provider 503 overloaded_error"] });
+  });
+
+  function fake(id: DecisionProvider["id"], decide: (req: DecisionRequest) => Promise<DecisionOutcome>): DecisionProvider {
+    return { id, describe: () => ({ reachable: true, egress: "byo-account" }), decide };
+  }
 });
 
 describe("readRecentToolActions", () => {
