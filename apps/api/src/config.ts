@@ -185,6 +185,13 @@ export interface WorkspaceConfig {
      */
     typesafeRoute?: "direct" | "openrouter";
     /**
+     * The judge `decision:floor-discovery` asks first (M16, Jev slice). Read by
+     * that job only; no other site. Default `typesafe` when `typesafeApiKeyRef`
+     * is named (the egress opt-in), else `model`. `typesafe` falls back to
+     * `model` on an error; `typesafe` without a reference fails at load.
+     */
+    discoveryProvider?: "typesafe" | "model";
+    /**
      * Per-site mode (§7.4). `shadow` records what the site would do and changes
      * nothing; it is the default and the fail-closed value (I-D3). `applied`
      * is refused at load time — and the site kept in shadow, loudly — unless a
@@ -253,6 +260,8 @@ export interface ResolvedDecisionsConfig {
   provider: "typesafe" | "model" | "rules";
   typesafeApiKeyRef?: string;
   typesafeRoute?: "direct" | "openrouter";
+  /** The floor discovery job's first judge; always resolved (see `WorkspaceConfig.decisions.discoveryProvider`). */
+  discoveryProvider: "typesafe" | "model";
   /** The REQUESTED mode. The effective one is resolved against the provider chain (I-D8) at composition. */
   sites: { "tool-gate": { mode: "shadow" | "applied" } };
   /** Null-prototype maps of own keys only; empty when nothing is declared. */
@@ -587,8 +596,13 @@ function resolveDecisions(file: WorkspaceConfig["decisions"], configPath: string
   if (route !== undefined && route !== "direct" && route !== "openrouter") {
     throw new Error(`${configPath}: decisions.typesafeRoute must be direct | openrouter, got ${JSON.stringify(route)}`);
   }
+  const discovery = file?.discoveryProvider ?? (file?.typesafeApiKeyRef !== undefined ? "typesafe" : "model");
+  if (discovery !== "typesafe" && discovery !== "model") {
+    throw new Error(`${configPath}: decisions.discoveryProvider must be typesafe | model, got ${JSON.stringify(discovery)}`);
+  }
   return {
     provider: provider as ResolvedDecisionsConfig["provider"],
+    discoveryProvider: discovery,
     sites: { "tool-gate": { mode: toolGateMode } },
     mcpTools: resolveMcpTools(file?.mcpTools, configPath),
     ...(file?.typesafeApiKeyRef !== undefined ? { typesafeApiKeyRef: file.typesafeApiKeyRef } : {}),
@@ -643,6 +657,11 @@ function validateDecisions(decisions: ResolvedDecisionsConfig, path: string, wor
   if (decisions.provider === "typesafe" && ref === undefined) {
     throw new Error(
       `Invalid config at ${path}:\n  - decisions.provider: typesafe needs decisions.typesafeApiKeyRef; naming the key reference is this workspace's egress opt-in (I-D7)`,
+    );
+  }
+  if (decisions.discoveryProvider === "typesafe" && ref === undefined) {
+    throw new Error(
+      `Invalid config at ${path}:\n  - decisions.discoveryProvider: typesafe needs decisions.typesafeApiKeyRef; naming the key reference is this workspace's egress opt-in (I-D7)`,
     );
   }
 }
