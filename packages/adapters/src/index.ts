@@ -1,5 +1,6 @@
 export { ClaudeAdapter, profileSettings, provisionedOptions, type ClaudeAdapterOptions, type ClaudeLaunchProfile } from "./claude.js";
 export { CodexAdapter, type CodexAdapterOptions } from "./codex.js";
+export { codexConfigArgs, codexProfileConfig, probeCodexProfile, type CodexProbeOptions, type CodexProbeResult, type CodexProbeRun } from "./codex-probe.js";
 export { OpenRouterCodexAdapter, type OpenRouterOptions } from "./openrouter.js";
 export { CursorAdapter, CursorSchemaError, mapCursorLine, calibrateFromSamples, type CursorOptions } from "./cursor.js";
 export { BedrockAdapter, parseAgentOutput, type BedrockOptions } from "./bedrock.js";
