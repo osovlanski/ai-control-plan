@@ -18,6 +18,8 @@ import type {
 } from "@agent-plane/core";
 import { newRunId, NotSupportedError, ProvisioningError } from "@agent-plane/core";
 import { CodexAppServerRuntime } from "./codex-app-server-runtime.js";
+import { codexProfileConfig, probeCodexProfile, type CodexProbeRun } from "./codex-probe.js";
+import { codexSdkBinary } from "./codex-sdk-binary.js";
 import { codexPermissions } from "./codex-permissions.js";
 import { EventQueue } from "./event-queue.js";
 import { codexProvisioningPlan, disposeProfileDir, materializeProfile, mcpSecretEnv, requireProfileHarness, verifyProfileOnDisk } from "./provisioning.js";
@@ -36,6 +38,13 @@ export interface CodexAdapterOptions {
   codex?: CodexOptions;
   /** Explicit execution-transport opt-in; session input still needs a per-session grant. */
   appServerInput?: boolean;
+  /**
+   * M3 S5b: `verify` also renders the profile with `codex debug prompt-input` and checks the
+   * model-visible input carries it. Off by default; needs the Codex binary, not credentials.
+   */
+  probePromptInput?: boolean;
+  /** Test seam for the prompt-input probe's process launch. */
+  probeRun?: CodexProbeRun;
 }
 
 /**
@@ -133,7 +142,15 @@ export class CodexAdapter implements AgentAdapter {
   }
 
   async verify(profile: ProvisionedProfile): Promise<ProvisioningVerification> {
-    return verifyProfileOnDisk(profile, "codex");
+    if (!this.options.probePromptInput) return verifyProfileOnDisk(profile, "codex");
+    let codexPath: string;
+    try {
+      codexPath = this.options.codex?.codexPathOverride ?? codexSdkBinary();
+    } catch (err) {
+      return verifyProfileOnDisk(profile, "codex", [{ name: "prompt_input_exit", ok: false, detail: `no Codex binary: ${err instanceof Error ? err.message : String(err)}` }]);
+    }
+    const evidence = await probeCodexProfile(profile, { codexPath, baseConfig: this.options.codex?.config, run: this.options.probeRun });
+    return verifyProfileOnDisk(profile, "codex", evidence);
   }
 
   async dispose(profile: ProvisionedProfile): Promise<{ removed: boolean }> {
@@ -153,16 +170,10 @@ export class CodexAdapter implements AgentAdapter {
   private codexFor(run: RunSpec): Codex {
     const launch = run.profile?.launch;
     if (!launch || launch.harness !== "codex") return this.codex;
-    const servers = launch.mcpServers ?? {};
     const secretEnv = mcpSecretEnv(run.profile, run.secretEnv);
-    const mcp_servers = Object.fromEntries(Object.entries(servers).map(([name, server]) => [name, {
-      command: server.command,
-      args: [...server.args],
-      ...(Object.keys(server.envRefs).length > 0 ? { env_vars: Object.keys(server.envRefs) } : {}),
-    }]));
     return new Codex({
       ...this.options.codex,
-      config: { ...this.options.codex?.config, ...launch.config, ...(Object.keys(servers).length > 0 ? { mcp_servers } : {}) },
+      config: codexProfileConfig(this.options.codex?.config, launch),
       ...(Object.keys(secretEnv).length > 0 ? { env: { ...(this.options.codex?.env ?? inheritedEnv()), ...secretEnv } } : {}),
     });
   }

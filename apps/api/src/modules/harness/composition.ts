@@ -104,6 +104,7 @@ export function buildHarnessComposition(deps: HarnessCompositionDeps): HarnessCo
   // boot can tell this process's strays from a live sibling's.
   markIncarnation(config.dir);
   const processes = new ProviderProcessTracker(undefined, deps.onInfo, config.dir);
+  let bootSweepPending = false;
   const harnessRecovery = new HarnessRecovery({
     store: sessionStore,
     approvals,
@@ -112,11 +113,25 @@ export function buildHarnessComposition(deps: HarnessCompositionDeps): HarnessCo
     verification: verificationStore,
     shouldTerminalizeOnRecovery: (sessionId) => shouldTerminalizeOnRecovery(db, config, sessionId),
     processes,
-    reapStrays: () => reapStrayProviders(config.dir, { log: deps.onInfo }),
+    reapStrays: () => {
+      bootSweepPending = true; // only reconcileOnBoot reaps, and it sweeps profiles last
+      return reapStrayProviders(config.dir, { log: deps.onInfo });
+    },
     sweepProfiles: () => {
+      // On boot no runner is alive (§9), so a lease a dead incarnation left on a terminal session
+      // holds nothing; the boot sweep decides on session state alone, as before.
+      const boot = bootSweepPending;
+      bootSweepPending = false;
       const swept = sweepProfiles({
         root: profilesRoot,
         sessionState: (sid) => sessionStore.get(sid)?.state,
+        // A terminal state lands before the runner terminates its provider and disposes the
+        // profile; its lease is released last. Until then the profile may still be in use.
+        inUse: boot ? undefined : (sid) => {
+          const s = sessionStore.get(sid);
+          const leased = !!s?.leaseToken && !!s.leaseExpiresAt && s.leaseExpiresAt > new Date().toISOString();
+          return leased || processes.get(sid) !== undefined;
+        },
         record: (sid, events) => recorder.appendSettled(sid, events),
       });
       if (swept.removed.length || swept.unowned.length) deps.onInfo?.("profile sweep", { removed: swept.removed.length, retained: swept.retained.length, unowned: swept.unowned });

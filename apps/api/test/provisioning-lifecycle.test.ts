@@ -5,12 +5,14 @@
  * own. A boot sweep removes owned profiles a crash left behind and never touches what the plane
  * cannot prove it owns.
  */
+import { spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExecutionSessionState, NormalizedEvent, ProvisioningVerifiedPayload } from "@agent-plane/core";
 import { PROFILE_MARKER } from "@agent-plane/adapters";
+import type { HarnessRecovery } from "../src/modules/harness/recovery.js";
 import { sweepProfiles } from "../src/modules/harness/profile-sweep.js";
 import { bootRig, reaches, type Rig } from "./helpers/composer-cockpit.js";
 
@@ -19,12 +21,15 @@ let scratch: string | undefined;
 let instant = Date.parse("2030-01-01T00:00:00.000Z");
 const now = () => new Date(instant);
 afterEach(async () => {
+  await rig?.built.orchestrator.shutdown();
   await rig?.close();
   rig = undefined;
   if (scratch) rmSync(scratch, { recursive: true, force: true });
   scratch = undefined;
 });
 
+// Exercise the production-wired recovery without adding a public server surface.
+const recovery = () => (rig!.built.orchestrator as unknown as { harnessRecovery: HarnessRecovery }).harnessRecovery;
 const profilesDir = () => join(rig!.config.dir, "profiles");
 const runsOf = (taskId: string) => rig!.db.prepare("SELECT id, assistant_id, composition_revision_id FROM runs WHERE task_id = ? ORDER BY started_at, rowid").all(taskId) as Array<{ id: string; assistant_id: string; composition_revision_id: string }>;
 const eventsOf = (runId: string) => rig!.db.prepare("SELECT type, payload FROM events WHERE run_id = ? ORDER BY seq").all(runId) as Array<{ type: string; payload: string | null }>;
@@ -92,6 +97,7 @@ describe("boot sweep", () => {
     const staging = "S-ended.staging-0f0e0d0c-0b0a-4908-8706-050403020100";
     profile(root, "S-ended");
     profile(root, "S-live");
+    profile(root, "S-starting");
     profile(root, "S-gone");
     profile(root, "S-nomarker", "S-nomarker", false);
     profile(root, "S-other", "S-someone-else");
@@ -102,12 +108,12 @@ describe("boot sweep", () => {
     symlinkSync(join(scratch, "elsewhere"), join(root, "S-link"));
     writeFileSync(join(root, "stray.txt"), "x");
 
-    const states: Record<string, ExecutionSessionState> = { "S-ended": "FAILED", "S-live": "RUNNING", "S-nomarker": "COMPLETED", "S-other": "COMPLETED", "S-link": "COMPLETED" };
+    const states: Record<string, ExecutionSessionState> = { "S-ended": "FAILED", "S-live": "RUNNING", "S-starting": "STARTING", "S-nomarker": "COMPLETED", "S-other": "COMPLETED", "S-link": "COMPLETED" };
     const recorded: Array<{ sessionId: string; events: NormalizedEvent[] }> = [];
     const result = sweepProfiles({ root, sessionState: (sid) => states[sid], record: (sessionId, events) => recorded.push({ sessionId, events }), now: () => new Date(instant) });
 
     expect(result.removed).toEqual(["S-ended", staging, "S-gone"].sort());
-    expect(result.retained).toEqual(["S-live"]);
+    expect(result.retained).toEqual(["S-live", "S-starting"]);
     expect(result.unowned).toEqual(["S-ended.staging-11111111-2222-4333-8444-555555555555", "S-link", "S-nomarker", "S-other", "stray.txt"]);
     expect(readdirSync(root).sort()).toEqual([...result.retained, ...result.unowned].sort());
     expect(readdirSync(join(scratch, "elsewhere"))).toEqual([PROFILE_MARKER]); // never followed the link
@@ -121,6 +127,138 @@ describe("boot sweep", () => {
   it("with no profiles directory there is nothing to do", () => {
     scratch = mkdtempSync(join(tmpdir(), "agent-plane-sweep-"));
     expect(sweepProfiles({ root: join(scratch, "profiles"), sessionState: () => undefined, record: () => {} })).toEqual({ removed: [], retained: [], unowned: [] });
+  });
+
+  it("periodically sweeps a crash-left profile after a resume-offered session is cancelled", async () => {
+    rig = await bootRig({ configure: (config) => { config.policy.approvalMode = "prompt-on-escalation"; } });
+    const id = rig.built.tasks.create({ goal: "Implement a typed helper [FAKE:APPROVAL]", repoPath: rig.repo }).taskId;
+    expect((await rig.built.app.inject({ method: "POST", url: `/api/tasks/${id}/start`, headers: rig.auth(), payload: {} })).statusCode).toBe(200);
+    const [run] = runsOf(id);
+    expect(run!.composition_revision_id).toBeTruthy();
+    await vi.waitFor(() => expect(rig!.db.prepare("SELECT session_state FROM runs WHERE id = ?").get(run!.id)).toEqual({ session_state: "AWAITING_APPROVAL" }));
+    const beforeCrash = rig.db.prepare("SELECT * FROM runs WHERE id = ?").get(run!.id) as Record<string, unknown>;
+    expect(beforeCrash.session_state).toBe("AWAITING_APPROVAL");
+    expect(beforeCrash.provider_session_ref).toBeTruthy();
+    // Drain the in-process runner, then restore its pre-crash durable session row and profile.
+    // This models a dead runner without leaving a real runner racing recovery in the test.
+    await rig.built.orchestrator.shutdown();
+    await vi.waitFor(() => expect(eventsOf(run!.id).at(-1)?.type).toBe("provisioning.disposed"));
+    rig.db.prepare("DELETE FROM execution_results WHERE session_id = ?").run(run!.id);
+    rig.db.prepare(`UPDATE runs SET ${Object.keys(beforeCrash).map((key) => `${key} = ?`).join(", ")} WHERE id = ?`).run(...Object.values(beforeCrash), run!.id);
+    profile(profilesDir(), run!.id);
+
+    expect(await recovery().reconcileOnBoot()).toContainEqual(expect.objectContaining({ sessionId: run!.id, action: "resume_offered" }));
+    expect(readdirSync(profilesDir())).toContain(run!.id);
+    await rig.built.orchestrator.cancelTask(id);
+    expect(await recovery().recoverSession(run!.id)).toMatchObject({ sessionId: run!.id, action: "cancelled" });
+    expect(rig.db.prepare("SELECT session_state FROM runs WHERE id = ?").get(run!.id)).toEqual({ session_state: "CANCELLED" });
+    expect(readdirSync(profilesDir())).toContain(run!.id);
+    expect(await recovery().sweepExpiredLeases()).toEqual([]);
+    expect(readdirSync(profilesDir())).not.toContain(run!.id);
+    expect(eventsOf(run!.id).at(-1)?.type).toBe("provisioning.swept");
+    expect(JSON.parse(eventsOf(run!.id).at(-1)!.payload!)).toEqual({ compositionRevisionId: `CR-${run!.id}`, profileDigest: `sha256:${"cd".repeat(32)}`, staging: false });
+    await recovery().sweepExpiredLeases();
+    expect(eventsOf(run!.id).filter((e) => e.type === "provisioning.swept")).toHaveLength(1);
+  });
+
+  it("keeps a RUNNING session's verified profile while its runner holds a valid lease", async () => {
+    rig = await bootRig();
+    const id = rig.built.tasks.create({ goal: "Implement a typed helper [FAKE:APPROVAL]", repoPath: rig.repo }).taskId;
+    expect((await rig.built.app.inject({ method: "POST", url: `/api/tasks/${id}/start`, headers: rig.auth(), payload: {} })).statusCode).toBe(200);
+    const [run] = runsOf(id);
+    const state = () => rig!.db.prepare("SELECT session_state, lease_token FROM runs WHERE id = ?").get(run!.id) as { session_state: string; lease_token: string };
+    await vi.waitFor(() => expect(state().session_state).toBe("RUNNING"), { interval: 1 });
+    const lease = state().lease_token;
+    expect(lease).toBeTruthy();
+    expect(verifiedOf(run!.id)).toBeDefined();
+    expect(readdirSync(profilesDir())).toContain(run!.id);
+
+    expect(await recovery().sweepExpiredLeases()).toEqual([]);
+    expect(state()).toEqual({ session_state: "RUNNING", lease_token: lease });
+    expect(readdirSync(profilesDir())).toContain(run!.id);
+    expect(eventsOf(run!.id).some((e) => e.type === "provisioning.swept")).toBe(false);
+  });
+
+  const completedRun = async () => {
+    rig = await bootRig();
+    const id = rig.built.tasks.create({ goal: "Add a typed helper to the TypeScript parser module", repoPath: rig.repo }).taskId;
+    const done = reaches(rig.built, id, ["COMPLETED", "FAILED", "CANCELLED", "WAITING_INPUT"]);
+    expect((await rig.built.app.inject({ method: "POST", url: `/api/tasks/${id}/start`, headers: rig.auth(), payload: {} })).statusCode).toBe(200);
+    expect(await done).toBe("COMPLETED");
+    const [run] = runsOf(id);
+    return run!.id;
+  };
+  const setLease = (sessionId: string, token: string | null, expiresInMs = 0) =>
+    rig!.db.prepare("UPDATE runs SET lease_token = ?, lease_expires_at = ? WHERE id = ?")
+      .run(token, token ? new Date(Date.now() + expiresInMs).toISOString() : null, sessionId);
+  const swept = (sessionId: string) => eventsOf(sessionId).filter((e) => e.type === "provisioning.swept").length;
+
+  it("keeps a terminal session's profile while its runner still holds the lease, and takes it on the pass after release", async () => {
+    const sid = await completedRun();
+    // Stand in for the teardown window: the state is terminal, the runner has not disposed or released yet.
+    profile(profilesDir(), sid);
+    setLease(sid, "lease_tearing-down", 60_000);
+
+    expect(await recovery().sweepExpiredLeases()).toEqual([]);
+    expect(readdirSync(profilesDir())).toContain(sid);
+    expect(swept(sid)).toBe(0);
+
+    setLease(sid, null);
+    await recovery().sweepExpiredLeases();
+    expect(readdirSync(profilesDir())).not.toContain(sid);
+    expect(swept(sid)).toBe(1);
+  });
+
+  it("still sweeps a terminal session's profile when the lease it left has expired", async () => {
+    const sid = await completedRun();
+    profile(profilesDir(), sid);
+    setLease(sid, "lease_crash-left", -1_000);
+
+    await recovery().sweepExpiredLeases();
+    expect(readdirSync(profilesDir())).not.toContain(sid);
+    expect(swept(sid)).toBe(1);
+  });
+
+  it("the boot sweep still decides on state alone: a dead incarnation's unexpired lease keeps nothing", async () => {
+    const sid = await completedRun();
+    profile(profilesDir(), sid);
+    setLease(sid, "lease_dead-incarnation", 60_000);
+
+    await rig!.built.orchestrator.reconcileOnBoot();
+    expect(readdirSync(profilesDir())).not.toContain(sid);
+    expect(swept(sid)).toBe(1);
+  });
+
+  it("a real runner tearing down a slow-exit provider keeps its profile through a periodic sweep and disposes it itself", async () => {
+    rig = await bootRig();
+    // FAKE slow-exit provider: a real child the runner tracks, which takes ~1.5s to exit after SIGTERM.
+    const child = spawn(process.execPath, ["-e", "process.on('SIGTERM', () => setTimeout(() => process.exit(0), 1500)); setInterval(() => {}, 1000);"], { stdio: "ignore" });
+    const spawnedAt = new Date().toISOString();
+    const adapter = rig.built.registry.adapter("fake-claude") as { providerProcess?: unknown };
+    adapter.providerProcess = () => ({ pid: child.pid!, spawnedAt, alive: () => child.exitCode === null && child.signalCode === null });
+    try {
+      const id = rig.built.tasks.create({ goal: "Add a typed helper to the TypeScript parser module", repoPath: rig.repo }).taskId;
+      expect((await rig.built.app.inject({ method: "POST", url: `/api/tasks/${id}/start`, headers: rig.auth(), payload: {} })).statusCode).toBe(200);
+      const [run] = runsOf(id);
+      const row = () => rig!.db.prepare("SELECT session_state, lease_token FROM runs WHERE id = ?").get(run!.id) as { session_state: string; lease_token: string | null };
+      // The teardown window: terminal state written, provider still exiting, lease still held.
+      await vi.waitFor(() => expect(row().session_state).toBe("COMPLETED"), { interval: 5, timeout: 5_000 });
+      expect(child.exitCode).toBeNull();
+      expect(row().lease_token).toBeTruthy();
+      expect(readdirSync(profilesDir())).toContain(run!.id);
+
+      await recovery().sweepExpiredLeases();
+      expect(readdirSync(profilesDir())).toContain(run!.id);
+      expect(swept(run!.id)).toBe(0);
+
+      await vi.waitFor(() => expect(row().lease_token).toBeNull(), { interval: 25, timeout: 10_000 });
+      expect(child.exitCode ?? child.signalCode).not.toBeNull();
+      expect(eventsOf(run!.id).at(-1)?.type).toBe("provisioning.disposed");
+      expect(readdirSync(profilesDir())).not.toContain(run!.id);
+      expect(swept(run!.id)).toBe(0);
+    } finally {
+      child.kill("SIGKILL");
+    }
   });
 
   it("runs at boot after recovery: a crash-left profile of a settled session is swept and witnessed on its timeline", async () => {
