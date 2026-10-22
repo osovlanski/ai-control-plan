@@ -5,6 +5,7 @@
  * own. A boot sweep removes owned profiles a crash left behind and never touches what the plane
  * cannot prove it owns.
  */
+import { spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -176,6 +177,88 @@ describe("boot sweep", () => {
     expect(state()).toEqual({ session_state: "RUNNING", lease_token: lease });
     expect(readdirSync(profilesDir())).toContain(run!.id);
     expect(eventsOf(run!.id).some((e) => e.type === "provisioning.swept")).toBe(false);
+  });
+
+  const completedRun = async () => {
+    rig = await bootRig();
+    const id = rig.built.tasks.create({ goal: "Add a typed helper to the TypeScript parser module", repoPath: rig.repo }).taskId;
+    const done = reaches(rig.built, id, ["COMPLETED", "FAILED", "CANCELLED", "WAITING_INPUT"]);
+    expect((await rig.built.app.inject({ method: "POST", url: `/api/tasks/${id}/start`, headers: rig.auth(), payload: {} })).statusCode).toBe(200);
+    expect(await done).toBe("COMPLETED");
+    const [run] = runsOf(id);
+    return run!.id;
+  };
+  const setLease = (sessionId: string, token: string | null, expiresInMs = 0) =>
+    rig!.db.prepare("UPDATE runs SET lease_token = ?, lease_expires_at = ? WHERE id = ?")
+      .run(token, token ? new Date(Date.now() + expiresInMs).toISOString() : null, sessionId);
+  const swept = (sessionId: string) => eventsOf(sessionId).filter((e) => e.type === "provisioning.swept").length;
+
+  it("keeps a terminal session's profile while its runner still holds the lease, and takes it on the pass after release", async () => {
+    const sid = await completedRun();
+    // Stand in for the teardown window: the state is terminal, the runner has not disposed or released yet.
+    profile(profilesDir(), sid);
+    setLease(sid, "lease_tearing-down", 60_000);
+
+    expect(await recovery().sweepExpiredLeases()).toEqual([]);
+    expect(readdirSync(profilesDir())).toContain(sid);
+    expect(swept(sid)).toBe(0);
+
+    setLease(sid, null);
+    await recovery().sweepExpiredLeases();
+    expect(readdirSync(profilesDir())).not.toContain(sid);
+    expect(swept(sid)).toBe(1);
+  });
+
+  it("still sweeps a terminal session's profile when the lease it left has expired", async () => {
+    const sid = await completedRun();
+    profile(profilesDir(), sid);
+    setLease(sid, "lease_crash-left", -1_000);
+
+    await recovery().sweepExpiredLeases();
+    expect(readdirSync(profilesDir())).not.toContain(sid);
+    expect(swept(sid)).toBe(1);
+  });
+
+  it("the boot sweep still decides on state alone: a dead incarnation's unexpired lease keeps nothing", async () => {
+    const sid = await completedRun();
+    profile(profilesDir(), sid);
+    setLease(sid, "lease_dead-incarnation", 60_000);
+
+    await rig!.built.orchestrator.reconcileOnBoot();
+    expect(readdirSync(profilesDir())).not.toContain(sid);
+    expect(swept(sid)).toBe(1);
+  });
+
+  it("a real runner tearing down a slow-exit provider keeps its profile through a periodic sweep and disposes it itself", async () => {
+    rig = await bootRig();
+    // FAKE slow-exit provider: a real child the runner tracks, which takes ~1.5s to exit after SIGTERM.
+    const child = spawn(process.execPath, ["-e", "process.on('SIGTERM', () => setTimeout(() => process.exit(0), 1500)); setInterval(() => {}, 1000);"], { stdio: "ignore" });
+    const spawnedAt = new Date().toISOString();
+    const adapter = rig.built.registry.adapter("fake-claude") as { providerProcess?: unknown };
+    adapter.providerProcess = () => ({ pid: child.pid!, spawnedAt, alive: () => child.exitCode === null && child.signalCode === null });
+    try {
+      const id = rig.built.tasks.create({ goal: "Add a typed helper to the TypeScript parser module", repoPath: rig.repo }).taskId;
+      expect((await rig.built.app.inject({ method: "POST", url: `/api/tasks/${id}/start`, headers: rig.auth(), payload: {} })).statusCode).toBe(200);
+      const [run] = runsOf(id);
+      const row = () => rig!.db.prepare("SELECT session_state, lease_token FROM runs WHERE id = ?").get(run!.id) as { session_state: string; lease_token: string | null };
+      // The teardown window: terminal state written, provider still exiting, lease still held.
+      await vi.waitFor(() => expect(row().session_state).toBe("COMPLETED"), { interval: 5, timeout: 5_000 });
+      expect(child.exitCode).toBeNull();
+      expect(row().lease_token).toBeTruthy();
+      expect(readdirSync(profilesDir())).toContain(run!.id);
+
+      await recovery().sweepExpiredLeases();
+      expect(readdirSync(profilesDir())).toContain(run!.id);
+      expect(swept(run!.id)).toBe(0);
+
+      await vi.waitFor(() => expect(row().lease_token).toBeNull(), { interval: 25, timeout: 10_000 });
+      expect(child.exitCode ?? child.signalCode).not.toBeNull();
+      expect(eventsOf(run!.id).at(-1)?.type).toBe("provisioning.disposed");
+      expect(readdirSync(profilesDir())).not.toContain(run!.id);
+      expect(swept(run!.id)).toBe(0);
+    } finally {
+      child.kill("SIGKILL");
+    }
   });
 
   it("runs at boot after recovery: a crash-left profile of a settled session is swept and witnessed on its timeline", async () => {
