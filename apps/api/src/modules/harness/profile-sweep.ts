@@ -1,8 +1,8 @@
 /**
- * M3 S3 boot sweep of per-run profiles (plans/m3-provisioning.md §3 S3).
+ * M3 S3 boot and periodic sweep of per-run profiles (plans/m3-provisioning.md §3 S3).
  *
- * A session disposes its own profile when it ends. A crash skips that, so on boot, after recovery
- * has decided every live session, this removes each profile the plane owns whose session is no
+ * A session disposes its own profile when it ends. A crash skips that, so after boot or periodic lease
+ * recovery, this removes each profile the plane owns whose session is no
  * longer live: terminal, or gone from the database. A live session keeps its profile (a K11
  * continuation or resume provisions again under its own session, with the same digest).
  *
@@ -77,6 +77,8 @@ export function sweepProfiles(deps: ProfileSweepDeps): ProfileSweepResult {
       result.unowned.push(name);
       continue;
     }
+    // This check and removal are synchronous. STARTING/RUNNING are non-terminal, so a live
+    // runner keeps its profile, including a marked staging directory during provisioning.
     const state = deps.sessionState(sessionId);
     if (state !== undefined && !isSessionTerminal(state)) {
       result.retained.push(name);
@@ -90,7 +92,7 @@ export function sweepProfiles(deps: ProfileSweepDeps): ProfileSweepResult {
       runId: sessionId as never,
       ts: (deps.now ? deps.now() : new Date()).toISOString(),
       type: "provisioning.swept",
-      summary: `boot sweep removed ${staging ? "half-written " : ""}profile ${marker.profileDigest} left by a ${state} session`,
+      summary: `profile sweep removed ${staging ? "half-written " : ""}profile ${marker.profileDigest} left by a ${state} session`,
       payload: { ...payload },
     }]);
   }
