@@ -96,6 +96,22 @@ describe("DecisionView", () => {
     expect(html).toContain("method-unknown");
   });
 
+  it("shows the plane's parallel share evidence beside that candidate's profile and budget", () => {
+    const decision = stages().map((s) => s.stage === "policy" ? stage("policy", {
+      candidates: [{ ref: "max_tokens:25000", evidence: ["task cap 50000, consumed 0, remaining 50000", "parallel share 1 of 2: 25000"] }],
+      chosen: ["max_tokens:25000"],
+    }) : s);
+    const html = renderToStaticMarkup(<DecisionView decision={{ stages: decision }} spec={spec({
+      policy: { ...spec().policy, budget: { max_tokens: 25_000 } },
+      provisioning: { requested: "isolated", achieved: "partial" },
+    })} />);
+    expect(html).toContain("parallel share 1 of 2: 25000");
+    expect(html).toContain("task cap 50000, consumed 0, remaining 50000");
+    expect(html).toContain("25,000");
+    expect(html).toContain("partial (requested isolated)");
+    expect(html).toContain("claude-code");
+  });
+
   it("says nothing is attached when no asset was chosen, rather than listing ambient tooling", () => {
     const html = renderToStaticMarkup(<DecisionView decision={{ stages: stages() }} spec={spec({ assets: { skills: [], mcp_servers: [], subagents: [] } })} />);
     expect(html).toContain("No skill, MCP server or subagent is attached");

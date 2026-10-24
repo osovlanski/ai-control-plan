@@ -250,8 +250,12 @@ export function NewTask({ onStarted, onPreviewed }: { onStarted: (taskId: string
               </div>
             ))}
             {eligible.length > 1 && <div className="shell-parallel">
-              <p className="fine-print">Parallel execution multiplies quota and token spend. Choose it deliberately.</p>
-              {composition.state === "ready" && <p className="fine-print">Compare and Race start on routing alone: no revision is written and the composition above is not bound to those runs.</p>}
+              <p className="fine-print">Parallel execution runs multiple candidates. Choose it deliberately.</p>
+              <p className="fine-print">{composition.state === "off" || !repoPath.trim()
+                ? "Compare and Race start on routing only because the Composer is off or this task has no repository."
+                : composition.state === "ready"
+                  ? "Compare and Race compose a separate revision and profile for each candidate, each with an equal share of the remaining task token and cost budget. Runtime limits apply per run."
+                  : "With the Composer enabled and a repository, Compare and Race compose a separate revision and profile for each candidate, each with an equal share of the remaining task token and cost budget. Otherwise they start on routing only."} The previewed composition does not bind these runs.</p>
               <Button variant="secondary" disabled={busy} onClick={() => void startParallel("compare")}>Compare {eligible.length}</Button>
               <Button variant="secondary" disabled={busy} onClick={() => void startParallel("race")}>Race {eligible.length}</Button>
             </div>}
