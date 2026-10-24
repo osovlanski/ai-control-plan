@@ -4,7 +4,8 @@
  * Permission only tightens: it is the stricter of the workspace approval mode and the risk map.
  * When the chosen harness refuses that mode the attempt fails `policy_unenforceable`; the Composer
  * never loosens permission to make a route work. An override may only tighten permission or a
- * cap. The budget is the task cap minus what the task consumed.
+ * cap. The budget is the task cap minus what the task consumed; N candidates composed together
+ * (compare, race) each get an equal share of that remainder.
  *
  * Provisioning (M3 S2): when the chosen adapter's `prepare` plans a profile, the revision requests
  * `isolated` and binds its fidelity and profile digest, which the run must then verify. A `partial`
@@ -13,7 +14,7 @@
  */
 import { jcs } from "../canonical-json.js";
 import type { AgentSpec, CompositionPermission } from "../composition-types.js";
-import { remainingBudget, roundUsd } from "./accounting.js";
+import { remainingBudget, roundUsd, shareBudget } from "./accounting.js";
 import { byCodeUnit, overrideWhy, sha256Digest, sortedUnique, type RawCandidate, type RawFilter, type RawStage } from "./explain.js";
 import type { ApprovalMode, BudgetCaps, ComposedIntent, ComposerDeps, ComposerInputs, HarnessModelChoice, IntentRisk, ProvisioningPrediction } from "./types.js";
 
@@ -119,15 +120,23 @@ export function policyStage(
   if (tightened.refused) return refuse(tightened.refused);
   const permission = override?.permission ?? actual.permission;
 
-  const computedBudget = remainingBudget(config.budget, consumed);
-  const budget = remainingBudget(tightened.caps, consumed);
+  const share = inputs.budgetShare?.candidates;
+  const taskComputed = remainingBudget(config.budget, consumed);
+  const taskBudget = remainingBudget(tightened.caps, consumed);
+  const computedBudget = share !== undefined ? shareBudget(taskComputed, share) : taskComputed;
+  const budget = share !== undefined ? shareBudget(taskBudget, share) : taskBudget;
+  // The task-cap line stays the task's, so a later revision can read the task cap back from it.
+  const shareLine = (value: number) => (share !== undefined ? [`parallel share 1 of ${share}: ${value}`] : []);
   const tokensEnforcement = choice.usageReporting
     ? `tokens: bounded (${choice.assistantId} declares usage reporting)`
     : `tokens: advisory (${choice.assistantId} declares no usage reporting)`;
   const unknownCost = consumed.unknownCostSessions > 0 ? [`consumed cost unknown for ${consumed.unknownCostSessions} sessions; not subtracted`] : [];
-  const capCandidates = (caps: BudgetCaps, remaining: BudgetCaps): RawCandidate[] => [
+  const capCandidates = (caps: BudgetCaps, task: BudgetCaps, remaining: BudgetCaps): RawCandidate[] => [
     ...(remaining.max_tokens !== undefined
-      ? [{ ref: `max_tokens:${remaining.max_tokens}`, evidence: [tokensEnforcement, `task cap ${caps.max_tokens}, consumed ${consumed.tokens}, remaining ${remaining.max_tokens}`] }]
+      ? [{
+        ref: `max_tokens:${remaining.max_tokens}`,
+        evidence: [tokensEnforcement, `task cap ${caps.max_tokens}, consumed ${consumed.tokens}, remaining ${task.max_tokens}`, ...shareLine(remaining.max_tokens)],
+      }]
       : []),
     ...(remaining.max_runtime_ms !== undefined ? [{ ref: `max_runtime_ms:${remaining.max_runtime_ms}`, evidence: ["runtime: hard (local clock)"] }] : []),
     ...(remaining.max_cost_usd !== undefined
@@ -136,7 +145,8 @@ export function policyStage(
         evidence: [
           "cost: advisory until deferral #3 closes",
           choice.price ? `price evidence ${choice.price.pricingVersion}` : "no price evidence; cost is not computed",
-          `task cap ${caps.max_cost_usd}, consumed ${roundUsd(consumed.costUsd)}, remaining ${remaining.max_cost_usd}`,
+          `task cap ${caps.max_cost_usd}, consumed ${roundUsd(consumed.costUsd)}, remaining ${task.max_cost_usd}`,
+          ...shareLine(remaining.max_cost_usd),
           ...unknownCost,
         ],
       }]
@@ -173,7 +183,8 @@ export function policyStage(
     `harness ${choice.harness} (${choice.assistantId}) does not enforce ${toApprovalMode(permission)}`,
   ];
   const candidates = [
-    ...permissionCandidates, ...capCandidates(config.budget, computedBudget.remaining), ...capCandidates(tightened.caps, budget.remaining),
+    ...permissionCandidates, ...capCandidates(config.budget, taskComputed.remaining, computedBudget.remaining),
+    ...capCandidates(tightened.caps, taskBudget.remaining, budget.remaining),
     ...isolatedCandidates, provisioningCandidate,
   ];
 
@@ -183,7 +194,9 @@ export function policyStage(
     ...(provisioningRef === "provisioning:isolated" ? [{ filter: "profile_planned", removed: ["provisioning:ambient"], reason: "the revision binds a verified profile; it does not run ambient" }] : []),
     ...(isolationUnavailable ? [{ filter: "isolation_unavailable", removed: ["provisioning:ambient"], reason: `no profile can be bound${partialRefused ? " at a permitted fidelity" : ""} and the workspace does not permit ambient` }] : []),
     ...(budget.exhausted.length
-      ? [{ filter: "budget_exhausted", removed: capRefs(budget.remaining).filter((r) => budget.exhausted.some((k) => r.startsWith(`${k}:`))), reason: "the task has no budget remaining under its cap" }]
+      ? [{ filter: "budget_exhausted", removed: capRefs(budget.remaining).filter((r) => budget.exhausted.some((k) => r.startsWith(`${k}:`))), reason: share !== undefined && !taskBudget.exhausted.length
+        ? `the task's remaining budget cannot give each of ${share} candidates a share`
+        : "the task has no budget remaining under its cap" }]
       : []),
   ];
   const failure: PolicyFailure | undefined = refused ? "policy_unenforceable" : isolationUnavailable ? "isolation_unavailable" : budget.exhausted.length ? "budget_exhausted" : undefined;
@@ -192,7 +205,7 @@ export function policyStage(
   const why = [
     permissionWhy,
     `tools: ${workspacePolicy.toolAllowlist.length ? sortedUnique(workspacePolicy.toolAllowlist).join(", ") : "none listed; the approval mode governs"}`,
-    `budget: ${capRefs(budget.remaining).join(", ") || "no caps"}`,
+    `budget: ${capRefs(budget.remaining).join(", ") || "no caps"}${share !== undefined ? ` (equal share for each of ${share} candidates composed together)` : ""}`,
     ...(budget.remaining.max_cost_usd !== undefined && !choice.price ? ["no price evidence; cost is not computed"] : []),
     provisioningRef === "provisioning:isolated"
       ? `provisioning isolated: ${planned!.fidelity} ${planned!.harness} profile ${planned!.profileDigest}`

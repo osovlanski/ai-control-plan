@@ -173,6 +173,8 @@ export interface DispatchComposer {
     taskId: string; assistantId: string; origin: RecomposeOrigin; routingDecisionId: number;
     /** Why this start can never carry a revision (`compositionUnbindable`); the attempt row says so. */
     unbindable?: string;
+    /** Compare or race: how many candidates compose together; each gets an equal share of the task's remainder. */
+    budgetShare?: number;
   }): Promise<DispatchComposition>;
   /** Binds a replayed dispatch's run to the revision its saved request already names. */
   attachRun(runId: string, compositionRevisionId: string): void;
@@ -1724,7 +1726,8 @@ export class Orchestrator {
         });
         // `run-now`: an operator start over a route already made, with no preview to confirm. The
         // routing decision's rule names the comparison; a distinct origin would be a core contract change.
-        const composed = await this.dispatchComposer.composeForDispatch({ taskId, assistantId, origin: "run-now", routingDecisionId });
+        // Candidates share the task's remainder equally, so together they cannot spend past its cap.
+        const composed = await this.dispatchComposer.composeForDispatch({ taskId, assistantId, origin: "run-now", routingDecisionId, budgetShare: assistantIds.length });
         if (composed.kind === "blocked") throw new Error(`${assistantId} cannot start: ${composed.reason}`);
         plans.set(assistantId, {
           routingDecisionRef: String(routingDecisionId),

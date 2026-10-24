@@ -128,6 +128,11 @@ export interface ComposerInputs {
   workspacePolicy: ComposerWorkspacePolicy;
   /** What the task has consumed so far (core accounting, `taskConsumption`). */
   consumed: TaskConsumption;
+  /**
+   * Set when this is one of N candidates composed together (compare, race). Each gets an equal
+   * share of the task's remaining tokens and cost, so together they cannot spend past the cap.
+   */
+  budgetShare?: { candidates: number };
   overrides?: ComposerOverrides;
   confirm: ConfirmInput;
   /** Hostnames that must never appear in a decision: the machine's own and the Cockpit base URL host. */

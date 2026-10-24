@@ -182,6 +182,26 @@ export function remainingBudget(caps: BudgetCaps, consumed: TaskConsumption): Re
 }
 
 /**
+ * One of N candidates' share of a remainder (compare, race): tokens floor(R / N) and cost floored
+ * to the micro-dollar, so N shares never sum past R. Runtime is a per-run timeout and is not
+ * split. A share at or below zero is exhausted.
+ */
+export function shareBudget(budget: RemainingBudget, candidates: number): RemainingBudget {
+  if (!Number.isSafeInteger(candidates) || candidates < 1) throw new Error(`budget share needs a positive candidate count, got ${candidates}`);
+  const remaining: BudgetCaps = { ...budget.remaining };
+  const exhausted: RemainingBudget["exhausted"] = [];
+  if (remaining.max_tokens !== undefined) {
+    remaining.max_tokens = Math.floor(remaining.max_tokens / candidates);
+    if (remaining.max_tokens <= 0) exhausted.push("max_tokens");
+  }
+  if (remaining.max_cost_usd !== undefined) {
+    remaining.max_cost_usd = Math.floor(Math.round(remaining.max_cost_usd * 1e6) / candidates) / 1e6;
+    if (remaining.max_cost_usd <= 0) exhausted.push("max_cost_usd");
+  }
+  return { remaining, exhausted };
+}
+
+/**
  * The overrun a late record adds (§5 "Late and post-run behaviour"): how far `after` exceeds the
  * cap beyond what `before` already exceeded. `undefined` when it adds none. It never changes a
  * run's state; it only reduces the task's remainder.

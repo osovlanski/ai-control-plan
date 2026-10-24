@@ -270,6 +270,8 @@ export class ComposerService implements DispatchComposer {
    */
   async composeForDispatch(input: {
     taskId: string; assistantId: string; origin: RecomposeOrigin; routingDecisionId: number; unbindable?: string;
+    /** Compare or race: how many candidates compose together and share the task's remainder. */
+    budgetShare?: number;
   }): Promise<DispatchComposition> {
     const { taskId, assistantId, origin, routingDecisionId } = input;
     const required = this.config.composer.requireRevision;
@@ -298,7 +300,7 @@ export class ComposerService implements DispatchComposer {
     const explanation = JSON.parse(row.explanation) as PinnedRoute["explanation"];
     if (String(explanation.chosen) !== assistantId) throw new Error(`composer: routing decision ${routingDecisionId} chose ${String(explanation.chosen)}, not ${assistantId}`);
 
-    const composed = await this.compose(taskId, undefined, { mode: "start", origin }, { routingDecisionId, explanation });
+    const composed = await this.compose(taskId, undefined, { mode: "start", origin }, { routingDecisionId, explanation }, input.budgetShare);
     const { result } = composed;
     const outcome = result.outcome;
     const inputsDigest = composerInputsDigest(composed.inputs, { sha256 });
@@ -334,19 +336,19 @@ export class ComposerService implements DispatchComposer {
   }
 
   /** Runs the pipeline over fresh ports; on a stale pin, one registry sync and one recompose (§2 stage 4). */
-  private async compose(taskId: string, overrides: ComposerOverrides | undefined, confirm: ConfirmInput, pinned?: PinnedRoute): Promise<Composed> {
+  private async compose(taskId: string, overrides: ComposerOverrides | undefined, confirm: ConfirmInput, pinned?: PinnedRoute, budgetShare?: number): Promise<Composed> {
     const harnessModel = pinned
       ? new RouteHarnessModelPort(this.deps, taskId, confirm.mode === "start" && confirm.origin !== "operator" ? confirm.origin : "intake", {}, pinned)
       : new RouteHarnessModelPort(this.deps, taskId, "intake");
     const bundle = new CockpitBundlePort(this.deps.bundled);
     const ports = { harnessModel, bundle, provisioning: new AdapterProvisioningPort(this.deps) };
-    let inputs = await this.inputs(taskId, overrides, harnessModel, confirm);
+    let inputs = await this.inputs(taskId, overrides, harnessModel, confirm, budgetShare);
     let result = await runComposer(inputs, ports, { sha256 });
     let resynced = false;
     if (result.outcome.status === "failed" && result.outcome.reason === "not_found" && this.config.registry.cockpit.enabled) {
       await this.deps.federation.sync();
       resynced = true;
-      inputs = await this.inputs(taskId, overrides, harnessModel, confirm);
+      inputs = await this.inputs(taskId, overrides, harnessModel, confirm, budgetShare);
       result = await runComposer(inputs, ports, { sha256 });
     }
     return { inputs, result, harnessModel, bundle, resynced };
@@ -447,7 +449,7 @@ export class ComposerService implements DispatchComposer {
 
   // ---- inputs ---------------------------------------------------------------
 
-  private async inputs(taskId: string, overrides: ComposerOverrides | undefined, harnessModel: RouteHarnessModelPort, confirm: ConfirmInput): Promise<ComposerInputs> {
+  private async inputs(taskId: string, overrides: ComposerOverrides | undefined, harnessModel: RouteHarnessModelPort, confirm: ConfirmInput, budgetShare?: number): Promise<ComposerInputs> {
     const row = this.deps.tasks.get(taskId)!;
     const intent = JSON.parse(row.intent_json) as TaskIntent;
     const registry = await this.registryView();
@@ -502,6 +504,7 @@ export class ComposerService implements DispatchComposer {
       workspacePolicy: { policyId: WORKSPACE_POLICY_ID, approvalMode: this.config.policy.approvalMode, toolAllowlist: [] },
       // What the task's runs have settled so far (S6): a failover revision gets only the remainder.
       consumed: this.accounting.consumption(taskId),
+      ...(budgetShare !== undefined ? { budgetShare: { candidates: budgetShare } } : {}),
       ...(overrides ? { overrides } : {}),
       confirm,
       forbiddenHostnames: this.forbiddenHostnames(),

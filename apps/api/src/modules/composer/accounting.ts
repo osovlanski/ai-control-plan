@@ -95,8 +95,10 @@ export class TaskAccounting {
    * consumption, or undefined when the task has no revision. Its persisted `policy.budget` is the
    * remainder, so carrying that and subtracting consumption again would count it twice. Stage 5
    * records each cap as "task cap C, consumed U, remaining R" on the chosen `max_*:R` candidate;
-   * C is read back only when C - U is R. Runtime is never consumed, so its remainder is its cap. A
-   * cap whose line is missing or inconsistent carries the remainder: tighter, never looser.
+   * C is read back only when C - U is R. A compare or race candidate's chosen cap is its share S,
+   * stated as "parallel share 1 of N: S" beside the task's line, and C is read back when S is no
+   * more than R. Runtime is never consumed, so its remainder is its cap. A cap whose line is missing
+   * or inconsistent carries the remainder: tighter, never looser.
    */
   latestTaskCaps(taskId: string): BudgetCaps | undefined {
     const row = this.d.db.prepare(
@@ -110,12 +112,17 @@ export class TaskAccounting {
       .stages?.find((s) => s.stage === "policy");
     const taskCap = (key: "max_tokens" | "max_cost_usd", left: number): number => {
       const evidence = policy?.candidates?.find((c) => c.ref === `${key}:${left}`)?.evidence ?? [];
+      const shared = evidence.some((line) => {
+        const m = /^parallel share 1 of ([1-9]\d*): (\S+)$/.exec(line);
+        return m !== null && Number(m[2]) === left;
+      });
       const caps = evidence.flatMap((line) => {
         const m = /^task cap (\S+), consumed (\S+), remaining (\S+)$/.exec(line);
         if (!m) return [];
         const [cap, used, rest] = [Number(m[1]), Number(m[2]), Number(m[3])];
-        const exact = key === "max_cost_usd" ? roundUsd(cap - used) === left : cap - used === left;
-        return Number.isFinite(cap) && Number.isFinite(used) && rest === left && exact && cap >= left ? [cap] : [];
+        const exact = key === "max_cost_usd" ? roundUsd(cap - used) === rest : cap - used === rest;
+        const chosen = shared ? left <= rest : rest === left;
+        return Number.isFinite(cap) && Number.isFinite(used) && chosen && exact && cap >= rest ? [cap] : [];
       });
       return caps.length ? Math.min(...caps) : left;
     };

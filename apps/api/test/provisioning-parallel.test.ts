@@ -8,7 +8,7 @@
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import type { ProvisioningVerifiedPayload } from "@agent-plane/core";
+import type { AgentSpec, CompositionDecision, ProvisioningVerifiedPayload } from "@agent-plane/core";
 import { bootRig, reaches, type Rig } from "./helpers/composer-cockpit.js";
 
 let rig: Rig | undefined;
@@ -162,5 +162,67 @@ describe("composed compare and race candidates provision their own profiles", ()
     const { taskId } = await startParallel("compare");
     expect(await rig.built.orchestrator.waitForSettled(taskId)).toBe("WAITING_INPUT");
     expect(runsOf(taskId).map((r) => [r.execution_request_id, r.composition_revision_id])).toEqual([[null, null], [null, null]]);
+  });
+});
+
+describe("composed compare and race candidates share the task budget", () => {
+  const revisionSpec = (revisionId: string) =>
+    JSON.parse((rig!.db.prepare("SELECT spec_json FROM agent_specs WHERE composition_revision_id = ?").get(revisionId) as { spec_json: string }).spec_json) as AgentSpec;
+  const revisionBudget = (revisionId: string) =>
+    (JSON.parse((rig!.db.prepare("SELECT spec_json FROM agent_specs WHERE composition_revision_id = ?").get(revisionId) as { spec_json: string }).spec_json) as AgentSpec).policy.budget;
+  const policyEvidence = (revisionId: string, ref: string) => {
+    const row = rig!.db.prepare("SELECT decision_json FROM composition_decisions WHERE composition_revision_id = ?").get(revisionId) as { decision_json: string };
+    return (JSON.parse(row.decision_json) as CompositionDecision).stages.find((s) => s.stage === "policy")!.candidates.find((c) => c.ref === ref)?.evidence;
+  };
+
+  it.each([
+    ["two candidates", ["fake-a", "fake-b"], 5000],
+    ["three candidates", ["fake-a", "fake-b", "fake-c"], 3333],
+  ] as const)("compare, %s: each revision gets an equal share, never more than the task remainder together", async (_name, assistants, share) => {
+    rig = await bootRig({ assistants: { ...ASSISTANTS, ...CLAUDES }, budget: { maxTokens: 10_000, maxRuntimeMs: 600_000 } });
+    const { taskId } = await startParallel("compare", GOAL, [...assistants]);
+    expect(await rig.built.orchestrator.waitForSettled(taskId)).toBe("WAITING_INPUT");
+    const runs = runsOf(taskId);
+    expect(runs).toHaveLength(assistants.length);
+    for (const r of runs) {
+      expect(revisionBudget(r.composition_revision_id!), r.assistant_id).toEqual({ max_tokens: share, max_runtime_ms: 600_000 });
+      expect(policyEvidence(r.composition_revision_id!, `max_tokens:${share}`)!.slice(1)).toEqual([
+        "task cap 10000, consumed 0, remaining 10000", `parallel share 1 of ${assistants.length}: ${share}`,
+      ]);
+    }
+    expect(share * assistants.length).toBeLessThanOrEqual(10_000);
+  });
+
+  it("a dispatch after the comparison gets the task cap minus everything consumed, not a share", async () => {
+    rig = await bootRig({ assistants: ASSISTANTS, budget: { maxTokens: 10_000, maxRuntimeMs: 600_000 } });
+    const { taskId } = await startParallel("compare");
+    expect(await rig.built.orchestrator.waitForSettled(taskId)).toBe("WAITING_INPUT");
+    const [a, b] = runsOf(taskId);
+    expect((await rig.postUsage({ eventId: "u-a", runId: a!.id, accounting: "delta", tokensIn: 3000, tokensOut: 0 })).status).toBe(201);
+    expect((await rig.postUsage({ eventId: "u-b", runId: b!.id, accounting: "delta", tokensIn: 1000, tokensOut: 0 })).status).toBe(201);
+    const budget = await rig.built.app.inject({ method: "GET", url: `/api/tasks/${taskId}/composition/budget`, headers: rig.auth() });
+    const consumed = (budget.json() as { consumed: { tokens: number } }).consumed.tokens;
+    expect(consumed).toBeGreaterThanOrEqual(4000);
+
+    const routingDecisionId = Number((rig.db.prepare("SELECT routing_decision_ref AS r FROM execution_requests WHERE composition_revision_id = ?").get(a!.composition_revision_id) as { r: string }).r);
+    const composed = await rig.built.orchestrator.dispatchComposer!.composeForDispatch({ taskId, assistantId: "fake-a", origin: "run-now", routingDecisionId });
+    expect(composed.kind).toBe("compose");
+    if (composed.kind !== "compose") return;
+    const ws = revisionSpec(a!.composition_revision_id!).workspace;
+    const bound = composed.composition.bind({ repositoryId: ws.repository_id, branch: ws.branch, worktreeId: ws.worktree_id });
+    expect(bound.ok).toBe(true);
+    if (!bound.ok) return;
+    expect(bound.policy.budget).toEqual({ max_tokens: 10_000 - consumed, max_runtime_ms: 600_000 });
+  });
+
+  it("a remainder too small to share blocks the start before anything runs", async () => {
+    // A cost cap, so stage 4's context budget (which a tiny token cap would also starve) is not what stops it.
+    rig = await bootRig({ assistants: ASSISTANTS, budget: { maxCostUsd: 0.000001 } });
+    const taskId = rig.built.tasks.create({ goal: GOAL, repoPath: rig.repo }).taskId;
+    const res = await rig.built.app.inject({ method: "POST", url: `/api/tasks/${taskId}/parallel`, headers: rig.auth(), payload: { assistants: ["fake-a", "fake-b"], mode: "race" } });
+    expect(res.statusCode).not.toBe(200);
+    expect(res.body).toContain("budget_exhausted");
+    expect(rig.built.tasks.get(taskId)!.state).toBe("CREATED");
+    expect(runsOf(taskId)).toEqual([]);
   });
 });
