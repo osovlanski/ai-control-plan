@@ -95,7 +95,9 @@ function StageItem({ stage, index }: { stage: DecisionStage; index: number }) {
 }
 
 function SpecSummary({ spec }: { spec: AgentSpec | AgentSpecDraft }) {
-  const rows = specRows(spec);
+  const rows = specRows(spec).map((row) => row.label === "Token cap" || row.label === "Cost cap"
+    ? { ...row, title: "The budget bound to this revision; see stage 5 for task remainder and any parallel share" }
+    : row);
   const assets = assetRows(spec);
   const ctx = spec.context;
   return (
@@ -204,7 +206,7 @@ function BudgetView({ budget }: { budget: CompositionBudget }) {
           Latest revision <code>{budget.latestRevision.compositionRevisionId}</code> runs under{" "}
           {budget.latestRevision.caps.max_tokens !== undefined ? `${fmtInt(budget.latestRevision.caps.max_tokens)} tokens` : "no token cap"}
           {budget.latestRevision.caps.max_cost_usd !== undefined ? `, ${fmtUsd(budget.latestRevision.caps.max_cost_usd)}` : ""}
-          {" "}(what remained when it was composed).
+          {" "}(the budget bound to that revision; see its stage 5 for any parallel share).
         </p>
       )}
       {budget.provisional && <p className="fine-print">Provisional: usage records can still arrive for any run, and the figures settle to the larger of in-run usage and records, never their sum.</p>}
@@ -264,7 +266,7 @@ const failure = (e: unknown): Read<never> => ({ state: "error", message: e insta
 const isOff = (e: unknown) => e instanceof ApiError && e.reason === "composer_disabled";
 
 /**
- * The bound revision, attempts and budget of one task. `runs` says which revision each run bound;
+ * All bound revisions, attempts and budget of one task. The budget read supplies run bindings;
  * `refreshKey` changes when the task does, and the reads are repeated.
  */
 export function CompositionPanel({ taskId, runs, refreshKey }: {
@@ -292,10 +294,10 @@ export function CompositionPanel({ taskId, runs, refreshKey }: {
     return <p className="comp-off" role="status">The Composer is off for this workspace (<code>composer.enabled</code> is false), so this task has no composition revision and runs on routing alone.</p>;
   }
   const { history, budget } = panel;
-  const bound = history.state === "ready" ? boundRevisions(history.value, runs) : [];
-  const current = bound.at(-1);
-  const earlier = bound.slice(0, -1);
-  const stray = history.state === "ready" ? unboundRevisions(history.value, bound) : [];
+  const bound = history.state === "ready" && budget.state === "ready"
+    ? boundRevisions(history.value, budget.value.runs.map((run) => ({ id: run.runId, compositionRevisionId: run.compositionRevisionId })))
+    : [];
+  const stray = history.state === "ready" && budget.state === "ready" ? unboundRevisions(history.value, bound) : [];
   const lastAttempt = history.state === "ready" ? history.value.attempts.at(-1) : undefined;
   return (
     <div className="comp-panel">
@@ -303,10 +305,10 @@ export function CompositionPanel({ taskId, runs, refreshKey }: {
         <button type="button" className="btn" onClick={load}>Refresh</button>
       </div>
 
-      <h3 className="section-label">Bound revision</h3>
+      <h3 className="section-label">Bound revisions</h3>
       {history.state === "loading" && <p role="status" className="fine-print">Reading composition…</p>}
       {history.state === "error" && <p role="alert" className="error">Composition unavailable: {history.message}</p>}
-      {history.state === "ready" && !current && (
+      {history.state === "ready" && budget.state === "ready" && bound.length === 0 && (
         <p className="comp-none" role="status">
           No composition revision is bound to this task{runs.length ? "'s runs" : ""}.{" "}
           {runs.length === 0
@@ -316,26 +318,16 @@ export function CompositionPanel({ taskId, runs, refreshKey }: {
               : "The run used routing alone."}
         </p>
       )}
-      {current && (
-        <section aria-label="Bound revision">
+      {bound.map((candidate) => (
+        <section key={candidate.revision.compositionRevisionId} aria-label={bound.length === 1 ? "Bound revision" : `Bound revision ${candidate.revision.compositionRevisionId}`}>
+          <h4>{candidate.revision.spec.harness} · revision <code>{candidate.revision.compositionRevisionId}</code></h4>
           <p className="comp-rev">
-            <code>{current.revision.compositionRevisionId}</code> · bundle <Digest value={current.revision.bundleDigest} /> · composed {new Date(current.revision.createdAt).toLocaleString()} ·
-            run{current.runIds.length === 1 ? "" : "s"} {current.runIds.map((id, i) => <span key={id}>{i ? ", " : " "}<code>{id}</code></span>)}
+            bundle <Digest value={candidate.revision.bundleDigest} /> · composed {new Date(candidate.revision.createdAt).toLocaleString()} ·
+            run{candidate.runIds.length === 1 ? "" : "s"} {candidate.runIds.map((id, i) => <span key={id}>{i ? ", " : " "}<code>{id}</code></span>)}
           </p>
-          <DecisionView decision={current.revision.decision} spec={current.revision.spec} />
+          <DecisionView decision={candidate.revision.decision} spec={candidate.revision.spec} />
         </section>
-      )}
-      {earlier.length > 0 && (
-        <details className="comp-earlier">
-          <summary>{earlier.length} earlier revision{earlier.length === 1 ? "" : "s"} (wake, failover or handoff)</summary>
-          {earlier.map((b) => (
-            <section key={b.revision.compositionRevisionId} aria-label={`Revision ${b.revision.compositionRevisionId}`}>
-              <p className="comp-rev"><code>{b.revision.compositionRevisionId}</code> · run{b.runIds.length === 1 ? "" : "s"} {b.runIds.join(", ")}</p>
-              <DecisionView decision={b.revision.decision} spec={b.revision.spec} />
-            </section>
-          ))}
-        </details>
-      )}
+      ))}
       {stray.length > 0 && <p className="fine-print">{stray.length} persisted revision{stray.length === 1 ? " is" : "s are"} not bound to any run: {stray.map((r) => r.compositionRevisionId).join(", ")}.</p>}
 
       <h3 className="section-label">Budget</h3>

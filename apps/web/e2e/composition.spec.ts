@@ -162,6 +162,51 @@ test.describe("Composer on", () => {
     await page.screenshot({ path: info.outputPath("task-detail-composition.png"), fullPage: true });
   });
 
+  test("Compare shows both candidate revisions, profiles and equal budget shares in Task Detail and Inspector", async ({ context }, info) => {
+    const page = await h.openApp(context);
+    await preview(page);
+    const proposal = page.getByRole("region", { name: "Routing recommendation" });
+    await proposal.getByText("Routing evidence & advanced overrides", { exact: true }).click();
+    await expect(proposal.locator(".shell-parallel")).toContainText("equal share of the remaining task token and cost budget");
+    await expect(proposal.locator(".shell-parallel")).toContainText("The previewed composition does not bind these runs");
+    const started = page.waitForResponse((response) => response.url().endsWith("/parallel") && response.request().method() === "POST");
+    await proposal.getByRole("button", { name: "Compare 2", exact: true }).click();
+    expect((await started).ok()).toBe(true);
+    const task = h.built.tasks.list().find((t) => t.goal === GOAL)!;
+    const api = await h.privileged();
+    const history = await (await api.get(`/api/tasks/${task.id}/composition`)).json();
+    const budget = await (await api.get(`/api/tasks/${task.id}/composition/budget`)).json();
+    expect(history.revisions).toHaveLength(2);
+    expect(budget.runs.map((run: { assistantId: string }) => run.assistantId).sort()).toEqual([A, B]);
+    expect(new Set(budget.runs.map((run: { compositionRevisionId: string }) => run.compositionRevisionId)).size).toBe(2);
+
+    const checkCandidates = async (panel: ReturnType<Page["locator"]>) => {
+      await expect(panel.getByRole("region", { name: /^Bound revision / })).toHaveCount(2);
+      for (const revision of history.revisions) {
+        const bound = panel.getByRole("region", { name: `Bound revision ${revision.compositionRevisionId}`, exact: true });
+        await expect(bound).toBeVisible();
+        await expect(bound).toContainText(revision.spec.harness);
+        const summary = bound.getByLabel("What this composition attaches and enforces");
+        await expect(summary).toContainText(`${revision.spec.provisioning.achieved} (requested ${revision.spec.provisioning.requested})`);
+        await expect(summary.locator("div", { has: page.locator("dt", { hasText: /^Token cap$/ }) }).first()).toContainText("25,000");
+        const policy = bound.locator('[data-stage="policy"]');
+        await expect(policy).toContainText("task cap 50000, consumed 0, remaining 50000");
+        await expect(policy).toContainText("parallel share 1 of 2: 25000");
+        const run = budget.runs.find((r: { compositionRevisionId: string }) => r.compositionRevisionId === revision.compositionRevisionId);
+        await expect(bound).toContainText(run.runId);
+      }
+    };
+    const inspector = page.getByRole("region", { name: "Selected task inspector" });
+    await inspector.getByRole("button", { name: "Decision", exact: true }).click();
+    await inspector.getByText("Composition", { exact: true }).click();
+    await checkCandidates(inspector.locator(".comp-panel"));
+    await page.getByRole("button", { name: "Open mission controls" }).click();
+    await page.getByRole("button", { name: "Composition", exact: true }).click();
+    await checkCandidates(page.locator(".comp-panel"));
+    await expect(page.locator(".comp-panel").getByRole("table", { name: "Task budget", exact: true })).toContainText("50,000");
+    await page.screenshot({ path: info.outputPath("compare-candidate-compositions.png"), fullPage: true });
+  });
+
   test("a composition that changed since the preview starts nothing and shows the new decision", async ({ context }) => {
     const page = await h.openApp(context);
     await preview(page);
@@ -201,6 +246,17 @@ test.describe("Composer on", () => {
     expect((await (await api.get(`/api/tasks/${task.id}`)).json()).runs.map((r: { assistant_id: string }) => r.assistant_id)).toEqual([B]);
   });
 
+  test("parallel start without a repository explains routing only", async ({ context }) => {
+    const page = await h.openApp(context);
+    await page.getByRole("textbox", { name: "What should Agentic OS do?" }).fill(GOAL);
+    const shell = page.getByLabel("Mission shell");
+    await shell.getByRole("button", { name: "Preview routing", exact: true }).click();
+    const proposal = page.getByRole("region", { name: "Routing recommendation" });
+    await proposal.getByText("Routing evidence & advanced overrides", { exact: true }).click();
+    await expect(proposal.locator(".shell-parallel")).toContainText("start on routing only");
+    await expect(proposal.locator(".shell-parallel")).not.toContainText("each with an equal share");
+  });
+
   test("the Inspector's Composition section reads the same revision", async ({ context }) => {
     const api = await h.privileged();
     const created = await (await api.post("/api/tasks", { data: { goal: GOAL, repoPath: repo } })).json();
@@ -236,6 +292,8 @@ test.describe("Composer off", () => {
     const proposal = page.getByRole("region", { name: "Routing recommendation" });
     await expect(proposal.getByText(/Composer is off for this workspace/)).toBeVisible();
     await expect(proposal.locator(".comp-stage")).toHaveCount(0);
+    await proposal.getByText("Routing evidence & advanced overrides", { exact: true }).click();
+    await expect(proposal.locator(".shell-parallel")).toContainText("start on routing only");
     await proposal.getByRole("button", { name: "Run recommended", exact: true }).click();
     const task = h.built.tasks.list().find((t) => t.goal === GOAL)!;
     await h.waitForState(task.id, "COMPLETED");
