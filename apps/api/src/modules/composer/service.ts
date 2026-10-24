@@ -468,6 +468,18 @@ export class ComposerService implements DispatchComposer {
       ...(b.maxCostUsd !== undefined ? { max_cost_usd: b.maxCostUsd } : {}),
       ...(b.maxRuntimeMs !== undefined ? { max_runtime_ms: b.maxRuntimeMs } : {}),
     };
+    if (confirm.mode === "start" && confirm.origin !== "operator") {
+      // Only config and a persisted revision may supply caps. Preserve every prior tightening,
+      // even if config raises or removes a cap. The carry is the prior revision's task cap, not
+      // its remainder: stage 5 subtracts the task's whole consumption, exactly once.
+      const priorCaps = this.accounting.latestTaskCaps(taskId);
+      if (priorCaps) {
+        for (const key of ["max_tokens", "max_cost_usd", "max_runtime_ms"] as const) {
+          const priorCap = priorCaps[key];
+          if (priorCap !== undefined) budget[key] = Math.min(budget[key] ?? priorCap, priorCap);
+        }
+      }
+    }
     const config: ComposerConfig = {
       maxSkills: composer.assets.maxSkills,
       maxMcpServers: composer.assets.maxMcpServers,

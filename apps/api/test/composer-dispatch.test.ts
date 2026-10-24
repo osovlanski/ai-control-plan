@@ -5,7 +5,7 @@
  * same assistant reuses its revision. A recomposition with no budget left starts nothing.
  */
 import { afterEach, describe, expect, it } from "vitest";
-import type { AgentSpec, CompositionDecision, ExecutionPolicy } from "@agent-plane/core";
+import type { AgentSpec, ComposerOverrides, CompositionDecision, ExecutionPolicy } from "@agent-plane/core";
 import { bootRig, reaches, type Rig } from "./helpers/composer-cockpit.js";
 
 let rig: Rig | undefined;
@@ -46,12 +46,100 @@ function repoTask(goal: string, overrides?: { assistantId: string }): string {
 function park(taskId: string) {
   rig!.built.scheduler.attach(taskId, { kind: "time", notBefore: new Date(instant + 1000).toISOString() });
 }
-async function operatorStart(taskId: string) {
-  const res = await rig!.built.app.inject({ method: "POST", url: `/api/tasks/${taskId}/start`, headers: rig!.auth(), payload: {} });
+async function operatorStart(taskId: string, overrides?: ComposerOverrides) {
+  const res = await rig!.built.app.inject({ method: "POST", url: `/api/tasks/${taskId}/start`, headers: rig!.auth(), payload: overrides ? { overrides } : {} });
   return { status: res.statusCode, body: res.json() as { runId?: string; composition?: { compositionRevisionId: string | null } } };
 }
 
 describe("recomposition at a scheduler dispatch", () => {
+  it.each([
+    ["unchanged", 10_000, 5000],
+    ["tightened", 4000, 4000],
+    ["removed", undefined, 5000],
+  ] as const)("run-now carries the persisted override when the config cap is %s", async (_label, configuredCap, effectiveCap) => {
+    rig = await bootRig({ now, budget: { maxTokens: 10_000, maxRuntimeMs: 600_000 } });
+    const id = repoTask("Ship the feature [FAKE:LIMIT]");
+    expect((await operatorStart(id, { policy: { budget: { max_tokens: 5000, max_runtime_ms: 60_000 } } })).status).toBe(200);
+    expect(await reaches(rig.built, id, ["WAITING_RESOURCE", "WAITING_INPUT"])).toBe("WAITING_RESOURCE");
+    expect(revisions(id)[0]!.spec.policy.budget).toEqual({ max_tokens: 5000, max_runtime_ms: 60_000 });
+
+    // Change only the live config; no override is sent with the scheduler dispatch.
+    rig.config.composer.policy.budget = configuredCap === undefined ? {} : { maxTokens: configuredCap, maxRuntimeMs: 600_000 };
+    instant += 11 * 60_000;
+    const done = settled(id);
+    await rig.built.scheduler.runNow(id);
+    expect(await done).toBe("COMPLETED");
+    const all = revisions(id);
+    expect(all).toHaveLength(2);
+    expect(all[1]!.spec.policy.budget).toEqual({ max_tokens: effectiveCap - 1650, max_runtime_ms: 60_000 });
+    expect(attempts(id).at(-1)).toMatchObject({ origin: "run-now", outcome: "persisted" });
+    expect(request(runs(id)[1]!.execution_request_id!)).toMatchObject({
+      composition_revision_id: all[1]!.id,
+      policy: { budget: { maxTokens: effectiveCap - 1650 }, timeout: { hardMs: 60_000 } },
+    });
+  });
+
+  // A persisted revision's budget is the task's remainder when it was composed. The carry must take
+  // the task cap behind it, so consumption is subtracted once, however many revisions came before.
+  const policyEvidence = (decision: CompositionDecision, ref: string) =>
+    decision.stages.find((s) => s.stage === "policy")!.candidates.find((c) => c.ref === ref)?.evidence;
+  async function recompose(taskId: string) {
+    const routingDecisionId = (rig!.db.prepare("SELECT routing_decision_id AS r FROM dispatches WHERE task_id = ? ORDER BY rowid DESC LIMIT 1").get(taskId) as { r: number }).r;
+    const latest = revisions(taskId).at(-1)!.spec.workspace;
+    const composed = await rig!.built.orchestrator.dispatchComposer!.composeForDispatch({ taskId, assistantId: "fake-a", origin: "wake", routingDecisionId });
+    if (composed.kind !== "compose") return composed;
+    return composed.composition.bind({ repositoryId: latest.repository_id, branch: latest.branch, worktreeId: latest.worktree_id });
+  }
+  async function twoRuns(configuredCap: number | undefined) {
+    rig = await bootRig({ now, assistants: { "fake-a": { provider: "fake" } }, budget: { maxTokens: 10_000, maxRuntimeMs: 600_000 } });
+    const id = repoTask("Ship the feature [FAKE:LIMIT]");
+    expect((await operatorStart(id, { policy: { budget: { max_tokens: 5000, max_runtime_ms: 60_000 } } })).status).toBe(200);
+    expect(await reaches(rig.built, id, ["WAITING_RESOURCE", "WAITING_INPUT"])).toBe("WAITING_RESOURCE");
+    rig.config.composer.policy.budget = configuredCap === undefined ? {} : { maxTokens: configuredCap, maxRuntimeMs: 600_000 };
+    instant += 11 * 60_000;
+    const done = settled(id);
+    await rig.built.scheduler.runNow(id);
+    expect(await done).toBe("COMPLETED");
+    return id;
+  }
+
+  it("revisions 2, 3 and 4 each carry the operator cap less the task's whole consumption, once", async () => {
+    const id = await twoRuns(10_000);
+    // Revision 2: 1650 consumed by run 1.
+    const [r1, r2] = revisions(id);
+    expect(r1!.spec.policy.budget).toEqual({ max_tokens: 5000, max_runtime_ms: 60_000 });
+    expect(r2!.spec.policy.budget).toEqual({ max_tokens: 3350, max_runtime_ms: 60_000 });
+    expect(policyEvidence(r2!.decision, "max_tokens:3350")).toContain("task cap 5000, consumed 1650, remaining 3350");
+
+    // Revision 3: run 2 settled another 1650. 5000 - 3300, not 3350 - 3300.
+    expect(await recompose(id)).toMatchObject({ ok: true, compositionRevisionId: `CR-${id}-3`, policy: { budget: { max_tokens: 1700, max_runtime_ms: 60_000 } } });
+    const r3 = revisions(id)[2]!;
+    expect(r3.spec.policy.budget).toEqual({ max_tokens: 1700, max_runtime_ms: 60_000 });
+    expect(policyEvidence(r3.decision, "max_tokens:1700")).toContain("task cap 5000, consumed 3300, remaining 1700");
+
+    // Revision 4: a late record lifts run 2 from 1650 to 2150 settled after revision 3 was composed.
+    const run2 = runs(id)[1]!.id;
+    expect((await rig!.postUsage({ eventId: "FAKE-evt-late", runId: run2, accounting: "cumulative", tokensIn: 1500, tokensOut: 650 })).status).toBe(201);
+    expect(await recompose(id)).toMatchObject({ ok: true, compositionRevisionId: `CR-${id}-4`, policy: { budget: { max_tokens: 1200, max_runtime_ms: 60_000 } } });
+    const r4 = revisions(id)[3]!;
+    expect(policyEvidence(r4.decision, "max_tokens:1200")).toContain("task cap 5000, consumed 3800, remaining 1200");
+
+    // Once the cap is spent the next recomposition starts nothing, rather than resetting.
+    expect((await rig!.postUsage({ eventId: "FAKE-evt-late-2", runId: run2, accounting: "cumulative", tokensIn: 3000, tokensOut: 650 })).status).toBe(201);
+    expect(await recompose(id)).toEqual({ kind: "blocked", reason: "budget_exhausted", pauseKind: "budget_exhausted" });
+    expect(revisions(id)).toHaveLength(4);
+  });
+
+  it("when config tightens below the operator cap, policy wins at every later revision", async () => {
+    const id = await twoRuns(4000);
+    expect(revisions(id)[1]!.spec.policy.budget).toEqual({ max_tokens: 4000 - 1650, max_runtime_ms: 60_000 });
+    expect(await recompose(id)).toMatchObject({ ok: true, policy: { budget: { max_tokens: 4000 - 3300, max_runtime_ms: 60_000 } } });
+    expect(policyEvidence(revisions(id)[2]!.decision, "max_tokens:700")).toContain("task cap 4000, consumed 3300, remaining 700");
+    // Raising config again never loosens: revision 3's task cap of 4000 is carried.
+    rig!.config.composer.policy.budget = { maxTokens: 50_000, maxRuntimeMs: 600_000 };
+    expect(await recompose(id)).toMatchObject({ ok: true, policy: { budget: { max_tokens: 700, max_runtime_ms: 60_000 } } });
+  });
+
   it("a wake composes a new revision over the dispatch's own route and binds the run to it", async () => {
     rig = await bootRig({ now, budget: { maxTokens: 50_000, maxRuntimeMs: 600_000 } });
     const id = repoTask("Add a typed helper to the parser module");
@@ -140,10 +228,10 @@ describe("recomposition at a scheduler dispatch", () => {
 describe("recomposition at failover", () => {
   const two = { "fake-a": { provider: "fake" as const }, "fake-b": { provider: "fake" as const } };
 
-  it("a failover composes a new revision for the new assistant, with what remains of the task cap", async () => {
+  it.each([10_000, 5000])("a failover carries the persisted cap %i to the new assistant, less consumption", async (cap) => {
     rig = await bootRig({ now, assistants: two, budget: { maxTokens: 10_000 } });
     const id = repoTask("Ship the feature [FAKE:LIMIT]");
-    const started = await operatorStart(id);
+    const started = await operatorStart(id, { policy: { budget: { max_tokens: cap } } });
     expect(started.status).toBe(200);
     expect(started.body.composition?.compositionRevisionId).toBe(`CR-${id}-1`);
     expect(await rig.built.orchestrator.waitForSettled(id)).toBe("COMPLETED");
@@ -157,14 +245,14 @@ describe("recomposition at failover", () => {
     expect(confirm(r2!.decision)).toMatchObject({ chosen: ["start"], why: "failover dispatch; intent confirmed at creation" });
     expect(r2!.spec.harness).toBe(r1!.spec.harness);
     // The first run settled 1200 in + 450 out (the fake reports one cumulative total).
-    expect(r1!.spec.policy.budget).toEqual({ max_tokens: 10_000 });
-    expect(r2!.spec.policy.budget).toEqual({ max_tokens: 10_000 - 1650 });
+    expect(r1!.spec.policy.budget).toEqual({ max_tokens: cap });
+    expect(r2!.spec.policy.budget).toEqual({ max_tokens: cap - 1650 });
     const policy = r2!.decision.stages.find((s) => s.stage === "policy")!;
-    expect(policy.candidates.find((c) => c.ref === "max_tokens:8350")?.evidence).toContain("task cap 10000, consumed 1650, remaining 8350");
+    expect(policy.candidates.find((c) => c.ref === `max_tokens:${cap - 1650}`)?.evidence).toContain(`task cap ${cap}, consumed 1650, remaining ${cap - 1650}`);
     expect(attempts(id).map((a) => [a.origin, a.outcome, a.composition_revision_id])).toEqual([
       ["start", "persisted", `CR-${id}-1`], ["failover", "persisted", `CR-${id}-2`],
     ]);
-    expect(request(second!.execution_request_id!)).toMatchObject({ composition_revision_id: `CR-${id}-2`, policy: { budget: { maxTokens: 8350, enforcement: "advisory" } } });
+    expect(request(second!.execution_request_id!)).toMatchObject({ composition_revision_id: `CR-${id}-2`, policy: { budget: { maxTokens: cap - 1650, enforcement: "advisory" } } });
   });
 
   it("a failover with no budget left starts nothing and parks the task for an operator: budget_exhausted", async () => {
@@ -234,9 +322,9 @@ describe("K11 continuation", () => {
 describe("budget_exhausted at a scheduler wake", () => {
   it("a wake whose recomposition finds no budget left aborts the dispatch and waits for an operator", async () => {
     // One assistant: a limit has nowhere to fail over to, so the task parks on a quota wait.
-    rig = await bootRig({ now, assistants: { "fake-a": { provider: "fake" } }, budget: { maxTokens: 1000 } });
+    rig = await bootRig({ now, assistants: { "fake-a": { provider: "fake" } }, budget: { maxTokens: 10_000 } });
     const id = repoTask("Ship the feature [FAKE:LIMIT]");
-    expect((await operatorStart(id)).status).toBe(200);
+    expect((await operatorStart(id, { policy: { budget: { max_tokens: 1000 } } })).status).toBe(200);
     expect(await reaches(rig.built, id, ["WAITING_RESOURCE", "WAITING_INPUT"])).toBe("WAITING_RESOURCE");
     expect(runs(id)).toHaveLength(1);
 
