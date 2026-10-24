@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  accumulateInRun, combineUsageRecords, lateOverrun, NO_CONSUMPTION, remainingBudget, settleSession, taskConsumption,
+  accumulateInRun, combineUsageRecords, lateOverrun, NO_CONSUMPTION, remainingBudget, settleSession, shareBudget, taskConsumption,
   type SessionUsageRecord,
 } from "../../src/index.js";
 
@@ -76,6 +76,22 @@ describe("task consumption and remainder", () => {
       remaining: { max_tokens: -200, max_cost_usd: 0.25, max_runtime_ms: 60000 }, exhausted: ["max_tokens"],
     });
     expect(remainingBudget({}, consumed)).toEqual({ remaining: {}, exhausted: [] });
+  });
+
+  it.each([
+    ["two candidates", 2, { max_tokens: 500, max_cost_usd: 0.125, max_runtime_ms: 60000 }, []],
+    ["three candidates never sum past the remainder", 3, { max_tokens: 333, max_cost_usd: 0.083333, max_runtime_ms: 60000 }, []],
+    ["too many candidates for the remainder", 1001, { max_tokens: 0, max_cost_usd: 0.000249, max_runtime_ms: 60000 }, ["max_tokens"]],
+  ] as const)("a parallel share: %s; runtime is not split", (_name, n, remaining, exhausted) => {
+    const r = shareBudget(remainingBudget({ max_tokens: 1000, max_cost_usd: 0.25, max_runtime_ms: 60000 }, NO_CONSUMPTION), n);
+    expect(r).toEqual({ remaining, exhausted });
+    expect(r.remaining.max_tokens! * n).toBeLessThanOrEqual(1000);
+    expect(Math.round(r.remaining.max_cost_usd! * 1e6) * n).toBeLessThanOrEqual(250000);
+  });
+
+  it("a share of an exhausted remainder is exhausted", () => {
+    expect(shareBudget(remainingBudget({ max_tokens: 1000 }, { ...NO_CONSUMPTION, tokens: 1200 }), 2).exhausted).toEqual(["max_tokens"]);
+    expect(() => shareBudget(remainingBudget({}, NO_CONSUMPTION), 0)).toThrow(/positive candidate count/);
   });
 
   it.each([

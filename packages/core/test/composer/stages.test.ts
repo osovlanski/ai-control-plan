@@ -365,6 +365,35 @@ describe("stage 5: policy", () => {
     expect(finalizeStage(r.stage, guard).filters).toEqual([{ filter: "budget_exhausted", removed: ["max_tokens:0"], reason: "the task has no budget remaining under its cap" }]);
   });
 
+  it("compare and race candidates each get an equal share; the task-cap line stays the task's", () => {
+    const consumed = { tokens: 150001, costUsd: 0.5, costMethod: "measured" as const, unknownCostSessions: 0, sessions: 1, recordCount: 1 };
+    const config = { ...baseInputs().config, budget: { max_tokens: 200000, max_cost_usd: 2.5, max_runtime_ms: 1800000 } };
+    const r = run({ consumed, config, budgetShare: { candidates: 2 } });
+    expect(r.policy!.budget).toEqual({ max_tokens: 24999, max_cost_usd: 1, max_runtime_ms: 1800000 });
+    const s = finalizeStage(r.stage, guard);
+    expect(s.candidates.find((c) => c.ref === "max_tokens:24999")!.evidence!.slice(1)).toEqual([
+      "task cap 200000, consumed 150001, remaining 49999", "parallel share 1 of 2: 24999",
+    ]);
+    expect(s.candidates.find((c) => c.ref === "max_cost_usd:1")!.evidence).toContain("parallel share 1 of 2: 1");
+    expect(s.chosen).toContain("max_tokens:24999");
+    expect(s.why).toContain("(equal share for each of 2 candidates composed together)");
+  });
+
+  it("a remainder too small to share is budget_exhausted, and says why", () => {
+    const consumed = { tokens: 199999, costUsd: 0, costMethod: "unknown" as const, unknownCostSessions: 1, sessions: 1, recordCount: 1 };
+    const r = run({ consumed, budgetShare: { candidates: 2 } });
+    expect(r.failure).toBe("budget_exhausted");
+    expect(finalizeStage(r.stage, guard).filters).toEqual([
+      { filter: "budget_exhausted", removed: ["max_tokens:0"], reason: "the task's remaining budget cannot give each of 2 candidates a share" },
+    ]);
+  });
+
+  it("without a share the stage is unchanged", () => {
+    const plain = run({});
+    expect(finalizeStage(plain.stage, guard)).toEqual(finalizeStage(run({ budgetShare: undefined }).stage, guard));
+    expect(finalizeStage(plain.stage, guard).candidates.flatMap((c) => c.evidence ?? []).some((e) => e.startsWith("parallel share"))).toBe(false);
+  });
+
   it("cost cap evidence: advisory, and no price means not computed", () => {
     const r = run({ config: { ...baseInputs().config, budget: { max_cost_usd: 2.5 } } });
     const s = finalizeStage(r.stage, guard);
