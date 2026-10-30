@@ -1,0 +1,22 @@
+{
+  "_note": "Claude Agent SDK 0.3.x message shapes for one composed run, redacted: every id is FAKE. Uncached input (8), output (1,334) and total_cost_usd (0.225) are the OCI dogfood run's (2026-10-30); the cache figures and modelUsage split are reconstructed, because the transcript is not kept.",
+  "messages": [
+    {
+      "type": "system", "subtype": "init", "session_id": "FAKE-claude-session-not-real-0001", "model": "claude-sonnet-5",
+      "claude_code_version": "2.1.0", "tools": ["Read", "Edit", "Bash"], "skills": [], "plugins": [], "mcp_servers": []
+    },
+    {
+      "type": "rate_limit_event", "uuid": "FAKE-uuid-0001", "session_id": "FAKE-claude-session-not-real-0001",
+      "rate_limit_info": { "status": "allowed", "resetsAt": 1793361600, "rateLimitType": "five_hour", "utilization": 0.31 }
+    },
+    {
+      "type": "result", "subtype": "success", "is_error": false, "result": "Added the helper and its test.", "num_turns": 6, "duration_ms": 48211,
+      "session_id": "FAKE-claude-session-not-real-0001", "total_cost_usd": 0.225,
+      "usage": { "input_tokens": 8, "cache_creation_input_tokens": 12406, "cache_read_input_tokens": 61544, "output_tokens": 1334 },
+      "modelUsage": {
+        "claude-sonnet-5": { "inputTokens": 6, "outputTokens": 1201, "cacheReadInputTokens": 58710, "cacheCreationInputTokens": 11950, "webSearchRequests": 0, "costUSD": 0.2121, "contextWindow": 200000 },
+        "claude-haiku-4-5": { "inputTokens": 2, "outputTokens": 133, "cacheReadInputTokens": 2834, "cacheCreationInputTokens": 456, "webSearchRequests": 0, "costUSD": 0.0129, "contextWindow": 200000 }
+      }
+    }
+  ]
+}
