@@ -83,6 +83,38 @@ const fromRow = (r: Row): UsageRecord => ({
 export class UsageLedger {
   constructor(private db: Db, private now: () => Date = () => new Date()) {}
 
+  /**
+   * Resolve attribution without rewriting the immutable observation. Cockpit's assistant ids
+   * name environments (claude/codex), not this workspace's configured assistants. Only a unique
+   * provider/session pair is sufficient: a resumed provider session can belong to several runs.
+   */
+  runIdFor(record: Pick<UsageRecord, "runId" | "provider" | "sessionRef">): string | null {
+    if (record.runId) return record.runId;
+    if (!record.sessionRef) return null;
+    const matches = this.db.prepare(
+      `SELECT r.id FROM runs r JOIN assistants a ON a.id = r.assistant_id
+        WHERE a.provider = ? AND r.provider_session_ref = ? LIMIT 2`,
+    ).all(record.provider, record.sessionRef) as Array<{ id: string }>;
+    return matches.length === 1 ? matches[0]!.id : null;
+  }
+
+  /**
+   * Read-time attribution also catches imports received before the run's session ref was
+   * recorded. Shared-session imports remain ledger-only; never charge a session total twice.
+   */
+  recordsForRun(runId: string): UsageRecord[] {
+    const run = this.db.prepare(
+      `SELECT a.provider, r.provider_session_ref AS sessionRef
+         FROM runs r JOIN assistants a ON a.id = r.assistant_id WHERE r.id = ?`,
+    ).get(runId) as { provider: string; sessionRef: string | null } | undefined;
+    const inferred = run ? this.runIdFor({ runId: null, ...run }) === runId : false;
+    return (this.db.prepare(
+      `SELECT * FROM usage_records WHERE run_id = ?
+         OR (run_id IS NULL AND provider = ? AND session_ref = ? AND ?)
+        ORDER BY received_at, rowid`,
+    ).all(runId, run?.provider ?? null, run?.sessionRef ?? null, Number(inferred)) as Row[]).map(fromRow);
+  }
+
   /** `record` is the value of a successful validateUsageRecord. */
   ingest(record: UsageRecord): IngestResult {
     const digest = `sha256:${createHash("sha256").update(JSON.stringify(record), "utf8").digest("hex")}`;

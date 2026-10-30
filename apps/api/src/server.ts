@@ -322,10 +322,11 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     const result = usage.ingest(parsed.value);
     if (result.status === "unknown_run") return reply.status(422).send({ error: `run ${parsed.value.runId} does not exist` });
     if (result.status === "conflict") return reply.status(409).send({ error: "a different usage record is stored under this provider, sessionRef and eventId", record: result.record });
-    // M2 S6: a first delivery bound to a run may take its revision past a cap. That appends a
+    // M2 S6: a first delivery explicitly or uniquely attributed to a run may exceed its cap. That appends a
     // `budget.overrun` event and never changes the run; the record's own answer is unchanged.
-    if (result.status === "created" && result.record.runId && composer) {
-      try { composer.lateRecord(result.record.runId); } catch (err) { req.log.warn({ err: message(err) }, "budget overrun check failed"); }
+    const attributedRunId = usage.runIdFor(result.record);
+    if (result.status === "created" && attributedRunId && composer) {
+      try { composer.lateRecord(attributedRunId); } catch (err) { req.log.warn({ err: message(err) }, "budget overrun check failed"); }
     }
     return reply.status(result.status === "created" ? 201 : 200).send({ replayed: result.status === "replayed", record: result.record });
   });

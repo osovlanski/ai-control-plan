@@ -686,3 +686,15 @@ Plan §6 row 7, checked against PR bodies #85–#112, Cockpit #46/#47 and a driv
 ## 2026-10-30 — Project verification skips unchanged runs and blocks on missing dependencies (SHIPPED)
 
 - **The coordinator settles project checks (`project:*`) before the Harness runs them.** A run whose checkpoint saw no changed files, and whose worktree git shows HEAD at the base commit with a clean tree, skips them (`skipped`, not required, reason recorded on the plan decision as `skipped:unchanged`), so a read-only task completes. Otherwise, a lockfile with no `node_modules` (or Yarn `.pnp.cjs`) makes them `blocked`, still required, with the install command in the summary; nothing is installed automatically (owner decision, needs network). Any doubt (git error, uninspectable tree) verifies as before, and a check that ran and failed still fails. The task still parks in `WAITING_INPUT` on a blocked check, under the orchestrator's existing "verification failed" notice.
+
+## 2026-10-30 — Session attribution of imported usage (PROPOSED; Phase 7 stays open)
+
+Cockpit's `assistantId` names its environment (`claude`/`codex`), not necessarily the plane's
+configured assistant. Imports without a run id are therefore attributed only when their provider
+and session reference identify exactly one run in this workspace. Attribution is derived at read
+time: it must never rewrite a usage record, its body digest or its replay response. Shared provider
+sessions remain unattributed; allocating their transcript to every resumed run would double count.
+If another run later shares that session, reads exclude the unbound imports from both runs. The
+existing max(in-run, imports) settlement rule remains. This is a bounded step toward the Phase 7
+usage condition, not its closure. The continuation report is
+`docs/phase7-continuation-2026-10-30.md`.

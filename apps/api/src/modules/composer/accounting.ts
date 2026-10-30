@@ -4,8 +4,8 @@
  *
  * - A session is a run. Its in-run tokens are the terminal result's usage when there is one,
  *   otherwise its `usage.updated` events under the manifest's accounting mode. Its late tokens are
- *   the `usage_records` bound to it (already deduplicated by the ledger). Settled tokens are
- *   max(in-run, records), never the sum.
+ *   the `usage_records` explicitly bound to it or uniquely matched by provider/session (already
+ *   deduplicated by the ledger). Settled tokens are max(in-run, records), never the sum.
  * - Cost is measured (`costUsd`), else estimated from K7 price evidence for the run's model, else
  *   the subscription API-equivalent, else unknown with no number.
  * - Every figure is provisional: records may still arrive. Each read reports the record count.
@@ -23,6 +23,7 @@ import type { ResolvedConfig } from "../../config.js";
 import type { Db } from "../../db/index.js";
 import type { ModelCatalogService } from "../model-catalog.js";
 import type { Registry } from "../registry.js";
+import { UsageLedger } from "../usage.js";
 import { modelPrice } from "./ports.js";
 
 export interface TaskAccountingDeps {
@@ -238,10 +239,7 @@ export class TaskAccounting {
 
   private settle(rows: RunRow[]): RunSettlement[] {
     const assistants = new Map(this.d.registry.list().map((a) => [a.id, a]));
-    const records = this.d.db.prepare(
-      `SELECT event_id, accounting, tokens_in, tokens_out, cost_usd, api_equivalent_usd
-         FROM usage_records WHERE run_id = ? ORDER BY received_at, rowid`,
-    );
+    const ledger = new UsageLedger(this.d.db);
     const usageEvents = this.d.db.prepare("SELECT payload FROM events WHERE run_id = ? AND type = 'usage.updated' ORDER BY seq");
     return rows.map((r) => {
       const assistant = assistants.get(r.assistant_id);
@@ -260,9 +258,7 @@ export class TaskAccounting {
         });
         inRun = accumulateInRun(accounting, observations);
       }
-      const sessionRecords: SessionUsageRecord[] = (records.all(r.id) as Array<{
-        event_id: string; accounting: "delta" | "cumulative"; tokens_in: number; tokens_out: number; cost_usd: number | null; api_equivalent_usd: number;
-      }>).map((x) => ({ eventId: x.event_id, accounting: x.accounting, tokensIn: x.tokens_in, tokensOut: x.tokens_out, costUsd: x.cost_usd, apiEquivalentUsd: x.api_equivalent_usd }));
+      const sessionRecords: SessionUsageRecord[] = ledger.recordsForRun(r.id);
       const model = r.model_resolved ?? r.model_requested ?? assistant?.manifestParsed?.core.models[0]?.id ?? null;
       const price = model && assistant ? modelPrice(this.d, r.assistant_id, assistant.provider, model) : undefined;
       const settled = settleSession({ inRun, records: sessionRecords, ...(price ? { price } : {}) });
