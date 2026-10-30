@@ -9,6 +9,7 @@ import { join } from "node:path";
 import type {
   AgentSpec,
   ContextPolicy,
+  CompositionDecision,
   ContextYieldRequest,
   Continuation,
   QuotaBlocker,
@@ -152,6 +153,21 @@ export interface StartComposition {
   attachRun(runId: string, compositionRevisionId: string): void;
 }
 
+/**
+ * The model a run requests and which rule chose it (`runs.model_requested_source`): the task's
+ * model override, a K13 selector committed in applied mode, or the bound revision's model.primary.
+ */
+export interface LaunchModel { id: string; source: 'task-override' | 'k13-applied' | 'revision' }
+
+/** A bound revision names a model its assistant does not offer: the start fails, never falls back. */
+export class LaunchModelRefusedError extends Error {
+  readonly reason = 'revision_model_refused';
+  constructor(readonly compositionRevisionId: string, readonly assistantId: string, readonly model: string, offered: readonly string[]) {
+    super(`revision_model_refused: revision ${compositionRevisionId} binds model ${model}, which ${assistantId} does not offer (offers ${offered.join(', ')}); the start does not fall back to another model`);
+    this.name = 'LaunchModelRefusedError';
+  }
+}
+
 /** The non-interactive starts that recompose at dispatch (plans/m2-composer.md §2 stage 6, I-S1). */
 export type RecomposeOrigin = 'wake' | 'run-now' | 'failover' | 'context-yield';
 
@@ -208,24 +224,78 @@ export class Orchestrator {
    * the same dispatch reuses the committed request instead of calling this.
    */
   /**
-   * The selector this run will REQUEST (CR-33). Two sources, in priority order:
+   * The selector this run will REQUEST (CR-33), and which rule chose it. Three sources, in
+   * priority order:
    *
    *  1. the operator's explicit `intent.overrides.model` — hard intent, and it
    *     outranks any recommendation;
    *  2. the model an ACTIVE K13 decision committed, read back from the durable
-   *     routing decision this dispatch already owns.
+   *     routing decision this dispatch already owns;
+   *  3. the bound revision's `model.primary` (plan §3.1: the revision binds the run). A
+   *     failover recomposes, so its destination's own revision applies.
    *
-   * It is only ever READ from the committed decision, never recomputed here: a
+   * It is only ever READ from committed records, never recomputed here: a
    * recovery of an already committed dispatch must re-materialize the same
    * request, not a newer opinion formed from telemetry that arrived since.
    * Whatever this returns becomes `ExecutionRequest.model`, and the bridge
-   * remains the only place that becomes `RunSpec.model`.
+   * remains the only place that becomes `RunSpec.model`. A revision model the
+   * assistant does not offer throws `LaunchModelRefusedError`; it never falls
+   * back to the CLI default.
    */
-  private requestedModel(taskId: string, assistantId?: AssistantId, routingDecisionRef?: string): string | undefined {
+  private requestedModel(taskId: string, assistantId?: AssistantId, routingDecisionRef?: string, compositionRevisionId?: string): LaunchModel | undefined {
     const row = this.tasks.get(taskId);
     const override = row ? (JSON.parse(row.intent_json) as TaskIntent).overrides?.model : undefined;
-    if (override) return override;
-    return this.appliedModel(assistantId, routingDecisionRef);
+    if (override) return { id: override, source: 'task-override' };
+    const applied = this.appliedModel(assistantId, routingDecisionRef);
+    if (applied) return { id: applied, source: 'k13-applied' };
+    const revision = this.revisionModel(compositionRevisionId, assistantId);
+    return revision ? { id: revision, source: 'revision' } : undefined;
+  }
+
+  /**
+   * The bound revision's `model.primary`. The assistant refuses it when its manifest lists models
+   * and this is not one of them, unless the revision's own stage 2 records an operator override
+   * to exactly this model (an override outside the manifest list is the operator's call).
+   */
+  private revisionModel(compositionRevisionId: string | undefined, assistantId: AssistantId | undefined): string | undefined {
+    if (!compositionRevisionId || !assistantId) return undefined;
+    const row = this.db.prepare('SELECT spec_json FROM agent_specs WHERE composition_revision_id = ?')
+      .get(compositionRevisionId) as { spec_json: string } | undefined;
+    if (!row) throw new Error(`Bound revision ${compositionRevisionId} does not exist`);
+    const model = (JSON.parse(row.spec_json) as AgentSpec).model?.primary?.id;
+    if (!model) return undefined;
+    const offered = this.registry.manifest(assistantId)?.core.models ?? [];
+    if (offered.length && !offered.some((m) => m.id === model) && !this.operatorChoseModel(compositionRevisionId, `${assistantId}/${model}`)) {
+      throw new LaunchModelRefusedError(compositionRevisionId, assistantId, model, offered.map((m) => m.id));
+    }
+    return model;
+  }
+
+  private operatorChoseModel(compositionRevisionId: string, ref: string): boolean {
+    const row = this.db.prepare('SELECT decision_json FROM composition_decisions WHERE composition_revision_id = ?')
+      .get(compositionRevisionId) as { decision_json: string } | undefined;
+    if (!row) return false;
+    const stage = (JSON.parse(row.decision_json) as CompositionDecision).stages.find((s) => s.stage === 'harness_model');
+    return stage?.override?.to.includes(ref) ?? false;
+  }
+
+  /**
+   * Which rule chose a committed request's model, for a replayed dispatch. The sources are
+   * immutable records, so re-resolving gives the same answer; anything else is left unknown.
+   */
+  private committedModelSource(request: ExecutionRequest): LaunchModel['source'] | undefined {
+    if (!request.model?.id) return undefined;
+    try {
+      const resolved = this.requestedModel(request.taskId, request.assistantId, request.routingDecisionRef, request.compositionRevisionId);
+      return resolved?.id === request.model.id ? resolved.source : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** `runs.model_requested_source`: which rule chose `model_requested` (migration 035). */
+  private recordModelSource(runId: string, source: LaunchModel['source'] | undefined): void {
+    if (source) this.db.prepare('UPDATE runs SET model_requested_source = ? WHERE id = ?').run(source, runId);
   }
 
   /** The committed K13 selector for this routing decision, if it committed one. */
@@ -496,6 +566,7 @@ export class Orchestrator {
         request.runSpec.prompt = this.dispatchPrompt(request, options);
         new SessionStore(this.db).recordRequest(request); // fingerprint witnesses semantic replay
         const replayed = await this.executeDispatch(request, options);
+        this.recordModelSource(replayed.runId, this.committedModelSource(request));
         // M2 S6: the saved request already names its revision; the replayed run binds to it.
         if (request.compositionRevisionId) this.dispatchComposer?.attachRun(replayed.runId, request.compositionRevisionId);
         return replayed;
@@ -568,7 +639,8 @@ export class Orchestrator {
         ? composedExecutionPolicy(composed.policy, { approvalMode: this.config.policy.approvalMode, maxRuntimeMs: this.maxRuntimeMs },
           this.registry.manifest(assistantId)?.harness)
         : undefined;
-      const request = buildExecutionRequest({ taskId, dispatchId: options.dispatchId, assistantId, attempt, prompt, workdir, model: this.requestedModel(taskId, assistantId, options.routingDecisionRef),
+      const launchModel = this.requestedModel(taskId, assistantId, options.routingDecisionRef, composed?.compositionRevisionId);
+      const request = buildExecutionRequest({ taskId, dispatchId: options.dispatchId, assistantId, attempt, prompt, workdir, model: launchModel?.id,
         worktree: envelope.repository ? { repoPath: envelope.repository.path, branch: taskRow.branch ?? envelope.repository.branch, worktreePath: workdir, baseRef: taskRow.base_ref ?? 'HEAD' } : undefined,
         scratchPath, target: executionTarget, approvalMode: policy?.approvalMode ?? this.config.policy.approvalMode, maxRuntimeMs: policy?.maxRuntimeMs ?? this.maxRuntimeMs,
         routingDecisionRef: options.routingDecisionRef!, verificationPlan: project?.plan,
@@ -589,6 +661,7 @@ export class Orchestrator {
         } else { request.runSpec.prompt = this.dispatchPrompt(request, options); insert(); }
       })();
       const started = await this.executeDispatch(request, options);
+      this.recordModelSource(started.runId, launchModel?.source);
       // `runs.composition_revision_id` is written once, here (M1 attachRun).
       if (composed) options.composition!.attachRun(started.runId, composed.compositionRevisionId);
       return started;
@@ -624,11 +697,12 @@ export class Orchestrator {
         ? composedExecutionPolicy(composed.policy, { approvalMode: this.config.policy.approvalMode, maxRuntimeMs: this.maxRuntimeMs },
           this.registry.manifest(assistantId)?.harness)
         : undefined;
+      const launchModel = this.requestedModel(taskId, assistantId, routingDecisionRef, composed?.compositionRevisionId);
       const { runId } = this.harnessBridge!.start(
         {
           taskId,
           assistantId,
-          model: this.requestedModel(taskId, assistantId, routingDecisionRef),
+          model: launchModel?.id,
           dispatchId: options.dispatchId,
           checkpointId: options.continuation?.kind === "checkpoint" ? options.continuation.checkpointId : undefined,
           attempt,
@@ -653,6 +727,7 @@ export class Orchestrator {
         },
         (result, sid) => this.settleFromResult(taskId, assistantId, sid, result),
       );
+      this.recordModelSource(runId, launchModel?.source);
       // `runs.composition_revision_id` is written once, here (M1 attachRun).
       if (composed) options.composition!.attachRun(runId, composed.compositionRevisionId);
       if (options.dispatchId && this.tasks.get(taskId)?.state === "ROUTING") this.tasks.transition(taskId, "RUNNING");
@@ -671,7 +746,9 @@ export class Orchestrator {
     // Same-provider continuation resumes the provider session; cross-provider
     // handoff always starts fresh from the rendered package (arch §7).
     const priorRef = options.continuation?.kind === "checkpoint" ? this.resumableRef(taskId, assistantId) : undefined;
-    const requestedModel = this.requestedModel(taskId, assistantId, options.routingDecisionRef);
+    // The legacy path never carries a revision, so only the override and K13 can choose here.
+    const launchModel = this.requestedModel(taskId, assistantId, options.routingDecisionRef);
+    const requestedModel = launchModel?.id;
     const runSpec = {
       taskId: envelope.taskId,
       prompt,
@@ -697,8 +774,8 @@ export class Orchestrator {
       .prepare(
         // `harness_major` is the K13 cohort key: telemetry from two execution
         // majors is not comparable, so it is stamped at insert, never inferred.
-        `INSERT INTO runs (id, task_id, assistant_id, provider_session_ref, state, started_at, worktree_path, branch, dispatch_id, model_requested, harness_major)
-         VALUES (?, ?, ?, ?, 'ACTIVE', ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO runs (id, task_id, assistant_id, provider_session_ref, state, started_at, worktree_path, branch, dispatch_id, model_requested, model_requested_source, harness_major)
+         VALUES (?, ?, ?, ?, 'ACTIVE', ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         handle.runId,
@@ -710,6 +787,7 @@ export class Orchestrator {
         options.worktree?.branch ?? null,
         options.dispatchId ?? null,
         requestedModel ?? null,
+        launchModel?.source ?? null,
         HARNESS_MAJOR,
       );
 
@@ -814,8 +892,8 @@ export class Orchestrator {
     const adapter = this.registry.adapter(request.assistantId);
     const handle = await adapter.start(request.runSpec);
     if (this.tasks.get(taskId)?.state === 'CANCELLED') await adapter.cancel(handle);
-    this.db.prepare(`INSERT INTO runs(id,task_id,assistant_id,provider_session_ref,state,started_at,dispatch_id)
-      VALUES(?,?,?,?,'ACTIVE',?,?)`).run(handle.runId, taskId, request.assistantId, handle.providerSessionRef ?? null, new Date().toISOString(), request.executionRequestId);
+    this.db.prepare(`INSERT INTO runs(id,task_id,assistant_id,provider_session_ref,state,started_at,dispatch_id,model_requested)
+      VALUES(?,?,?,?,'ACTIVE',?,?,?)`).run(handle.runId, taskId, request.assistantId, handle.providerSessionRef ?? null, new Date().toISOString(), request.executionRequestId, request.model?.id ?? null);
     if (this.tasks.get(taskId)?.state === 'ROUTING') this.tasks.transition(taskId, 'RUNNING');
     const run: ActiveRun = { runId: handle.runId, taskId, assistantId: request.assistantId, adapter, handle,
       timeout: setTimeout(() => { void adapter.cancel(handle); }, request.runSpec.env?.maxRuntimeMs ?? this.maxRuntimeMs) };
@@ -1889,11 +1967,12 @@ export class Orchestrator {
       const attempt = ((this.db.prepare("SELECT MAX(attempt) AS m FROM execution_requests WHERE task_id = ?").get(taskId) as { m: number | null }).m ?? 0) + 1;
       const project = this.projectVerification ? this.projectVerification(wt.worktreePath) : { warnings: [] };
       for (const warning of project.warnings) this.notice(taskId, "warn", warning);
+      const launchModel = this.requestedModel(taskId, assistantId, plan.routingDecisionRef, composed?.compositionRevisionId);
       const { runId } = this.harnessBridge!.start(
         {
           taskId,
           assistantId,
-          model: this.requestedModel(taskId, assistantId, plan.routingDecisionRef),
+          model: launchModel?.id,
           attempt,
           prompt,
           workdir: wt.worktreePath,
@@ -1910,6 +1989,7 @@ export class Orchestrator {
       );
       // The comparison diffs and merges by the run's own worktree and branch.
       this.db.prepare("UPDATE runs SET worktree_path = ?, branch = ? WHERE id = ?").run(wt.worktreePath, wt.branch, runId);
+      this.recordModelSource(runId, launchModel?.source);
       if (composed) plan.composition!.attachRun(runId, composed.compositionRevisionId);
       started.push({ runId, assistantId });
     }
