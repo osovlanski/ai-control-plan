@@ -11,6 +11,7 @@ import {
   VerificationCoordinator,
   type VerificationCoordinatorCheckpoints,
 } from "../../src/modules/verification-coordinator.js";
+import { planProjectVerification, snapshotProjectVerification } from "../../src/modules/project-verification.js";
 
 let dir: string;
 let worktree: string;
@@ -43,12 +44,23 @@ function createSession(req: ExecutionRequest): string {
   return sessions.createSession(req.executionRequestId).sessionId;
 }
 
-function coordinator(changedFiles: string[], checkpointOverride?: VerificationCoordinatorCheckpoints) {
+function coordinator(
+  changedFiles: string[],
+  checkpointOverride?: VerificationCoordinatorCheckpoints,
+  unchanged?: () => Promise<boolean>,
+) {
   const checkpoints: VerificationCoordinatorCheckpoints = checkpointOverride ?? {
     create: async () => ({ changedFiles }),
   };
   const authority = new WorkspaceAuthority({ repoAllowlist: [dir], worktreeRoot: dir });
-  return new VerificationCoordinator(new VerificationStore(db), checkpoints, authority);
+  return new VerificationCoordinator(new VerificationStore(db), checkpoints, authority, unchanged);
+}
+
+/** The request the orchestrator builds: the project plan is bound at start. */
+function projectRequest(id = "erq_p", taskId = "AG-p"): ExecutionRequest {
+  const authority = new WorkspaceAuthority({ repoAllowlist: [dir], worktreeRoot: dir });
+  const plan = planProjectVerification(snapshotProjectVerification(authority, worktree)).plan!;
+  return { ...request(id, taskId), verification: plan.checks, verificationPlan: plan };
 }
 
 beforeEach(() => {
@@ -120,5 +132,69 @@ describe("VerificationCoordinator", () => {
     expect(leftPrepared.planRevisionId).not.toBe(rightPrepared.planRevisionId);
     expect(() => subject.claim({ ...leftPrepared, sessionId: rightSid }, "runner"))
       .toThrow("revision binding mismatch");
+  });
+
+  it("skips project checks with a recorded reason when the run changed nothing", async () => {
+    const req = projectRequest();
+    const sid = createSession(req);
+    const subject = coordinator([], undefined, async () => true);
+    const prepared = await subject.prepare(sid, req);
+    expect(prepared.checks).toEqual([]);
+    expect(prepared.outcomes?.map((o) => [o.checkId, o.status, o.required])).toEqual([
+      ["project:test", "skipped", false], ["project:typecheck", "skipped", false], ["project:lint", "skipped", false],
+    ]);
+    expect(prepared.outcomes?.[0]?.summary).toContain("changed nothing relative to its base");
+    // A replayed prepare (crash recovery) settles them the same way, from the stored decision.
+    expect(await subject.prepare(sid, req)).toEqual(prepared);
+    subject.claim(prepared, "runner");
+    const completed = subject.complete(prepared, "runner", { passed: true, checks: [] }, []);
+    expect(completed.evaluation?.passed).toBe(true);
+    expect(completed.evaluation?.checks.map((check) => check.status)).toEqual(["skipped", "skipped", "skipped"]);
+  });
+
+  it("verifies as before when the change probe cannot prove the run unchanged", async () => {
+    const req = projectRequest();
+    const sid = createSession(req);
+    const prepared = await coordinator([], undefined, async () => false).prepare(sid, req);
+    expect(prepared.checks.map((check) => check.checkId)).toEqual(["project:test", "project:typecheck", "project:lint"]);
+    expect(prepared.outcomes).toBeUndefined();
+  });
+
+  it("does not consult the change probe when the checkpoint saw changed files", async () => {
+    const req = projectRequest();
+    const sid = createSession(req);
+    let probed = false;
+    const prepared = await coordinator(["src/widget.ts"], undefined, async () => { probed = true; return true; })
+      .prepare(sid, req);
+    expect(probed).toBe(false);
+    expect(prepared.checks).toHaveLength(3);
+  });
+
+  it("blocks project checks, keeping them required, when the lockfile has no installed tree", async () => {
+    writeFileSync(join(worktree, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+    const req = projectRequest();
+    const sid = createSession(req);
+    const subject = coordinator(["src/widget.ts"], undefined, async () => false);
+    const prepared = await subject.prepare(sid, req);
+    expect(prepared.checks).toEqual([]);
+    expect(prepared.outcomes).toHaveLength(3);
+    expect(prepared.outcomes?.[0]).toMatchObject({
+      checkId: "project:test", status: "blocked", required: true, passed: false,
+      summary: "blocked: dependencies not installed: pnpm-lock.yaml present, node_modules missing; " +
+        "run `pnpm install --frozen-lockfile` in the worktree to install them",
+    });
+    subject.claim(prepared, "runner");
+    const completed = subject.complete(prepared, "runner", { passed: true, checks: [] }, []);
+    expect(completed.evaluation?.passed).toBe(false);
+  });
+
+  it("runs project checks when the lockfile's tree is installed", async () => {
+    writeFileSync(join(worktree, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+    mkdirSync(join(worktree, "node_modules"));
+    const req = projectRequest();
+    const sid = createSession(req);
+    const prepared = await coordinator(["src/widget.ts"], undefined, async () => false).prepare(sid, req);
+    expect(prepared.checks).toHaveLength(3);
+    expect(prepared.outcomes).toBeUndefined();
   });
 });

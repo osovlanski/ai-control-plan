@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { Codex, type CodexOptions, type Thread, type ThreadEvent, type ThreadItem } from "@openai/codex-sdk";
+import { Codex, type CodexOptions, type Thread, type ThreadEvent, type ThreadItem, type Usage } from "@openai/codex-sdk";
 import type {
   AgentAdapter,
   ProvisionedProfile,
@@ -27,7 +27,14 @@ import { codexProvisioningPlan, disposeProfileDir, materializeProfile, mcpSecret
 interface CodexRunState {
   queue: EventQueue<NormalizedEvent>;
   abort: AbortController;
+  /** The thread this run continues, when it is a resume. */
+  resumedThread?: string;
 }
+
+/** A `turn.completed` usage figure: at SDK 0.154 the thread's running total, not the turn's. */
+interface ThreadTotals { input: number; cached: number; cacheWrite: number; output: number; reasoning: number }
+
+const ZERO_TOTALS: ThreadTotals = { input: 0, cached: 0, cacheWrite: 0, output: 0, reasoning: 0 };
 
 export interface CodexAdapterOptions {
   /** Capability-provider label; execution still uses the Codex agent runtime. */
@@ -52,7 +59,11 @@ export interface CodexAdapterOptions {
  * The opt-in app-server path owns execution and the separate input contract.
  *
  * Honesty notes (verified against SDK 0.149 type declarations):
- * - Usage arrives per-turn via turn.completed — mapped to usage.updated.
+ * - Usage arrives once per run via turn.completed — mapped to usage.updated. Despite the SDK's
+ *   "during the turn" doc, codex exec fills it from the thread's running total
+ *   (`usage_from_last_total`, rust-v0.154.0), and a resumed thread is seeded with its earlier
+ *   total from the rollout. So the adapter counts the run's share: the total minus the total it
+ *   last saw for that thread, or nothing when a resumed thread has no baseline in this process.
  * - This SDK layer exposes NO rate_limits/quota-percent payload, so the
  *   manifest reports reportsLimits: false; limit *hits* are still detected
  *   by error classification and emitted as limit.hit.
@@ -66,6 +77,8 @@ export class CodexAdapter implements AgentAdapter {
 
   get sessionInput() { return this.appServer?.sessionInput; }
   private runs = new Map<string, CodexRunState>();
+  /** The last thread total each thread reported in this process: a resume's baseline. */
+  private threadTotals = new Map<string, ThreadTotals>();
 
   constructor(readonly id: AssistantId, private options: CodexAdapterOptions = {}) {
     if (options.appServerInput && options.codex && Object.entries(options.codex).some(([key, value]) => key !== "codexPathOverride" && value !== undefined)) {
@@ -92,7 +105,10 @@ export class CodexAdapter implements AgentAdapter {
       // M3: the SDK path delivers a profile's instructions but leaves ~/.codex visible
       // (`codexProvisioningPlan`); the app-server transport delivers nothing yet. The other fields
       // are the defaults an absent block already meant, so Prepare decides exactly as before.
-      harness: { usageAccounting: "none", toolGating: "none", approvalRelay: false, processIsolation: "none", provisioning: this.appServer ? "none" : "partial" },
+      // Usage: the SDK path emits the run's share once, so it is cumulative for the run. The
+      // app-server transport keeps the last model request's figure (`tokenUsage.last`), not the
+      // turn's, so it stays uncounted. No `usageReporting` contract: a token cap stays advisory.
+      harness: { usageAccounting: this.appServer ? "none" : "cumulative", toolGating: "none", approvalRelay: false, processIsolation: "none", provisioning: this.appServer ? "none" : "partial" },
       // M14 K9: `turn.completed` token accounting is NOT established as live
       // context occupancy, and this SDK layer exposes no context-usage payload.
       // App Server `thread/compact/start` + `thread/tokenUsage/updated` exist
@@ -129,7 +145,7 @@ export class CodexAdapter implements AgentAdapter {
     this.refuseProfileOnAppServer(run);
     if (this.appServer) return this.appServer.start(run, ref);
     const thread = this.codexFor(run).resumeThread(ref, this.threadOptions(run));
-    return this.launch(thread, run);
+    return this.launch(thread, run, ref);
   }
 
   async prepare(input: ProvisioningInput): Promise<ProvisioningPlan> {
@@ -188,9 +204,9 @@ export class CodexAdapter implements AgentAdapter {
     };
   }
 
-  private async launch(thread: Thread, run: RunSpec): Promise<RunHandle> {
+  private async launch(thread: Thread, run: RunSpec, resumedThread?: string): Promise<RunHandle> {
     const runId = newRunId();
-    const state: CodexRunState = { queue: new EventQueue<NormalizedEvent>(), abort: new AbortController() };
+    const state: CodexRunState = { queue: new EventQueue<NormalizedEvent>(), abort: new AbortController(), ...(resumedThread ? { resumedThread } : {}) };
     this.runs.set(runId, state);
     const handle: RunHandle = { runId, assistantId: this.id };
 
@@ -211,7 +227,7 @@ export class CodexAdapter implements AgentAdapter {
     try {
       const { events } = await thread.runStreamed(run.prompt, { signal: state.abort.signal });
       for await (const event of events) {
-        ended = this.mapEvent(event, handle, emit) || ended;
+        ended = this.mapEvent(event, handle, emit, state) || ended;
       }
       if (!ended) emit({ type: "run.ended", summary: "Stream closed", payload: { ok: true } });
       state.queue.end();
@@ -233,6 +249,7 @@ export class CodexAdapter implements AgentAdapter {
     event: ThreadEvent,
     handle: RunHandle,
     emit: (e: Omit<NormalizedEvent, "runId" | "ts">) => void,
+    state: CodexRunState,
   ): boolean {
     switch (event.type) {
       case "thread.started":
@@ -261,17 +278,7 @@ export class CodexAdapter implements AgentAdapter {
         this.mapItem(event.item, emit);
         return false;
       case "turn.completed":
-        emit({
-          type: "usage.updated",
-          summary: `Tokens in/out: ${event.usage.input_tokens}/${event.usage.output_tokens}`,
-          payload: {
-            inputTokens: event.usage.input_tokens,
-            outputTokens: event.usage.output_tokens,
-            cachedInputTokens: event.usage.cached_input_tokens,
-            reasoningOutputTokens: event.usage.reasoning_output_tokens,
-          },
-          raw: event,
-        });
+        emit({ type: "usage.updated", ...this.runUsage(event.usage, handle, state), raw: event });
         emit({ type: "run.ended", summary: "Run completed", payload: { ok: true } });
         return true;
       case "turn.failed": {
@@ -294,6 +301,44 @@ export class CodexAdapter implements AgentAdapter {
       default:
         return false;
     }
+  }
+
+  /**
+   * The run's share of a thread total. The counted input is non-cached input (Codex's own
+   * `non_cached_input`: `input_tokens` includes cached reads), and output includes reasoning;
+   * cache reads are reported beside them, uncounted. A resumed thread with no baseline in this
+   * process carries the thread total only, because counting it would count earlier runs again.
+   */
+  private runUsage(usage: Usage, handle: RunHandle, state: CodexRunState): Pick<NormalizedEvent, "summary" | "payload"> {
+    const total: ThreadTotals = {
+      input: usage.input_tokens, cached: usage.cached_input_tokens, cacheWrite: usage.cache_write_input_tokens ?? 0,
+      output: usage.output_tokens, reasoning: usage.reasoning_output_tokens,
+    };
+    const thread = handle.providerSessionRef ?? state.resumedThread;
+    const baseline = (thread ? this.threadTotals.get(thread) : undefined) ?? (state.resumedThread ? undefined : ZERO_TOTALS);
+    if (thread) this.threadTotals.set(thread, total);
+    const threadTotal = { inputTokens: total.input, cachedInputTokens: total.cached, outputTokens: total.output };
+    if (!baseline) {
+      return {
+        summary: `Thread total in/out: ${total.input}/${total.output} (resumed thread, no baseline: not counted)`,
+        payload: { scope: "thread", threadTotal },
+      };
+    }
+    const run = (key: keyof ThreadTotals) => Math.max(0, total[key] - baseline[key]);
+    const cachedInputTokens = run("cached");
+    const inputTokens = Math.max(0, run("input") - cachedInputTokens);
+    return {
+      summary: `Tokens in/out: ${inputTokens}/${run("output")} (cache reads ${cachedInputTokens})`,
+      payload: {
+        scope: "run",
+        inputTokens,
+        outputTokens: run("output"),
+        cachedInputTokens,
+        cacheWriteInputTokens: run("cacheWrite"),
+        reasoningOutputTokens: run("reasoning"),
+        threadTotal,
+      },
+    };
   }
 
   private mapItem(item: ThreadItem, emit: (e: Omit<NormalizedEvent, "runId" | "ts">) => void): void {
