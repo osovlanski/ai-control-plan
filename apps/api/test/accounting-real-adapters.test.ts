@@ -8,7 +8,7 @@
  */
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AssistantId } from "@agent-plane/core";
 import { ClaudeAdapter } from "@agent-plane/adapters";
 
@@ -28,6 +28,7 @@ let rig: Rig | undefined;
 afterEach(async () => {
   await rig?.close();
   rig = undefined;
+  vi.unstubAllEnvs();
 });
 
 /** Replays the fixture; init lists the provisioned plugin and its skills, as Claude Code would. */
@@ -44,6 +45,8 @@ function replay(model?: string): Query {
 }
 
 async function bootClaude(maxTokens: number, model?: string): Promise<Rig> {
+  // The manifest's auth comes from the environment; a runner with no Claude login would route nothing.
+  vi.stubEnv("ANTHROPIC_API_KEY", "FAKE-anthropic-key-not-real-slice1");
   // The seed's prices apply to an API account; a subscription has no list price to estimate from.
   const r = await bootRig({ assistants: { claude: { provider: "anthropic", accountKind: "api" } }, budget: { maxTokens } });
   (r.built.registry as unknown as { adapters: Map<string, unknown> }).adapters.set("claude", new ClaudeAdapter("claude" as AssistantId, replay(model)));
