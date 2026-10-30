@@ -7,6 +7,8 @@ import { StandaloneShell } from "./shell/StandaloneShell.js";
 import { Catalog } from "./shell/Agents.js";
 import { ApplicationWorkspace } from "./shell/ApplicationWorkspace.js";
 import { APPLICATIONS, readRoute, useShellRoute } from "./shell/routes.js";
+import { ShellView } from "./shell-view/ShellView.js";
+import { useOverviewView } from "./shell-view/viewMode.js";
 
 /** Scheduler ownership as the system health signal — read, never inferred. */
 function SystemHealth() {
@@ -41,6 +43,7 @@ function SystemHealth() {
 export function App() {
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
   const [route] = useShellRoute();
+  const [view, setView] = useOverviewView();
   const [error, setError] = useState<string | null>(null);
   const [expired, setExpired] = useState(false);
   const main = useRef<HTMLElement>(null);
@@ -86,6 +89,10 @@ export function App() {
     <div className="os-main">
       <header className="os-topbar">
         <div className="os-brand"><strong>{label}</strong><span>Agentic OS</span></div>
+        {route.screen === "overview" && <div className="overview-toggle" role="group" aria-label="Overview view">
+          <button type="button" aria-pressed={view === "orbit"} onClick={() => setView("orbit")}>Orbit</button>
+          <button type="button" aria-pressed={view === "shell"} onClick={() => setView("shell")}>Shell</button>
+        </div>}
         <a className="btn" href={route.screen === "shell" ? "#/overview" : "#/shell"}>{route.screen === "shell" ? "Operator mode" : "Shell mode"}</a>
         {workspace && <span className="os-workspace">{workspace.workspace}</span>}
         <SystemHealth />
@@ -93,9 +100,11 @@ export function App() {
       <main id="main-content" tabIndex={-1} ref={main}>
         {error && <p className="error" role="alert">Workspace unavailable: {error}</p>}
         {/* Retain private in-memory drafts while navigating applications. */}
-        <div hidden={route.screen !== "overview"}>
-          <OrbitalBoard active={route.screen === "overview"} onOpen={taskId => { window.location.hash = `/missions/${encodeURIComponent(taskId)}`; }} />
+        <div hidden={route.screen !== "overview" || view !== "orbit"}>
+          <OrbitalBoard active={route.screen === "overview" && view === "orbit"} onOpen={taskId => { window.location.hash = `/missions/${encodeURIComponent(taskId)}`; }} />
         </div>
+        {route.screen === "overview" && view === "shell" && <ShellView active workspace={workspace?.workspace ?? null}
+          onOpen={taskId => { window.location.hash = `/missions/${encodeURIComponent(taskId)}`; }} />}
         <div hidden={route.screen !== "shell"}><StandaloneShell active={route.screen === "shell"}
           taskId={route.screen === "shell" ? route.taskId : undefined} /></div>
         {route.screen === "mission" && <TaskDetail key={route.taskId} taskId={route.taskId}
