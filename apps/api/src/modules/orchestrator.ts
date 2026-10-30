@@ -41,10 +41,12 @@ import type { ResolvedConfig } from "../config.js";
 import type { Db } from "../db/index.js";
 import type { RepositoryIdentityRegistry } from "../repo/identity-registry.js";
 import {
+  attachWorktree,
   createAssistantWorktree,
   createTaskBranch,
   createTaskWorktree,
   mergeWinner,
+  type TaskWorktree,
   runDiffSummary,
 } from "../repo/git.js";
 import { renderCommittedHandoff, renderHandoffPrompt } from "../render/handoff.js";
@@ -512,7 +514,7 @@ export class Orchestrator {
     const scratchPath = !envelope.repository && !options.worktree && !row.worktree_path ? ensureScratch(this.config.dir, taskId) : undefined;
     let workdir = options.worktree?.worktreePath ?? row.worktree_path ?? scratchPath ?? this.config.dir;
     if (envelope.repository && !options.worktree && !row.worktree_path) {
-      const worktree = await createTaskWorktree(
+      const worktree = await this.parallelContinuationWorktree(taskId, envelope.repository.path) ?? await createTaskWorktree(
         envelope.repository.path,
         envelope.taskId,
         join(this.config.dir, "worktrees"),
@@ -1370,6 +1372,44 @@ export class Orchestrator {
     return { deferred: 'resource', resource: need.resource, units: need.units };
   }
 
+  /**
+   * Where a single run continues a compare/race task whose candidates have settled. With a
+   * recorded pick (a run marked `winner`) it continues on the picked candidate's branch, in that
+   * candidate's worktree. Without one it continues on the shared task branch `task/<id>`, which
+   * the comparison created but never checked out: the worktree git has registered for it, or a
+   * new one attached to the existing branch at `worktrees/<id>/_task` (`worktrees/<id>` already
+   * holds the candidates' trees). No candidate branch is ever deleted or reset. Undefined for a
+   * task that never ran candidates, which keeps creating its tree as before.
+   */
+  private async parallelContinuationWorktree(taskId: string, repoPath: string): Promise<TaskWorktree | undefined> {
+    const row = this.tasks.get(taskId)!;
+    const candidates = this.db
+      .prepare("SELECT branch, outcome FROM runs WHERE task_id = ? AND branch IS NOT NULL AND branch != ? ORDER BY started_at DESC")
+      .all(taskId, row.branch ?? "") as Array<{ branch: string; outcome: string | null }>;
+    if (candidates.length === 0 || !row.branch || !row.base_ref) return undefined;
+    const branch = candidates.find((c) => c.outcome === "winner")?.branch ?? row.branch;
+    const path = await attachWorktree(repoPath, branch, join(this.config.dir, "worktrees", taskId, "_task"));
+    return { path, branch, baseRef: row.base_ref };
+  }
+
+  /**
+   * Starts a manual handoff's successor. A start that throws parks the task in WAITING_INPUT with
+   * a notice carrying the error, so it is never left in HANDING_OFF (or ROUTING) with nothing running.
+   */
+  private async startHandoffSuccessor(taskId: string, assistantId: AssistantId, options: StartOptions): Promise<{ runId: string }> {
+    try {
+      return await this.startTask(taskId, assistantId, options);
+    } catch (err) {
+      if (!this.isActive(taskId)) {
+        try {
+          this.publishState(taskId, this.tasks.transition(taskId, "WAITING_INPUT", "intervention_required"));
+        } catch { /* already moved on */ }
+        this.notice(taskId, "warn", `Handoff to ${assistantId} did not start; task parked: ${message(err)}`);
+      }
+      throw err;
+    }
+  }
+
   /** Manual handoff: checkpoint, then move the task to another assistant. */
   async handoff(taskId: string, to?: AssistantId): Promise<HandoffResult> {
     const row = this.tasks.get(taskId);
@@ -1408,6 +1448,9 @@ export class Orchestrator {
 
     const checkpoint = await this.checkpoints.create(taskId, current?.runId ?? null, "handoff");
 
+    // A settled compare/race continues as ONE run (see `parallelContinuationWorktree`), so it is a
+    // single task from here: it routes and composes on the single path and settles as one run.
+    if (row.mode !== "single") this.tasks.setMode(taskId, "single");
     // A manual handoff away from an assistant shouldn't immediately re-pick it.
     const { explanation, routingDecisionId } = this.routeTask(taskId, "failover", { exclude: fromAssistantId, override: to });
     if (!explanation.chosen) {
@@ -1438,7 +1481,7 @@ export class Orchestrator {
       .run(newHandoffId(), taskId, current?.runId ?? null, checkpoint.id, new Date().toISOString());
 
     this.notice(taskId, "info", `Manual handoff to ${explanation.chosen}.`);
-    const { runId } = await this.startTask(taskId, explanation.chosen, {
+    const { runId } = await this.startHandoffSuccessor(taskId, explanation.chosen, {
       trigger: "handoff",
       continuation: { kind: "checkpoint", checkpointId: checkpoint.id },
       reason: "A manual handoff was requested by the user.",
@@ -1495,6 +1538,9 @@ export class Orchestrator {
     // cancel checkpoint would also serve; this labels one 'handoff' for parity.)
     const checkpoint = await this.checkpoints.create(taskId, sid ?? null, "handoff");
 
+    // A settled compare/race continues as ONE run (see `parallelContinuationWorktree`), so it is a
+    // single task from here: it routes and composes on the single path and settles as one run.
+    if (this.tasks.get(taskId)!.mode !== "single") this.tasks.setMode(taskId, "single");
     const { explanation, routingDecisionId } = this.routeTask(taskId, "failover", { exclude: fromAssistantId, override: to });
     if (!explanation.chosen) {
       throw new Error(`No eligible assistant for handoff. ${describeWaits(explanation)}`);
@@ -1524,7 +1570,7 @@ export class Orchestrator {
       .run(newHandoffId(), taskId, sid ?? null, checkpoint.id, new Date().toISOString());
 
     this.notice(taskId, "info", `Manual handoff to ${explanation.chosen}.`);
-    const { runId } = await this.startTask(taskId, explanation.chosen, {
+    const { runId } = await this.startHandoffSuccessor(taskId, explanation.chosen, {
       trigger: "handoff",
       continuation: { kind: "checkpoint", checkpointId: checkpoint.id },
       reason: "A manual handoff was requested by the user.",

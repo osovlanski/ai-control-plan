@@ -99,6 +99,20 @@ export async function createTaskWorktree(
   return { path, branch, baseRef };
 }
 
+/**
+ * A worktree on a branch that already exists: the one git has registered for it, or a new one
+ * at `path` attached without `-b`. Never creates, resets or deletes the branch.
+ */
+export async function attachWorktree(repoPath: string, branch: string, path: string): Promise<string> {
+  const listed = await git(repoPath, ["worktree", "list", "--porcelain"]);
+  for (const entry of listed.split("\n\n")) {
+    const lines = entry.split("\n");
+    if (lines.includes(`branch refs/heads/${branch}`)) return lines[0]!.slice("worktree ".length);
+  }
+  await git(repoPath, ["worktree", "add", path, branch]);
+  return path;
+}
+
 /** Diffstat of the task branch against its base (for checkpoints/handoff). */
 export async function worktreeDiffStat(worktreePath: string, baseRef: string): Promise<string> {
   return git(worktreePath, ["diff", "--stat", baseRef]);
