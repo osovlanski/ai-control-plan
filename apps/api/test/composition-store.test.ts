@@ -171,7 +171,7 @@ describe("POST /api/usage/records", () => {
     expect(first.json()).toMatchObject({ replayed: false, record: { eventId: "evt-1", runId: null, tokensIn: 100 } });
     const again = await post(record());
     expect(again.statusCode).toBe(200);
-    expect(again.json()).toEqual({ replayed: true, record: first.json().record });
+    expect(again.json()).toEqual({ replayed: true, record: first.json().record, link: "unmatched" });
     const conflict = await post(record({ tokensIn: 101 }));
     expect(conflict.statusCode).toBe(409);
     expect(conflict.json().record.tokensIn).toBe(100);

@@ -322,12 +322,13 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     const result = usage.ingest(parsed.value);
     if (result.status === "unknown_run") return reply.status(422).send({ error: `run ${parsed.value.runId} does not exist` });
     if (result.status === "conflict") return reply.status(409).send({ error: "a different usage record is stored under this provider, sessionRef and eventId", record: result.record });
-    // M2 S6: a first delivery bound to a run may take its revision past a cap. That appends a
+    if (result.status === "run_conflict") return reply.status(409).send({ error: "run_conflict: runId is not a run of this provider session", sessionRuns: result.sessionRuns });
+    // M2 S6: a record newly bound to a run may take its revision past a cap. That appends a
     // `budget.overrun` event and never changes the run; the record's own answer is unchanged.
-    if (result.status === "created" && result.record.runId && composer) {
+    if ((result.status === "created" || result.linkedNow) && result.record.runId && composer) {
       try { composer.lateRecord(result.record.runId); } catch (err) { req.log.warn({ err: message(err) }, "budget overrun check failed"); }
     }
-    return reply.status(result.status === "created" ? 201 : 200).send({ replayed: result.status === "replayed", record: result.record });
+    return reply.status(result.status === "created" ? 201 : 200).send({ replayed: result.status === "replayed", record: result.record, link: result.link });
   });
 
   // ---- Decisions (K18 / M16) ----
@@ -532,6 +533,14 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     : undefined;
   // M2 S6: wakes, run-now, failover and handoffs recompose at dispatch; settles record overruns.
   if (composer) orchestrator.dispatchComposer = composer;
+  // Boot pass: bind usage records stored before their run's session was known (or before 036).
+  try {
+    const backfill = usage.backfillRunLinks();
+    for (const runId of new Set(backfill.linked.map((l) => l.runId))) composer?.lateRecord(runId);
+    if (backfill.linked.length || backfill.unmatched || backfill.ambiguous) {
+      app.log.info({ linked: backfill.linked.length, unmatched: backfill.unmatched, ambiguous: backfill.ambiguous }, "usage records linked to runs");
+    }
+  } catch (err) { app.log.warn({ err: message(err) }, "usage run-link backfill failed"); }
   const composerDisabled = (reply: FastifyReply) =>
     reply.status(404).send({ error: "the composer is disabled (composer.enabled is false)", reason: "composer_disabled" });
 
