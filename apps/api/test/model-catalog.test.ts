@@ -13,7 +13,7 @@ import type { AssistantId } from '@agent-plane/core';
 import { loadConfig, type ResolvedConfig } from '../src/config.js';
 import { openDb, type Db } from '../src/db/index.js';
 import { buildServer, type BuiltServer } from '../src/server.js';
-import type { CatalogSource } from '../src/modules/model-catalog.js';
+import { PRICE_SEED_OBSERVED_AT, PRICE_SEED_VERSION, type CatalogSource } from '../src/modules/model-catalog.js';
 import { randomBytes } from 'node:crypto';
 import { atomicWriteCredential, credentialPath, readCredential } from '../src/auth/credential-file.js';
 
@@ -361,5 +361,66 @@ describe('price snapshot freshness', () => {
     // The refresh attempt itself is recorded as having happened now.
     expect(built.modelCatalog.refreshes().find((r) => r.source === 'price-seed')!.startedAt)
       .toBe('2027-03-01T00:00:00.000Z');
+  });
+});
+
+/**
+ * Phase 7 dogfood: the run was served by `claude-sonnet-5` and
+ * `claude-haiku-4-5`, which the 2026-09-08 seed did not price, so every imported
+ * record was held `unknown-model`. Prices bind to the served model id.
+ */
+describe('price seed 2026-10-30', () => {
+  const PRICING_URL = 'https://platform.claude.com/docs/en/about-claude/pricing';
+  const priceOf = (modelKey: string) => built.modelCatalog.list().find((m) => m.modelKey === modelKey)?.pricing ?? [];
+
+  it('prices the models the adapters are served today, from the pricing page read on that date', async () => {
+    await boot();
+    await built.modelCatalog.refresh();
+    const expected: Record<string, [number, number, number, number]> = {
+      'claude-fable-5-1': [10, 50, 0.25, 12.5],
+      'claude-opus-5-5': [4, 20, 0.2, 5],
+      'claude-opus-5': [5, 25, 0.5, 6.25],
+      'claude-sonnet-5-5': [2, 10, 0.1, 2.5],
+      'claude-sonnet-5': [2, 10, 0.2, 2.5],
+      'claude-haiku-4-5': [1, 5, 0.1, 1.25],
+      'claude-haiku-4-5-20251001': [1, 5, 0.1, 1.25],
+    };
+    for (const [modelId, [input, output, cacheRead, cacheWrite]] of Object.entries(expected)) {
+      const prices = priceOf(`anthropic:${modelId}`);
+      expect(prices, modelId).toHaveLength(1);
+      expect(prices[0]).toMatchObject({
+        inputPerMtok: input, outputPerMtok: output, cacheReadPerMtok: cacheRead, cacheWritePerMtok: cacheWrite,
+        currency: 'USD', pricingVersion: PRICE_SEED_VERSION, appliesTo: { servingProvider: 'anthropic', accountKind: 'api' },
+      });
+      expect(prices[0]!.provenance.observedAt).toBe(PRICE_SEED_OBSERVED_AT);
+      expect(prices[0]!.provenance.attribution).toContain(PRICING_URL);
+    }
+  });
+
+  it('keeps the 2026-09-08 revision: history is append-only', async () => {
+    await boot();
+    await built.modelCatalog.refresh();
+    for (const modelId of ['claude-opus-4-1', 'claude-sonnet-4-5']) {
+      const prices = priceOf(`anthropic:${modelId}`);
+      expect(prices.map((p) => p.pricingVersion)).toEqual(['2026-09-08']);
+      expect(prices[0]!.provenance.observedAt).toBe('2026-09-08T00:00:00.000Z');
+    }
+    expect(PRICE_SEED_VERSION).not.toBe('2026-09-08');
+  });
+
+  it('moves the opus and sonnet aliases to the models the current CLI resolves them to, with no ambiguity', async () => {
+    await boot();
+    await built.modelCatalog.refresh();
+    expect(built.modelCatalog.resolve('opus').entry?.modelKey).toBe('anthropic:claude-opus-5-5');
+    expect(built.modelCatalog.resolve('sonnet').entry?.modelKey).toBe('anthropic:claude-sonnet-5-5');
+    const old = built.modelCatalog.list().find((m) => m.modelKey === 'anthropic:claude-opus-4-1')!;
+    expect(old.aliases).toEqual([]);
+  });
+
+  it('leaves unpriced what it cannot price honestly: tiered Haiku 5.5 and the Codex default', async () => {
+    await boot();
+    await built.modelCatalog.refresh();
+    expect(priceOf('anthropic:claude-haiku-5-5')).toEqual([]);
+    expect(built.modelCatalog.list().filter((m) => m.provider !== 'anthropic' && m.pricing.length > 0)).toEqual([]);
   });
 });
