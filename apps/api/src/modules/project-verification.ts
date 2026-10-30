@@ -20,6 +20,10 @@ export interface ProjectVerificationSnapshot { packageJson?: string; lockfiles: 
 export interface ProjectVerificationDiscovery { plan?: VerificationPlan; warnings: string[] }
 export interface ProjectVerificationCapabilities { capabilities: VerificationCapability[]; warnings: string[] }
 
+const INSTALL_COMMANDS: Record<PackageManager, string> = {
+  npm: "npm ci", pnpm: "pnpm install --frozen-lockfile", yarn: "yarn install", bun: "bun install --frozen-lockfile",
+};
+
 /** All filesystem access stays behind the Harness's existing authority. */
 export function snapshotProjectVerification(authority: WorkspaceAuthority, worktreePath: string): ProjectVerificationSnapshot {
   const packageJson = authority.readRegularFile(worktreePath, "package.json", MAX_PACKAGE_JSON_BYTES);
@@ -72,6 +76,30 @@ export function discoverProjectVerificationCapabilities(snapshot: ProjectVerific
     required: true,
   }));
   return { capabilities, warnings: [] };
+}
+
+/**
+ * Why project checks cannot run in this worktree, or undefined when they can.
+ * Only a lockfile with no installed tree counts: a project without a lockfile,
+ * or one the authority cannot inspect, runs its checks as before.
+ */
+export function projectDependenciesMissing(authority: WorkspaceAuthority, worktreePath: string): string | undefined {
+  try {
+    const snapshot = snapshotProjectVerification(authority, worktreePath);
+    if (snapshot.packageJson === undefined || snapshot.lockfiles.length === 0) return undefined;
+    const manifest = JSON.parse(snapshot.packageJson) as unknown;
+    const declared = manifest && typeof manifest === "object" && !Array.isArray(manifest)
+      ? (manifest as Record<string, unknown>).packageManager : undefined;
+    const { manager } = packageManagerOf(declared, snapshot.lockfiles);
+    if (!manager) return undefined;
+    if (authority.artifactExists(worktreePath, "node_modules") ||
+        authority.regularFileExists(worktreePath, ".pnp.cjs") ||
+        authority.regularFileExists(worktreePath, ".pnp.js")) return undefined;
+    return `dependencies not installed: ${snapshot.lockfiles.join(", ")} present, node_modules missing; ` +
+      `run \`${INSTALL_COMMANDS[manager]}\` in the worktree to install them`;
+  } catch {
+    return undefined;
+  }
 }
 
 export function planProjectVerification(

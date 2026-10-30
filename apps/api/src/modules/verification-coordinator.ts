@@ -1,3 +1,5 @@
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import {
   evaluationResult,
   planVerification,
@@ -12,6 +14,7 @@ import {
 } from "@agent-plane/core";
 import {
   discoverProjectVerificationCapabilities,
+  projectDependenciesMissing,
   snapshotProjectVerification,
 } from "./project-verification.js";
 import type { WorkspaceAuthority } from "./harness/workspace-authority.js";
@@ -28,7 +31,36 @@ export interface PreparedVerification {
   verificationRunId: string;
   checks: Array<VerificationSpec & { checkId: string }>;
   preflightFailure?: VerificationCheckResult;
+  /** Results the coordinator settled without running: skipped or blocked project checks. */
+  outcomes?: VerificationCheckResult[];
 }
+
+/**
+ * True only when the session's worktree provably changed nothing relative to
+ * its base: HEAD is the base commit and the tree is clean. Any doubt is false.
+ */
+export type WorktreeUnchangedProbe = (worktreePath: string, baseRef: string) => Promise<boolean>;
+
+const run = promisify(execFile);
+export const gitWorktreeUnchanged: WorktreeUnchangedProbe = async (worktreePath, baseRef) => {
+  try {
+    const git = async (...args: string[]) =>
+      (await run("git", ["-C", worktreePath, ...args], { maxBuffer: 10 * 1024 * 1024 })).stdout.trim();
+    const [head, base, status] = await Promise.all([
+      git("rev-parse", "--verify", "HEAD^{commit}"),
+      git("rev-parse", "--verify", `${baseRef}^{commit}`),
+      git("status", "--porcelain", "--untracked-files=all"),
+    ]);
+    return head.length > 0 && head === base && status === "";
+  } catch {
+    return false;
+  }
+};
+
+const PROJECT_CHECK = "project:";
+const SKIPPED_UNCHANGED = "skipped:unchanged";
+const BLOCKED_DEPENDENCIES = "blocked:dependencies";
+const UNCHANGED_REASON = "project verification skipped: the run changed nothing relative to its base (no diff, no new commits)";
 
 export interface VerificationCoordinatorCheckpoints {
   create(
@@ -63,6 +95,7 @@ export class VerificationCoordinator implements VerificationCoordinatorPort {
     private readonly store: VerificationStore,
     private readonly checkpoints: VerificationCoordinatorCheckpoints,
     private readonly authority: WorkspaceAuthority,
+    private readonly unchanged: WorktreeUnchangedProbe = gitWorktreeUnchanged,
   ) {}
 
   async prepare(sessionId: string, request: ExecutionRequest, signal?: AbortSignal): Promise<PreparedVerification> {
@@ -103,7 +136,17 @@ export class VerificationCoordinator implements VerificationCoordinatorPort {
       if (discovery.warnings.length > 0) throw new Error(discovery.warnings.join("; "));
       const capabilities = discovery.capabilities;
       const discovered = planVerification({ changedFiles, capabilities });
-      const revised = reviseVerificationPlan(initial, discovered);
+      let revised = reviseVerificationPlan(initial, discovered);
+      const target = request.context.worktree;
+      if (target && revised.checks.some(isProjectCheck)) {
+        if (changedFiles.length === 0 && await this.unchanged(target.worktreePath, target.baseRef)) {
+          revised = settleProjectChecks(revised, SKIPPED_UNCHANGED, UNCHANGED_REASON);
+        } else {
+          const missing = projectDependenciesMissing(this.authority, target.worktreePath);
+          if (missing) revised = settleProjectChecks(revised, BLOCKED_DEPENDENCIES, `blocked: ${missing}`);
+        }
+        throwIfAborted(signal);
+      }
       if (!samePlanContent(initial, revised)) {
         effective = withRevision(revised, postChangeId, 2, initialId);
         this.store.insertRevision({
@@ -139,6 +182,7 @@ export class VerificationCoordinator implements VerificationCoordinatorPort {
       }
     }
 
+    const outcomes = settledOutcomes(effective);
     this.store.prepareRun({
       runId,
       sessionId,
@@ -152,6 +196,7 @@ export class VerificationCoordinator implements VerificationCoordinatorPort {
       verificationRunId: runId,
       checks: effective.checks,
       ...(preflightFailure ? { preflightFailure } : {}),
+      ...(outcomes.length > 0 ? { outcomes } : {}),
     };
   }
 
@@ -173,13 +218,15 @@ export class VerificationCoordinator implements VerificationCoordinatorPort {
     artifacts: ExecutionArtifact[],
   ): StoredVerificationRun {
     this.assertPrepared(prepared);
+    const settled = (prepared.outcomes ?? []).filter((outcome) =>
+      !evaluation.checks.some((check) => check.checkId === outcome.checkId));
     return this.store.complete({
       runId: prepared.verificationRunId,
       sessionId: prepared.sessionId,
       executionRequestId: prepared.executionRequestId,
       planRevisionId: prepared.planRevisionId,
       claimToken,
-      evaluation,
+      evaluation: settled.length > 0 ? evaluationResult([...evaluation.checks, ...settled]) : evaluation,
       artifacts,
     });
   }
@@ -213,6 +260,7 @@ export class VerificationCoordinator implements VerificationCoordinatorPort {
   private boundResult(run: StoredVerificationRun): PreparedVerification {
     const revision = this.store.getRevision(run.planRevisionId);
     if (!revision) throw new VerificationStoreConflictError("verification run references an unknown revision");
+    const outcomes = settledOutcomes(revision.plan);
     return {
       sessionId: run.sessionId,
       executionRequestId: run.executionRequestId,
@@ -222,6 +270,7 @@ export class VerificationCoordinator implements VerificationCoordinatorPort {
       ...(run.evaluation?.checks.find((check) => check.checkId === "preflight:planning")
         ? { preflightFailure: run.evaluation.checks.find((check) => check.checkId === "preflight:planning")! }
         : {}),
+      ...(outcomes.length > 0 ? { outcomes } : {}),
     };
   }
 }
@@ -274,6 +323,56 @@ function withRevision(
 function samePlanContent(left: VerificationPlan, right: VerificationPlan): boolean {
   return JSON.stringify({ checks: left.checks, decisions: left.decisions, unmetRequirements: left.unmetRequirements ?? [] }) ===
     JSON.stringify({ checks: right.checks, decisions: right.decisions, unmetRequirements: right.unmetRequirements ?? [] });
+}
+
+function isProjectCheck(check: { checkId: string }): boolean {
+  return check.checkId.startsWith(PROJECT_CHECK);
+}
+
+/**
+ * Takes the project checks out of the executable plan and records why on their
+ * decisions. The decision, not process memory, carries the outcome, so a
+ * prepare replayed after a crash settles them the same way.
+ */
+function settleProjectChecks(plan: VerificationPlan, signal: string, reason: string): VerificationPlan {
+  const settled = new Set(plan.checks.filter(isProjectCheck).map((check) => check.checkId));
+  return {
+    ...plan,
+    checks: plan.checks.filter((check) => !settled.has(check.checkId)),
+    decisions: plan.decisions.map((decision) => settled.has(decision.checkId)
+      ? { ...decision, selected: false, signals: [...new Set([...decision.signals, signal])].sort(), reason }
+      : decision),
+  };
+}
+
+/** Skipped checks are not required (nothing to verify); blocked ones keep their requirement. */
+function settledOutcomes(plan: VerificationPlan): VerificationCheckResult[] {
+  return plan.decisions.flatMap((decision): VerificationCheckResult[] => {
+    const skipped = decision.signals.includes(SKIPPED_UNCHANGED);
+    if (!skipped && !decision.signals.includes(BLOCKED_DEPENDENCIES)) return [];
+    const identity = parseIdentity(decision.capabilityIdentity);
+    return [{
+      checkId: decision.checkId,
+      name: identity.name ?? decision.checkId,
+      kind: identity.kind ?? "review",
+      required: skipped ? false : decision.required,
+      status: skipped ? "skipped" : "blocked",
+      passed: false,
+      summary: redactText(decision.reason).slice(0, 2000),
+    }];
+  });
+}
+
+function parseIdentity(identity: string | undefined): { name?: string; kind?: VerificationCheckResult["kind"] } {
+  try {
+    const parsed = JSON.parse(identity ?? "{}") as { name?: unknown; kind?: unknown };
+    return {
+      ...(typeof parsed.name === "string" ? { name: parsed.name } : {}),
+      ...(typeof parsed.kind === "string" ? { kind: parsed.kind as VerificationCheckResult["kind"] } : {}),
+    };
+  } catch {
+    return {};
+  }
 }
 
 function blockedPreflight(error: unknown): VerificationCheckResult {
