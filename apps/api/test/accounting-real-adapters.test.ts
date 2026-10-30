@@ -31,14 +31,18 @@ afterEach(async () => {
   vi.unstubAllEnvs();
 });
 
-/** Replays the fixture; init lists the provisioned plugin and its skills, as Claude Code would. */
+/**
+ * Replays the fixture; init lists the provisioned plugin, its skills and the tools that
+ * `allowedTools` rules opt in (Grep, Glob), as Claude Code would.
+ */
 function replay(model?: string): Query {
-  return ((params: { options?: { plugins?: Array<{ path: string }> } }) => (async function* () {
+  return ((params: { options?: { plugins?: Array<{ path: string }>; allowedTools?: string[] } }) => (async function* () {
     const pluginDir = params.options?.plugins?.[0]?.path;
+    const optedIn = (params.options?.allowedTools ?? []).map((rule) => rule.replace(/\(.*$/, ""));
     const skills = pluginDir ? readdirSync(join(pluginDir, "skills")).map((s) => `${PLUGIN_NAME}:${s}`) : [];
     for (const m of FIXTURE.messages) {
       if (m.type === "system") {
-        yield { ...m, ...(model ? { model } : {}), skills, plugins: pluginDir ? [{ name: PLUGIN_NAME, path: pluginDir }] : [] } as never;
+        yield { ...m, ...(model ? { model } : {}), tools: [...(m.tools as string[]), ...optedIn], skills, plugins: pluginDir ? [{ name: PLUGIN_NAME, path: pluginDir }] : [] } as never;
       } else yield m as never;
     }
   })()) as unknown as Query;
