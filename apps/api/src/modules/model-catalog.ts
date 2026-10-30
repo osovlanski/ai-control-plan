@@ -106,23 +106,79 @@ export interface RefreshAttempt {
  * were copied from published pricing pages by a human, not fetched from a
  * provider API. They are EVIDENCE, not an enforcement tariff — see
  * `session-runner`'s bounded-cost rejection and standing deferral #3.
+ *
+ * Revisions are append-only: a new revision is a new entry in
+ * `PRICE_SEED_REVISIONS`, and an older one stays, so a record priced under it
+ * keeps a price row to point at (`model_prices` is keyed by pricing version).
+ * Only aliases, which are not price history, move to the current revision.
  */
-export const PRICE_SEED_VERSION = '2026-09-08';
+export const PRICE_SEED_VERSION = '2026-10-30';
 /**
- * When this snapshot was transcribed — a fixed historical fact, NOT the time of
- * the refresh that loaded it. Re-running refresh in 2027 must not make a 2026
- * price look freshly observed; only a newer price revision with its own
+ * When the current snapshot was transcribed — a fixed historical fact, NOT the
+ * time of the refresh that loaded it. Re-running refresh in 2027 must not make a
+ * 2026 price look freshly observed; only a newer price revision with its own
  * evidence row can do that.
  */
-export const PRICE_SEED_OBSERVED_AT = '2026-09-08T00:00:00.000Z';
-const PRICE_SEED: Array<{ modelId: string; provider: string; aliases?: string[]; price: Omit<ModelPriceEvidence, 'provenance'> }> = [
+export const PRICE_SEED_OBSERVED_AT = '2026-10-30T00:00:00.000Z';
+
+type SeedEntry = { modelId: string; provider: string; aliases?: string[]; price: Omit<ModelPriceEvidence, 'provenance' | 'pricingVersion'> };
+interface PriceSeedRevision {
+  version: string;
+  observedAt: string;
+  /** The pricing page the numbers were read from. */
+  source: string;
+  entries: SeedEntry[];
+}
+
+const ANTHROPIC_API = { servingProvider: 'anthropic', accountKind: 'api' } as const;
+const anthropic = (modelId: string, inputPerMtok: number, outputPerMtok: number, cacheReadPerMtok: number, cacheWritePerMtok: number, aliases?: string[]): SeedEntry => ({
+  modelId, provider: 'anthropic', aliases,
+  price: { inputPerMtok, outputPerMtok, cacheReadPerMtok, cacheWritePerMtok, currency: 'USD', appliesTo: { ...ANTHROPIC_API } },
+});
+
+/**
+ * `cacheWritePerMtok` is the 5-minute cache write; `cacheReadPerMtok` is "cache
+ * hits and refreshes". Oldest first.
+ *
+ * 2026-10-30 deliberately leaves unpriced:
+ * - `claude-haiku-5-5`: its price depends on prompt length (up to / over 100,000
+ *   tokens) and `ModelPriceEvidence` has no tier, so one row would misprice one
+ *   of the two.
+ * - Codex (`openai:default`): the adapter advertises `default` and reports no
+ *   resolved model, and the CLI picks "a recommended model" when config.toml
+ *   names none (developers.openai.com/codex/models). There is no model id a
+ *   price could bind to.
+ *
+ * The `opus` and `sonnet` aliases follow the Claude Code CLI: since v2.1.280
+ * `opus` resolves to Opus 5.5 and since v2.1.284 `sonnet` to Sonnet 5.5 on the
+ * Anthropic API (code.claude.com/docs/en/model-config, alias changelog). An
+ * older CLI resolves them to older models, so an alias is a lookup convenience
+ * here and never prices a run: prices bind to the served model id.
+ */
+const PRICE_SEED_REVISIONS: PriceSeedRevision[] = [
   {
-    modelId: 'claude-opus-4-1', provider: 'anthropic', aliases: ['opus'],
-    price: { inputPerMtok: 15, outputPerMtok: 75, cacheReadPerMtok: 1.5, cacheWritePerMtok: 18.75, currency: 'USD', pricingVersion: PRICE_SEED_VERSION, appliesTo: { servingProvider: 'anthropic', accountKind: 'api' } },
+    version: '2026-09-08',
+    observedAt: '2026-09-08T00:00:00.000Z',
+    source: 'the published provider pricing page',
+    entries: [
+      anthropic('claude-opus-4-1', 15, 75, 1.5, 18.75),
+      anthropic('claude-sonnet-4-5', 3, 15, 0.3, 3.75),
+    ],
   },
   {
-    modelId: 'claude-sonnet-4-5', provider: 'anthropic', aliases: ['sonnet'],
-    price: { inputPerMtok: 3, outputPerMtok: 15, cacheReadPerMtok: 0.3, cacheWritePerMtok: 3.75, currency: 'USD', pricingVersion: PRICE_SEED_VERSION, appliesTo: { servingProvider: 'anthropic', accountKind: 'api' } },
+    version: PRICE_SEED_VERSION,
+    observedAt: PRICE_SEED_OBSERVED_AT,
+    source: 'https://platform.claude.com/docs/en/about-claude/pricing',
+    entries: [
+      anthropic('claude-fable-5-1', 10, 50, 0.25, 12.5),
+      anthropic('claude-opus-5-5', 4, 20, 0.2, 5, ['opus']),
+      anthropic('claude-opus-5', 5, 25, 0.5, 6.25),
+      anthropic('claude-sonnet-5-5', 2, 10, 0.1, 2.5, ['sonnet']),
+      anthropic('claude-sonnet-5', 2, 10, 0.2, 2.5),
+      anthropic('claude-haiku-4-5', 1, 5, 0.1, 1.25),
+      // The dated snapshot `claude-haiku-4-5` points to; a provider can report either.
+      anthropic('claude-haiku-4-5-20251001', 1, 5, 0.1, 1.25),
+    ],
   },
 ];
 
@@ -412,19 +468,22 @@ export class ModelCatalogService {
   }
 
   private priceSeedObservations(): CatalogObservation[] {
-    return PRICE_SEED.map((seed) => {
+    // Oldest first, so a model a later revision re-prices stores that
+    // revision's identity row last; each revision's price row stays.
+    return PRICE_SEED_REVISIONS.flatMap((revision) => revision.entries.map((seed) => {
       const provenance: Provenance = {
         // Pinned, never `now`: refreshing a snapshot does not re-observe it.
-        source: 'manual', tier: 'manual', observedAt: PRICE_SEED_OBSERVED_AT,
+        source: 'manual', tier: 'manual', observedAt: revision.observedAt,
         normalizationVersion: CATALOG_NORMALIZATION_VERSION,
-        attribution: `manually transcribed from the published provider pricing page on ${PRICE_SEED_VERSION}`,
+        attribution: `manually transcribed from ${revision.source} on ${revision.version}`,
       };
       return {
         modelId: seed.modelId, provider: seed.provider, aliases: seed.aliases,
-        provenance, pricing: [{ ...seed.price, provenance }],
+        provenance, pricing: [{ ...seed.price, pricingVersion: revision.version, provenance }],
       };
-    });
+    }));
   }
+
 
   // --- persistence ---------------------------------------------------------
 
