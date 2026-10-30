@@ -42,14 +42,22 @@ function SystemHealth() {
 
 export function App() {
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
-  const [route] = useShellRoute();
+  const [rawRoute] = useShellRoute();
+  // Keep the legacy route and normalize the Mission mode alias at the application boundary.
+  const route = rawRoute.key === "mission" || rawRoute.key.startsWith("mission/")
+    ? readRoute(`#/shell${rawRoute.key.slice("mission".length)}`) : rawRoute;
   const [view, setView] = useOverviewView();
   const [error, setError] = useState<string | null>(null);
   const [expired, setExpired] = useState(false);
   const main = useRef<HTMLElement>(null);
   const previousRoute = useRef(readRoute().key);
   const application = route.screen === "mission" ? "overview" : route.screen;
-  const label = route.screen === "shell" ? "Shell" : APPLICATIONS.find(a => a.screen === application)?.label ?? "Page unavailable";
+  const label = route.screen === "shell" ? "Mission" : APPLICATIONS.find(a => a.screen === application)?.label ?? "Page unavailable";
+
+  useEffect(() => {
+    document.documentElement.classList.toggle("shell-overview", route.screen === "overview" && view === "shell");
+    return () => document.documentElement.classList.remove("shell-overview");
+  }, [route.screen, view]);
 
   useEffect(() => onAuthExpired(() => setExpired(true)), []);
   useEffect(() => {
@@ -93,7 +101,7 @@ export function App() {
           <button type="button" aria-pressed={view === "orbit"} onClick={() => setView("orbit")}>Orbit</button>
           <button type="button" aria-pressed={view === "shell"} onClick={() => setView("shell")}>Shell</button>
         </div>}
-        <a className="btn" href={route.screen === "shell" ? "#/overview" : "#/shell"}>{route.screen === "shell" ? "Operator mode" : "Shell mode"}</a>
+        <a className="btn" href={route.screen === "shell" ? "#/overview" : "#/shell"}>{route.screen === "shell" ? "Operator mode" : "Mission mode"}</a>
         {workspace && <span className="os-workspace">{workspace.workspace}</span>}
         <SystemHealth />
       </header>
@@ -103,7 +111,7 @@ export function App() {
         <div hidden={route.screen !== "overview" || view !== "orbit"}>
           <OrbitalBoard active={route.screen === "overview" && view === "orbit"} onOpen={taskId => { window.location.hash = `/missions/${encodeURIComponent(taskId)}`; }} />
         </div>
-        {route.screen === "overview" && view === "shell" && <ShellView active workspace={workspace?.workspace ?? null}
+        {route.screen === "overview" && view === "shell" && <ShellView active workspace={workspace?.workspace ?? null} repositories={workspace?.repoAllowlist ?? []}
           onOpen={taskId => { window.location.hash = `/missions/${encodeURIComponent(taskId)}`; }} />}
         <div hidden={route.screen !== "shell"}><StandaloneShell active={route.screen === "shell"}
           taskId={route.screen === "shell" ? route.taskId : undefined} /></div>

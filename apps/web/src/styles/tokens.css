@@ -79,3 +79,39 @@
 [class*="tone-"] {
   color: var(--tone);
 }
+
+/* Only the Overview Shell opts its shared chrome into the system palette. */
+:root.shell-overview {
+  color-scheme: light;
+  --bg-0: #fbfbf8;
+  --bg-1: #f0f1ec;
+  --bg-2: #e7e9e3;
+  --surface: rgba(28, 35, 48, 0.04);
+  --surface-2: rgba(28, 35, 48, 0.08);
+  --surface-solid: #f0f1ec;
+  --line: rgba(28, 35, 48, 0.16);
+  --line-strong: rgba(28, 35, 48, 0.3);
+  --text: #1c2330;
+  --text-2: #465163;
+  --text-3: #5c6676;
+  --accent: #2350b8;
+  --tone-active: #2350b8;
+  --tone-human: #8a4b00;
+  --tone-resource: #4a5a78;
+  --tone-limit: #9c421a;
+  --tone-handoff: #67449b;
+  --tone-complete: #1d6b3b;
+  --tone-failed: #b42323;
+  --tone-neutral: #5c6676;
+}
+@media (prefers-color-scheme: dark) {
+  :root.shell-overview { color-scheme: dark; }
+  :root.shell-overview {
+    --bg-0: #040610; --bg-1: #080d1d; --bg-2: #10182b;
+    --surface: rgba(146, 178, 200, 0.045); --surface-2: rgba(146, 178, 200, 0.08); --surface-solid: #10182a;
+    --line: rgba(146, 178, 200, 0.13); --line-strong: rgba(146, 178, 200, 0.26);
+    --text: #e8eef4; --text-2: #a3b1be; --text-3: #96a3ba; --accent: #9bb9ff;
+    --tone-active: #9bb9ff; --tone-human: #f3b565; --tone-resource: #8ea4c9; --tone-limit: #f0895c;
+    --tone-handoff: #c9bdf5; --tone-complete: #8fd3a8; --tone-failed: #f07c7c; --tone-neutral: #9aa8bc;
+  }
+}

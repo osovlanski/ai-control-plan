@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ApiError, api, type CompositionPreview } from "../api.js";
+import { DecisionView } from "../Composition.js";
+import { readRepository, writeRepository } from "./repository.js";
 import { composeFor } from "../NewTask.js";
 import { useBoard } from "../board/useBoard.js";
 import { Inspector } from "../board/Inspector.js";
@@ -11,7 +13,7 @@ import {
 import { usePendingApprovals, useProcessDetails } from "./reads.js";
 
 /** What Tab showed for the current command line. Enter runs exactly this. */
-interface Preview { goal: string; taskId: string; chosen: string | null; rule: string; composition: string; digest: string | null }
+interface Preview { repoPath: string; composed: Awaited<ReturnType<typeof composeFor>>; goal: string; taskId: string; chosen: string | null; rule: string; composition: string; digest: string | null }
 type Confirm = { kind: "deny"; taskId: string; requestId: string } | { kind: "cancel"; taskId: string };
 
 const compositionLine = (c: Awaited<ReturnType<typeof composeFor>>): [string, string | null] => {
@@ -27,7 +29,10 @@ const compositionLine = (c: Awaited<ReturnType<typeof composeFor>>): [string, st
  * The Overview as a shell: top panel, process list, the selected task's event log and a command
  * line, keyboard first. Every key maps to a command the web already sends; nothing here is new API.
  */
-export function ShellView({ active, workspace, onOpen }: { active: boolean; workspace: string | null; onOpen: (id: string) => void }) {
+export function ShellView({ active, workspace, repositories, onOpen }: { active: boolean; workspace: string | null; repositories: string[]; onOpen: (id: string) => void }) {
+  const [repository, setRepository] = useState(readRepository);
+  const repoPath = repositories.includes(repository) ? repository : "";
+  const repoName = repoPath ? repoPath.split(/[\\/]/).filter(Boolean).at(-1) ?? repoPath : null;
   const [revision, setRevision] = useState(0);
   const { tasks, assistants, cooldowns, error, loading, unavailable } = useBoard(revision, active);
   const details = useProcessDetails(tasks, active);
@@ -107,15 +112,15 @@ export function ShellView({ active, workspace, onOpen }: { active: boolean; work
   };
 
   const runPreview = async (goal: string): Promise<Preview> => {
-    if (preview?.goal === goal) return preview;
-    const { taskId } = await api.createTask({ goal });
+    if (preview?.goal === goal && preview.repoPath === repoPath) return preview;
+    const { taskId } = await api.createTask({ goal, repoPath: repoPath || undefined });
     // The composition preview records the routing decision itself, so it is read back rather than routed twice.
     const composed = await composeFor(taskId);
     const recorded = composed.state === "ready" && composed.preview.routingDecisionId !== null
       ? (await api.routing(taskId)).at(-1)?.explanation : undefined;
     const explanation = recorded ?? await api.route(taskId);
     const [composition, digest] = compositionLine(composed);
-    const p: Preview = { goal, taskId, chosen: explanation.chosen ?? null, rule: explanation.ruleFired, composition, digest };
+    const p: Preview = { repoPath, composed, goal, taskId, chosen: explanation.chosen ?? null, rule: explanation.ruleFired, composition, digest };
     setPreview(p);
     setSelectedId(taskId);
     setRevision(r => r + 1);
@@ -154,7 +159,7 @@ export function ShellView({ active, workspace, onOpen }: { active: boolean; work
         const fresh = (e.body as { preview?: CompositionPreview }).preview;
         if (fresh && p) {
           const [composition, digest] = compositionLine({ state: "ready", preview: fresh });
-          setPreview({ ...p, composition, digest });
+          setPreview({ ...p, composition, digest, composed: { state: "ready", preview: fresh } });
         }
         setStatus("composition changed since the preview, nothing started. Enter again to run the new one.");
       } else setStatus(`start: ${(e as Error).message}`);
@@ -211,13 +216,19 @@ export function ShellView({ active, workspace, onOpen }: { active: boolean; work
   return <section className="shell-view" aria-label="Shell view">
     <header className="sv-top" aria-label="Top panel">
       <span className="sv-ws">agentic-os · {workspace ?? "…"}</span>
+      <label className="sv-repository">Repository <select aria-label="Repository" value={repoPath} disabled={busy} onChange={e => {
+        setRepository(e.target.value); writeRepository(e.target.value); setPreview(null);
+      }}>
+        <option value="">No repository</option>
+        {repositories.map(path => <option key={path} value={path}>{path}</option>)}
+      </select></label>
       <ul className="sv-quota" aria-label="Assistants">
         {assistants.map(a => {
           const pct = quotaPercent(a);
           const state = assistantStatus(a, cooldowns, now);
           return <li key={a.id} title={pct === null ? "The provider reports no quota windows" : "Highest reported quota window"}>
-            <b>{a.id}</b> <span className="sv-bar" aria-hidden="true">{quotaBar(pct)}</span>{" "}
-            <span className={pct === null ? "sv-muted" : ""}>{pct === null ? "unknown" : `${Math.round(pct)}%`}</span>
+            <b>{a.id}</b> <span className={pct === null ? "sv-muted" : "sv-bar"} aria-hidden={pct === null ? undefined : true}>{quotaBar(pct)}</span>
+            {pct !== null && <span> {Math.round(pct)}%</span>}
             {state !== "ready" && <span className="sv-flag"> {state}</span>}
           </li>;
         })}
@@ -270,7 +281,7 @@ export function ShellView({ active, workspace, onOpen }: { active: boolean; work
     </div>
 
     <form className="sv-cmd" aria-label="Command line" onSubmit={e => { e.preventDefault(); void enter(); }}>
-      <label htmlFor="sv-cmd-input">agentic-os$</label>
+      <label htmlFor="sv-cmd-input">agentic-os [{repoName ?? "no repo: route only"}]$</label>
       <input id="sv-cmd-input" ref={input} value={line} autoComplete="off" spellCheck={false} readOnly={busy}
         aria-describedby="sv-cmd-help"
         placeholder="describe a goal · Tab previews the route · Enter runs"
@@ -281,9 +292,14 @@ export function ShellView({ active, workspace, onOpen }: { active: boolean; work
         }} />
       <span id="sv-cmd-help" className="sv-hint">[Tab] route preview</span>
     </form>
-    {preview && <p className="sv-preview" aria-label="Route preview">
+    {preview && <div className="sv-preview-pane"><p className="sv-preview" aria-label="Route preview">
       route → <b>{preview.chosen ?? "no eligible assistant"}</b> · {preview.rule}{preview.composition && ` · ${preview.composition}`} · task {preview.taskId}
-    </p>}
+    </p>
+      {preview.composed.state === "ready" && <section aria-label="Composition preview">
+        <DecisionView decision={preview.composed.preview.decision} outcome={preview.composed.preview.outcome}
+          spec={preview.composed.preview.specDraft} digest={preview.composed.preview.compositionDigest} resynced={preview.composed.preview.resynced} />
+      </section>}
+    </div>}
     <p className="sv-status" role="status">{confirmText || status}</p>
 
     {help && <div className="sv-help" role="dialog" aria-label="Keys">

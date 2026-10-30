@@ -139,7 +139,7 @@ export function quotaPercent(a: Assistant): number | null {
 }
 
 export function quotaBar(percent: number | null, cells = 4): string {
-  if (percent === null) return "▯".repeat(cells);
+  if (percent === null) return "unknown";
   const filled = Math.min(cells, Math.max(0, Math.round((percent / 100) * cells)));
   return "▮".repeat(filled) + "▯".repeat(cells - filled);
 }
