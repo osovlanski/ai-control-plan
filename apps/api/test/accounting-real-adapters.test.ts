@@ -80,10 +80,11 @@ const COUNTED = 8 + 12_406 + 1_334;
 
 describe("a composed Claude run settles its result usage", () => {
   it("counts the recorded result under cumulative accounting; an unpriced served model leaves the cost unknown", async () => {
-    rig = await bootClaude(1_000_000);
+    // The catalog seed prices claude-sonnet-5 since 2026-10-30, so the served model here is one no seed carries.
+    rig = await bootClaude(1_000_000, "claude-unpriced-fake-1");
     const { taskId, runId } = await composedRun();
     const b = await budget(taskId);
-    expect(b.runs).toEqual([expect.objectContaining({ accounting: "cumulative", model: "claude-sonnet-5", tokens: COUNTED, source: "in_run", inRunTokens: COUNTED, cost: { method: "unknown" } })]);
+    expect(b.runs).toEqual([expect.objectContaining({ accounting: "cumulative", model: "claude-unpriced-fake-1", tokens: COUNTED, source: "in_run", inRunTokens: COUNTED, cost: { method: "unknown" } })]);
     expect(b.consumed).toMatchObject({ tokens: COUNTED, costMethod: "unknown" });
     expect(b.remaining).toEqual({ max_tokens: 1_000_000 - COUNTED });
     // The terminal result's accounting is the manifest's.
