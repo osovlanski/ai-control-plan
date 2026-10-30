@@ -683,6 +683,10 @@ Plan §6 row 7, checked against PR bodies #85–#112, Cockpit #46/#47 and a driv
 - Neither adapter declares `usageReporting`, so a token cap stays advisory and `bounded` is still refused. Declaring it needs the conformance proof (deferral #4).
 - Open findings, not fixed here (other owners): settlement never reads in-run measured cost. Claude's `costUsd` (the dogfood's $0.225) is carried on the event, but `settleSession` takes measured cost only from usage records, so an in-run Claude run is `estimated` or `unknown`. The estimate also prices cache-creation tokens at the input rate. The served models need prices (slice 2).
 
+## 2026-10-30 — Project verification skips unchanged runs and blocks on missing dependencies (SHIPPED)
+
+- **The coordinator settles project checks (`project:*`) before the Harness runs them.** A run whose checkpoint saw no changed files, and whose worktree git shows HEAD at the base commit with a clean tree, skips them (`skipped`, not required, reason recorded on the plan decision as `skipped:unchanged`), so a read-only task completes. Otherwise, a lockfile with no `node_modules` (or Yarn `.pnp.cjs`) makes them `blocked`, still required, with the install command in the summary; nothing is installed automatically (owner decision, needs network). Any doubt (git error, uninspectable tree) verifies as before, and a check that ran and failed still fails. The task still parks in `WAITING_INPUT` on a blocked check, under the orchestrator's existing "verification failed" notice.
+
 ## 2026-10-30 — Restart after a crash, phase 7 resume (SHIPPED)
 
 - **Nothing consumed `resume_offered` before this.** The runner resumes a provider session when a request has `origin: resume` (`session-runner.ts`), but nothing in the plane ever built one. Boot recovery parked the task in `WAITING_INPUT` `harness_error` with the session still live, so wait, run-now and a same-assistant handoff all refused it (the handoff route excludes the source assistant). The only path that worked was a side effect: a handoff answered 409 "did not settle" and the next lease sweep honoured its cancel.
