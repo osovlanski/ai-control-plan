@@ -62,6 +62,7 @@ import type { CooldownStore } from "./cooldown.js";
 import type { Registry } from "./registry.js";
 import { persistRoutingDecision, routeTask } from "./router.js";
 import { decideContextContinuation } from "./context-continuation.js";
+import { runSessionRefStored } from "./usage.js";
 import type { TaskEventBus } from "./sse.js";
 import type { TaskStore } from "./tasks.js";
 import type { ProjectVerificationDiscovery } from "./project-verification.js";
@@ -790,6 +791,7 @@ export class Orchestrator {
         launchModel?.source ?? null,
         HARNESS_MAJOR,
       );
+    if (handle.providerSessionRef) runSessionRefStored(this.db, handle.runId);
 
     if (options.dispatchId && this.tasks.get(taskId)?.state === "ROUTING") this.tasks.transition(taskId, "RUNNING");
     const run: ActiveRun = {
@@ -894,6 +896,7 @@ export class Orchestrator {
     if (this.tasks.get(taskId)?.state === 'CANCELLED') await adapter.cancel(handle);
     this.db.prepare(`INSERT INTO runs(id,task_id,assistant_id,provider_session_ref,state,started_at,dispatch_id,model_requested)
       VALUES(?,?,?,?,'ACTIVE',?,?,?)`).run(handle.runId, taskId, request.assistantId, handle.providerSessionRef ?? null, new Date().toISOString(), request.executionRequestId, request.model?.id ?? null);
+    if (handle.providerSessionRef) runSessionRefStored(this.db, handle.runId);
     if (this.tasks.get(taskId)?.state === 'ROUTING') this.tasks.transition(taskId, 'RUNNING');
     const run: ActiveRun = { runId: handle.runId, taskId, assistantId: request.assistantId, adapter, handle,
       timeout: setTimeout(() => { void adapter.cancel(handle); }, request.runSpec.env?.maxRuntimeMs ?? this.maxRuntimeMs) };
@@ -992,6 +995,7 @@ export class Orchestrator {
         const payload = event.payload as { providerSessionRef?: string; model?: string } | undefined;
         if (payload?.providerSessionRef) {
           this.db.prepare("UPDATE runs SET provider_session_ref = ? WHERE id = ?").run(payload.providerSessionRef, run.runId);
+          runSessionRefStored(this.db, run.runId);
         }
         // Resolved identity is provider evidence only: no model in the payload
         // stays unknown (NULL), it is never inferred from the request (I-M5).
