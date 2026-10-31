@@ -23,7 +23,7 @@ import type {
   RunInput,
   RunSpec,
 } from "@agent-plane/core";
-import { newRunId, NotSupportedError } from "@agent-plane/core";
+import { newRunId, NotSupportedError, type ProfileRuntimeEvidence } from "@agent-plane/core";
 import type { ClaudeLiveSession } from "./claude-session-input.js";
 import { EventQueue } from "./event-queue.js";
 import { claudeInitEvidence } from "./profile-evidence.js";
@@ -81,6 +81,7 @@ const FILE_MUTATING_TOOLS: Record<string, { pathKey: string; kind: string }> = {
  * - `canUseTool` permission callback → approval.requested event; the answer
  *   comes back through send({kind:"approval"}).
  * - `result` message → run.ended with modelUsage/total_cost_usd rollup.
+ * - Grep and Glob are opted in with worktree-scoped allow rules (`SEARCH_TOOL_RULES`).
  */
 export class ClaudeAdapter implements AgentAdapter {
   private runs = new Map<string, ClaudeRunState>();
@@ -114,7 +115,10 @@ export class ClaudeAdapter implements AgentAdapter {
       // M3: per-run profiles exclude user and local settings, user plugins and MCP (see
       // `claudeProvisioningPlan`). The other fields are the defaults an absent block already
       // meant (relay follows `send`, which this adapter has), so Prepare decides exactly as before.
-      harness: { usageAccounting: "none", toolGating: "none", approvalRelay: true, processIsolation: "none", provisioning: "full" },
+      // Usage: the `result` message carries the run's totals, so its `usage.updated` is cumulative
+      // for the run; the quota-only `usage.updated` from `rate_limit_event` carries no tokens and
+      // adds nothing. No `usageReporting` contract is declared, so a token cap stays advisory.
+      harness: { usageAccounting: "cumulative", toolGating: "none", approvalRelay: true, processIsolation: "none", provisioning: "full" },
       // M14 K9 — the Agent SDK's `getContextUsage` control request reports live
       // occupancy (`totalTokens`) against the resolved autocompaction window
       // (`rawMaxTokens`), which is a DIFFERENT fact from the model's advertised
@@ -207,6 +211,7 @@ export class ClaudeAdapter implements AgentAdapter {
           : this.options.profile
             ? { settings: profileSettings(this.options.profile), strictMcpConfig: true, mcpServers: this.options.profile.mcpServers }
             : {}),
+        allowedTools: [...SEARCH_TOOL_RULES],
         permissionMode: run.permissionPolicy.mode === "auto-approve" ? "bypassPermissions" : "default",
         allowDangerouslySkipPermissions: run.permissionPolicy.mode === "auto-approve" ? true : undefined,
         canUseTool:
@@ -312,7 +317,7 @@ export class ClaudeAdapter implements AgentAdapter {
               version: msg.claude_code_version,
               // M3 S5: the runner fails a `full` profile whose init does not match before RUNNING.
               ...(state.profile
-                ? { profileEvidence: claudeInitEvidence(state.profile, { skills: msg.skills ?? [], plugins: msg.plugins ?? [], mcpServers: msg.mcp_servers ?? [] }) }
+                ? { profileEvidence: withSearchToolsCheck(claudeInitEvidence(state.profile, { skills: msg.skills ?? [], plugins: msg.plugins ?? [], mcpServers: msg.mcp_servers ?? [] }), msg.tools) }
                 : {}),
             },
             raw: msg,
@@ -424,13 +429,24 @@ export class ClaudeAdapter implements AgentAdapter {
           ...Object.values(msg.modelUsage ?? {}).map((u) => (typeof u?.contextWindow === "number" ? u.contextWindow : 0)),
         );
         if (advertised > 0) state.advertisedMaxTokens = advertised;
+        // The run's totals. `input_tokens` excludes both cache fields: the counted input is
+        // uncached input plus cache creation, and cache reads are reported beside it, uncounted.
+        const cacheCreationInputTokens = msg.usage.cache_creation_input_tokens ?? 0;
+        const cacheReadInputTokens = msg.usage.cache_read_input_tokens ?? 0;
         const usage = {
-          inputTokens: msg.usage.input_tokens,
+          inputTokens: msg.usage.input_tokens + cacheCreationInputTokens,
           outputTokens: msg.usage.output_tokens,
+          uncachedInputTokens: msg.usage.input_tokens,
+          cacheCreationInputTokens,
+          cacheReadInputTokens,
           costUsd: msg.total_cost_usd,
           modelUsage: msg.modelUsage,
         };
-        emit({ type: "usage.updated", summary: `Tokens in/out: ${usage.inputTokens}/${usage.outputTokens}`, payload: usage });
+        emit({
+          type: "usage.updated",
+          summary: `Tokens in/out: ${usage.inputTokens}/${usage.outputTokens} (cache reads ${cacheReadInputTokens})`,
+          payload: usage,
+        });
         if (msg.subtype === "success" && !msg.is_error) {
           emit({
             type: "run.ended",
@@ -609,6 +625,29 @@ export interface ClaudeLaunchProfile {
    * names, so tool policy that names them still matches.
    */
   mcpServers: Record<string, McpServerConfig>;
+}
+
+/** The read-only search tools a run must be offered, so a search never needs Bash. */
+export const READ_ONLY_SEARCH_TOOLS = ["Grep", "Glob"] as const;
+
+/**
+ * Native Claude Code builds (2.1.238 here) leave Grep and Glob out of the default tool set
+ * and route search through Bash, which escalates every call and can reach outside the
+ * worktree. A rule that names a tool opts it in. The rules are scoped to `cwd` (the worktree):
+ * a search inside it is auto-allowed, as Read already is in `default` mode, and one outside
+ * still reaches `canUseTool`. A bare `Grep` would auto-allow every path and bypass the callback.
+ */
+export const SEARCH_TOOL_RULES = READ_ONLY_SEARCH_TOOLS.map((tool) => `${tool}(./**)`);
+
+/** M3 S5a: the startup inventory must offer the read-only search tools too. */
+export function withSearchToolsCheck(evidence: ProfileRuntimeEvidence, tools: readonly string[]): ProfileRuntimeEvidence {
+  const missing = READ_ONLY_SEARCH_TOOLS.filter((t) => !tools.includes(t));
+  const check = {
+    name: "runtime_search_tools",
+    ok: missing.length === 0,
+    detail: missing.length ? `read-only search tools not offered: ${missing.join(", ")}` : `${READ_ONLY_SEARCH_TOOLS.join(", ")} offered`,
+  };
+  return { ...evidence, ok: evidence.ok && check.ok, checks: [...evidence.checks, check] };
 }
 
 /**

@@ -2,7 +2,11 @@ import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { planProjectVerification, snapshotProjectVerification } from "../src/modules/project-verification.js";
+import {
+  planProjectVerification,
+  projectDependenciesMissing,
+  snapshotProjectVerification,
+} from "../src/modules/project-verification.js";
 import { buildExecutionRequest } from "../src/modules/harness/control-plane-bridge.js";
 import { WorkspaceAuthority, WorkspaceError } from "../src/modules/harness/workspace-authority.js";
 
@@ -137,3 +141,36 @@ describe("planProjectVerification", () => {
     expect(planProjectVerification({ lockfiles: [] })).toEqual({ warnings: [] });
   });
 });
+
+describe("projectDependenciesMissing", () => {
+  function inWorktree(files: Record<string, string>, dirs: string[] = []): string | undefined {
+    const parent = mkdtempSync(join(tmpdir(), "project-deps-"));
+    const worktree = join(parent, "worktree");
+    mkdirSync(worktree);
+    for (const name of dirs) mkdirSync(join(worktree, name));
+    for (const [name, body] of Object.entries(files)) writeFileSync(join(worktree, name), body);
+    try {
+      return projectDependenciesMissing(new WorkspaceAuthority({ repoAllowlist: [], worktreeRoot: parent }), worktree);
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  }
+  const manifest = JSON.stringify({ scripts: { test: "vitest" } });
+
+  it("names the lockfile and the install command when node_modules is missing", () => {
+    expect(inWorktree({ "package.json": manifest, "yarn.lock": "" })).toBe(
+      "dependencies not installed: yarn.lock present, node_modules missing; run `yarn install` in the worktree to install them",
+    );
+  });
+
+  it("treats an installed tree or a Plug'n'Play map as installed", () => {
+    expect(inWorktree({ "package.json": manifest, "yarn.lock": "" }, ["node_modules"])).toBeUndefined();
+    expect(inWorktree({ "package.json": manifest, "yarn.lock": "", ".pnp.cjs": "" })).toBeUndefined();
+  });
+
+  it("never blocks a project with no lockfile or no manifest", () => {
+    expect(inWorktree({ "package.json": JSON.stringify({ packageManager: "npm@11.0.0" }) })).toBeUndefined();
+    expect(inWorktree({ "package-lock.json": "{}" })).toBeUndefined();
+  });
+});
+

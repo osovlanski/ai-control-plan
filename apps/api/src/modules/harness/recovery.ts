@@ -127,6 +127,30 @@ export class HarnessRecovery {
     return out;
   }
 
+  /**
+   * Operator restart after a crash: end a session this process offered for resume
+   * (`resume_offered`, no runner alive) through the same fenced cancel `decide()` honors, so
+   * its checkpoint is committed and the task can continue from it. Refuses any other session.
+   */
+  async releaseResumeOffered(sessionId: string): Promise<SessionRecoveryOutcome> {
+    const s = this.deps.store.get(sessionId);
+    if (!s) throw new Error(`No such session ${sessionId}`);
+    if (isTerminal(s.state)) throw new Error(`Session ${sessionId} is already ${s.state}`);
+    if (!this.deps.store.hasRecoveryDecision(sessionId, "resume_offered")) {
+      throw new Error(`Session ${sessionId} was not offered for resume`);
+    }
+    if (s.leaseToken && s.leaseExpiresAt && s.leaseExpiresAt > this.now().toISOString()) {
+      throw new Error(`Session ${sessionId} is leased by a live runner`);
+    }
+    this.deps.store.requestCancel(sessionId);
+    const outcome = await this.recoverSession(sessionId);
+    if (outcome.action !== "cancelled" && outcome.action !== "already_terminal") {
+      throw new Error(`Session ${sessionId} was not released: ${outcome.action}${outcome.detail ? ` (${outcome.detail})` : ""}`);
+    }
+    this.deps.sweepProfiles?.();
+    return outcome;
+  }
+
   /** Decide one live session. Acquires the (void) lease so its writes are fenced. */
   async recoverSession(sessionId: string): Promise<SessionRecoveryOutcome> {
     const s0 = this.deps.store.get(sessionId);
