@@ -501,6 +501,34 @@ export class SessionStore {
   }
 
   /**
+   * Stores a provider session ref the provider reported AFTER start() returned (Claude learns
+   * its session id from `system/init`, which arrives as run.started), so ackHandle had none to
+   * write. Fenced like every session write (version + live lease) and write-once: a run that
+   * already has a ref (acked at start, or a resume) is left unchanged. Any non-terminal state,
+   * because the first event also moves STARTING to RUNNING. Fenced on the lease, not the
+   * version: a concurrent version bump (a cancel request) must not lose the ref, and the
+   * caller adopts the returned version only when it is exactly one past its own. Returns the
+   * new session when it wrote, undefined when it did not; a write tells the usage ledger.
+   */
+  recordLateSessionRef(
+    sessionId: string,
+    ref: ProviderSessionRef,
+    input: { leaseToken: string },
+  ): ExecutionSession | undefined {
+    const info = this.db
+      .prepare(
+        `UPDATE runs SET provider_session_ref = ?, version = version + 1
+         WHERE id = ? AND provider_session_ref IS NULL
+           AND session_state IN ('STARTING','RUNNING','AWAITING_APPROVAL','PAUSED','RESUMING')
+           AND lease_token = ? AND lease_expires_at > ?`,
+      )
+      .run(ref, sessionId, input.leaseToken, this.iso());
+    if (info.changes !== 1) return undefined;
+    runSessionRefStored(this.db, sessionId);
+    return this.get(sessionId)!;
+  }
+
+  /**
    * Durable cancellation intent (§4, §9). The plane/user may set it at ANY time
    * without holding the lease — it is a monotonic 0→1 flag. The version bump is
    * the wakeup: the owning runner's next fenced CAS fails, it re-reads, sees the

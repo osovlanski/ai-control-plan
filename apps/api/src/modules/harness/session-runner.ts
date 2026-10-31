@@ -1300,8 +1300,19 @@ class RunContext {
       case "run.started": {
         // The provider's own statement of what it is serving. Absent ⇒ unknown;
         // the requested selector is never promoted into resolved identity.
-        const model = (event.payload as { model?: string } | undefined)?.model;
+        const payload = event.payload as { model?: string; providerSessionRef?: string } | undefined;
+        const model = payload?.model;
         if (model) this.d.store.recordResolvedModel(this.sessionId, model, "run.started");
+        // A provider that learns its session id only at startup (Claude's system/init) had no
+        // ref for ackHandle. Store it now, write-once: recovery offers a resume from it and
+        // imported usage binds to this run by it.
+        if (payload?.providerSessionRef) {
+          const next = this.d.store.recordLateSessionRef(this.sessionId, payload.providerSessionRef as ProviderSessionRef, {
+            leaseToken: this.lease,
+          });
+          // Only our own bump is adopted; a concurrent write still fails our next CAS.
+          if (next && next.version === this.version + 1) this.version = next.version;
+        }
         break;
       }
       case "usage.updated": {

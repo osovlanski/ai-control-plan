@@ -187,6 +187,32 @@ describe("imported usage joins its run by sessionRef", () => {
     expect(new UsageLedger(rig.db).backfillRunLinks()).toEqual({ linked: [], unmatched: 0, ambiguous: 0 });
   });
 
+  it("binds a record imported before a Claude-shaped run (session id known only from run.started) reports its session", async () => {
+    rig = await bootRig();
+    const sessionRef = "FAKE-session-late-not-real";
+    expect(await post(imported(sessionRef, "FAKE-msg-late-first", 1500, 500))).toMatchObject({ status: 201, body: { link: "unmatched" } });
+    // [FAKE:LATE_SESSION:<ref>]: start() returns no ref, the way the Claude CLI learns its id from system/init.
+    const adapter = rig.built.registry.adapter("fake-claude");
+    const start = adapter.start.bind(adapter);
+    const refsAtStart: Array<string | undefined> = [];
+    vi.spyOn(adapter, "start").mockImplementation(async (spec) => {
+      const handle = await start(spec);
+      refsAtStart.push(handle.providerSessionRef);
+      return handle;
+    });
+    const taskId = rig.built.tasks.create({ goal: `Add a typed helper to the parser module [FAKE:LATE_SESSION:${sessionRef}]`, repoPath: rig.repo }).taskId;
+    const res = await rig.built.app.inject({ method: "POST", url: `/api/tasks/${taskId}/start`, headers: rig.auth(), payload: {} });
+    expect(res.statusCode).toBe(200);
+    const runId = (res.json() as { runId: string }).runId;
+    expect(await rig.built.orchestrator.waitForSettled(taskId)).toBe("COMPLETED");
+    expect(refsAtStart).toEqual([undefined]);
+    expect(rig.db.prepare("SELECT provider_session_ref FROM runs WHERE id = ?").get(runId)).toEqual({ provider_session_ref: sessionRef });
+    expect(stored()).toEqual([{ event_id: "FAKE-msg-late-first", run_id: runId, run_link: "session_ref" }]);
+    expect((await budget(taskId)).runs[0]).toMatchObject({ runId, tokens: 2000, source: "records", recordCount: 1 });
+    // A record imported after the run also binds at once.
+    expect(await post(imported(sessionRef, "FAKE-msg-late-after", 10, 0))).toMatchObject({ status: 201, body: { record: { runId } } });
+  });
+
   it("keeps records immutable except the one NULL-to-run step", async () => {
     rig = await bootRig();
     const { runId, sessionRef } = await composedRun();
