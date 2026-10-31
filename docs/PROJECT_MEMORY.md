@@ -655,11 +655,11 @@ rule-allowed tools; neither changed here.
 - **Every cell is a plane read, and `unknown` where the plane has none.** MODEL is the run's `modelIdentity.resolvedModelId`; TOKENS is `consumed.tokens / max_tokens` from `/composition/budget`, so it is `unknown` with the composer off or for a run whose accounting is `none`. A quota bar is the highest `manifest.core.limits[].usedPercent`; config-defined fakes report no limits and show `unknown`.
 - Keys never fire from a text field, and Enter on a focused button keeps the button's meaning. `d` and `c` confirm inline with y/n. In the command line, Tab creates the task and previews route and composition, which is what NewTask's Preview already did, and Enter starts what Tab showed (or previews and starts in one go).
 
-## 2026-10-30 — Phase 7 close and first dogfood run (BLOCKED; phase 7 stays open, two conditions lack evidence)
+## 2026-10-30 — Phase 7 close and first dogfood run (SHIPPED 2026-10-31; phase 7 closed, all six conditions shown)
 
 Plan §6 row 7, checked against PR bodies #85–#112, Cockpit #46/#47 and a drive on main `b3b02fe` today. The diff wins where a body or this file disagrees.
 
-Re-checked 2026-10-31 on main `beb7254` (#119, #120, #121, #123 merged; #115 still open), with unpatched Cockpit main `760db1c` on loopback and `pnpm --filter @agent-plane/api dev` started from a clean environment on a scratch `AGENT_PLANE_HOME`. Real claude-code runs (bundled CLI 2.1.238, served `claude-sonnet-5`) used `prompt-on-escalation`, Harness single mode, a 1,000,000-token cap and one Cockpit skill. Failover and parallel runs used fake assistants, because #120 changed their launch path.
+Re-checked 2026-10-31 with unpatched Cockpit main `760db1c` on loopback and `pnpm --filter @agent-plane/api dev` started from a clean environment on a scratch `AGENT_PLANE_HOME`, using `prompt-on-escalation` and Harness single mode. Conditions 2–5 were driven on main `beb7254` (#119, #120, #121, #123 merged; #115 still open), with real claude-code (bundled CLI 2.1.238, served `claude-sonnet-5`), a 1,000,000-token cap and one Cockpit skill. Failover and parallel runs used fake assistants, because #120 changed their launch path. On `beb7254`, conditions 1 and 6 failed because the Harness path never stored the session id Claude reports at startup. #126 fixed that, and both conditions were re-driven with real claude-code (CLI 2.1.316) on #126's head `c0c74f8`, merged as `c94d1a0`.
 
 | Condition | Evidence | Status |
 |---|---|---|
