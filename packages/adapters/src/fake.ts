@@ -81,6 +81,19 @@ function parseContextMarker(prompt: string): FakeRunState["context"] | undefined
   return { unavailable: false, tokens: Math.round(pressure * FAKE_CONTEXT_WINDOW), window: FAKE_CONTEXT_WINDOW };
 }
 
+/**
+ * `[FAKE:LATE_SESSION]` / `[FAKE:LATE_SESSION:<ref>]`: the run's handle carries no
+ * providerSessionRef when start() returns, and the ref is reported only by run.started,
+ * the way the Claude CLI learns its session id from `system/init`. With `<ref>`, that is
+ * the ref reported (so a drive can import usage for a session before its run exists).
+ * Returns undefined when absent, `true` for the bare form.
+ */
+function parseLateSessionMarker(prompt: string): string | true | undefined {
+  const m = prompt.match(/\[FAKE:LATE_SESSION(?::([^\]\s]+))?\]/);
+  if (!m) return undefined;
+  return m[1] ?? true;
+}
+
 /** The harness a fake assistant presents itself as (the AgentSpec harness vocabulary). */
 export type FakeHarness = AgentSpec["harness"];
 
@@ -103,6 +116,12 @@ export interface FakeOptions {
    * `catalog-exact` entry once discovery is ingested.
    */
   models?: Array<{ id: string; displayName?: string }>;
+  /**
+   * TEST-ONLY. When true, start() returns a handle with no providerSessionRef and the ref
+   * appears first on run.started, as with the real Claude CLI. Default false (the ref is
+   * known at start). The `[FAKE:LATE_SESSION]` prompt marker does the same per run.
+   */
+  sessionRefAfterStart?: boolean;
 }
 
 const DEFAULT_MODELS: FakeOptions["models"] = [{ id: "fake-1", displayName: "Fake model" }];
@@ -203,12 +222,12 @@ export class FakeAdapter implements AgentAdapter {
       mcpSecretsDelivered: delivered,
     };
     this.runs.set(runId, state);
-    const handle: RunHandle = {
-      runId,
-      assistantId: this.id,
-      providerSessionRef: `fake-session-${runId}` as ProviderSessionRef,
-    };
-    void this.pump(runId, handle, run, state);
+    const late = parseLateSessionMarker(run.prompt) ?? (this.options.sessionRefAfterStart ? true : undefined);
+    const ref = (typeof late === "string" ? late : `fake-session-${runId}`) as ProviderSessionRef;
+    const handle: RunHandle = late === undefined
+      ? { runId, assistantId: this.id, providerSessionRef: ref }
+      : { runId, assistantId: this.id };
+    void this.pump(runId, handle, run, state, ref);
     return handle;
   }
 
@@ -218,10 +237,16 @@ export class FakeAdapter implements AgentAdapter {
     return handle;
   }
 
-  private async pump(runId: RunId | string, handle: RunHandle, run: RunSpec, state: FakeRunState): Promise<void> {
+  private async pump(runId: RunId | string, handle: RunHandle, run: RunSpec, state: FakeRunState, ref: ProviderSessionRef): Promise<void> {
     const emit = (e: EmittedEvent) =>
       state.queue.push({ runId: runId as RunId, ts: new Date().toISOString(), ...e });
 
+    // A late-session run learns its ref only after start() has returned (a macrotask later),
+    // like Claude's system/init; resume() has set it by then and keeps its own ref.
+    if (!handle.providerSessionRef) {
+      await new Promise((r) => setTimeout(r, 0));
+      handle.providerSessionRef ??= ref;
+    }
     emit({
       type: "run.started",
       summary: "Fake run started",
