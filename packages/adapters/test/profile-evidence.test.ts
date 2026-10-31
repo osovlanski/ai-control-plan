@@ -134,7 +134,7 @@ describe("Claude adapter: run.started carries the evidence for a profile launch"
     permissionPolicy: { mode: "auto-approve" }, env: { redactionRules: [], maxRuntimeMs: 10_000 },
   };
   const initOf = (inventory: ReturnType<typeof faithful>) => ({
-    type: "system", subtype: "init", session_id: "s1", model: "claude-x", claude_code_version: "9.9", tools: [],
+    type: "system", subtype: "init", session_id: "s1", model: "claude-x", claude_code_version: "9.9", tools: ["Bash", "Read", "Grep", "Glob"],
     skills: inventory.skills, plugins: inventory.plugins, mcp_servers: inventory.mcpServers,
   });
   async function started(run: RunSpec, init: unknown): Promise<NormalizedEvent> {
@@ -162,8 +162,14 @@ describe("Claude adapter: run.started carries the evidence for a profile launch"
     expect(failing((bad.payload as { profileEvidence: ProfileRuntimeEvidence }).profileEvidence)).toEqual(["runtime_plugins: plugins outside the profile loaded: claude-mem"]);
   });
 
+  it("an init that does not offer Grep or Glob fails runtime_search_tools", async () => {
+    const profile = await profileFor("claude-code", false);
+    const e = await started({ ...RUN, profile }, { ...initOf(faithful(profile)), tools: ["Bash", "Read"] });
+    expect(failing((e.payload as { profileEvidence: ProfileRuntimeEvidence }).profileEvidence)).toEqual(["runtime_search_tools: read-only search tools not offered: Grep, Glob"]);
+  });
+
   it("no profile: no evidence, payload unchanged", async () => {
     const e = await started(RUN, initOf({ skills: [], plugins: [], mcpServers: [] }));
-    expect(e.payload).toEqual({ providerSessionRef: "s1", model: "claude-x", tools: [], version: "9.9" });
+    expect(e.payload).toEqual({ providerSessionRef: "s1", model: "claude-x", tools: ["Bash", "Read", "Grep", "Glob"], version: "9.9" });
   });
 });

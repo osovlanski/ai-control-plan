@@ -355,7 +355,7 @@ export class Orchestrator {
      * is then scoped to legacy `runs` rows only. `quarantineSession` forcibly
      * terminalises a session regardless of mode (increment 3, mixed ownership).
      */
-    private harnessRecovery?: { reconcileOnBoot(): Promise<unknown>; quarantineSession(sessionId: string): Promise<unknown> },
+    private harnessRecovery?: { reconcileOnBoot(): Promise<unknown>; quarantineSession(sessionId: string): Promise<unknown>; releaseResumeOffered?(sessionId: string): Promise<unknown> },
     /**
      * Single-mode seam to `SessionRunner` (PLAN.md 8c). Injected by `buildServer`
      * for every internal composition root (increment 3, D6) — its presence does
@@ -1486,6 +1486,33 @@ export class Orchestrator {
       }
       throw err;
     }
+  }
+
+  /**
+   * Operator restart after a crash (phase 7 resume). Boot recovery parks a Harness task whose
+   * session it offered for resume (`resume_offered`) in WAITING_INPUT `harness_error`, and no
+   * runner is left to continue it. This ends that session through recovery's fenced cancel and
+   * leaves the task's newest checkpoint bound to it, so a scheduler wait can continue the task
+   * on the same assistant. The continuation provisions under its own session id (M3 S3).
+   */
+  async releaseResumeOffered(taskId: string): Promise<{ sessionId: string; checkpointId: string }> {
+    const row = this.tasks.get(taskId);
+    if (!row) throw new Error(`Unknown task ${taskId}`);
+    this.assertNoMixedOwnership(taskId);
+    if (row.state !== "WAITING_INPUT" || row.pause_kind !== "harness_error") {
+      throw new Error(`Task ${taskId} is ${row.state}${row.pause_kind ? ` (${row.pause_kind})` : ""}; only a task parked by crash recovery can be restarted`);
+    }
+    const sid = this.harnessBridge?.liveSessionId(taskId);
+    if (!sid || !this.harnessRecovery?.releaseResumeOffered) {
+      throw new Error(`Task ${taskId} has no live Harness session offered for resume`);
+    }
+    await this.harnessRecovery.releaseResumeOffered(sid);
+    const latest = this.db
+      .prepare("SELECT id, run_id FROM checkpoints WHERE task_id = ? ORDER BY at DESC, rowid DESC LIMIT 1")
+      .get(taskId) as { id: string; run_id: string | null } | undefined;
+    const checkpointId = latest?.run_id === sid ? latest.id : (await this.checkpoints.create(taskId, sid, "cancel")).id;
+    this.notice(taskId, "info", `Session ${sid} was offered for resume after a crash; released for restart from checkpoint ${checkpointId}.`);
+    return { sessionId: sid, checkpointId };
   }
 
   /** Manual handoff: checkpoint, then move the task to another assistant. */

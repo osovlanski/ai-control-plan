@@ -36,7 +36,7 @@ beforeEach(async () => {
   mkdirSync(join(home, "personal"), { recursive: true });
   writeFileSync(
     join(home, "personal", "config.yaml"),
-    `assistants:\n  fake-project:\n    provider: fake\nrepoAllowlist:\n  - ${JSON.stringify(repo)}\nexecution:\n  harnessModes:\n    single: true\n`,
+    `assistants:\n  fake-project:\n    provider: fake\nrepoAllowlist:\n  - ${JSON.stringify(repo)}\nexecution:\n  harnessModes:\n    single: true\npolicy:\n  approvalMode: prompt-on-escalation\n`,
   );
   const config = loadConfig({ AGENT_PLANE_HOME: home });
   db = openDb(config.dbPath);
@@ -55,13 +55,119 @@ afterEach(async () => {
   rmSync(repo, { recursive: true, force: true });
 });
 
+async function pollFor<T>(read: () => T | undefined): Promise<T> {
+  for (let i = 0; i < 400; i++) {
+    const value = read();
+    if (value !== undefined) return value;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error("timed out");
+}
+
+/** The fake never writes, so a "writing" run pauses on an approval while the test writes for it. */
+async function runWriting(write: (worktreePath: string) => void): Promise<{ taskId: string; runId: string }> {
+  const task = built.tasks.create({ goal: "change it [FAKE:APPROVAL]", repoPath: repo });
+  built.tasks.transition(task.taskId, "ROUTING");
+  const { runId } = await built.orchestrator.startTask(task.taskId, assistant);
+  const requestId = await pollFor(() => {
+    const row = db.prepare("SELECT payload FROM events WHERE run_id = ? AND type = 'approval.requested'")
+      .get(runId) as { payload: string } | undefined;
+    return row ? (JSON.parse(row.payload) as { requestId: string }).requestId : undefined;
+  });
+  const { worktree_path } = db.prepare("SELECT worktree_path FROM tasks WHERE id = ?")
+    .get(task.taskId) as { worktree_path: string };
+  write(worktree_path);
+  await built.orchestrator.respondApproval(task.taskId, requestId, true);
+  return { taskId: task.taskId, runId };
+}
+
+function verificationOf(runId: string): ExecutionResult["verification"] {
+  const row = db.prepare("SELECT result FROM execution_results WHERE session_id = ?").get(runId) as { result: string };
+  return (JSON.parse(row.result) as ExecutionResult).verification;
+}
+
+function addLockfile(): void {
+  writeFileSync(join(repo, "package-lock.json"), JSON.stringify({ name: "fixture", lockfileVersion: 3, packages: {} }));
+  git("add", "package-lock.json");
+  git("commit", "-m", "lockfile");
+}
+
 describe("project verification cutover", () => {
-  it("persists and executes a discovered root script on a flag-ON repository task", async () => {
-    const task = built.tasks.create({ goal: "change it", repoPath: repo });
+  it("skips project verification for a run that changed nothing, and completes", async () => {
+    const task = built.tasks.create({ goal: "read-only question", repoPath: repo });
     built.tasks.transition(task.taskId, "ROUTING");
     const { runId } = await built.orchestrator.startTask(task.taskId, assistant);
 
     expect(await built.orchestrator.waitForSettled(task.taskId)).toBe("COMPLETED");
+    expect(verificationOf(runId)).toEqual({
+      passed: true,
+      checks: [expect.objectContaining({
+        checkId: "project:test",
+        status: "skipped",
+        required: false,
+        summary: expect.stringContaining("changed nothing relative to its base"),
+      })],
+    });
+    const revision = db.prepare(
+      "SELECT plan FROM verification_plan_revisions WHERE session_id = ? AND revision = 2",
+    ).get(runId) as { plan: string };
+    expect(JSON.parse(revision.plan)).toMatchObject({
+      checks: [],
+      decisions: [{ checkId: "project:test", selected: false, signals: ["explicit:tests", "skipped:unchanged"] }],
+    });
+  });
+
+  it("blocks, without running, a changed run whose lockfile has no installed dependencies", async () => {
+    addLockfile();
+    const { taskId, runId } = await runWriting((worktree) => writeFileSync(join(worktree, "note.txt"), "x\n"));
+
+    expect(await built.orchestrator.waitForSettled(taskId)).toBe("WAITING_INPUT");
+    expect(verificationOf(runId)).toEqual({
+      passed: false,
+      checks: [expect.objectContaining({
+        checkId: "project:test",
+        status: "blocked",
+        required: true,
+        summary: "blocked: dependencies not installed: package-lock.json present, node_modules missing; " +
+          "run `npm ci` in the worktree to install them",
+      })],
+    });
+  });
+
+  it("runs the checks of a changed run once its dependencies are installed", async () => {
+    addLockfile();
+    const { taskId, runId } = await runWriting((worktree) => {
+      mkdirSync(join(worktree, "node_modules"));
+      writeFileSync(join(worktree, "note.txt"), "x\n");
+    });
+
+    expect(await built.orchestrator.waitForSettled(taskId)).toBe("COMPLETED");
+    expect(verificationOf(runId)).toMatchObject({
+      passed: true,
+      checks: [{ checkId: "project:test", status: "passed", required: true }],
+    });
+  });
+
+  it("still fails a changed run whose check ran and failed", async () => {
+    writeFileSync(join(repo, "package.json"), JSON.stringify({
+      packageManager: "npm@11.0.0",
+      scripts: { test: "node -e \"process.exit(3)\"" },
+    }));
+    git("commit", "-am", "failing test");
+    const { taskId, runId } = await runWriting((worktree) => writeFileSync(join(worktree, "note.txt"), "x\n"));
+
+    expect(await built.orchestrator.waitForSettled(taskId)).toBe("WAITING_INPUT");
+    expect(verificationOf(runId)).toMatchObject({
+      passed: false,
+      checks: [{ checkId: "project:test", status: "failed", required: true }],
+    });
+  });
+
+  it("persists and executes a discovered root script on a flag-ON repository task", async () => {
+    const { taskId, runId } = await runWriting((worktree) => writeFileSync(join(worktree, "note.txt"), "x\n"));
+    const task = { taskId };
+
+    expect(await built.orchestrator.waitForSettled(taskId)).toBe("COMPLETED");
     const request = db.prepare(
       `SELECT verification, verification_plan, target_kind, workspace_id, repository_id, worktree_id
          FROM execution_requests WHERE task_id = ?`,
