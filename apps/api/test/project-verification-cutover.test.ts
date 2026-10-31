@@ -65,8 +65,9 @@ async function pollFor<T>(read: () => T | undefined): Promise<T> {
 }
 
 /** The fake never writes, so a "writing" run pauses on an approval while the test writes for it. */
-async function runWriting(write: (worktreePath: string) => void): Promise<{ taskId: string; runId: string }> {
+async function runWriting(write: (worktreePath: string) => void, watch?: (taskId: string) => void): Promise<{ taskId: string; runId: string }> {
   const task = built.tasks.create({ goal: "change it [FAKE:APPROVAL]", repoPath: repo });
+  watch?.(task.taskId);
   built.tasks.transition(task.taskId, "ROUTING");
   const { runId } = await built.orchestrator.startTask(task.taskId, assistant);
   const requestId = await pollFor(() => {
@@ -84,6 +85,15 @@ async function runWriting(write: (worktreePath: string) => void): Promise<{ task
 function verificationOf(runId: string): ExecutionResult["verification"] {
   const row = db.prepare("SELECT result FROM execution_results WHERE session_id = ?").get(runId) as { result: string };
   return (JSON.parse(row.result) as ExecutionResult).verification;
+}
+
+/** The orchestrator's notices go to the task bus only; collect them for one task. */
+function noticesOf(taskId: string): string[] {
+  const texts: string[] = [];
+  built.bus.subscribe(taskId, (payload) => {
+    if (payload.kind === "notice" && payload.notice) texts.push(payload.notice.text);
+  });
+  return texts;
 }
 
 function addLockfile(): void {
@@ -119,9 +129,12 @@ describe("project verification cutover", () => {
 
   it("blocks, without running, a changed run whose lockfile has no installed dependencies", async () => {
     addLockfile();
-    const { taskId, runId } = await runWriting((worktree) => writeFileSync(join(worktree, "note.txt"), "x\n"));
+    let notices: string[] = [];
+    const { taskId, runId } = await runWriting((worktree) => writeFileSync(join(worktree, "note.txt"), "x\n"), (id) => { notices = noticesOf(id); });
 
     expect(await built.orchestrator.waitForSettled(taskId)).toBe("WAITING_INPUT");
+    expect(notices).toContain("verification blocked — run `npm ci` in the worktree to install dependencies — awaiting your call");
+    expect(notices.join("\n")).not.toMatch(/verification failed/);
     expect(verificationOf(runId)).toEqual({
       passed: false,
       checks: [expect.objectContaining({
@@ -154,9 +167,11 @@ describe("project verification cutover", () => {
       scripts: { test: "node -e \"process.exit(3)\"" },
     }));
     git("commit", "-am", "failing test");
-    const { taskId, runId } = await runWriting((worktree) => writeFileSync(join(worktree, "note.txt"), "x\n"));
+    let notices: string[] = [];
+    const { taskId, runId } = await runWriting((worktree) => writeFileSync(join(worktree, "note.txt"), "x\n"), (id) => { notices = noticesOf(id); });
 
     expect(await built.orchestrator.waitForSettled(taskId)).toBe("WAITING_INPUT");
+    expect(notices).toContain("verification failed — awaiting your call");
     expect(verificationOf(runId)).toMatchObject({
       passed: false,
       checks: [{ checkId: "project:test", status: "failed", required: true }],
