@@ -163,6 +163,9 @@ describe("recomposition at a scheduler dispatch", () => {
     expect(attempts(id)).toEqual([{ origin: "wake", outcome: "persisted", reason: null, routing_decision_id: dispatch.routing_decision_id, composition_revision_id: `CR-${id}-1` }]);
     const [run] = runs(id);
     expect(run).toMatchObject({ composition_revision_id: `CR-${id}-1`, execution_request_id: dispatch.dispatch_id });
+    // BIND: the wake's run requests its revision's model, and records that the revision chose it.
+    expect(rig.db.prepare("SELECT model_requested, model_requested_source FROM runs WHERE task_id = ?").get(id))
+      .toEqual({ model_requested: revision!.spec.model.primary.id, model_requested_source: "revision" });
     const req = request(dispatch.dispatch_id);
     expect(req.composition_revision_id).toBe(`CR-${id}-1`);
     expect(req.routing_decision_ref).toBe(String(dispatch.routing_decision_id));
@@ -253,6 +256,12 @@ describe("recomposition at failover", () => {
       ["start", "persisted", `CR-${id}-1`], ["failover", "persisted", `CR-${id}-2`],
     ]);
     expect(request(second!.execution_request_id!)).toMatchObject({ composition_revision_id: `CR-${id}-2`, policy: { budget: { maxTokens: cap - 1650, enforcement: "advisory" } } });
+    // BIND: each run requests its own revision's model; the destination's comes from its recomposition.
+    const models = rig.db.prepare("SELECT composition_revision_id, model_requested, model_requested_source FROM runs WHERE task_id = ? ORDER BY started_at").all(id);
+    expect(models).toEqual([
+      { composition_revision_id: `CR-${id}-1`, model_requested: r1!.spec.model.primary.id, model_requested_source: "revision" },
+      { composition_revision_id: `CR-${id}-2`, model_requested: r2!.spec.model.primary.id, model_requested_source: "revision" },
+    ]);
   });
 
   it("a failover with no budget left starts nothing and parks the task for an operator: budget_exhausted", async () => {
