@@ -584,3 +584,27 @@ describe("HarnessRecovery.sweepExpiredLeases", () => {
     expect(store.get(held)!.leaseToken).toBe("live"); // untouched
   });
 });
+
+describe("a ref reported after start (Claude's system/init)", () => {
+  it("offers resume once the late ref is stored, where the same session without it is orphaned", async () => {
+    store.recordRequest(request("erq_late"));
+    const id = store.createSession("erq_late").sessionId as string;
+    const t = store.acquireLease(id)!;
+    store.transition(id, { expectedVersion: 0, from: "PREPARED", to: "STARTING", leaseToken: t });
+    store.transition(id, { expectedVersion: 1, from: "STARTING", to: "RUNNING", leaseToken: t, patch: { providerStartAcked: true } });
+    expect(store.recordLateSessionRef(id, "psr_late" as ProviderSessionRef, { leaseToken: t })!.version).toBe(3);
+    // Write-once: a second report does not move it.
+    expect(store.recordLateSessionRef(id, "psr_other" as ProviderSessionRef, { leaseToken: t })).toBeUndefined();
+    store.releaseLease(id, t); // kill -9
+
+    expect(await recovery({ canResume: true }).reconcileOnBoot()).toEqual([
+      { sessionId: id, action: "resume_offered", detail: "psr_late" },
+    ]);
+  });
+
+  it("needs the live lease: a dead runner cannot store a ref", () => {
+    const id = seedSession({ reqId: "erq_late_dead", to: "RUNNING" });
+    expect(store.recordLateSessionRef(id, "psr_late" as ProviderSessionRef, { leaseToken: "dead" })).toBeUndefined();
+    expect(store.get(id)!.providerSessionRef).toBeUndefined();
+  });
+});
