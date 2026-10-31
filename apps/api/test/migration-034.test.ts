@@ -40,8 +40,8 @@ const count = (table: string) => (db.prepare(`SELECT COUNT(*) AS n FROM ${table}
 describe("migration 034", () => {
   it("is applied after 033 and creates both tables, empty", () => {
     const applied = appliedMigrations(db);
-    const at = applied.indexOf("033_composition.sql");
-    expect(applied.slice(at, at + 2)).toEqual(["033_composition.sql", "034_composition_attempts.sql"]);
+    const at = applied.indexOf("034_composition_attempts.sql");
+    expect(applied.slice(at - 1, at + 1)).toEqual(["033_composition.sql", "034_composition_attempts.sql"]);
     expect(count("composition_attempts")).toBe(0);
     expect(count("composition_opt_ins")).toBe(0);
   });

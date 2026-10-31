@@ -761,6 +761,28 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     },
   );
 
+  // Phase 7 resume: continue a task boot recovery parked with a `resume_offered` session. The
+  // session is released, then the task continues from its checkpoint through a scheduler wait,
+  // on the same assistant, so dispatch, recomposition and provisioning are the run-now path's.
+  app.post<{ Params: { id: string } }>("/api/tasks/:id/restart", write, async (req, reply) => {
+    const taskId = req.params.id;
+    if (!tasks.get(taskId)) return reply.status(404).send({ error: "not found" });
+    if (!scheduler.enabled) return reply.status(409).send({ error: "A restart continues through the scheduler, which is disabled (scheduler.enabled is false)" });
+    let released: { sessionId: string; checkpointId: string };
+    try {
+      released = await orchestrator.releaseResumeOffered(taskId);
+    } catch (err) {
+      return reply.status(409).send({ error: message(err) });
+    }
+    try {
+      scheduler.attach(taskId, { kind: "time", notBefore: now().toISOString(), reason: "Operator restart after a crash" });
+      const wake = await scheduler.runNow(taskId);
+      return { ...released, wake };
+    } catch (err) {
+      return reply.status(409).send({ error: message(err), ...released });
+    }
+  });
+
   app.get<{ Params: { id: string } }>("/api/tasks/:id/handoffs", read.tasks, (req, reply) => {
     if (!tasks.get(req.params.id)) return reply.status(404).send({ error: "not found" });
     const live = db
