@@ -127,6 +127,12 @@ export class HarnessRecovery {
     return out;
   }
 
+  /** A live session this process offered for resume: no runner will deliver anything to it. */
+  isResumeOffered(sessionId: string): boolean {
+    const s = this.deps.store.get(sessionId);
+    return !!s && !isTerminal(s.state) && this.deps.store.hasRecoveryDecision(sessionId, "resume_offered");
+  }
+
   /**
    * Operator restart after a crash: end a session this process offered for resume
    * (`resume_offered`, no runner alive) through the same fenced cancel `decide()` honors, so
