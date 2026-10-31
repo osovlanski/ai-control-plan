@@ -7,6 +7,7 @@
  */
 import { spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { once } from "node:events";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -14,6 +15,7 @@ import type { ExecutionSessionState, NormalizedEvent, ProvisioningVerifiedPayloa
 import { PROFILE_MARKER } from "@agent-plane/adapters";
 import type { HarnessRecovery } from "../src/modules/harness/recovery.js";
 import { sweepProfiles } from "../src/modules/harness/profile-sweep.js";
+import { processAlive } from "../src/modules/harness/provider-processes.js";
 import { bootRig, reaches, type Rig } from "./helpers/composer-cockpit.js";
 
 let rig: Rig | undefined;
@@ -231,11 +233,18 @@ describe("boot sweep", () => {
 
   it("a real runner tearing down a slow-exit provider keeps its profile through a periodic sweep and disposes it itself", async () => {
     rig = await bootRig();
-    // FAKE slow-exit provider: a real child the runner tracks, which takes ~1.5s to exit after SIGTERM.
-    const child = spawn(process.execPath, ["-e", "process.on('SIGTERM', () => setTimeout(() => process.exit(0), 1500)); setInterval(() => {}, 1000);"], { stdio: "ignore" });
+    // FAKE slow-exit provider: a real child the runner tracks. It survives SIGTERM until the test closes
+    // its stdin, so the teardown window stays open on the test's word rather than on a timer. It reports
+    // "ready" only once the handler is installed, so a SIGTERM can never land on Node's default action.
+    const child = spawn(process.execPath, ["-e", "process.on('SIGTERM', () => { process.stdin.on('end', () => process.exit(0)).resume(); }); process.stdout.write('ready\\n'); setInterval(() => {}, 1000);"], { stdio: ["pipe", "pipe", "ignore"] });
+    const exited = once(child, "exit");
+    await once(child.stdout!, "data");
     const spawnedAt = new Date().toISOString();
+    // The runner's own liveness test (zombie = gone), not ChildProcess.exitCode, which is set only when
+    // Node delivers the exit event — after the runner may already have seen the process die.
+    const alive = () => processAlive(child.pid!);
     const adapter = rig.built.registry.adapter("fake-claude") as { providerProcess?: unknown };
-    adapter.providerProcess = () => ({ pid: child.pid!, spawnedAt, alive: () => child.exitCode === null && child.signalCode === null });
+    adapter.providerProcess = () => ({ pid: child.pid!, spawnedAt, alive });
     try {
       const id = rig.built.tasks.create({ goal: "Add a typed helper to the TypeScript parser module", repoPath: rig.repo }).taskId;
       expect((await rig.built.app.inject({ method: "POST", url: `/api/tasks/${id}/start`, headers: rig.auth(), payload: {} })).statusCode).toBe(200);
@@ -243,21 +252,25 @@ describe("boot sweep", () => {
       const row = () => rig!.db.prepare("SELECT session_state, lease_token FROM runs WHERE id = ?").get(run!.id) as { session_state: string; lease_token: string | null };
       // The teardown window: terminal state written, provider still exiting, lease still held.
       await vi.waitFor(() => expect(row().session_state).toBe("COMPLETED"), { interval: 5, timeout: 5_000 });
-      expect(child.exitCode).toBeNull();
+      expect(alive()).toBe(true);
       expect(row().lease_token).toBeTruthy();
       expect(readdirSync(profilesDir())).toContain(run!.id);
 
       await recovery().sweepExpiredLeases();
       expect(readdirSync(profilesDir())).toContain(run!.id);
       expect(swept(run!.id)).toBe(0);
+      expect(alive()).toBe(true);
+      expect(row().lease_token).toBeTruthy();
 
+      child.stdin!.end(); // let the provider finish exiting
       await vi.waitFor(() => expect(row().lease_token).toBeNull(), { interval: 25, timeout: 10_000 });
-      expect(child.exitCode ?? child.signalCode).not.toBeNull();
+      expect(alive()).toBe(false);
       expect(eventsOf(run!.id).at(-1)?.type).toBe("provisioning.disposed");
       expect(readdirSync(profilesDir())).not.toContain(run!.id);
       expect(swept(run!.id)).toBe(0);
     } finally {
       child.kill("SIGKILL");
+      await exited;
     }
   });
 
