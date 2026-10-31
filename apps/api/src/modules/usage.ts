@@ -10,7 +10,9 @@
  * a plane run, or not yet) or several (a resumed provider session spans runs, and a session-wide
  * total cannot be split between them) leave it unbound, and the answer says which. A body `runId`
  * that is not among the session's runs is a `run_conflict`, never stored. `backfillRunLinks`
- * applies the same rule to records already stored unbound, and is idempotent.
+ * applies the same rule to records already stored unbound, and is idempotent. A record that arrives
+ * before its run's session is known is bound when the run's `provider_session_ref` is stored: each
+ * writer calls `runSessionRefStored`, and the plane's listener runs `linkRun` for that run.
  *
  * Source precedence (plan §3.7) is settlement's, in core `settleSession`: a run settles to
  * max(in-run, its records), never the sum. With in-run accounting `none` the in-run side measures
@@ -109,6 +111,21 @@ const fromRow = (r: Row): UsageRecord => ({
   pricingVersion: r.pricing_version, observedAt: r.observed_at,
 });
 
+const sessionRefListeners = new WeakMap<Db, (runId: string) => void>();
+
+/** Registers the one listener told when a run's provider_session_ref is written on this database. */
+export function onRunSessionRef(db: Db, listener: (runId: string) => void): void {
+  sessionRefListeners.set(db, listener);
+}
+
+/**
+ * Called by every writer of runs.provider_session_ref, after the write. A failing listener never
+ * fails the write: an unbound record still binds at the next replay or boot.
+ */
+export function runSessionRefStored(db: Db, runId: string): void {
+  try { sessionRefListeners.get(db)?.(runId); } catch { /* the boot backfill binds it later */ }
+}
+
 export class UsageLedger {
   constructor(private db: Db, private now: () => Date = () => new Date()) {}
 
@@ -173,6 +190,23 @@ export class UsageLedger {
         else result.unmatched += 1;
       }
       return result;
+    })();
+  }
+
+  /**
+   * Binds the unbound records of a run's (provider, session) by the ingestion rule, once the run's
+   * provider_session_ref is stored. Returns how many it bound to the run; idempotent.
+   */
+  linkRun(runId: string): number {
+    return this.db.transaction((): number => {
+      const run = this.db.prepare(
+        "SELECT r.provider_session_ref AS ref, a.provider FROM runs r JOIN assistants a ON a.id = r.assistant_id WHERE r.id = ?",
+      ).get(runId) as { ref: string | null; provider: string } | undefined;
+      if (!run?.ref) return 0;
+      const rows = this.db.prepare(
+        "SELECT * FROM usage_records WHERE run_id IS NULL AND provider = ? AND session_ref = ? ORDER BY received_at, rowid",
+      ).all(run.provider, run.ref) as Row[];
+      return rows.filter((row) => this.linkStored(row).linkedNow).length;
     })();
   }
 

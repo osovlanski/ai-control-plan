@@ -1,4 +1,5 @@
 import { HandoffService } from './handoff.js';
+import { runSessionRefStored } from '../usage.js';
 /**
  * SessionStore — durable substrate for the Execution Harness (Phase 1).
  *
@@ -371,6 +372,7 @@ export class SessionStore {
           (input.claimSettlement !== undefined ? " with settlement unclaimed" : ""),
       );
     }
+    if (input.patch?.providerSessionRef) runSessionRefStored(this.db, sessionId);
     const origin = this.db.prepare(`SELECT er.id, er.origin_envelope_id FROM execution_requests er JOIN runs r ON r.execution_request_id = er.id WHERE r.id = ?`).get(sessionId) as { id: string; origin_envelope_id: string | null };
     if (origin?.origin_envelope_id) {
       const handoff = new HandoffService(this.db, this.now);
@@ -494,6 +496,7 @@ export class SessionStore {
       )
       .run(ref, sessionId, input.expectedVersion, input.leaseToken, this.iso());
     if (info.changes !== 1) throw new SessionCasConflictError(sessionId, "ackHandle: stale version/state or dead lease");
+    runSessionRefStored(this.db, sessionId);
     return this.get(sessionId)!;
   }
 

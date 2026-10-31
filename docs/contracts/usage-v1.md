@@ -58,8 +58,8 @@ whose provider session is `sessionRef`. The response's `link` says how the store
 `body` (the record named its run), `session_ref` (the plane resolved it), `unmatched` (no run has
 the session yet), `ambiguous` (several runs share it, as a resumed session does; a session-wide
 total cannot be split, so it stays unbound) or `none` (no runId and no sessionRef). An unbound
-record is bound later, once, when its session has exactly one run: on a replay or by the plane's
-boot pass. A bound record never moves, and `record.runId` in a replay shows the binding even though
+record is bound later, once, when its session has exactly one run: when a run stores that session
+(followed by the late budget check), on a replay, or by the plane's boot pass. A bound record never moves, and `record.runId` in a replay shows the binding even though
 the posted body said `null`; "same record" still compares the posted fields only.
 
 ## Versioning

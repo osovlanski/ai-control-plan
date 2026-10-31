@@ -59,7 +59,7 @@ import { renderProgressMd } from "./render/progress.js";
 import { registerAuth, type SessionMap } from "./auth/index.js";
 import { ClaudeAdapter, ClaudeCodeSessionInputAdapter, CodexAdapter, FakeSessionInputAdapter } from "@agent-plane/adapters";
 import { CredentialStore, credentialPath } from "./auth/credential-file.js";
-import { UsageLedger, validateUsageRecord } from "./modules/usage.js";
+import { onRunSessionRef, UsageLedger, validateUsageRecord } from "./modules/usage.js";
 
 export interface ServerDeps {
   config: ResolvedConfig;
@@ -541,6 +541,12 @@ export function buildServer(deps: ServerDeps): BuiltServer {
       app.log.info({ linked: backfill.linked.length, unmatched: backfill.unmatched, ambiguous: backfill.ambiguous }, "usage records linked to runs");
     }
   } catch (err) { app.log.warn({ err: message(err) }, "usage run-link backfill failed"); }
+  // A record that arrived before its run's session was stored binds when the run stores it.
+  onRunSessionRef(db, (runId) => {
+    try {
+      if (usage.linkRun(runId) > 0) composer?.lateRecord(runId);
+    } catch (err) { app.log.warn({ err: message(err), runId }, "usage run-link on session store failed"); }
+  });
   const composerDisabled = (reply: FastifyReply) =>
     reply.status(404).send({ error: "the composer is disabled (composer.enabled is false)", reason: "composer_disabled" });
 

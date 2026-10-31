@@ -9,7 +9,7 @@ import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { migrate } from "../src/db/index.js";
 import { UsageLedger } from "../src/modules/usage.js";
 import { bootRig, type Rig } from "./helpers/composer-cockpit.js";
@@ -156,6 +156,35 @@ describe("imported usage joins its run by sessionRef", () => {
     expect(b.overruns).toEqual([expect.objectContaining({ source: "late", amount: 300 })]);
     await post(imported(sessionRef, "FAKE-msg-late", 300, 0));
     expect((await budget(taskId)).overruns).toHaveLength(1);
+  });
+
+  it("binds a record imported before its run stored the session as soon as the run stores it, with no replay or restart", async () => {
+    rig = await bootRig({ budget: { maxTokens: 1800 } });
+    const sessionRef = "FAKE-session-early-not-real";
+    // Cockpit delivers first: no run has this session yet.
+    expect(await post(imported(sessionRef, "FAKE-msg-first", 1500, 500))).toMatchObject({ status: 201, body: { link: "unmatched", record: { runId: null } } });
+    // Then the run starts on that provider session and records it.
+    const adapter = rig.built.registry.adapter("fake-claude");
+    const start = adapter.start.bind(adapter);
+    vi.spyOn(adapter, "start").mockImplementation(async (spec) => {
+      const handle = await start(spec);
+      handle.providerSessionRef = sessionRef as never;
+      return handle;
+    });
+    const taskId = rig.built.tasks.create({ goal: "Add a typed helper to the parser module", repoPath: rig.repo }).taskId;
+    const res = await rig.built.app.inject({ method: "POST", url: `/api/tasks/${taskId}/start`, headers: rig.auth(), payload: {} });
+    expect(res.statusCode).toBe(200);
+    const runId = (res.json() as { runId: string }).runId;
+    expect(await rig.built.orchestrator.waitForSettled(taskId)).toBe("COMPLETED");
+    expect(rig.db.prepare("SELECT provider_session_ref FROM runs WHERE id = ?").get(runId)).toEqual({ provider_session_ref: sessionRef });
+
+    expect(stored()).toEqual([{ event_id: "FAKE-msg-first", run_id: runId, run_link: "session_ref" }]);
+    const b = await budget(taskId);
+    // In-run counted 1650; the records' 2000 exceed it, so they are the run's figure: max, never the sum.
+    expect(b.runs[0]).toMatchObject({ runId, tokens: 2000, source: "records", inRunTokens: 1650, recordTokens: 2000, recordCount: 1 });
+    expect(b.overruns).toContainEqual(expect.objectContaining({ source: "late" }));
+    // The boot backfill has nothing left to do.
+    expect(new UsageLedger(rig.db).backfillRunLinks()).toEqual({ linked: [], unmatched: 0, ambiguous: 0 });
   });
 
   it("keeps records immutable except the one NULL-to-run step", async () => {
