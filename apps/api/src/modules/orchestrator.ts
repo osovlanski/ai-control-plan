@@ -2,7 +2,7 @@ import { SessionStore } from './harness/session-store.js';
 import { HandoffService } from './harness/handoff.js';
 import { buildExecutionRequest, composedExecutionPolicy } from './harness/control-plane-bridge.js';
 import type { ModelCatalogService } from './model-catalog.js';
-import type { ExecutionRequest } from '@agent-plane/core';
+import type { ExecutionRequest, VerificationCheckResult } from '@agent-plane/core';
 import { QuotaProjection, controllingRetry } from './quota.js';
 import type { Scheduler } from './scheduler.js';
 import { join } from "node:path";
@@ -356,7 +356,7 @@ export class Orchestrator {
      * is then scoped to legacy `runs` rows only. `quarantineSession` forcibly
      * terminalises a session regardless of mode (increment 3, mixed ownership).
      */
-    private harnessRecovery?: { reconcileOnBoot(): Promise<unknown>; quarantineSession(sessionId: string): Promise<unknown>; releaseResumeOffered?(sessionId: string): Promise<unknown> },
+    private harnessRecovery?: { reconcileOnBoot(): Promise<unknown>; quarantineSession(sessionId: string): Promise<unknown>; releaseResumeOffered?(sessionId: string): Promise<unknown>; isResumeOffered?(sessionId: string): boolean },
     /**
      * Single-mode seam to `SessionRunner` (PLAN.md 8c). Injected by `buildServer`
      * for every internal composition root (increment 3, D6) — its presence does
@@ -1251,7 +1251,7 @@ export class Orchestrator {
     switch (result.outcome) {
       case "completed": {
         if (result.verification && !result.verification.passed) {
-          tx("WAITING_INPUT", "verification failed — awaiting your call", "verification_failed");
+          tx("WAITING_INPUT", verificationNotice(result.verification.checks), "verification_failed");
         } else {
           tx("COMPLETED");
         }
@@ -1519,7 +1519,22 @@ export class Orchestrator {
     return { sessionId: sid, checkpointId };
   }
 
-  /** Manual handoff: checkpoint, then move the task to another assistant. */
+  /** The live session of a task crash recovery parked with a resume offer, i.e. one `/restart` takes. */
+  private resumeOfferedSession(taskId: string): string | undefined {
+    const row = this.tasks.get(taskId);
+    if (row?.state !== "WAITING_INPUT" || row.pause_kind !== "harness_error") return undefined;
+    const sid = this.harnessBridge?.liveSessionId(taskId);
+    return sid && this.harnessRecovery?.isResumeOffered?.(sid) ? sid : undefined;
+  }
+
+  /** Routing excludes a handoff's source; a crash-parked task continues on it through `/restart`. */
+  private restartHint(taskId: string, source: string): string {
+    return this.resumeOfferedSession(taskId)
+      ? ` Task ${taskId} was parked by crash recovery; to continue on ${source}, use POST /api/tasks/${taskId}/restart.`
+      : "";
+  }
+
+  /** Manual handoff: route, checkpoint, then move the task to another assistant. */
   async handoff(taskId: string, to?: AssistantId): Promise<HandoffResult> {
     const row = this.tasks.get(taskId);
     if (!row) throw new Error(`Unknown task ${taskId}`);
@@ -1529,6 +1544,11 @@ export class Orchestrator {
       throw new Error(
         `Task ${taskId} is ${row.state}. A finished task cannot be handed off — create a follow-up task instead.`,
       );
+    }
+    // Refuse before anything is cancelled or written.
+    const source = this.lastAssistant(taskId);
+    if (to && to === source) {
+      throw new Error(`Handoff to ${to} refused: ${to} is the source assistant, and a handoff excludes its source.${this.restartHint(taskId, to)}`);
     }
 
     if (this.harnessOwns(taskId)) return this.harnessHandoff(taskId, to);
@@ -1555,7 +1575,9 @@ export class Orchestrator {
     });
     if (deferred) return deferred;
 
-    const checkpoint = await this.checkpoints.create(taskId, current?.runId ?? null, "handoff");
+    // The cancelled run's checkpoint is its continuation anchor even if routing refuses. A run-less
+    // one is written only once the handoff will happen: left behind, it would block `/wait`.
+    let checkpoint = current ? await this.checkpoints.create(taskId, current.runId, "handoff") : undefined;
 
     // A settled compare/race continues as ONE run (see `parallelContinuationWorktree`), so it is a
     // single task from here: it routes and composes on the single path and settles as one run.
@@ -1563,7 +1585,7 @@ export class Orchestrator {
     // A manual handoff away from an assistant shouldn't immediately re-pick it.
     const { explanation, routingDecisionId } = this.routeTask(taskId, "failover", { exclude: fromAssistantId, override: to });
     if (!explanation.chosen) {
-      throw new Error(`No eligible assistant for handoff. ${describeWaits(explanation)}`);
+      throw new Error(`No eligible assistant for handoff. ${this.describeHandoffWaits(taskId, explanation, fromAssistantId)}`);
     }
     // M2 S6: the handoff target is a changed assistant and gets a new revision with the remainder.
     const recomposed = await this.recompose(taskId, explanation.chosen, "failover", routingDecisionId);
@@ -1574,6 +1596,7 @@ export class Orchestrator {
       } catch { /* already parked */ }
       throw new Error(`Handoff to ${explanation.chosen} was not started: ${recomposed.reason}`);
     }
+    checkpoint ??= await this.checkpoints.create(taskId, null, "handoff");
 
     const state = this.tasks.get(taskId)!.state;
     if (state === "RUNNING" || state === "WAITING_INPUT" || state === "LIMIT_PAUSED") {
@@ -1645,14 +1668,15 @@ export class Orchestrator {
     // Session-scoped checkpoint on the captured harness sid — the target's
     // handoff-prompt render reads checkpoints.latest(taskId). (The runner's own
     // cancel checkpoint would also serve; this labels one 'handoff' for parity.)
-    const checkpoint = await this.checkpoints.create(taskId, sid ?? null, "handoff");
+    // As on the legacy path: a run-less checkpoint waits until routing has accepted the handoff.
+    let checkpoint = sid ? await this.checkpoints.create(taskId, sid, "handoff") : undefined;
 
     // A settled compare/race continues as ONE run (see `parallelContinuationWorktree`), so it is a
     // single task from here: it routes and composes on the single path and settles as one run.
     if (this.tasks.get(taskId)!.mode !== "single") this.tasks.setMode(taskId, "single");
     const { explanation, routingDecisionId } = this.routeTask(taskId, "failover", { exclude: fromAssistantId, override: to });
     if (!explanation.chosen) {
-      throw new Error(`No eligible assistant for handoff. ${describeWaits(explanation)}`);
+      throw new Error(`No eligible assistant for handoff. ${this.describeHandoffWaits(taskId, explanation, fromAssistantId)}`);
     }
     // M2 S6: the handoff target is a changed assistant and gets a new revision with the remainder.
     const recomposed = await this.recompose(taskId, explanation.chosen, "failover", routingDecisionId);
@@ -1663,6 +1687,7 @@ export class Orchestrator {
       } catch { /* already parked */ }
       throw new Error(`Handoff to ${explanation.chosen} was not started: ${recomposed.reason}`);
     }
+    checkpoint ??= await this.checkpoints.create(taskId, null, "handoff");
 
     const state = this.tasks.get(taskId)!.state;
     if (state === "RUNNING" || state === "WAITING_INPUT" || state === "LIMIT_PAUSED") {
@@ -1691,6 +1716,16 @@ export class Orchestrator {
       .prepare("UPDATE handoffs SET to_run_id = ? WHERE task_id = ? AND to_run_id IS NULL")
       .run(runId, taskId);
     return { runId, assistantId: explanation.chosen };
+  }
+
+  /** `describeWaits`, with the excluded source reported as excluded rather than "disabled". */
+  private describeHandoffWaits(taskId: string, explanation: { candidates: Array<{ assistantId: string; filterFailures: string[] }> }, source: string | undefined): string {
+    const sourceEnabled = !!source && this.registry.list().some((a) => a.id === source && a.enabled === 1);
+    return describeWaits({
+      candidates: explanation.candidates.map((c) => c.assistantId === source && sourceEnabled
+        ? { ...c, filterFailures: c.filterFailures.map((f) => f === "disabled in workspace config" ? "excluded as the handoff source" : f) }
+        : c),
+    }) + (source ? this.restartHint(taskId, source) : "");
   }
 
   routeTask(taskId: string, origin: 'intake' | 'wake' | 'run-now' | 'failover' | 'context-yield', options: { exclude?: string; override?: AssistantId; dispatchId?: string } = {}) {
@@ -1722,6 +1757,14 @@ export class Orchestrator {
     if (this.harnessOwns(taskId)) {
       const live = this.liveHarnessSessions(taskId);
       if (live.length === 0) throw new Error(`No live harness session for task ${taskId}`);
+      // A session offered for resume after a crash has no runner: an answer would be stored and
+      // never delivered. Refuse before writing; the restart's new session asks again.
+      const offered = live.find((sid) => this.harnessRecovery?.isResumeOffered?.(sid) &&
+        this.db.prepare("SELECT 1 FROM approvals WHERE session_id = ? AND provider_request_id = ?").get(sid, requestId));
+      if (offered) {
+        throw new Error(`Approval ${requestId} cannot be delivered: session ${offered} was offered for resume after a crash and no runner is attached. ` +
+          `Restart the task with POST /api/tasks/${taskId}/restart; the new session asks for approval again.`);
+      }
       // ApprovalService.answer validates the (session, provider_request_id) row
       // exists and is answerable — loud on a mismatch. The runner's
       // AWAITING_APPROVAL poll delivers it via adapter.send. A composed
@@ -2231,6 +2274,20 @@ export class Orchestrator {
 
 function firstResetsAt(event: NormalizedEvent): string | undefined {
   return quotaOf(event)?.find((q) => q.resetsAt)?.resetsAt;
+}
+
+/**
+ * A required check that ran and failed is a failure. Otherwise a blocked one (missing dependencies)
+ * is reported as blocked, with the install command its summary carries.
+ */
+function verificationNotice(checks: VerificationCheckResult[]): string {
+  const unmet = checks.filter((c) => c.required && c.status !== "passed" && !(c.status === undefined && c.passed));
+  const blocked = unmet.filter((c) => c.status === "blocked");
+  if (blocked.length === 0 || blocked.length < unmet.length) return "verification failed — awaiting your call";
+  const install = blocked.map((c) => /run `([^`]+)`/.exec(c.summary)?.[1]).find(Boolean);
+  return install
+    ? `verification blocked — run \`${install}\` in the worktree to install dependencies — awaiting your call`
+    : `verification blocked — ${blocked[0]!.summary} — awaiting your call`;
 }
 
 function describeWaits(explanation: { candidates: Array<{ assistantId: string; filterFailures: string[] }> }): string {

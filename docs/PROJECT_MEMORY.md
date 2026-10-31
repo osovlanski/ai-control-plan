@@ -701,7 +701,6 @@ Extra checks, 2026-10-31, not gating:
 
 - **Nothing consumed `resume_offered` before this.** The runner resumes a provider session when a request has `origin: resume` (`session-runner.ts`), but nothing in the plane ever built one. Boot recovery parked the task in `WAITING_INPUT` `harness_error` with the session still live, so wait, run-now and a same-assistant handoff all refused it (the handoff route excludes the source assistant). The only path that worked was a side effect: a handoff answered 409 "did not settle" and the next lease sweep honoured its cancel.
 - **Owner decision (2026-10-30): a restart route, not provider resume.** `POST /api/tasks/:id/restart` takes only a task parked that way whose live session carries a `resume_offered` decision and no live lease. It ends the session through recovery's fenced cancel (checkpoint committed, profile swept), then continues the task from that checkpoint with a time wait and run-now on the same assistant. The continuation is a new provider session and a new revision (origin `run-now`) that verifies the same profile digest. It needs the scheduler enabled and answers 409 otherwise. `origin: resume` is still unproduced.
-- Still open from the slice 4 drive: a handoff refused by routing writes a run-less `handoff` checkpoint that then blocks `/wait`; a same-assistant handoff is refused as "disabled in workspace config"; an approval answered on a `resume_offered` session returns 200 and is never delivered.
 
 ## 2026-10-31 — Harness runs store a session ref the provider reports after start (SHIPPED)
 
