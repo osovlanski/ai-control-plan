@@ -2,6 +2,11 @@
  * Shell view (part A): the Overview as a Linux-style shell, driven keyboard-only against the real
  * in-process API. Two fake assistants, one running task, one awaiting approval and one waiting.
  */
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fakeCockpit, FAKE_COCKPIT_TOKEN, type FakeCockpit } from "./fake-cockpit.js";
 import { expect, test, type Page } from "@playwright/test";
 import type { CapabilityManifest } from "@agent-plane/core";
 import { FakeAdapter } from "@agent-plane/adapters";
@@ -16,10 +21,29 @@ class QuotaFake extends FakeAdapter {
 }
 
 let h: Harness;
+let root: string;
+let repo: string;
+let cockpit: FakeCockpit;
 let ids: { running: string; approval: string; waiting: string };
 
-test.beforeEach(async () => {
+test.beforeEach(async ({ context: _context }, info) => {
+  const composerOn = info.title.startsWith("repository preview");
+  root = mkdtempSync(join(tmpdir(), "shell-view-repository-"));
+  repo = join(root, "ai-control-plan");
+  mkdirSync(repo);
+  writeFileSync(join(repo, "README.md"), "Scratch repository.\n");
+  for (const args of [["init", "-q"], ["add", "."], ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "init"]]) {
+    execFileSync("git", ["-C", repo, ...args]);
+  }
+  const tokenPath = join(root, "registry-credential");
+  writeFileSync(tokenPath, FAKE_COCKPIT_TOKEN, { mode: 0o600 });
+  cockpit = await fakeCockpit();
   h = await boot(4199, "shell-view", { [A]: { provider: "fake" }, [B]: { provider: "fake" } }, undefined, config => {
+    config.repoAllowlist = [repo];
+    config.composer.enabled = composerOn;
+    config.composer.policy.permitAmbient = true;
+    config.composer.policy.budget = { maxTokens: 50_000 };
+    config.registry.cockpit = { enabled: composerOn, baseUrl: cockpit.url, tokenPath, maxCacheAgeHours: 48 };
     config.policy.approvalMode = "prompt-on-escalation";
     config.execution = { harnessModes: { single: true } };
   }, new Map([[A, new QuotaFake(A, { ok: true, delayMs: 600_000, events: [{ type: "message", summary: "Reconciling partitions", payload: { text: "…" } }] })]]));
@@ -34,7 +58,7 @@ test.beforeEach(async () => {
   ids = { running, approval, waiting };
   await api.dispose();
 });
-test.afterEach(async () => { await h.close(); });
+test.afterEach(async () => { await h.close(); await cockpit.close(); rmSync(root, { recursive: true, force: true }); });
 
 const openShell = async (page: Page) => {
   const toggle = page.getByRole("group", { name: "Overview view" });
@@ -51,7 +75,7 @@ test("keyboard drive: rows, log, inspector, approve, preview and run, remembered
   const shell = await openShell(page);
   const top = shell.getByLabel("Top panel");
   await expect(top).toContainText(`${A} ▮▮▯▯ 62%`);
-  await expect(top).toContainText(`${B} ▯▯▯▯ unknown`);
+  await expect(top).toContainText(`${B} unknown`);
   await expect(top).toContainText("1 need you");
 
   const list = shell.getByRole("region", { name: "Process list" });
@@ -63,8 +87,7 @@ test("keyboard drive: rows, log, inspector, approve, preview and run, remembered
   await expect(rowOf(page, ids.running)).toContainText("RUNNING");
   await expect(rowOf(page, ids.running)).toContainText(A);
   await expect(rowOf(page, ids.waiting)).toContainText("WAITING");
-  // MODEL is the run's resolved model as the provider reported it. The composer is off, so there is
-  // no budget read and TOKENS says unknown rather than 0.
+  // MODEL is the resolved model. Repo-less runs have no composition accounting, so TOKENS is unknown.
   await expect(rowOf(page, ids.running)).toContainText("fake-1");
   await expect(rowOf(page, ids.running)).toContainText("unknown");
 
@@ -100,7 +123,7 @@ test("keyboard drive: rows, log, inspector, approve, preview and run, remembered
 
   // Keys do not fire from the command line; Esc leaves it.
   await page.keyboard.press("/");
-  const cmd = shell.getByRole("textbox", { name: "agentic-os$" });
+  const cmd = shell.getByRole("textbox", { name: /agentic-os \[.*\]\$/ });
   await expect(cmd).toBeFocused();
   await page.keyboard.type("jk fix the flaky schedule-queue test");
   await expect(cmd).toHaveValue("jk fix the flaky schedule-queue test");
@@ -160,12 +183,68 @@ for (const scheme of ["light", "dark"] as const) test(`follows the ${scheme} sys
   const shell = await openShell(page);
   await expect(rowOf(page, ids.running)).toContainText(A);
   await expect(shell.getByRole("region", { name: "Event log" })).toContainText("approval.requested");
+  expect(await page.locator("body").evaluate(el => getComputedStyle(el).backgroundColor)).toBe(scheme === "light" ? "rgb(251, 251, 248)" : "rgb(4, 6, 16)");
   const bg = await shell.evaluate(el => getComputedStyle(el).backgroundColor);
   expect(bg).toBe(scheme === "light" ? "rgb(251, 251, 248)" : "rgb(7, 11, 22)");
   for (const width of [1280, 390]) {
     await page.setViewportSize({ width, height: 860 });
-    await expect(shell.getByRole("textbox", { name: "agentic-os$" })).toBeInViewport();
+    await expect(shell.getByRole("textbox", { name: /agentic-os \[.*\]\$/ })).toBeInViewport();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await page.screenshot({ path: info.outputPath(`shell-${scheme}-${width}.png`), fullPage: true });
   }
+});
+
+
+test("repository preview binds a composed run and cap; changing repository invalidates it", async ({ context }) => {
+  const page = await h.openApp(context);
+  const shell = await openShell(page);
+  const picker = shell.getByRole("combobox", { name: "Repository", exact: true });
+  const cmd = shell.getByRole("textbox", { name: /agentic-os/ });
+  await expect(cmd).toHaveAccessibleName("agentic-os [no repo: route only]$");
+  await picker.selectOption(repo);
+  await expect(cmd).toHaveAccessibleName("agentic-os [ai-control-plan]$");
+  await page.reload();
+  await expect(picker).toHaveValue(repo);
+  await cmd.fill("Inspect the scratch repository");
+  await cmd.press("Tab");
+  const composition = shell.getByRole("region", { name: "Composition preview" });
+  await expect(composition).toContainText("Composed.");
+  await expect(composition.locator(".comp-stage")).toHaveCount(6);
+  await expect(composition).toContainText("50,000");
+  const created = h.built.tasks.list().find(t => t.goal === "Inspect the scratch repository")!;
+  const api = await h.privileged();
+  const preview = await (await api.post(`/api/tasks/${created.id}/compose`, { data: {} })).json();
+  await cmd.press("Enter");
+  await expect(shell.locator(".sv-status")).toContainText(`started ${created.id}`);
+  const detail = await (await api.get(`/api/tasks/${created.id}`)).json();
+  expect(detail.repo_path).toBe(repo);
+  expect(detail.runs).toHaveLength(1);
+  const budget = await (await api.get(`/api/tasks/${created.id}/composition/budget`)).json();
+  expect(budget.latestRevision.caps.max_tokens).toBe(50_000);
+  const history = await (await api.get(`/api/tasks/${created.id}/composition`)).json();
+  expect(history.attempts.at(-1).compositionDigest).toBe(preview.compositionDigest);
+  await cmd.fill("A new preview");
+  await cmd.press("Tab");
+  await expect(composition).toBeVisible();
+  await picker.selectOption("");
+  await expect(composition).toHaveCount(0);
+  await cmd.press("Tab");
+  await expect(shell.getByLabel("Route preview")).toBeVisible();
+  const routeOnly = h.built.tasks.list().filter(t => t.goal === "A new preview");
+  expect(routeOnly).toHaveLength(2);
+  expect(routeOnly.filter(t => t.repo_path === repo)).toHaveLength(1);
+  await api.dispose();
+});
+
+test("Mission mode alias retains the legacy shell route", async ({ context }, info) => {
+  const page = await h.openApp(context);
+  await page.getByRole("banner").getByRole("link", { name: "Mission mode", exact: true }).click();
+  await expect(page).toHaveURL(/#\/shell$/);
+  await page.evaluate(() => { location.hash = "/mission"; });
+  await expect(page).toHaveURL(/#\/mission$/);
+  await expect(page.getByRole("region", { name: "Mission workspace" })).toBeVisible();
+  await page.screenshot({ path: info.outputPath("mission-mode.png"), fullPage: true });
+  await page.evaluate(() => { location.hash = "/shell"; });
+  await expect(page.getByRole("region", { name: "Mission workspace" })).toBeVisible();
+  await expect(page).toHaveTitle("Mission · Agentic OS");
 });

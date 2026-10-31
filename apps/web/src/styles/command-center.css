@@ -219,3 +219,10 @@
   .inspector-summary h2 { font-size: 20px; }
   .inspector-summary .state-reason { margin-block: 6px 10px; }
 }
+
+/* Overview Shell chrome shares the system tokens; application surfaces retain their own styling. */
+:root.shell-overview .os-environment { background: linear-gradient(150deg, var(--bg-1), var(--bg-0) 65%); }
+:root.shell-overview .os-rail { background: var(--bg-1); }
+:root.shell-overview .os-nav[aria-current="page"] { color: var(--accent); background: var(--surface-2); border-color: var(--line-strong); box-shadow: none; }
+:root.shell-overview .os-nav[aria-current="page"] svg { color: var(--accent); filter: none; }
+:root.shell-overview .os-health { background: var(--surface-2); }

@@ -162,3 +162,11 @@
   .sv-hint { display: none; }
   .sv-procs td, .sv-procs th button { padding-inline: 6px; }
 }
+
+.sv-repository { display: flex; flex-wrap: wrap; gap: 4px 8px; min-width: 0; }
+.sv-repository select { background: var(--sv-panel); border: 1px solid var(--sv-line); max-width: min(320px, 100%); min-width: 0; }
+.sv-preview-pane { flex: 0 1 auto; max-height: 40vh; overflow: auto; background: var(--sv-panel); }
+.sv-preview-pane section { padding: 8px 12px; }
+.sv-cmd { flex-wrap: wrap; }
+.sv-cmd label { overflow-wrap: anywhere; max-width: 100%; }
+.sv-cmd input { flex-basis: 12ch; }

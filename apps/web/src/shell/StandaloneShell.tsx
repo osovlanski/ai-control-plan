@@ -40,9 +40,9 @@ export function StandaloneShell({ active, taskId }: { active: boolean; taskId?: 
         </a>)}
       </nav>
     </aside>
-    <section className="shell-workspace" aria-label="Shell workspace">
+    <section className="shell-workspace" aria-label="Mission workspace">
       <div hidden={!!taskId} className="shell-new-mission">
-        <div className="shell-welcome"><span className="eyebrow">Agentic OS · Shell</span><h1>What are we working on?</h1>
+        <div className="shell-welcome"><span className="eyebrow">Agentic OS · Mission</span><h1>What are we working on?</h1>
           <p>Set a goal. Inspect the route. Follow the work here.</p></div>
         <div className="shell-dock"><NewTask onPreviewed={refresh} onStarted={id => { refresh(); window.location.hash = destination(id); }} /></div>
       </div>
