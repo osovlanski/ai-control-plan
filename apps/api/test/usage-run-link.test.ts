@@ -5,11 +5,13 @@
  * max(in-run, records), so in-run counted usage is reconciled, never summed, and with in-run
  * accounting `none` the records are the source. Every value is FAKE.
  */
-import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { AssistantId } from "@agent-plane/core";
+import { ClaudeAdapter } from "@agent-plane/adapters";
 import { migrate } from "../src/db/index.js";
 import { UsageLedger } from "../src/modules/usage.js";
 import { bootRig, type Rig } from "./helpers/composer-cockpit.js";
@@ -19,9 +21,10 @@ let rig: Rig | undefined;
 afterEach(async () => {
   await rig?.close();
   rig = undefined;
+  vi.unstubAllEnvs();
 });
 
-interface RunBudget { runId: string; tokens: number; source: string; inRunTokens: number; recordTokens: number; recordCount: number; accounting: string }
+interface RunBudget { runId: string; tokens: number; source: string; inRunTokens: number; recordTokens: number; recordCount: number; accounting: string; cost: { method: string; usd?: number; basis?: string } }
 interface Budget { consumed: { tokens: number; recordCount: number }; runs: RunBudget[]; overruns: Array<{ source: string; amount: number }> }
 
 async function budget(taskId: string): Promise<Budget> {
@@ -118,7 +121,7 @@ describe("imported usage joins its run by sessionRef", () => {
     expect(await post(imported(a.sessionRef, "FAKE-msg-x", 10, 10, { runId: a.runId }))).toMatchObject({ status: 201, body: { link: "body", record: { runId: a.runId } } });
   });
 
-  it("leaves a record unbound when no run or several runs have its session, and says which", async () => {
+  it("leaves a record unbound when no run has its session, or several do and none holds it, and says which", async () => {
     rig = await bootRig();
     const { taskId, runId, sessionRef } = await composedRun();
     expect(await post(imported("FAKE-session-elsewhere", "FAKE-msg-u", 5, 5))).toMatchObject({ status: 201, body: { link: "unmatched", record: { runId: null } } });
@@ -128,7 +131,8 @@ describe("imported usage joins its run by sessionRef", () => {
       `INSERT INTO runs (id, task_id, assistant_id, provider_session_ref, state, started_at)
        SELECT 'RUN-FAKE-second', task_id, assistant_id, provider_session_ref, 'COMPLETED', '2030-01-01T01:00:00.000Z' FROM runs WHERE id = ?`,
     ).run(runId);
-    expect(await post(imported(sessionRef, "FAKE-msg-amb", 5, 5))).toMatchObject({ status: 201, body: { link: "ambiguous", record: { runId: null } } });
+    // Neither run's window holds the record (the first ended before it, the second starts after it).
+    expect(await post(imported(sessionRef, "FAKE-msg-amb", 5, 5))).toMatchObject({ status: 201, body: { link: "outside_windows", record: { runId: null } } });
     expect((await budget(taskId)).consumed.recordCount).toBe(0);
   });
 
@@ -253,5 +257,105 @@ describe("migration 036", () => {
       db.close();
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+/** Pins a run's window, so a test can place records inside, between and across runs' windows. */
+function windowRun(runId: string, startedAt: string, endedAt: string | null) {
+  rig!.db.prepare("UPDATE runs SET started_at = ?, ended_at = ? WHERE id = ?").run(startedAt, endedAt, runId);
+}
+
+describe("a provider session that spans runs binds each record by its run's window", () => {
+  const SESSION = "FAKE-session-resumed-not-real";
+
+  /** A composed fake run reporting SESSION from run.started (in-run cumulative 1200 + 450). */
+  async function sessionRun(): Promise<{ taskId: string; runId: string }> {
+    const taskId = rig!.built.tasks.create({ goal: `Add a typed helper to the parser module [FAKE:LATE_SESSION:${SESSION}]`, repoPath: rig!.repo }).taskId;
+    const res = await rig!.built.app.inject({ method: "POST", url: `/api/tasks/${taskId}/start`, headers: rig!.auth(), payload: {} });
+    expect(res.statusCode).toBe(200);
+    expect(await rig!.built.orchestrator.waitForSettled(taskId)).toBe("COMPLETED");
+    return { taskId, runId: (res.json() as { runId: string }).runId };
+  }
+
+  it("binds records in each window to that run, leaves one between or inside two unbound, and a replay changes nothing", async () => {
+    rig = await bootRig({ budget: { maxTokens: 100_000 } });
+    const a = await sessionRun();
+    const b = await sessionRun();
+    windowRun(a.runId, "2030-01-01T00:00:00.000Z", "2030-01-01T00:10:00.000Z");
+    windowRun(b.runId, "2030-01-01T01:00:00.000Z", "2030-01-01T01:10:00.000Z");
+    const at = (observedAt: string) => ({ observedAt });
+
+    expect(await post(imported(SESSION, "FAKE-msg-a1", 1500, 0, at("2030-01-01T00:00:00.000Z")))).toMatchObject({ status: 201, body: { link: "session_ref", record: { runId: a.runId } } });
+    expect(await post(imported(SESSION, "FAKE-msg-a2", 400, 100, at("2030-01-01T00:10:00.000Z")))).toMatchObject({ status: 201, body: { link: "session_ref", record: { runId: a.runId } } });
+    expect(await post(imported(SESSION, "FAKE-msg-b1", 300, 100, at("2030-01-01T01:05:00.000Z")))).toMatchObject({ status: 201, body: { link: "session_ref", record: { runId: b.runId } } });
+    expect(await post(imported(SESSION, "FAKE-msg-gap", 9000, 0, at("2030-01-01T00:30:00.000Z")))).toMatchObject({ status: 201, body: { link: "outside_windows", record: { runId: null } } });
+
+    // Each run counts only its own records, under max(in-run 1650, records), never the sum.
+    const settled = async () => [(await budget(a.taskId)).runs, (await budget(b.taskId)).runs];
+    const [ra, rb] = await settled();
+    expect(ra).toEqual([expect.objectContaining({ runId: a.runId, tokens: 2000, source: "records", inRunTokens: 1650, recordTokens: 2000, recordCount: 2 })]);
+    expect(rb).toEqual([expect.objectContaining({ runId: b.runId, tokens: 1650, source: "in_run", inRunTokens: 1650, recordTokens: 400, recordCount: 1 })]);
+
+    // Replays, the backfill and a session-ref write change nothing: binding is write-once, the gap stays unbound.
+    const before = JSON.stringify([stored(), await settled()]);
+    for (const [id, tin, tout, when] of [["FAKE-msg-a1", 1500, 0, "00:00"], ["FAKE-msg-a2", 400, 100, "00:10"], ["FAKE-msg-b1", 300, 100, "01:05"], ["FAKE-msg-gap", 9000, 0, "00:30"]] as const) {
+      expect((await post(imported(SESSION, id, tin, tout, at(`2030-01-01T${when}:00.000Z`)))).body).toMatchObject({ replayed: true });
+    }
+    const ledger = new UsageLedger(rig.db);
+    expect(ledger.backfillRunLinks()).toEqual({ linked: [], unmatched: 1, ambiguous: 0 });
+    expect(ledger.linkRun(a.runId) + ledger.linkRun(b.runId)).toBe(0);
+    expect(JSON.stringify([stored(), await settled()])).toBe(before);
+
+    // Overlapping windows (a run never closed) hold a record twice: it is never split, so it stays unbound.
+    windowRun(a.runId, "2030-01-01T00:00:00.000Z", null);
+    expect(await post(imported(SESSION, "FAKE-msg-both", 5, 5, at("2030-01-01T01:07:00.000Z")))).toMatchObject({ status: 201, body: { link: "ambiguous", record: { runId: null } } });
+    // Already-bound records keep their run.
+    expect(stored()).toContainEqual({ event_id: "FAKE-msg-b1", run_id: b.runId, run_link: "session_ref" });
+  });
+
+  it("settles cost per run under max(in-run, records), with cost.basis naming the winner", async () => {
+    // The real ClaudeAdapter over a replay of the redacted fixture: every run reports session
+    // FAKE-claude-session-not-real-0001 and a measured in-run $0.225 for 8 + 12,406 + 1,334 tokens.
+    const fixture = JSON.parse(readFileSync(join(import.meta.dirname, "../../../packages/adapters/test/fixtures/claude-result-run.json"), "utf8")) as { messages: Array<Record<string, unknown>> };
+    const replay = ((params: { options?: { plugins?: Array<{ path: string }>; allowedTools?: string[] } }) => (async function* () {
+      const pluginDir = params.options?.plugins?.[0]?.path;
+      const optedIn = (params.options?.allowedTools ?? []).map((rule) => rule.replace(/\(.*$/, ""));
+      const skills = pluginDir ? readdirSync(join(pluginDir, "skills")).map((s) => `agent-plane-profile:${s}`) : [];
+      for (const m of fixture.messages) {
+        yield (m.type === "system" ? { ...m, tools: [...(m.tools as string[]), ...optedIn], skills, plugins: pluginDir ? [{ name: "agent-plane-profile", path: pluginDir }] : [] } : m) as never;
+      }
+    })()) as unknown as NonNullable<ConstructorParameters<typeof ClaudeAdapter>[1]>;
+    vi.stubEnv("ANTHROPIC_API_KEY", "FAKE-anthropic-key-not-real-window");
+    rig = await bootRig({ assistants: { claude: { provider: "anthropic", accountKind: "api" } }, budget: { maxTokens: 1_000_000 } });
+    (rig.built.registry as unknown as { adapters: Map<string, unknown> }).adapters.set("claude", new ClaudeAdapter("claude" as AssistantId, replay));
+    await rig.built.registry.syncAll();
+    const claudeRun = async () => {
+      const taskId = rig!.built.tasks.create({ goal: "Add a typed helper to the parser module", repoPath: rig!.repo }).taskId;
+      const res = await rig!.built.app.inject({ method: "POST", url: `/api/tasks/${taskId}/start`, headers: rig!.auth(), payload: {} });
+      expect(res.statusCode, res.body).toBe(200);
+      expect(await rig!.built.orchestrator.waitForSettled(taskId)).toBe("COMPLETED");
+      return { taskId, runId: (res.json() as { runId: string }).runId };
+    };
+    const a = await claudeRun();
+    const b = await claudeRun();
+    const session = "FAKE-claude-session-not-real-0001";
+    expect(rig.db.prepare("SELECT provider_session_ref AS ref FROM runs WHERE id IN (?, ?)").all(a.runId, b.runId)).toEqual([{ ref: session }, { ref: session }]);
+    windowRun(a.runId, "2030-01-01T00:00:00.000Z", "2030-01-01T00:10:00.000Z");
+    windowRun(b.runId, "2030-01-01T01:00:00.000Z", "2030-01-01T01:10:00.000Z");
+    const claudeRecord = (eventId: string, tokensIn: number, costUsd: number, observedAt: string) => ({
+      ...imported(session, eventId, tokensIn, 0, { observedAt }), provider: "anthropic", model: "claude-sonnet-4-5", costUsd,
+    });
+
+    // Run A's records outweigh its in-run figure on both tokens and cost; run B's do not.
+    expect((await post(claudeRecord("FAKE-msg-ca1", 12_000, 0.25, "2030-01-01T00:02:00.000Z"))).body.record?.runId).toBe(a.runId);
+    expect((await post(claudeRecord("FAKE-msg-ca2", 8_000, 0.15, "2030-01-01T00:08:00.000Z"))).body.record?.runId).toBe(a.runId);
+    expect((await post(claudeRecord("FAKE-msg-cb1", 100, 0.01, "2030-01-01T01:02:00.000Z"))).body.record?.runId).toBe(b.runId);
+    expect((await post(claudeRecord("FAKE-msg-cgap", 50_000, 5, "2030-01-01T00:40:00.000Z"))).body.link).toBe("outside_windows");
+
+    const COUNTED = 8 + 12_406 + 1_334;
+    const ba = await budget(a.taskId);
+    const bb = await budget(b.taskId);
+    expect(ba.runs).toEqual([expect.objectContaining({ tokens: 20_000, source: "records", recordCount: 2, cost: { method: "measured", usd: 0.4, basis: "records" } })]);
+    expect(bb.runs).toEqual([expect.objectContaining({ tokens: COUNTED, source: "in_run", recordCount: 1, cost: { method: "measured", usd: 0.225, basis: "in_run" } })]);
   });
 });
