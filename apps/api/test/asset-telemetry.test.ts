@@ -130,7 +130,7 @@ describe("asset_usage projection at settle", () => {
     expect(rowsOf(sessionId)).toHaveLength(2);
   });
 
-  it("a session released by POST /restart is projected as neutral, not failed", async () => {
+  it("a session released by POST /restart is projected as neutral, not failed; boot recovery afterwards writes no second row", async () => {
     rig = await bootRig({ configure: (config) => { config.policy.approvalMode = "prompt-on-escalation"; } });
     const orchestrator = rig.built.orchestrator;
     orchestrator.assetTelemetry = undefined; // the pre-crash process never projected it
@@ -164,6 +164,32 @@ describe("asset_usage projection at settle", () => {
       ["skill", 1, "runtime_confirmed", "neutral"],
       ["fragment", 1, "files_verified", "neutral"],
     ]);
+
+    // Two call sites, one session: the /restart release projected it; boot recovery now sees it too.
+    const ledger = ledgerOf(sessionId);
+    await orchestrator.shutdown(); // the restarted run is held on its approval; a reboot drains it
+    await orchestrator.reconcileOnBoot();
+    expect(rowsOf(sessionId)).toEqual(rows);
+    expect(ledgerOf(sessionId)).toEqual(ledger);
+    expect(rig.db.prepare("SELECT event_id, COUNT(*) AS n FROM asset_usage WHERE session_id = ? GROUP BY event_id HAVING n > 1").all(sessionId)).toEqual([]);
+    expect((rig.db.prepare("SELECT COUNT(*) AS n FROM asset_usage_sessions WHERE session_id = ?").get(sessionId) as { n: number }).n).toBe(1);
+  });
+
+  it("parallel settle: each composed compare candidate is projected from the parallel settle path", async () => {
+    rig = await bootRig({ assistants: { "fake-a": { provider: "fake" }, "fake-b": { provider: "fake", options: { harness: "codex" } } } });
+    const taskId = rig.built.tasks.create({ goal: GOAL, repoPath: rig.repo }).taskId;
+    const res = await rig.built.app.inject({ method: "POST", url: `/api/tasks/${taskId}/parallel`, headers: rig.auth(), payload: { assistants: ["fake-a", "fake-b"], mode: "compare" } });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(await rig.built.orchestrator.waitForSettled(taskId)).toBe("WAITING_INPUT");
+    const sessions = rig.db.prepare("SELECT id, assistant_id, composition_revision_id AS rev FROM runs WHERE task_id = ? ORDER BY assistant_id").all(taskId) as Array<{ id: string; assistant_id: string; rev: string | null }>;
+    expect(sessions).toHaveLength(2);
+    for (const s of sessions) {
+      expect(s.rev).toBeTruthy();
+      expect(ledgerOf(s.id)).toMatchObject({ composition_revision_id: s.rev });
+      expect(rowsOf(s.id).length).toBeGreaterThan(0);
+    }
+    expect(rowsOf(sessions[0]!.id).every((r) => r.harness === "claude-code" && r.session_outcome === "success")).toBe(true);
+    expect(rowsOf(sessions[1]!.id).every((r) => r.harness === "codex" && r.session_outcome === "success")).toBe(true);
   });
 
   it("no FAKE value reaches the new tables", async () => {
