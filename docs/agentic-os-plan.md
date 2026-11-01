@@ -302,9 +302,14 @@ Assistant Catalog UI can show "what this environment has installed" from real da
 the opaque `provider` bag. Workspace policy defines a maximum cache age; stale data is visible
 in CompositionDecision and may block high-risk runs.
 
-The reverse edge closes the learning loop: after each run the control plane POSTs per-asset
-usage back as idempotent events (`eventId`, asset ID + digest, attached, invocation count,
-observed outcome and attribution method). Cockpit stores operational usage separately from the
+The reverse edge closes the learning loop: after each run the control plane records per-asset
+usage as idempotent events (`eventId`, asset ID + digest, attached, validated, invocation count,
+observed outcome and attribution method), and **cockpit pulls them** from the plane's feed
+(`GET /api/composition/asset-usage?after=&limit=`, `telemetry.read`, API 2.7; wire in
+[`docs/contracts/asset-usage-v1.md`](contracts/asset-usage-v1.md)). Pull, not a POST to cockpit
+(M6 Q2): cockpit already holds the plane's credential for the M11 usage import, the plane needs
+no token for cockpit and no outbox, and a cockpit that is down loses nothing because the feed is
+append-only and cursor-paged. Cockpit stores operational usage separately from the
 lineage ledger and joins by asset ID + digest; an event naming a digest that is no longer
 installed is stored and displayed as such rather than quarantined. Attachment, invocation and
 causal value remain distinct; telemetry must not claim that an attached asset caused success.

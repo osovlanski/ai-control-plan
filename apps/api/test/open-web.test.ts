@@ -7,7 +7,7 @@ import { EventEmitter } from "node:events";
 import { spawn } from "node:child_process";
 import type * as ChildProcessModule from "node:child_process";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { OBSERVABILITY_CAPABILITIES } from "@agent-plane/core";
+import { COMMAND_CAPABILITIES, INGEST_CAPABILITIES, OBSERVABILITY_CAPABILITIES } from "@agent-plane/core";
 import { loadConfig, type ResolvedConfig } from "../src/config.js";
 import { parseBootstrapToken } from "../src/auth/bootstrap-token.js";
 import { atomicWriteCredential, credentialPath, readCredential } from "../src/auth/credential-file.js";
@@ -267,6 +267,40 @@ describe("open-web launcher", () => {
       const cookie = String(response.headers["set-cookie"]).split(";")[0]!;
       expect((await built.app.inject({ url: "/api/workspace", headers: { cookie, origin: "http://127.0.0.1:4176" } })).statusCode).toBe(200);
       expect((await built.app.inject({ method: "POST", url: "/api/tasks", headers: { cookie, origin: "http://127.0.0.1:4176" }, payload: { goal: "forbidden" } })).statusCode).toBe(403);
+    } finally {
+      await built.app.close();
+      db.close();
+    }
+  });
+
+  it("a credential minted before 2.7 still opens the UI; its session gets 403 on the asset usage feed until rotated", async () => {
+    const pre27 = [...OBSERVABILITY_CAPABILITIES.filter((c) => c !== "telemetry.read"), ...COMMAND_CAPABILITIES, ...INGEST_CAPABILITIES];
+    const db = openDb(config.dbPath);
+    const built = buildServer({ config, db });
+    // A rotation mints a new kid; the plane's credential cache is keyed by kid.
+    const rotate = (capabilities: string[]) => {
+      const file = readCredential(credentialPath(config.dir));
+      const last = file.secrets.at(-1)!;
+      file.secrets.push({ ...last, kid: `${last.kid}r${file.secrets.length}`, secret: `${last.secret}r${file.secrets.length}`, capabilities });
+      atomicWriteCredential(credentialPath(config.dir), file);
+    };
+    const session = async (capabilities: string[]) => {
+      rotate(capabilities);
+      const listener = await start();
+      const page = await get(listener.origin);
+      await listener.closed;
+      const token = encodedToken(page.html);
+      const response = await built.app.inject({ method: "POST", url: "/api/auth/bootstrap", headers: { origin: listener.origin, "content-type": "application/x-www-form-urlencoded" }, payload: new URLSearchParams({ token }).toString() });
+      expect(response.statusCode).toBe(303);
+      const headers = { cookie: String(response.headers["set-cookie"]).split(";")[0]!, origin: "http://127.0.0.1:4176" };
+      return {
+        ui: (await built.app.inject({ url: "/api/workspace", headers })).statusCode,
+        feed: (await built.app.inject({ url: "/api/composition/asset-usage", headers })).statusCode,
+      };
+    };
+    try {
+      expect(await session(pre27)).toEqual({ ui: 200, feed: 403 });
+      expect(await session([...pre27, "telemetry.read"])).toEqual({ ui: 200, feed: 200 });
     } finally {
       await built.app.close();
       db.close();
