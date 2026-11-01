@@ -7,11 +7,11 @@
  * Linking (phase 7 "one deduped usage stream"). Cockpit sends `runId: null` by design, so a record
  * with a `sessionRef` and no `runId` is bound to the one run whose assistant has the record's
  * provider and whose `provider_session_ref` is that `sessionRef`. Zero candidates (the session is not
- * a plane run, or not yet) leave it unbound (`unmatched`). Several (a resumed or continued provider
- * session spans runs) are told apart by time: the record binds to the one run whose window
- * [started_at, ended_at] holds its `observedAt` (a run not yet ended has no end). A record outside
- * every window (`outside_windows`) or inside two (`ambiguous`) stays unbound; one record is never
- * split across runs. Cockpit's records are per-message deltas stamped with the transcript line's
+ * a plane run, or not yet) leave it unbound (`unmatched`). Otherwise every candidate, one or several
+ * (a resumed or continued provider session spans runs), is tested by time: the record binds to the
+ * one run whose window [started_at, ended_at] holds its `observedAt` (a run not yet ended has no
+ * end). A record outside every window (`outside_windows`) or inside two (`ambiguous`) stays unbound;
+ * one record is never split across runs. Cockpit's records are per-message deltas stamped with the transcript line's
  * instant, so one record is one moment. A body `runId`
  * that is not among the session's runs is a `run_conflict`, never stored. `backfillRunLinks`
  * applies the same rule to records already stored unbound, and is idempotent. A record that arrives
@@ -86,7 +86,7 @@ export function validateUsageRecord(body: unknown): ContractResult<UsageRecord> 
 
 /**
  * How a record stands against runs: bound from the body or by `sessionRef`; unbound because no
- * run has its session (`unmatched`), or its session has several runs and no window holds it
+ * run has its session (`unmatched`), or no window of its session's runs holds it
  * (`outside_windows`) or two do (`ambiguous`); or `none`, a record with neither runId nor sessionRef.
  */
 export type RunLink = "body" | "session_ref" | "unmatched" | "outside_windows" | "ambiguous" | "none";
@@ -150,7 +150,7 @@ export class UsageLedger {
   /** The run a runId-less record of this session binds to, by the rule in the header; null with the reason when none. */
   private resolve(provider: string, sessionRef: string, observedAt: string): { runId: string | null; link: RunLink } {
     const runs = this.sessionWindows(provider, sessionRef);
-    if (runs.length <= 1) return runs[0] ? { runId: runs[0].id, link: "session_ref" } : { runId: null, link: "unmatched" };
+    if (!runs.length) return { runId: null, link: "unmatched" };
     const at = Date.parse(observedAt);
     const holding = runs.filter((r) => Date.parse(r.started_at) <= at && (r.ended_at === null || at <= Date.parse(r.ended_at)));
     if (holding.length === 1) return { runId: holding[0]!.id, link: "session_ref" };
@@ -194,7 +194,8 @@ export class UsageLedger {
 
   /**
    * Binds every stored record that has a sessionRef and no run, by the ingestion rule. Idempotent:
-   * a bound record is never revisited, and one still unmatched or ambiguous is counted again.
+   * a bound record is never revisited, and one still unbound is counted again (`outside_windows` under
+   * `unmatched`).
    */
   backfillRunLinks(): BackfillResult {
     return this.db.transaction((): BackfillResult => {

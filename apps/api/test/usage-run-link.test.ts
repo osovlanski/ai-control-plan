@@ -33,7 +33,11 @@ async function budget(taskId: string): Promise<Budget> {
   return res.json() as Budget;
 }
 
-/** A composed fake run that completes with in-run cumulative usage 1200 + 450. */
+/** The window every composedRun is pinned to; `imported`'s default observedAt (00:05) is inside it. */
+const RUN_START = "2030-01-01T00:00:00.000Z";
+const RUN_END = "2030-01-01T00:10:00.000Z";
+
+/** A composed fake run that completes with in-run cumulative usage 1200 + 450, its window pinned to [RUN_START, RUN_END]. */
 async function composedRun(): Promise<{ taskId: string; runId: string; sessionRef: string }> {
   const taskId = rig!.built.tasks.create({ goal: "Add a typed helper to the parser module", repoPath: rig!.repo }).taskId;
   const res = await rig!.built.app.inject({ method: "POST", url: `/api/tasks/${taskId}/start`, headers: rig!.auth(), payload: {} });
@@ -42,6 +46,7 @@ async function composedRun(): Promise<{ taskId: string; runId: string; sessionRe
   expect(await rig!.built.orchestrator.waitForSettled(taskId)).toBe("COMPLETED");
   const { provider_session_ref } = rig!.db.prepare("SELECT provider_session_ref FROM runs WHERE id = ?").get(runId) as { provider_session_ref: string };
   expect(provider_session_ref).toMatch(/^fake-session-/);
+  windowRun(runId, RUN_START, RUN_END);
   return { taskId, runId, sessionRef: provider_session_ref };
 }
 
@@ -132,7 +137,7 @@ describe("imported usage joins its run by sessionRef", () => {
        SELECT 'RUN-FAKE-second', task_id, assistant_id, provider_session_ref, 'COMPLETED', '2030-01-01T01:00:00.000Z' FROM runs WHERE id = ?`,
     ).run(runId);
     // Neither run's window holds the record (the first ended before it, the second starts after it).
-    expect(await post(imported(sessionRef, "FAKE-msg-amb", 5, 5))).toMatchObject({ status: 201, body: { link: "outside_windows", record: { runId: null } } });
+    expect(await post(imported(sessionRef, "FAKE-msg-amb", 5, 5, { observedAt: "2030-01-01T00:30:00.000Z" }))).toMatchObject({ status: 201, body: { link: "outside_windows", record: { runId: null } } });
     expect((await budget(taskId)).consumed.recordCount).toBe(0);
   });
 
@@ -213,8 +218,9 @@ describe("imported usage joins its run by sessionRef", () => {
     expect(rig.db.prepare("SELECT provider_session_ref FROM runs WHERE id = ?").get(runId)).toEqual({ provider_session_ref: sessionRef });
     expect(stored()).toEqual([{ event_id: "FAKE-msg-late-first", run_id: runId, run_link: "session_ref" }]);
     expect((await budget(taskId)).runs[0]).toMatchObject({ runId, tokens: 2000, source: "records", recordCount: 1 });
-    // A record imported after the run also binds at once.
-    expect(await post(imported(sessionRef, "FAKE-msg-late-after", 10, 0))).toMatchObject({ status: 201, body: { record: { runId } } });
+    // A record imported after the run, stamped inside its window, also binds at once.
+    const { started_at } = rig.db.prepare("SELECT started_at FROM runs WHERE id = ?").get(runId) as { started_at: string };
+    expect(await post(imported(sessionRef, "FAKE-msg-late-after", 10, 0, { observedAt: started_at }))).toMatchObject({ status: 201, body: { record: { runId } } });
   });
 
   it("keeps records immutable except the one NULL-to-run step", async () => {
@@ -264,6 +270,68 @@ describe("migration 036", () => {
 function windowRun(runId: string, startedAt: string, endedAt: string | null) {
   rig!.db.prepare("UPDATE runs SET started_at = ?, ended_at = ? WHERE id = ?").run(startedAt, endedAt, runId);
 }
+
+describe("a single-run session binds only inside its run's window", () => {
+  it("binds a record inside the lone run's window, leaves one after its end outside_windows, and binds that one to a later run that holds it", async () => {
+    rig = await bootRig({ budget: { maxTokens: 100_000 } });
+    const { taskId, runId, sessionRef } = await composedRun();
+    inRunNone(runId);
+    const at = (observedAt: string) => ({ observedAt });
+
+    expect(await post(imported(sessionRef, "FAKE-msg-in", 100, 0, at("2030-01-01T00:05:00.000Z")))).toMatchObject({ status: 201, body: { link: "session_ref", record: { runId } } });
+    // Ends are inclusive.
+    expect(await post(imported(sessionRef, "FAKE-msg-end", 10, 0, at(RUN_END)))).toMatchObject({ status: 201, body: { link: "session_ref", record: { runId } } });
+    // After the only run ended (a session resumed by hand outside the plane): no window holds it.
+    expect(await post(imported(sessionRef, "FAKE-msg-after", 7000, 0, at("2030-01-01T00:30:00.000Z")))).toMatchObject({ status: 201, body: { link: "outside_windows", record: { runId: null } } });
+    // Before it started, too.
+    expect(await post(imported(sessionRef, "FAKE-msg-before", 5, 0, at("2029-12-31T23:59:59.999Z")))).toMatchObject({ status: 201, body: { link: "outside_windows", record: { runId: null } } });
+    expect((await budget(taskId)).runs[0]).toMatchObject({ runId, tokens: 110, source: "records", recordCount: 2 });
+
+    // Replays, the backfill and the run's own linkRun change nothing.
+    const ledger = new UsageLedger(rig.db);
+    const before = JSON.stringify(stored());
+    expect((await post(imported(sessionRef, "FAKE-msg-after", 7000, 0, at("2030-01-01T00:30:00.000Z")))).body).toMatchObject({ replayed: true, link: "outside_windows", record: { runId: null } });
+    expect((await post(imported(sessionRef, "FAKE-msg-in", 100, 0, at("2030-01-01T00:05:00.000Z")))).body).toMatchObject({ replayed: true, link: "session_ref", record: { runId } });
+    expect(ledger.backfillRunLinks()).toEqual({ linked: [], unmatched: 2, ambiguous: 0 });
+    expect(ledger.linkRun(runId)).toBe(0);
+    expect(JSON.stringify(stored())).toBe(before);
+
+    // A second run of the session, whose window holds the late record, stores the session: the late record binds to it.
+    rig.db.prepare(
+      `INSERT INTO runs (id, task_id, assistant_id, state, started_at, ended_at)
+       SELECT 'RUN-FAKE-resumed', task_id, assistant_id, 'COMPLETED', '2030-01-01T00:20:00.000Z', '2030-01-01T00:40:00.000Z' FROM runs WHERE id = ?`,
+    ).run(runId);
+    rig.db.prepare("UPDATE runs SET provider_session_ref = ? WHERE id = 'RUN-FAKE-resumed'").run(sessionRef);
+    expect(ledger.linkRun("RUN-FAKE-resumed")).toBe(1);
+    expect(stored()).toEqual([
+      { event_id: "FAKE-msg-in", run_id: runId, run_link: "session_ref" },
+      { event_id: "FAKE-msg-end", run_id: runId, run_link: "session_ref" },
+      { event_id: "FAKE-msg-after", run_id: "RUN-FAKE-resumed", run_link: "session_ref" },
+      { event_id: "FAKE-msg-before", run_id: null, run_link: null },
+    ]);
+    // The first run's records never moved, and its figure is unchanged.
+    expect((await budget(taskId)).runs[0]).toMatchObject({ runId, tokens: 110, recordCount: 2 });
+    // Replay and backfill after the bind change nothing.
+    const bound = JSON.stringify(stored());
+    expect((await post(imported(sessionRef, "FAKE-msg-after", 7000, 0, at("2030-01-01T00:30:00.000Z")))).body).toMatchObject({ replayed: true, link: "session_ref", record: { runId: "RUN-FAKE-resumed" } });
+    expect(ledger.backfillRunLinks()).toEqual({ linked: [], unmatched: 1, ambiguous: 0 });
+    expect(JSON.stringify(stored())).toBe(bound);
+  });
+
+  it("binds an outside_windows record by the boot backfill once a run that holds it has the session", async () => {
+    rig = await bootRig();
+    const { runId, sessionRef } = await composedRun();
+    expect((await post(imported(sessionRef, "FAKE-msg-next", 5, 5, { observedAt: "2030-01-01T02:00:00.000Z" }))).body.link).toBe("outside_windows");
+    // The next run's row lands with its session (as a boot would find it), without a runSessionRefStored call.
+    rig.db.prepare(
+      `INSERT INTO runs (id, task_id, assistant_id, provider_session_ref, state, started_at)
+       SELECT 'RUN-FAKE-next', task_id, assistant_id, provider_session_ref, 'RUNNING', '2030-01-01T01:30:00.000Z' FROM runs WHERE id = ?`,
+    ).run(runId);
+    const ledger = new UsageLedger(rig.db);
+    expect(ledger.backfillRunLinks()).toEqual({ linked: [{ provider: "fake", sessionRef, eventId: "FAKE-msg-next", runId: "RUN-FAKE-next" }], unmatched: 0, ambiguous: 0 });
+    expect(ledger.backfillRunLinks()).toEqual({ linked: [], unmatched: 0, ambiguous: 0 });
+  });
+});
 
 describe("a provider session that spans runs binds each record by its run's window", () => {
   const SESSION = "FAKE-session-resumed-not-real";
