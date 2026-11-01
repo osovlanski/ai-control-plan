@@ -485,6 +485,7 @@ export const api = {
     req<Array<{ id: string; reason: string; at: string; gitRef: string | null }>>(
       `/api/tasks/${id}/checkpoints`,
     ),
+  restart: (id: string) => req<unknown>(`/api/tasks/${id}/restart`, { method: "POST" }),
   handoff: (id: string, to?: string) =>
     // A task that still owes a K4b pool claim is not started by the handoff: it
     // re-enters the scheduler and starts when the pool can grant the slot.

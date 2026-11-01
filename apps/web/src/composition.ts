@@ -140,7 +140,7 @@ export function runTokens(r: BudgetRunSettlement): Figure {
 
 export function runCost(r: BudgetRunSettlement): Figure {
   if (r.cost.method === "unknown" || r.cost.usd === undefined) return { text: "unknown", method: "unknown", note: "no price evidence and no provider-reported cost" };
-  return { text: fmtUsd(r.cost.usd), method: r.cost.method };
+  return { text: fmtUsd(r.cost.usd), method: r.cost.method, ...(r.cost.basis ? { note: r.cost.basis } : {}) };
 }
 
 export interface BudgetLine { label: string; cap: string; consumed: Figure; remaining: Figure }

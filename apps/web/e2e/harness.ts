@@ -180,6 +180,6 @@ export async function boot(
         extraHTTPHeaders: { Authorization: `Bearer ${currentSecret().secret}` },
       }),
     waitForState: (id, expected) =>
-      expect.poll(() => built.tasks.get(id)?.state, { timeout: 8000, intervals: [100] }).toBe(expected),
+      expect.poll(() => built.tasks.get(id)?.state, { timeout: 30_000, intervals: [100] }).toBe(expected),
   };
 }

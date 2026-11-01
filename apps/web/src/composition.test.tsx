@@ -185,3 +185,12 @@ describe("bound revisions", () => {
     expect(boundRevisions(history(), [{ id: "es_1" }, { id: "es_2", compositionRevisionId: null }])).toEqual([]);
   });
 });
+
+ describe("cost basis", () => {
+  it("keeps the plane basis beside the existing method", () => {
+    for (const basis of ["in_run", "records", "cache creation at the input rate: no cache-write price"]) {
+      expect(runCost(run({ cost: { method: "measured", usd: 0.1, basis } }))).toMatchObject({ method: "measured", note: basis });
+    }
+    expect(runCost(run())).not.toHaveProperty("note");
+  });
+});
