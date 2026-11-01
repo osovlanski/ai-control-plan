@@ -1,4 +1,4 @@
-import { Restart, useRestartOffered } from "./Restart.js";
+import { Restart, namesRestartRoute, useRestartOffered } from "./Restart.js";
 import { WaitingSummary } from "./WaitingSummary.js";
 import { useEffect, useRef, useState, type ComponentProps } from "react";
 import {
@@ -238,7 +238,7 @@ export function TaskDetail({ taskId, onBack }: { taskId: string; onBack: () => v
           </li>)}</ul>
         </details>
       )}
-      {sessionActionError && <p role="alert">{sessionActionError} {restartControl}</p>}
+      {sessionActionError && <p role="alert">{sessionActionError}{namesRestartRoute(sessionActionError) && <> {restartControl}</>}</p>}
       {notices.map((n, i) => (
         <Card
           key={i}
@@ -250,7 +250,7 @@ export function TaskDetail({ taskId, onBack }: { taskId: string; onBack: () => v
           }}
         >
           <span style={{ fontSize: "0.88rem" }}>
-            <strong>{n.level === "warn" ? "Failover" : "Handoff"}</strong> · {n.text} {restartControl}
+            <strong>{n.level === "warn" ? "Failover" : "Handoff"}</strong> · {n.text}
           </span>
         </Card>
       ))}

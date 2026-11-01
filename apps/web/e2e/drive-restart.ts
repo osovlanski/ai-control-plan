@@ -36,10 +36,10 @@ console.log('Restart the scratch pnpm dev process; waiting for recovery.');
 await expect.poll(async()=>{try{return ['WAITING_INPUT','AWAITING_APPROVAL','RUNNING','COMPLETED'].includes((await api(`/api/tasks/${taskId}`)).state);}catch{return false;}},{timeout:180000}).toBe(true);
 await page.goto(`${web}/#/missions/${taskId}`);
 const detail = page.locator('.task-detail');
-mkdirSync('apps/web/evidence/restart-cost-basis',{recursive:true});
+mkdirSync('docs/demo/assets/restart-cost-basis',{recursive:true});
 if ((await api(`/api/tasks/${taskId}`)).state === 'WAITING_INPUT') {
 await detail.getByRole('button',{name:'Restart',exact:true}).click();
-await page.screenshot({path:'apps/web/evidence/restart-cost-basis/restart-confirmation.png'});
+await page.screenshot({path:'docs/demo/assets/restart-cost-basis/restart-confirmation.png'});
 await detail.getByRole('button',{name:'Confirm restart',exact:true}).click();
 }
 if ((await api(`/api/tasks/${taskId}`)).state !== 'COMPLETED') {
@@ -52,11 +52,11 @@ await api(`/api/tasks/${taskId}/input`,{kind:'approval',requestId:session.approv
 await expect.poll(async()=> (await api(`/api/tasks/${taskId}`)).state,{timeout:30000}).toBe('COMPLETED');
 await page.reload();
 await expect(detail.getByText('COMPLETED',{exact:true}).first()).toBeVisible({timeout:30_000});
-await page.screenshot({path:'apps/web/evidence/restart-cost-basis/restart-completed.png'});
+await page.screenshot({path:'docs/demo/assets/restart-cost-basis/restart-completed.png'});
 await detail.getByRole('button',{name:'Composition',exact:true}).click();
 const budget=await api(`/api/tasks/${taskId}/composition/budget`);
 if (!budget.runs.some((r:{cost:{method:string;basis?:string}})=>r.cost.method==='measured'&&r.cost.basis==='in_run')) throw Error('No measured in_run cost');
 await expect(detail.getByText('in_run',{exact:true}).first()).toBeVisible({timeout:30_000});
-await page.screenshot({path:'apps/web/evidence/restart-cost-basis/measured-in-run.png',fullPage:true});
+await page.screenshot({path:'docs/demo/assets/restart-cost-basis/measured-in-run.png',fullPage:true});
 console.log(JSON.stringify({taskId,state:'COMPLETED',costs:budget.runs.map((r:{cost:unknown})=>r.cost)}));
 await browser.close();

@@ -17,6 +17,11 @@ export function useRestartOffered(taskId: string | null, state: string, sessions
   return state === "WAITING_INPUT" && offered === taskId;
 }
 
+/** An error earns a Restart beside it only when it names the restart route; notices never do. */
+export function namesRestartRoute(text: string): boolean {
+  return /\/api\/tasks\/[^/\s]+\/restart\b/.test(text);
+}
+
 export function Restart({ taskId, busy, onRestart }: { taskId: string; busy: boolean; onRestart: () => void }) {
   const [confirm, setConfirm] = useState(false);
   const style = { font: "inherit", color: "inherit", background: "transparent", border: "1px solid currentColor", borderRadius: 6, padding: "0.35rem 0.6rem", cursor: "pointer" };
