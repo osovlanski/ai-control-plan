@@ -56,9 +56,12 @@ The wire is unchanged: `runId` stays optional, and Cockpit sends `null`. The pla
 with a `sessionRef` and no `runId` to the one run whose assistant has the record's `provider` and
 whose provider session is `sessionRef`. The response's `link` says how the stored record stands:
 `body` (the record named its run), `session_ref` (the plane resolved it), `unmatched` (no run has
-the session yet), `ambiguous` (several runs share it, as a resumed session does; a session-wide
-total cannot be split, so it stays unbound) or `none` (no runId and no sessionRef). An unbound
-record is bound later, once, when its session has exactly one run: when a run stores that session
+the session yet), `outside_windows` (no window of its session's runs holds it), `ambiguous`
+(inside two windows; one record is never split across runs, so it stays unbound) or `none` (no
+runId and no sessionRef). Every candidate run, one or several (a resumed or continued provider
+session spans runs), is tested by time: the record binds to the one run whose window
+`[started_at, ended_at]` holds its `observedAt` (a run not yet ended has no end). An unbound
+record is bound later, once, when the rule names its run: when a run stores that session
 (followed by the late budget check), on a replay, or by the plane's boot pass. A bound record never moves, and `record.runId` in a replay shows the binding even though
 the posted body said `null`; "same record" still compares the posted fields only.
 
