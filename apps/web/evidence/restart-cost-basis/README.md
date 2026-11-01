@@ -24,15 +24,19 @@ Screenshots:
 - [Completed continuation](restart-completed.png)
 - [Measured cost with `in_run` beside the method](measured-in-run.png)
 
-The interrupted session has unknown cost. The continuation has measured $0.025
-with basis `in_run`. The task aggregate remains a lower bound because of that
-unknown session; the UI preserves the server's aggregate method.
+The interrupted session has unknown cost. Its continuation has measured $0.025
+with basis `in_run`, while that task's aggregate remains a lower bound.
+Then a fresh single-run task, `AG-mvxhswrc1`, completed with 1,650 tokens,
+measured $0.025, no unknown-cost sessions and `cost.basis: in_run`.
+The measured-cost screenshot shows this fresh task, including its measured
+task aggregate and its per-run basis.
 
 Raw bounded capture (no credentials or provider transcript):
 
 ```text
 kill -9 API child 2008640; task AG-mvxgijxi1
 {"taskId":"AG-mvxgijxi1","state":"COMPLETED","costs":[{"method":"unknown"},{"method":"measured","usd":0.025,"basis":"in_run"}]}
+{"taskId":"AG-mvxhswrc1","state":"COMPLETED","cost":{"method":"measured","usd":0.025,"basis":"in_run"}}
 ```
 
 ## Reproduce
@@ -75,3 +79,7 @@ The focused browser coverage passed (2 tests), and all 100 web unit tests passed
 `pnpm test` was run twice. The retry stopped in core with 3 timing assertions
 failing and 586 tests passing. See the [raw capture](core-gate-failure.txt).
 Those thresholds and all core code are unchanged in this web-only branch.
+
+Final `pnpm typecheck`, `pnpm lint`, and the complete Chromium gate
+(`pnpm --filter @agent-plane/web test:e2e`, 50 tests) passed. The PR remains
+draft because the required `pnpm test` gate above is still failing.
