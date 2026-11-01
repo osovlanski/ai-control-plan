@@ -1,0 +1,193 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-plane.local/contracts/asset-usage/v1/asset-usage-event.schema.json",
+  "title": "AssetUsageEvent",
+  "description": "Asset usage v1: one asset in one composed session, as the Control Plane's feed serves it (GET /api/composition/asset-usage). Five facts, none implies the next: selected (every event), attached, validated, invoked, outcome. Closed: an unknown field is rejected. Idempotent on eventId; stored events are immutable. Normative text: docs/contracts/asset-usage-v1.md.",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "eventId",
+    "seq",
+    "compositionRevisionId",
+    "sessionId",
+    "taskId",
+    "assetKind",
+    "assetId",
+    "assetDigest",
+    "harness",
+    "fidelity",
+    "attached",
+    "validation",
+    "invocation",
+    "sessionOutcome",
+    "verificationPassed",
+    "attributionMethod",
+    "deriverVersion",
+    "at"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {
+      "type": "string",
+      "pattern": "^1\\.(0|[1-9][0-9]*)$"
+    },
+    "eventId": {
+      "description": "\"au1_\" + hex sha256 over JCS of {v, revision, session, kind, id, digest}. The same session and asset give the same id on every derivation.",
+      "type": "string",
+      "pattern": "^au1_[0-9a-f]{64}$"
+    },
+    "seq": {
+      "description": "The plane's ingest order, strictly increasing, assigned once. The feed cursor.",
+      "$ref": "#/$defs/seq"
+    },
+    "compositionRevisionId": {
+      "$ref": "#/$defs/id"
+    },
+    "sessionId": {
+      "$ref": "#/$defs/id"
+    },
+    "taskId": {
+      "$ref": "#/$defs/id"
+    },
+    "assetKind": {
+      "enum": [
+        "skill",
+        "mcp_server",
+        "memory_bundle",
+        "fragment"
+      ]
+    },
+    "assetId": {
+      "description": "A registry asset id, memory bundle id or fragment name. Never a path.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._@:+-]{0,255}$"
+    },
+    "assetDigest": {
+      "description": "The digest the revision pinned. \"excluded\" for a fragment the bundle left out, which has no rendered digest.",
+      "type": "string",
+      "pattern": "^(sha256:[0-9a-f]{64}|excluded)$"
+    },
+    "harness": {
+      "enum": [
+        "claude-code",
+        "codex",
+        "cursor",
+        "bedrock"
+      ]
+    },
+    "fidelity": {
+      "enum": [
+        "full",
+        "partial",
+        "none"
+      ]
+    },
+    "attached": {
+      "type": "boolean"
+    },
+    "validation": {
+      "enum": [
+        "runtime_confirmed",
+        "runtime_pending",
+        "rendered",
+        "files_verified",
+        "failed",
+        "none"
+      ]
+    },
+    "invocation": {
+      "description": "count and failed are null when invocation is not observable, which is not 0.",
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "method",
+            "count",
+            "failed"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "const": "tool_event"
+            },
+            "count": {
+              "$ref": "#/$defs/count"
+            },
+            "failed": {
+              "$ref": "#/$defs/count"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "method",
+            "count",
+            "failed"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "enum": [
+                "not_applicable",
+                "not_observable"
+              ]
+            },
+            "count": {
+              "type": "null"
+            },
+            "failed": {
+              "type": "null"
+            }
+          }
+        }
+      ]
+    },
+    "sessionOutcome": {
+      "enum": [
+        "success",
+        "error",
+        "neutral",
+        "not_run"
+      ]
+    },
+    "verificationPassed": {
+      "description": "The session's verification: null when no check ran.",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "attributionMethod": {
+      "description": "How the facts were associated. Co-occurrence only: no event claims an asset caused an outcome.",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,63}/v[1-9][0-9]{0,5}$"
+    },
+    "deriverVersion": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000000
+    },
+    "at": {
+      "description": "When the session's result was stored, never the time of derivation.",
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    }
+  }
+}

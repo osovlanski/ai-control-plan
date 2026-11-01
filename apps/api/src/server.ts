@@ -61,6 +61,7 @@ import { ClaudeAdapter, ClaudeCodeSessionInputAdapter, CodexAdapter, FakeSession
 import { CredentialStore, credentialPath } from "./auth/credential-file.js";
 import { onRunSessionRef, UsageLedger, validateUsageRecord } from "./modules/usage.js";
 import { AssetTelemetry } from "./modules/asset-telemetry.js";
+import { parseFeedQuery, readAssetUsagePage, validateAssetUsagePage } from "./asset-usage-contract.js";
 
 export interface ServerDeps {
   config: ResolvedConfig;
@@ -146,6 +147,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   const registryRead = { config: { auth: { require: "registry.read" } } } as const;
   const write = { config: { auth: { require: "commands.write" } } } as const;
   const usageWrite = { config: { auth: { require: "usage.write" } } } as const;
+  const telemetryRead = { config: { auth: { require: "telemetry.read" } } } as const;
 
   // The internal bridge + recovery are wired for every real composition root
   // (extracted to modules/harness/composition.ts so a test factory can build a
@@ -330,6 +332,22 @@ export function buildServer(deps: ServerDeps): BuiltServer {
       try { composer.lateRecord(result.record.runId); } catch (err) { req.log.warn({ err: message(err) }, "budget overrun check failed"); }
     }
     return reply.status(result.status === "created" ? 201 : 200).send({ replayed: result.status === "replayed", record: result.record, link: result.link });
+  });
+
+  // ---- Asset usage feed (M6 S3, API 2.7; Cockpit M10 pulls it) ----
+  // Append-only ledger rows after the `after` cursor, in ingest order. The page is validated
+  // against asset usage v1 before it leaves: a row that does not conform is a 500, never sent.
+  app.get<{ Querystring: { after?: string; limit?: string } }>("/api/composition/asset-usage", telemetryRead, (req, reply) => {
+    const query = parseFeedQuery(req.query);
+    if (!query.ok) return reply.status(400).send({ error: query.error });
+    const page = readAssetUsagePage(db, query.after, query.limit);
+    const checked = validateAssetUsagePage(page);
+    if (!checked.ok) {
+      // Event ids only: a detail could quote stored content.
+      req.log.error({ eventIds: page.events.map((e) => e.eventId) }, "asset usage page failed its own contract");
+      return reply.status(500).send({ error: "asset usage page failed the asset usage v1 contract" });
+    }
+    return page;
   });
 
   // ---- Decisions (K18 / M16) ----

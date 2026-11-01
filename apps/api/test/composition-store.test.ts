@@ -157,7 +157,7 @@ describe("POST /api/usage/records", () => {
   });
 
   it("needs its own capability", async () => {
-    expect(CONTROL_PLANE_API_VERSION).toBe("2.6");
+    expect(CONTROL_PLANE_API_VERSION).toBe("2.7");
     expect(INGEST_CAPABILITIES).toEqual(["usage.write"]);
     // A browser session requests observability + command capabilities only.
     expect(COMMAND_CAPABILITIES).not.toContain("usage.write");

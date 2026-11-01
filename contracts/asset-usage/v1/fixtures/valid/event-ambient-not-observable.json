@@ -1,0 +1,25 @@
+{
+  "schemaVersion": "1.0",
+  "eventId": "au1_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "seq": 8,
+  "compositionRevisionId": "rev_01",
+  "sessionId": "run_01",
+  "taskId": "task_01",
+  "assetKind": "skill",
+  "assetId": "review-pr",
+  "assetDigest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+  "harness": "claude-code",
+  "fidelity": "none",
+  "attached": false,
+  "validation": "none",
+  "invocation": {
+    "method": "not_observable",
+    "count": null,
+    "failed": null
+  },
+  "sessionOutcome": "neutral",
+  "verificationPassed": null,
+  "attributionMethod": "co-occurrence/v1",
+  "deriverVersion": 1,
+  "at": "2026-11-01T12:00:00.000Z"
+}

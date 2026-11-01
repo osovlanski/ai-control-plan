@@ -21,7 +21,11 @@
 // `GET /api/tasks/:id/composition` under `tasks.read`. No new capability. With
 // `composer.enabled` false (the default) the three routes answer 404
 // `composer_disabled` and every other route is unchanged.
-export const CONTROL_PLANE_API_VERSION = "2.6";
+// 2.7 (additive, M6 S3): `telemetry.read` for `GET /api/composition/asset-usage`,
+// the asset usage v1 feed Cockpit pulls (M10). Credentials minted before 2.7
+// lack it and get 403 there until rotated with `--capabilities`. A browser
+// session does not need it, so `open` still accepts such a credential.
+export const CONTROL_PLANE_API_VERSION = "2.7";
 export const NORMALIZED_EVENT_VERSION = "1.0";
 
 export const OBSERVABILITY_CAPABILITIES = [
@@ -41,7 +45,14 @@ export const OBSERVABILITY_CAPABILITIES = [
   "decisions.read",
   // M4: cached Cockpit registry snapshot reads.
   "registry.read",
+  // M6 S3: the asset usage feed (M10).
+  "telemetry.read",
 ] as const;
+
+// Observability capabilities the web UI does not use. `open` requests them when
+// the credential holds them and never refuses a credential that lacks them, so a
+// credential minted before they existed still opens the UI.
+export const BROWSER_OPTIONAL_CAPABILITIES = ["telemetry.read"] as const;
 
 export const COMMAND_CAPABILITIES = ["commands.write"] as const;
 

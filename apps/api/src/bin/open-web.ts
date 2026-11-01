@@ -7,7 +7,7 @@ import { parseArgs } from "node:util";
 import { loadConfig, type ResolvedConfig } from "../config.js";
 import { CredentialStore, credentialPath } from "../auth/credential-file.js";
 import { mintBootstrapToken } from "../auth/bootstrap-token.js";
-import { OBSERVABILITY_CAPABILITIES, COMMAND_CAPABILITIES, registerSecret, redactSecrets } from "@agent-plane/core";
+import { BROWSER_OPTIONAL_CAPABILITIES, OBSERVABILITY_CAPABILITIES, COMMAND_CAPABILITIES, registerSecret, redactSecrets } from "@agent-plane/core";
 
 export interface OpenWebOptions {
   config?: ResolvedConfig;
@@ -50,11 +50,13 @@ export async function startOpenWeb(options: OpenWebOptions = {}): Promise<OpenWe
   const port = integerOption("--port", options.port ?? 0, 0, 65535);
   const waitSeconds = integerOption("--wait-seconds", options.waitSeconds ?? 300, 1, 900);
   const config = options.config ?? loadConfig();
-  const requested = [...OBSERVABILITY_CAPABILITIES, ...(options.readOnly ? [] : COMMAND_CAPABILITIES)];
+  const requested: string[] = [...OBSERVABILITY_CAPABILITIES, ...(options.readOnly ? [] : COMMAND_CAPABILITIES)];
+  const optional = new Set<string>(BROWSER_OPTIONAL_CAPABILITIES);
+  const required = requested.filter((capability) => !optional.has(capability));
   const selectCredential = () => {
     const store = new CredentialStore(credentialPath(config.dir));
     const secret = store.active().filter((candidate) =>
-      requested.every((capability) => candidate.capabilities.includes(capability)),
+      required.every((capability) => candidate.capabilities.includes(capability)),
     ).at(-1);
     if (!secret) throw new Error("No active credential covers the requested browser capabilities");
     return secret;
@@ -92,7 +94,8 @@ export async function startOpenWeb(options: OpenWebOptions = {}): Promise<OpenWe
       token = mintBootstrapToken(secret, {
         aud: apiOrigin,
         lo: origin,
-        cap: requested,
+        // An optional capability is asked for only when the credential holds it.
+        cap: requested.filter((capability) => !optional.has(capability) || secret.capabilities.includes(capability)),
         exp: Math.floor(Date.now() / 1000) + config.api.auth.bootstrapTtlSeconds,
       });
       registerSecret(secret.secret);
