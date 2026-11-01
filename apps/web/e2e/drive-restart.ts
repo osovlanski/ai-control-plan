@@ -38,6 +38,8 @@ await page.goto(`${web}/#/missions/${taskId}`);
 const detail = page.locator('.task-detail');
 mkdirSync('docs/demo/assets/restart-cost-basis',{recursive:true});
 if ((await api(`/api/tasks/${taskId}`)).state === 'WAITING_INPUT') {
+await expect(detail.getByRole('button',{name:'Restart',exact:true})).toHaveCount(1,{timeout:30_000});
+console.log('Restart buttons on the task: 1');
 await detail.getByRole('button',{name:'Restart',exact:true}).click();
 await page.screenshot({path:'docs/demo/assets/restart-cost-basis/restart-confirmation.png'});
 await detail.getByRole('button',{name:'Confirm restart',exact:true}).click();
