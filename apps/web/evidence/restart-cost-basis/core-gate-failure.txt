@@ -1,0 +1,51 @@
+Command: pnpm test
+Retry; unchanged packages/core timing assertions.
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 3 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  test/tool-floors.test.ts > K19i — bounded time on hostile input (K19g once shipped a 10.8 s pattern) > words (65503 chars)
+AssertionError: expected 612.8289180000029 to be less than 500
+ ❯ test/tool-floors.test.ts:318:38
+    316|       const t0 = performance.now();
+    317|       toolGateFloorHits({ toolName: "Bash", commandText: command, work…
+    318|       expect(performance.now() - t0).toBeLessThan(500); // linear: ~15…
+       |                                      ^
+    319|     });
+    320|   }
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/3]⎯
+
+ FAIL  test/tool-floors.test.ts > K19i — bounded time on hostile input (K19g once shipped a 10.8 s pattern) > an ordinary command costs microseconds, not milliseconds
+AssertionError: expected 296.8840367499997 to be less than 250
+ ❯ test/tool-floors.test.ts:328:52
+    326|     const t0 = performance.now();
+    327|     for (let r = 0; r < n; r += 1) toolGateFloorHits({ toolName: "Bash…
+    328|     expect(((performance.now() - t0) / n) * 1_000).toBeLessThan(250); …
+       |                                                    ^
+    329|   });
+    330|
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/3]⎯
+
+ FAIL  test/tool-floors.test.ts > K19i — bounded time on hostile input (K19g once shipped a 10.8 s pattern) > past the cap it is opaque without being scanned
+AssertionError: expected 178.89507400000002 to be less than 50
+ ❯ test/tool-floors.test.ts:334:36
+    332|     const t0 = performance.now();
+    333|     expect(rules("a".repeat(500_000))).toEqual(["opaque"]);
+    334|     expect(performance.now() - t0).toBeLessThan(50);
+       |                                    ^
+    335|   });
+    336| });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/3]⎯
+
+
+ Test Files  1 failed | 21 passed (22)
+      Tests  3 failed | 586 passed (589)
+   Start at  06:55:29
+   Duration  251.05s (transform 15.29s, setup 0ms, collect 48.87s, tests 32.07s, environment 87ms, prepare 65.49s)
+
+/home/ubuntu/workspace/personal/ai-control-plan/packages/core:
+ ERR_PNPM_RECURSIVE_RUN_FIRST_FAIL  @agent-plane/core@0.1.0 test: `vitest run`
+Exit status 1
+ ELIFECYCLE  Test failed. See above for more details.

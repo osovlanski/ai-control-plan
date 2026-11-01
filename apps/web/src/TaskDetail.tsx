@@ -1,3 +1,4 @@
+import { Restart, useRestartOffered } from "./Restart.js";
 import { WaitingSummary } from "./WaitingSummary.js";
 import { useEffect, useRef, useState, type ComponentProps } from "react";
 import {
@@ -80,6 +81,11 @@ export function TaskDetail({ taskId, onBack }: { taskId: string; onBack: () => v
   const [sessionActionError, setSessionActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [tab, setTab] = useState<Tab>("activity");
+  const restartOffered = useRestartOffered(readError ? null : taskId, state, sessions);
+  const restartControl = restartOffered && <Restart key={taskId} taskId={taskId} busy={busy} onRestart={() => {
+    setBusy(true);
+    void api.restart(taskId).then(refresh).catch((e: Error) => setSessionActionError(e.message)).finally(() => setBusy(false));
+  }} />;
   const timelineRef = useRef<HTMLDivElement>(null);
 
   const refresh = () => {
@@ -108,6 +114,7 @@ export function TaskDetail({ taskId, onBack }: { taskId: string; onBack: () => v
   useEffect(() => {
     // A new task: drop anything shown for the previous one before refetching.
     setSession(null);
+    setSessionActionError(null);
     setSessions([]);
     selectedSessionId.current = null;
     void api.events(taskId).then(rows => { setEvents(rows); setEventError(null); }).catch(() => setEventError("Mission event read unavailable"));
@@ -149,8 +156,11 @@ export function TaskDetail({ taskId, onBack }: { taskId: string; onBack: () => v
 
   const respond = async (approved: boolean) => {
     if (!approval) return;
-    await api.approve(taskId, approval.requestId, approved);
-    setApproval(null);
+    try {
+      await api.approve(taskId, approval.requestId, approved);
+      setApproval(null);
+      refresh();
+    } catch (e) { setSessionActionError((e as Error).message); refresh(); }
   };
 
   if (!detail) return <div><Button variant="secondary" onClick={onBack}>Back to Overview</Button>
@@ -173,6 +183,7 @@ export function TaskDetail({ taskId, onBack }: { taskId: string; onBack: () => v
         </Button>
         <h2 style={{ margin: 0, fontSize: "1.05rem", whiteSpace: "nowrap", fontFamily: tokens.mono }}>{detail.id}</h2>
         <StateBadge state={state} />
+        {restartControl}
         {state === "WAITING_RESOURCE" && detail?.wait && (
           <Button disabled={busy} onClick={() => { setBusy(true); void api.runNow(taskId, detail.wait!.generation).then(refresh).catch((e: Error) => setNotices(prev => [...prev, { level: "warn", text: e.message, at: new Date().toISOString() }])).finally(() => setBusy(false)); }}>Run now</Button>
         )}
@@ -227,6 +238,7 @@ export function TaskDetail({ taskId, onBack }: { taskId: string; onBack: () => v
           </li>)}</ul>
         </details>
       )}
+      {sessionActionError && <p role="alert">{sessionActionError} {restartControl}</p>}
       {notices.map((n, i) => (
         <Card
           key={i}
@@ -238,7 +250,7 @@ export function TaskDetail({ taskId, onBack }: { taskId: string; onBack: () => v
           }}
         >
           <span style={{ fontSize: "0.88rem" }}>
-            <strong>{n.level === "warn" ? "Failover" : "Handoff"}</strong> · {n.text}
+            <strong>{n.level === "warn" ? "Failover" : "Handoff"}</strong> · {n.text} {restartControl}
           </span>
         </Card>
       ))}
@@ -545,7 +557,6 @@ export function TaskDetail({ taskId, onBack }: { taskId: string; onBack: () => v
                   </div>
                 </div>
               ))}
-              {sessionActionError && <p role="alert" className="error">{sessionActionError}</p>}
               {session.correlation?.parentTaskId && (
                 <p style={{ fontSize: "0.82rem", margin: "0 0 0.4rem", color: tokens.muted }}>
                   parent {session.correlation.parentTaskId}

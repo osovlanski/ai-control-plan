@@ -1,5 +1,6 @@
+import { Restart, useRestartOffered } from "../Restart.js";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ApiError, api, type CompositionPreview } from "../api.js";
+import { ApiError, api, type CompositionPreview, type SessionSummary } from "../api.js";
 import { DecisionView } from "../Composition.js";
 import { readRepository, writeRepository } from "./repository.js";
 import { composeFor } from "../NewTask.js";
@@ -13,6 +14,7 @@ import {
 import { usePendingApprovals, useProcessDetails } from "./reads.js";
 
 /** What Tab showed for the current command line. Enter runs exactly this. */
+const NO_SESSIONS: SessionSummary[] = [];
 interface Preview { repoPath: string; composed: Awaited<ReturnType<typeof composeFor>>; goal: string; taskId: string; chosen: string | null; rule: string; composition: string; digest: string | null }
 type Confirm = { kind: "deny"; taskId: string; requestId: string } | { kind: "cancel"; taskId: string };
 
@@ -59,8 +61,9 @@ export function ShellView({ active, workspace, repositories, onOpen }: { active:
   const rows = useMemo(() => sortRows(tasks.map(t => toRow(t, details[t.id], now)), sort), [tasks, details, now, sort]);
   const current = rows.find(r => r.pid === selectedId) ?? rows[0];
   const needYou = rows.filter(r => r.state === "NEEDS-YOU").length;
-  const { snapshot, error: snapshotError } = useMissionSnapshot(active && !inspecting ? current?.pid ?? null : null, actRev, true);
-  const { pending, error: approvalError, loading: approvalLoading } = usePendingApprovals(current?.pid ?? null, active && current?.rawState === "AWAITING_APPROVAL", actRev);
+  const { snapshot, error: snapshotError } = useMissionSnapshot(active ? current?.pid ?? null : null, actRev, true);
+  const { pending, error: approvalError, loading: approvalLoading } = usePendingApprovals(current?.pid ?? null, active && ["AWAITING_APPROVAL", "WAITING_INPUT"].includes(current?.rawState ?? ""), actRev);
+  const restartOffered = useRestartOffered(snapshotError ? null : snapshot?.detail.id ?? null, snapshot?.detail.state ?? "", snapshot?.sessions ?? NO_SESSIONS);
   const focused = pending[0];
   const lines = snapshot ? logLines(snapshot.events) : [];
 
@@ -300,7 +303,7 @@ export function ShellView({ active, workspace, repositories, onOpen }: { active:
           spec={preview.composed.preview.specDraft} digest={preview.composed.preview.compositionDigest} resynced={preview.composed.preview.resynced} />
       </section>}
     </div>}
-    <p className="sv-status" role="status">{confirmText || status}</p>
+    <div className="sv-status" role="status">{confirmText || status} {restartOffered && current && <Restart key={current.pid} taskId={current.pid} busy={busy} onRestart={() => { void act(`restart ${current.pid}`, () => api.restart(current.pid)); }} />}</div>
 
     {help && <div className="sv-help" role="dialog" aria-label="Keys">
       <p><b>keys</b> <span className="sv-muted">· Esc closes</span></p>
