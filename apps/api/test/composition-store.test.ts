@@ -61,9 +61,9 @@ describe("CompositionStore", () => {
     expect(() => db.prepare("DELETE FROM agent_specs WHERE composition_revision_id = ?").run(id)).toThrow(/immutable/);
     expect(() => db.prepare("UPDATE composition_decisions SET decision_json = '{}'").run()).toThrow(/immutable/);
     expect(() => db.prepare("DELETE FROM composition_decisions").run()).toThrow(/immutable/);
-    db.prepare("INSERT INTO asset_usage VALUES ('au-1','skill:x','sha256:x','run-1',1,0,NULL,'attached','t')").run();
-    expect(() => db.prepare("UPDATE asset_usage SET invocation_count = 9").run()).toThrow(/immutable/);
-    expect(() => db.prepare("DELETE FROM asset_usage").run()).toThrow(/immutable/);
+    db.prepare("INSERT INTO asset_usage_m1 VALUES ('au-1','skill:x','sha256:x','run-1',1,0,NULL,'attached','t')").run();
+    expect(() => db.prepare("UPDATE asset_usage_m1 SET invocation_count = 9").run()).toThrow(/immutable/);
+    expect(() => db.prepare("DELETE FROM asset_usage_m1").run()).toThrow(/immutable/);
     expect(Object.getOwnPropertyNames(CompositionStore.prototype).sort()).toEqual(["attachRun", "constructor", "get", "persist"]);
     // A decision explains exactly one revision.
     const reused = revision("two-skill");

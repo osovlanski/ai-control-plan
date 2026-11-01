@@ -27,7 +27,7 @@ import type {
   ProvisioningVerification,
   VerifiedProfile,
 } from "@agent-plane/core";
-import { jcs, mcpLaunchProblem, ProvisioningError } from "@agent-plane/core";
+import { jcs, mcpLaunchProblem, mcpServerName, ProvisioningError } from "@agent-plane/core";
 
 export const PROFILE_MARKER = ".agent-plane-profile.json";
 export const PLUGIN_NAME = "agent-plane-profile";
@@ -69,13 +69,8 @@ function checkedBundle(input: ProvisioningInput, harness: ProvisionedHarness): B
   return bundle;
 }
 
-/**
- * The server name an MCP asset launches under: its id without the `mcp:` prefix, with anything
- * outside `[A-Za-z0-9_-]` replaced, so it is a valid Claude server name and a bare Codex TOML key.
- */
-export function mcpServerName(assetId: string): string {
-  return assetId.replace(/^mcp:/, "").replace(/[^A-Za-z0-9_-]/g, "_");
-}
+/** Core owns it, so asset telemetry names a profile's servers the way the profile does. */
+export { mcpServerName };
 
 /**
  * M3 S4: the revision's MCP servers as the profile launches them, and the secret reference names

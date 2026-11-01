@@ -129,7 +129,7 @@ describe("K20 §6.2 — cohort freeze across migration 031", () => {
       expect(OLD.map((goal) => classifyTaskV2({ goal }).kind !== classifyTaskV1(goal))).toEqual([true, true, true, true, false]);
       const expected = (kind: TaskKind) => old.filter((o) => classifyTaskV1(o.goal) === kind).length;
 
-      expect(migrate(db)).toEqual(["031_task_classifier.sql", "032_registry_federation.sql", "033_composition.sql", "034_composition_attempts.sql", "035_run_model_requested_source.sql", "036_usage_run_link.sql"]);
+      expect(migrate(db)).toEqual(["031_task_classifier.sql", "032_registry_federation.sql", "033_composition.sql", "034_composition_attempts.sql", "035_run_model_requested_source.sql", "036_usage_run_link.sql", "037_asset_usage.sql"]);
       for (const { id } of old) {
         expect(db.prepare("SELECT task_kind, classifier_version FROM tasks WHERE id = ?").get(id)).toEqual({ task_kind: null, classifier_version: null });
       }
