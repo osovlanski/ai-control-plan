@@ -60,6 +60,7 @@ import { registerAuth, type SessionMap } from "./auth/index.js";
 import { ClaudeAdapter, ClaudeCodeSessionInputAdapter, CodexAdapter, FakeSessionInputAdapter } from "@agent-plane/adapters";
 import { CredentialStore, credentialPath } from "./auth/credential-file.js";
 import { onRunSessionRef, UsageLedger, validateUsageRecord } from "./modules/usage.js";
+import { AssetTelemetry } from "./modules/asset-telemetry.js";
 
 export interface ServerDeps {
   config: ResolvedConfig;
@@ -533,6 +534,8 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     : undefined;
   // M2 S6: wakes, run-now, failover and handoffs recompose at dispatch; settles record overruns.
   if (composer) orchestrator.dispatchComposer = composer;
+  // M6 S1: settles project composed sessions into asset_usage; reconcileOnBoot backfills the rest.
+  orchestrator.assetTelemetry = new AssetTelemetry(db, app.log);
   // Boot pass: bind usage records stored before their run's session was known (or before 036).
   try {
     const backfill = usage.backfillRunLinks();

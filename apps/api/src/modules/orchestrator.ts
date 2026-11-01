@@ -217,6 +217,8 @@ export class Orchestrator {
   scheduler?: Scheduler;
   /** M2 S6: recomposition at dispatch and failover, and budget settlement. Absent with the composer off. */
   dispatchComposer?: DispatchComposer;
+  /** M6 S1: projects a settled revision-bound session into `asset_usage`. Never throws. */
+  assetTelemetry?: { project(sessionId: string): unknown; backfill(): unknown };
   /** K11 thresholds and task-level bounds; injectable for deterministic tests. */
   contextPolicy?: ContextPolicy;
   /**
@@ -523,6 +525,8 @@ export class Orchestrator {
       const row = this.tasks.get(taskId);
       return row !== undefined && !isTerminal(row.state);
     });
+    // M6: a session settled before a crash (or before M6) with no projection yet.
+    this.assetTelemetry?.backfill();
     return reconciled;
   }
 
@@ -1212,6 +1216,12 @@ export class Orchestrator {
     }
   }
 
+  /** A session has a terminal result: settle its usage against its revision (M2 S6) and project its assets (M6). */
+  private sessionSettled(sessionId: string): void {
+    this.dispatchComposer?.settled(sessionId);
+    this.assetTelemetry?.project(sessionId);
+  }
+
   /**
    * Settle a task from a terminal Harness `ExecutionResult` (or `null` when the
    * runner promise rejected with no persisted result). Mirrors `settleRun` +
@@ -1224,7 +1234,7 @@ export class Orchestrator {
     result: ExecutionResult | null,
   ): Promise<void> {
     // M2 S6: whatever settles the task, the run's usage is settled against its revision's caps.
-    if (result) this.dispatchComposer?.settled(sessionId);
+    if (result) this.sessionSettled(sessionId);
     if (this.harnessBridge!.consumePlaneOwnsTerminal(sessionId)) return; // cancel / manual handoff owns it
     const row = this.tasks.get(taskId);
     if (!this.canSettle(taskId)) return;
@@ -1511,6 +1521,8 @@ export class Orchestrator {
       throw new Error(`Task ${taskId} has no live Harness session offered for resume`);
     }
     await this.harnessRecovery.releaseResumeOffered(sid);
+    // Released by recovery, not a runner, so no settle path sees it: CANCELLED, a neutral outcome.
+    this.assetTelemetry?.project(sid);
     const latest = this.db
       .prepare("SELECT id, run_id FROM checkpoints WHERE task_id = ? ORDER BY at DESC, rowid DESC LIMIT 1")
       .get(taskId) as { id: string; run_id: string | null } | undefined;
@@ -2078,7 +2090,7 @@ export class Orchestrator {
     sessionId: string,
     result: ExecutionResult | null,
   ): Promise<void> {
-    if (result) this.dispatchComposer?.settled(sessionId);
+    if (result) this.sessionSettled(sessionId);
     if (this.harnessBridge!.consumePlaneOwnsTerminal(sessionId)) return; // race loser or task cancel
     if (!this.canSettle(taskId) || this.tasks.get(taskId)?.state !== "RUNNING") return;
     const ok = result?.outcome === "completed" && result.verification?.passed !== false;

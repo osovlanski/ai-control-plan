@@ -229,6 +229,14 @@ export function mcpSecretRefs(launch: McpLaunch): Array<{ type: "env" | "keychai
   return [...byKey.values()].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : a.type < b.type ? -1 : a.type > b.type ? 1 : 0));
 }
 
+/**
+ * The server name an MCP asset launches under: its id without the `mcp:` prefix, with anything
+ * outside `[A-Za-z0-9_-]` replaced, so it is a valid Claude server name and a bare Codex TOML key.
+ */
+export function mcpServerName(assetId: string): string {
+  return assetId.replace(/^mcp:/, "").replace(/[^A-Za-z0-9_-]/g, "_");
+}
+
 /** Map a verified fidelity onto AgentSpec `provisioning.achieved`. */
 export function achievedTier(fidelity: ProvisioningFidelity): NonNullable<AgentSpec["provisioning"]["achieved"]> {
   return fidelity === "none" ? "ambient" : fidelity;
