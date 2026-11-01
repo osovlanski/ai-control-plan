@@ -144,7 +144,7 @@ describe("late usage records", () => {
     expect((await rig.postUsage({ eventId: "FAKE-m1", runId, accounting: "cumulative", tokensIn: 2000, tokensOut: 500, costUsd: 1.5 })).status).toBe(201);
     const b = (await budget(taskId)).body;
     expect(b.consumed).toMatchObject({ costUsd: 1.5, costMethod: "measured", unknownCostSessions: 0 });
-    expect(b.runs[0]!.cost).toEqual({ method: "measured", usd: 1.5 });
+    expect(b.runs[0]!.cost).toEqual({ method: "measured", usd: 1.5, basis: "records" });
     expect(b.remaining).toEqual({ max_cost_usd: -0.5 });
     expect(b.overruns).toEqual([expect.objectContaining({ cap: "max_cost_usd", capValue: 1, settled: 1.5, amount: 0.5, method: "measured", source: "late" })]);
   });

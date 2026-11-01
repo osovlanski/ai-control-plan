@@ -6,7 +6,8 @@
  *   otherwise its `usage.updated` events under the manifest's accounting mode. Its late tokens are
  *   the `usage_records` bound to it (already deduplicated by the ledger). Settled tokens are
  *   max(in-run, records), never the sum.
- * - Cost is measured (`costUsd`), else estimated from K7 price evidence for the run's model, else
+ * - Cost is measured (the run's own `costUsd` on its `usage.updated` events, or the records'; the
+ *   larger, never the sum), else estimated (cache creation at the catalog's cache-write rate) from K7 price evidence for the run's model, else
  *   the subscription API-equivalent, else unknown with no number.
  * - Every figure is provisional: records may still arrive. Each read reports the record count.
  * - A revision's caps are the task's remainder when it was composed, so "over its cap" is what the
@@ -16,12 +17,13 @@
  * Nothing here writes except `recordOverruns`, which only appends events.
  */
 import {
-  accumulateInRun, lateOverrun, remainingBudget, roundUsd, settleSession, taskConsumption,
-  type AgentSpec, type BudgetCaps, type BudgetOverrunPayload, type SessionSettlement, type SessionUsageRecord, type TaskConsumption, type UsageAccountingMode,
+  accumulateInRun, accumulateInRunExtras, lateOverrun, remainingBudget, roundUsd, settleSession, taskConsumption,
+  type AgentSpec, type BudgetCaps, type BudgetOverrunPayload, type SessionSettlement, type SessionUsageRecord, type SettlementPrice, type UsageObservation, type TaskConsumption, type UsageAccountingMode,
 } from "@agent-plane/core";
 import type { ResolvedConfig } from "../../config.js";
 import type { Db } from "../../db/index.js";
 import type { ModelCatalogService } from "../model-catalog.js";
+import { resolveCandidateIdentity } from "../model-selection.js";
 import type { Registry } from "../registry.js";
 import { modelPrice } from "./ports.js";
 
@@ -236,6 +238,24 @@ export class TaskAccounting {
     return n;
   }
 
+  /**
+   * `modelPrice` plus the cache-write rate of the row it chose.
+   * ponytail: second identity lookup because ports.ts is out of this slice; have modelPrice return the rate instead.
+   */
+  private price(assistantId: string, provider: string, model: string): SettlementPrice | undefined {
+    const price = modelPrice(this.d, assistantId, provider, model);
+    if (!price || !this.d.catalog) return price;
+    try {
+      const catalog = this.d.catalog.list();
+      const key = resolveCandidateIdentity(this.d.db, { assistantId, provider, selector: model, catalog, ...(this.d.now ? { now: this.d.now } : {}) }).resolvedModelKey;
+      const row = catalog.find((e) => e.modelKey === key)?.pricing
+        .find((p) => p.pricingVersion === price.pricingVersion && p.inputPerMtok === price.inputPerMtok && p.outputPerMtok === price.outputPerMtok);
+      return row?.cacheWritePerMtok !== undefined ? { ...price, cacheWritePerMtok: row.cacheWritePerMtok } : price;
+    } catch {
+      return price;
+    }
+  }
+
   private settle(rows: RunRow[]): RunSettlement[] {
     const assistants = new Map(this.d.registry.list().map((a) => [a.id, a]));
     const records = this.d.db.prepare(
@@ -247,6 +267,10 @@ export class TaskAccounting {
       const assistant = assistants.get(r.assistant_id);
       const manifestMode: UsageAccountingMode = assistant?.manifestParsed?.harness?.usageAccounting ?? "none";
       const resultUsage = r.result_usage ? (JSON.parse(r.result_usage) as { inputTokens?: number; outputTokens?: number; accounting?: UsageAccountingMode }) : undefined;
+      // Cost and cache creation ride the run's usage.updated events; the terminal result keeps tokens only.
+      const observations = (usageEvents.all(r.id) as Array<{ payload: string | null }>).map((e) => {
+        try { return e.payload ? (JSON.parse(e.payload) as UsageObservation) : {}; } catch { return {}; }
+      });
       let accounting: UsageAccountingMode;
       let inRun: { input: number; output: number };
       if (resultUsage) {
@@ -255,17 +279,15 @@ export class TaskAccounting {
         inRun = { input: isFiniteNumber(resultUsage.inputTokens) ? resultUsage.inputTokens : 0, output: isFiniteNumber(resultUsage.outputTokens) ? resultUsage.outputTokens : 0 };
       } else {
         accounting = manifestMode;
-        const observations = (usageEvents.all(r.id) as Array<{ payload: string | null }>).map((e) => {
-          try { return e.payload ? (JSON.parse(e.payload) as { inputTokens?: number; outputTokens?: number }) : {}; } catch { return {}; }
-        });
         inRun = accumulateInRun(accounting, observations);
       }
+      const extras = accumulateInRunExtras(accounting, observations);
       const sessionRecords: SessionUsageRecord[] = (records.all(r.id) as Array<{
         event_id: string; accounting: "delta" | "cumulative"; tokens_in: number; tokens_out: number; cost_usd: number | null; api_equivalent_usd: number;
       }>).map((x) => ({ eventId: x.event_id, accounting: x.accounting, tokensIn: x.tokens_in, tokensOut: x.tokens_out, costUsd: x.cost_usd, apiEquivalentUsd: x.api_equivalent_usd }));
       const model = r.model_resolved ?? r.model_requested ?? assistant?.manifestParsed?.core.models[0]?.id ?? null;
-      const price = model && assistant ? modelPrice(this.d, r.assistant_id, assistant.provider, model) : undefined;
-      const settled = settleSession({ inRun, records: sessionRecords, ...(price ? { price } : {}) });
+      const price = model && assistant ? this.price(r.assistant_id, assistant.provider, model) : undefined;
+      const settled = settleSession({ inRun: { ...inRun, ...extras }, records: sessionRecords, ...(price ? { price } : {}) });
       return { runId: r.id, assistantId: r.assistant_id, compositionRevisionId: r.composition_revision_id, model, accounting, ...settled };
     });
   }
