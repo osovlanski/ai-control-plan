@@ -323,6 +323,40 @@ describe("POST /api/tasks/:id/start with the composer on", () => {
     expect(() => db.prepare("UPDATE runs SET composition_revision_id = NULL WHERE id = ?").run(res.body.runId)).toThrow();
   });
 
+  it("a re-tag with the same digest reaches the next preview; a confirmed revision replays byte-equal", async () => {
+    await boot();
+    const first = task("Add a typed helper to the parser module");
+    const preview = await compose(first);
+    expect(stage(preview.body.decision, "assets").chosen).toEqual([TS_REVIEW]);
+    expect((await start(first, { compositionDigest: preview.body.compositionDigest! })).status).toBe(200);
+    expect(await built!.orchestrator.waitForSettled(first)).toBe("COMPLETED");
+    const stored = JSON.stringify((await history(first)).revisions);
+    const specRow = db.prepare("SELECT * FROM agent_specs").all();
+
+    // Re-tag in Cockpit: the content, so the asset digest, is unchanged.
+    const skill = cockpit.skills.get(TS_REVIEW)!;
+    skill.tags = ["writing"];
+    expect((await built!.registryFederation.sync()).ok).toBe(true);
+    const cached = built!.registryFederation.read().assets.find((a) => a.id === TS_REVIEW)!;
+    expect(cached.tags).toEqual(["writing"]);
+    expect(cached.digest).toBe(digestOf(skill.body));
+
+    const second = task("Add a typed helper to the lexer module");
+    const after = await compose(second);
+    expect(after.body.outcome).toEqual({ status: "composed" });
+    expect(stage(after.body.decision, "assets").chosen).toEqual([]);
+    expect(stage(after.body.decision, "assets").filters.map((f) => f.filter)).toContain("no_tag_match");
+
+    // Tag it back: the skill is selected again with no operator override.
+    skill.tags = ["coding", "typescript"];
+    await built!.registryFederation.sync();
+    expect(stage((await compose(second)).body.decision, "assets").chosen).toEqual([TS_REVIEW]);
+
+    // The confirmed revision is stored whole: the re-tag rewrote none of it.
+    expect(JSON.stringify((await history(first)).revisions)).toBe(stored);
+    expect(db.prepare("SELECT * FROM agent_specs WHERE task_id = ?").all(first)).toEqual(specRow.filter((r) => (r as { task_id: string }).task_id === first));
+  });
+
   it("starts without a digest when none is sent, and numbers revisions per task", async () => {
     await boot();
     const id = task("Add a typed helper to the parser module");
