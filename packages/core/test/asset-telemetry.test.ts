@@ -62,7 +62,7 @@ function input(over: Partial<AssetUsageInput> = {}): AssetUsageInput {
 const byKind = (rows: ReturnType<typeof deriveAssetUsage>["rows"]) => Object.fromEntries(rows.map((r) => [r.assetKind, r]));
 
 describe("deriveAssetUsage", () => {
-  it("Claude full + judge passed: skill runtime_confirmed, connected MCP confirmed, prompt instructions files_verified; invocation not observable", () => {
+  it("Claude full + judge passed: skill runtime_confirmed, connected MCP confirmed, prompt instructions files_verified; no tool events is 0 calls, instructions not applicable", () => {
     const { rows, session } = deriveAssetUsage(input(), deps);
     expect(rows.map((r) => r.assetKind)).toEqual(["skill", "mcp_server", "memory_bundle", "fragment"]);
     const k = byKind(rows);
@@ -71,11 +71,15 @@ describe("deriveAssetUsage", () => {
     expect(k.memory_bundle!.validation).toBe("files_verified");
     expect(k.fragment).toMatchObject({ assetDigest: D("f"), validation: "files_verified" });
     for (const r of rows) {
-      expect(r).toMatchObject({ invocationMethod: "not_observable", invocationCount: null, invocationFailed: null, attributionMethod: "co-occurrence/v1", at: "2030-01-01T00:10:00.000Z" });
+      const instructions = r.assetKind === "memory_bundle" || r.assetKind === "fragment";
+      expect(r).toMatchObject(instructions
+        ? { invocationMethod: "not_applicable", invocationCount: null, invocationFailed: null }
+        : { invocationMethod: "tool_event", invocationCount: 0, invocationFailed: 0 });
+      expect(r).toMatchObject({ attributionMethod: "co-occurrence/v1", at: "2030-01-01T00:10:00.000Z" });
       expect(r.eventId).toBe(assetUsageEventId({ revision: "CR-t-1", session: "run-1", kind: r.assetKind, id: r.assetId, digest: r.assetDigest }, deps));
       expect(r.eventId).toMatch(/^au1_[0-9a-f]{64}$/);
     }
-    expect(session).toMatchObject({ sessionId: "run-1", rows: 4, deriverVersion: 1 });
+    expect(session).toMatchObject({ sessionId: "run-1", rows: 4, deriverVersion: 2 });
   });
 
   it("an MCP server Claude reported pending passes the judge but is only runtime_pending", () => {

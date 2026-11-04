@@ -5,7 +5,9 @@
  * (risk 11). Pure: no clock, environment, locale or I/O; hashing is injected. Every input is final
  * once the session is terminal, so a re-derivation is byte-equal and its keys are stable.
  *
- * S1 observes no invocations: every row is `not_observable` with NULL counts. S2 adds tool events.
+ * Invocations (S2, Q5/Q6) are distinct `toolUseId`s from tool events, with failed calls inside the
+ * count and also separately. Instructions are `not_applicable`; an asset is `tool_event` only where
+ * it was attached and its adapter reports the calls (Claude: skills and MCP; Codex SDK: MCP).
  */
 
 import { jcs } from "./canonical-json.js";
@@ -19,7 +21,8 @@ import {
   type ProvisioningVerifiedPayload,
 } from "./provisioning.js";
 
-export const ASSET_USAGE_DERIVER_VERSION = 1;
+/** 2: S2 invocation evidence. Version 1 rows (S1) said `not_observable` everywhere. */
+export const ASSET_USAGE_DERIVER_VERSION = 2;
 export const ASSET_USAGE_ATTRIBUTION = "co-occurrence/v1";
 
 export type AssetUsageKind = "skill" | "mcp_server" | "memory_bundle" | "fragment";
@@ -43,7 +46,7 @@ export interface AssetUsageInput {
   bundleManifest: BundleManifest;
   sessionId: string;
   taskId: string;
-  /** The session's events in seq order. Only `provisioning.*` and the first `run.started` are read. */
+  /** The session's events in seq order. Only `provisioning.*`, the first `run.started` and `tool.*` are read. */
   events: readonly AssetUsageEvent[];
   result: Pick<ExecutionResult, "outcome" | "yield" | "verification">;
   /** `execution_results.at`: every row's `at`, never the clock. */
@@ -148,6 +151,59 @@ function readEvents(events: readonly AssetUsageEvent[]): {
   return { ...(verified ? { verified } : {}), ...(ambient ? { ambient } : {}), ...(started ? { started } : {}) };
 }
 
+/** Claude names a profile skill `agent-plane-profile:<skill>` (adapters' PLUGIN_NAME). */
+const PROFILE_PLUGIN = "agent-plane-profile";
+const BUNDLE_SKILL = /^\.claude\/skills\/([^/]+)\/SKILL\.md$/;
+/** The probe (scripts/probe-claude-skill-input.ts) pins which key Claude uses; both are accepted until then. */
+const SKILL_INPUT_KEYS = ["skill", "name"] as const;
+
+interface ToolCall { tools: string[]; input?: Record<string, unknown>; failed: boolean }
+
+/** One entry per distinct `toolUseId`. Claude names the tool at `tool.started` only; Codex reports MCP at completion only. */
+function toolCalls(events: readonly AssetUsageEvent[]): ToolCall[] {
+  const calls = new Map<string, ToolCall>();
+  for (const e of events) {
+    if (e.type !== "tool.started" && e.type !== "tool.completed" && e.type !== "tool.failed") continue;
+    const p = record(e.payload);
+    const id = p?.toolUseId;
+    if (typeof id !== "string" || !id) continue;
+    const call = calls.get(id) ?? { tools: [], failed: false };
+    if (typeof p!.tool === "string" && !call.tools.includes(p!.tool)) call.tools.push(p!.tool);
+    const input = record(p!.input);
+    if (input && !call.input) call.input = input;
+    if (e.type === "tool.failed") call.failed = true;
+    calls.set(id, call);
+  }
+  return [...calls.values()];
+}
+
+/**
+ * The profile server a tool name belongs to: Claude `mcp__<server>__<tool>`, Codex `mcp:<server>.<tool>`,
+ * matched against the profile's own server names, never split at the first separator (plan §7), so
+ * a server name containing `__` still attributes. When two names both prefix the tool, the longer wins.
+ */
+function mcpServerOf(tool: string, servers: readonly string[]): string | undefined {
+  let best: string | undefined;
+  for (const s of servers) {
+    if ((tool.startsWith(`mcp__${s}__`) || tool.startsWith(`mcp:${s}.`)) && (!best || s.length > best.length)) best = s;
+  }
+  return best;
+}
+
+/** Q6: a Skill call naming the profile skill, or a Read of the profile's `plugin/skills/<skill>/SKILL.md`. */
+function usesSkill(call: ToolCall, skill: string): boolean {
+  const input = call.input ?? {};
+  if (call.tools.includes("Skill")) {
+    return SKILL_INPUT_KEYS.some((k) => input[k] === `${PROFILE_PLUGIN}:${skill}` || input[k] === skill);
+  }
+  if (call.tools.includes("Read")) {
+    const path = input.file_path;
+    // ponytail: suffix match, since the payload has no profile dir; a worktree file at the same relative path also counts.
+    return typeof path === "string" && path.replaceAll("\\", "/").endsWith(`/plugin/skills/${skill}/SKILL.md`);
+  }
+  return false;
+}
+
 function verificationPassed(v: AssetUsageInput["result"]["verification"]): boolean | null {
   if (!v) return null;
   const ran = v.checks.some((c) => c.status !== "skipped");
@@ -192,6 +248,23 @@ export function deriveAssetUsage(input: AssetUsageInput, deps: AssetUsageDeps): 
     return "files_verified";
   };
 
+  const calls = toolCalls(input.events);
+  const servers = spec.assets.mcp_servers.map((a) => mcpServerName(a.id));
+  const skillDir = (id: string) => {
+    const relPath = manifest.included.find((i) => i.kind === "skill" && i.ref === id)?.relPath;
+    return relPath ? BUNDLE_SKILL.exec(relPath)?.[1] : undefined;
+  };
+  const invocationOf = (kind: AssetUsageKind, attached: boolean, assetId: string) => {
+    if (kind === "memory_bundle" || kind === "fragment") return { invocationMethod: "not_applicable" as const, invocationCount: null, invocationFailed: null };
+    const observable = attached && (spec.harness === "claude-code" || (spec.harness === "codex" && kind === "mcp_server"));
+    if (!observable) return { invocationMethod: "not_observable" as const, invocationCount: null, invocationFailed: null };
+    const dir = kind === "skill" ? skillDir(assetId) : undefined;
+    const used = calls.filter((c) => kind === "mcp_server"
+      ? c.tools.some((t) => mcpServerOf(t, servers) === mcpServerName(assetId))
+      : dir !== undefined && usesSkill(c, dir));
+    return { invocationMethod: "tool_event" as const, invocationCount: used.length, invocationFailed: used.filter((c) => c.failed).length };
+  };
+
   const sessionOutcome: AssetSessionOutcome = input.startAcked ? reliabilityClass(input.result) : "not_run";
   const passed = verificationPassed(input.result.verification);
 
@@ -223,9 +296,7 @@ export function deriveAssetUsage(input: AssetUsageInput, deps: AssetUsageDeps): 
       fidelity,
       attached: a.attached,
       validation: validationOf(a.kind, a.attached, a.id),
-      invocationMethod: "not_observable" as const,
-      invocationCount: null,
-      invocationFailed: null,
+      ...invocationOf(a.kind, a.attached, a.id),
       sessionOutcome,
       verificationPassed: passed,
       attributionMethod: ASSET_USAGE_ATTRIBUTION,
