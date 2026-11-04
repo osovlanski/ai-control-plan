@@ -36,9 +36,10 @@ session. A record without a `sessionRef` is keyed in its own space, so a session
 
 | Outcome | Status |
 |---|---|
-| First delivery | `201 { replayed: false, record }` |
-| Same key, same record | `200 { replayed: true, record }` with the stored row |
+| First delivery | `201 { replayed: false, record, link }` |
+| Same key, same record | `200 { replayed: true, record, link }` with the stored row |
 | Same key, different record | `409 { error, record }` with the stored row; never an overwrite |
+| `runId` is not a run of the record's session | `409 { error: "run_conflict: …", sessionRuns }`; nothing stored |
 | `runId` unknown | `422` |
 | Not a valid UsageRecord | `400 { error, details }` |
 
@@ -48,6 +49,21 @@ as above), except `schemaVersion`. Stored records are immutable. The `record` in
 
 Authentication is a bearer credential with the `usage.write` capability, which browser sessions
 never carry.
+
+## Run binding
+
+The wire is unchanged: `runId` stays optional, and Cockpit sends `null`. The plane binds a record
+with a `sessionRef` and no `runId` to the one run whose assistant has the record's `provider` and
+whose provider session is `sessionRef`. The response's `link` says how the stored record stands:
+`body` (the record named its run), `session_ref` (the plane resolved it), `unmatched` (no run has
+the session yet), `outside_windows` (no window of its session's runs holds it), `ambiguous`
+(inside two windows; one record is never split across runs, so it stays unbound) or `none` (no
+runId and no sessionRef). Every candidate run, one or several (a resumed or continued provider
+session spans runs), is tested by time: the record binds to the one run whose window
+`[started_at, ended_at]` holds its `observedAt` (a run not yet ended has no end). An unbound
+record is bound later, once, when the rule names its run: when a run stores that session
+(followed by the late budget check), on a replay, or by the plane's boot pass. A bound record never moves, and `record.runId` in a replay shows the binding even though
+the posted body said `null`; "same record" still compares the posted fields only.
 
 ## Versioning
 

@@ -1314,3 +1314,65 @@ describe("execution.maxConcurrentProviderStarts", () => {
     expect(queueEvents(sessionOf())).toEqual([]);
   });
 });
+
+describe("a provider that learns its session id after start (Claude's system/init)", () => {
+  const LATE_REF = "FAKE-claude-session-not-real";
+
+  /** Claude-shaped: start() returns no providerSessionRef; run.started carries it, then the run hangs. */
+  function lateRefAdapter(): AgentAdapter {
+    return {
+      id: "a1" as AssistantId,
+      describe: async () => MANIFEST,
+      start: async () => ({ runId: "h3", assistantId: "a1" as AssistantId }),
+      resume: async () => ({ runId: "h3", assistantId: "a1" as AssistantId }),
+      events: async function* () {
+        yield {
+          runId: "h3" as RunId,
+          ts: new Date().toISOString(),
+          type: "run.started",
+          summary: "started",
+          payload: { providerSessionRef: LATE_REF, model: "fake-1" },
+        };
+        await new Promise(() => {}); // still running when the plane dies
+      },
+      cancel: async () => {},
+    };
+  }
+
+  it("stores the ref from run.started while the session is RUNNING, so a crash now leaves something to resume", async () => {
+    const runner = new SessionRunner(deps(lateRefAdapter(), { approvalPollMs: 5 }));
+    const done = runner.run(request({ policy: { ...request().policy, timeout: { hardMs: 200 } } }));
+    await waitFor(() => store.forRequest("erq_1")?.state === "RUNNING");
+    const live = store.get(sessionOf())!;
+    expect(live.providerSessionRef).toBe(LATE_REF);
+    expect(live.leaseToken).toBeDefined(); // the runner still owns it: written mid-run, not at settlement
+    const result = await done;
+    // The runner's own CAS writes still line up after the extra version bump.
+    expect(result.terminalState).toBe("TIMED_OUT");
+    expect(store.get(sessionOf())!.providerSessionRef).toBe(LATE_REF);
+  });
+
+  it("FakeAdapter sessionRefAfterStart: start() hands back no ref, and the run still ends with one stored", async () => {
+    const fake = new FakeAdapter("a1" as AssistantId, undefined, { sessionRefAfterStart: true });
+    let atStart: RunHandle | undefined;
+    const realStart = fake.start.bind(fake);
+    fake.start = async (spec) => {
+      const handle = await realStart(spec);
+      atStart = { ...handle };
+      return handle;
+    };
+    const result = await new SessionRunner(deps(fake)).run(request());
+    expect(result.terminalState).toBe("COMPLETED");
+    expect(atStart).toBeDefined();
+    expect(atStart!.providerSessionRef).toBeUndefined();
+    expect(store.get(sessionOf())!.providerSessionRef).toBe(`fake-session-${atStart!.runId}`);
+  });
+
+  it("keeps a ref acked at start: a later run.started naming another ref does not overwrite it", async () => {
+    const fake = new FakeAdapter("a1" as AssistantId);
+    const realStart = fake.start.bind(fake);
+    fake.start = async (spec) => ({ ...(await realStart(spec)), providerSessionRef: "FAKE-acked-not-real" as never });
+    await new SessionRunner(deps(fake)).run(request());
+    expect(store.get(sessionOf())!.providerSessionRef).toBe("FAKE-acked-not-real");
+  });
+});

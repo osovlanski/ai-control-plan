@@ -81,7 +81,7 @@ describe("top panel", () => {
     expect(quotaPercent(assistant())).toBeNull();
     expect(quotaBar(62)).toBe("▮▮▯▯");
     expect(quotaBar(100)).toBe("▮▮▮▮");
-    expect(quotaBar(null)).toBe("▯▯▯▯");
+    expect(quotaBar(null)).toBe("unknown");
   });
   it("names off and cooling assistants", () => {
     expect(assistantStatus(assistant(undefined, false), [], NOW)).toBe("off");

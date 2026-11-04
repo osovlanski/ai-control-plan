@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  accumulateInRun, combineUsageRecords, lateOverrun, NO_CONSUMPTION, remainingBudget, settleSession, shareBudget, taskConsumption,
+  accumulateInRun, accumulateInRunExtras, combineUsageRecords, lateOverrun, NO_CONSUMPTION, remainingBudget, settleSession, shareBudget, taskConsumption,
   type SessionUsageRecord,
 } from "../../src/index.js";
 
@@ -52,8 +52,8 @@ describe("session settlement: max(in-run, records), never the sum", () => {
     expect(s.recordCount).toBe(records.length);
   });
 
-  it.each<[string, Parameters<typeof settleSession>[0], { method: string; usd?: number }]>([
-    ["measured wins", { inRun: { input: 0, output: 0 }, records: [delta("e1", 1000, 0, 0.05)], price: { pricingVersion: "p1", inputPerMtok: 3, outputPerMtok: 15 } }, { method: "measured", usd: 0.05 }],
+  it.each<[string, Parameters<typeof settleSession>[0], { method: string; usd?: number; basis?: string }]>([
+    ["measured wins", { inRun: { input: 0, output: 0 }, records: [delta("e1", 1000, 0, 0.05)], price: { pricingVersion: "p1", inputPerMtok: 3, outputPerMtok: 15 } }, { method: "measured", usd: 0.05, basis: "records" }],
     ["estimated from price", { inRun: { input: 1_000_000, output: 100_000 }, records: [], price: { pricingVersion: "p1", inputPerMtok: 3, outputPerMtok: 15 } }, { method: "estimated", usd: 4.5 }],
     ["estimated from apiEquivalentUsd", { inRun: { input: 0, output: 0 }, records: [{ ...delta("e1", 10, 0), apiEquivalentUsd: 0.25 }] }, { method: "estimated", usd: 0.25 }],
     ["unknown, no number", { inRun: { input: 10, output: 0 }, records: [] }, { method: "unknown" }],
@@ -101,5 +101,28 @@ describe("task consumption and remainder", () => {
     ["no growth", 1000, 1100, 1100, undefined],
   ])("late overrun: %s", (_name, cap, before, after, overrun) => {
     expect(lateOverrun(cap, before, after)).toBe(overrun);
+  });
+});
+
+describe("in-run measured cost and cache-write pricing", () => {
+  const price = { pricingVersion: "FAKE-v1", inputPerMtok: 3, outputPerMtok: 15 };
+  it("in-run cost only is measured", () => {
+    expect(settleSession({ inRun: { input: 100, output: 10, costUsd: 0.225 }, records: [] }).cost).toEqual({ method: "measured", usd: 0.225, basis: "in_run" });
+  });
+  it("records only are unchanged", () => {
+    expect(settleSession({ inRun: { input: 0, output: 0 }, records: [cumulative("e1", 10, 1, 0.4)] }).cost).toEqual({ method: "measured", usd: 0.4, basis: "records" });
+  });
+  it("both: max, never the sum", () => {
+    expect(settleSession({ inRun: { input: 100, output: 10, costUsd: 0.225 }, records: [cumulative("e1", 10, 1, 0.1)] }).cost).toEqual({ method: "measured", usd: 0.225, basis: "in_run" });
+    expect(settleSession({ inRun: { input: 100, output: 10, costUsd: 0.1 }, records: [cumulative("e1", 10, 1, 0.3)] }).cost).toEqual({ method: "measured", usd: 0.3, basis: "records" });
+  });
+  it("cache creation at the cache-write rate, labelled at the input rate otherwise", () => {
+    const inRun = { input: 1_000_000, output: 0, cacheCreation: 400_000 };
+    expect(settleSession({ inRun, records: [], price: { ...price, cacheWritePerMtok: 3.75 } }).cost).toEqual({ method: "estimated", usd: 3.3 });
+    expect(settleSession({ inRun, records: [], price }).cost).toEqual({ method: "estimated", usd: 3, basis: "cache creation at the input rate: no cache-write price" });
+  });
+  it("extras follow the accounting mode", () => {
+    expect(accumulateInRunExtras("cumulative", [{ quota: undefined } as never, { inputTokens: 5, costUsd: 0.2, cacheCreationInputTokens: 3 }])).toEqual({ costUsd: 0.2, cacheCreation: 3 });
+    expect(accumulateInRunExtras("none", [{ costUsd: 1 }])).toEqual({ cacheCreation: 0 });
   });
 });

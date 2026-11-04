@@ -181,7 +181,7 @@ export function NewTask({ onStarted, onPreviewed }: { onStarted: (taskId: string
             <p>Rule fired: <code>{explanation.ruleFired}</code>{explanation.tieBreaker ? ` · ${explanation.tieBreaker}` : ""}</p>
             {target && <p>You chose to compose on <strong>{target}</strong> instead of the recommended route; "Run composed" runs it there.</p>}
             {composed?.specDraft
-              ? <p className="fine-print">Requested model <code>{composed.specDraft.model.primary.id}</code>. The model that served the run is reported when execution provides evidence.</p>
+              ? <p className="fine-print">Launch model <code>{composed.specDraft.model.primary.id}</code>: the revision binds it, so the run requests it unless the task's own model override is set. The model that served the run is reported when execution provides evidence.</p>
               : <p className="fine-print">The model will be reported when execution provides evidence.</p>}
           </div>
           {explanation.chosen && <Button onClick={() => void start()} disabled={busy}>{composed ? "Run composed" : "Run recommended"}</Button>}

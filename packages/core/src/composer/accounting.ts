@@ -17,7 +17,11 @@ import type { BudgetCaps, ModelPrice } from "./types.js";
 
 export type UsageAccountingMode = "delta" | "cumulative" | "none";
 export interface TokenPair { input: number; output: number }
-export interface UsageObservation { inputTokens?: number; outputTokens?: number }
+export interface UsageObservation { inputTokens?: number; outputTokens?: number; costUsd?: number; cacheCreationInputTokens?: number; cacheWriteInputTokens?: number }
+/** In-run tokens, plus the provider-reported cost and the cache-creation share of input when the run reported them. */
+export interface InRunUsage extends TokenPair { costUsd?: number; cacheCreation?: number }
+/** K7 price evidence plus the cache-write rate when the catalog row has one. */
+export type SettlementPrice = ModelPrice & { cacheWritePerMtok?: number }
 
 /** One usage v1 record of a session, in arrival order. */
 export interface SessionUsageRecord {
@@ -52,7 +56,8 @@ export interface SessionSettlement {
   recordTokens: number;
   recordCount: number;
   regressed: string[];
-  cost: { method: CostMethod; usd?: number };
+  /** `basis` says which side a measured cost came from, or that an estimate priced cache creation at the input rate. */
+  cost: { method: CostMethod; usd?: number; basis?: string };
 }
 
 export interface TaskConsumption {
@@ -83,6 +88,21 @@ export function accumulateInRun(mode: UsageAccountingMode, observations: readonl
       ? { input: Math.max(acc.input, input), output: Math.max(acc.output, output) }
       : { input: acc.input + input, output: acc.output + output };
   }, { input: 0, output: 0 });
+}
+
+/**
+ * In-run provider cost and cache-creation tokens under the same mode as the tokens: cumulative
+ * takes the max, delta sums (cost only when every observation that counted tokens carried one),
+ * none contributes nothing.
+ */
+export function accumulateInRunExtras(mode: UsageAccountingMode, observations: readonly UsageObservation[]): { costUsd?: number; cacheCreation: number } {
+  if (mode === "none") return { cacheCreation: 0 };
+  const cache = observations.map((o) => count(o.cacheCreationInputTokens ?? o.cacheWriteInputTokens));
+  const costs = observations.filter((o) => typeof o.costUsd === "number" && Number.isFinite(o.costUsd)).map((o) => o.costUsd as number);
+  if (mode === "cumulative") return { cacheCreation: Math.max(0, ...cache), ...(costs.length ? { costUsd: roundUsd(Math.max(...costs)) } : {}) };
+  const counted = observations.filter((o) => count(o.inputTokens) + count(o.outputTokens) > 0 || o.costUsd !== undefined);
+  const cost = sumIfAll(counted.map((o) => o.costUsd));
+  return { cacheCreation: cache.reduce((a, b) => a + b, 0), ...(cost !== undefined ? { costUsd: cost } : {}) };
 }
 
 const sumIfAll = (values: ReadonlyArray<number | null | undefined>): number | undefined =>
@@ -124,15 +144,25 @@ export function combineUsageRecords(records: readonly SessionUsageRecord[]): Rec
  * `costUsd` (measured), else tokens × K7 price evidence (estimated), else the subscription
  * API-equivalent (estimated), else unknown, with no number.
  */
-export function settleSession(input: { inRun: TokenPair; records: readonly SessionUsageRecord[]; price?: ModelPrice }): SessionSettlement {
+export function settleSession(input: { inRun: InRunUsage; records: readonly SessionUsageRecord[]; price?: SettlementPrice }): SessionSettlement {
   const records = combineUsageRecords(input.records);
   const inRun = { input: count(input.inRun.input), output: count(input.inRun.output) };
   const fromRecords = records.total > total(inRun);
   const settled = fromRecords ? records.tokens : inRun;
+  // Measured cost follows the token rule: max(in-run, records), never the sum. Both are totals of
+  // the same session, so the larger has seen more of it.
+  const inRunCost = typeof input.inRun.costUsd === "number" && Number.isFinite(input.inRun.costUsd) ? roundUsd(input.inRun.costUsd) : undefined;
   let cost: SessionSettlement["cost"];
-  if (records.measuredCostUsd !== undefined) cost = { method: "measured", usd: records.measuredCostUsd };
-  else if (input.price) cost = { method: "estimated", usd: roundUsd((settled.input * input.price.inputPerMtok + settled.output * input.price.outputPerMtok) / 1e6) };
-  else if (records.apiEquivalentUsd !== undefined) cost = { method: "estimated", usd: records.apiEquivalentUsd };
+  if (inRunCost !== undefined || records.measuredCostUsd !== undefined) {
+    const fromRecordCost = records.measuredCostUsd !== undefined && (inRunCost === undefined || records.measuredCostUsd > inRunCost);
+    cost = { method: "measured", usd: fromRecordCost ? records.measuredCostUsd : inRunCost, basis: fromRecordCost ? "records" : "in_run" };
+  } else if (input.price) {
+    // Records carry no cache-creation split, so only in-run settlement can price it apart.
+    const cache = fromRecords ? 0 : Math.min(count(input.inRun.cacheCreation), settled.input);
+    const writeRate = input.price.cacheWritePerMtok ?? input.price.inputPerMtok;
+    const usd = roundUsd(((settled.input - cache) * input.price.inputPerMtok + cache * writeRate + settled.output * input.price.outputPerMtok) / 1e6);
+    cost = { method: "estimated", usd, ...(cache > 0 && input.price.cacheWritePerMtok === undefined ? { basis: "cache creation at the input rate: no cache-write price" } : {}) };
+  } else if (records.apiEquivalentUsd !== undefined) cost = { method: "estimated", usd: records.apiEquivalentUsd };
   else cost = { method: "unknown" };
   return {
     tokens: total(settled), source: fromRecords ? "records" : "in_run", inRunTokens: total(inRun), recordTokens: records.total,

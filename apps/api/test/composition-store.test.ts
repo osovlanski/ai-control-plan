@@ -61,9 +61,9 @@ describe("CompositionStore", () => {
     expect(() => db.prepare("DELETE FROM agent_specs WHERE composition_revision_id = ?").run(id)).toThrow(/immutable/);
     expect(() => db.prepare("UPDATE composition_decisions SET decision_json = '{}'").run()).toThrow(/immutable/);
     expect(() => db.prepare("DELETE FROM composition_decisions").run()).toThrow(/immutable/);
-    db.prepare("INSERT INTO asset_usage VALUES ('au-1','skill:x','sha256:x','run-1',1,0,NULL,'attached','t')").run();
-    expect(() => db.prepare("UPDATE asset_usage SET invocation_count = 9").run()).toThrow(/immutable/);
-    expect(() => db.prepare("DELETE FROM asset_usage").run()).toThrow(/immutable/);
+    db.prepare("INSERT INTO asset_usage_m1 VALUES ('au-1','skill:x','sha256:x','run-1',1,0,NULL,'attached','t')").run();
+    expect(() => db.prepare("UPDATE asset_usage_m1 SET invocation_count = 9").run()).toThrow(/immutable/);
+    expect(() => db.prepare("DELETE FROM asset_usage_m1").run()).toThrow(/immutable/);
     expect(Object.getOwnPropertyNames(CompositionStore.prototype).sort()).toEqual(["attachRun", "constructor", "get", "persist"]);
     // A decision explains exactly one revision.
     const reused = revision("two-skill");
@@ -157,7 +157,7 @@ describe("POST /api/usage/records", () => {
   });
 
   it("needs its own capability", async () => {
-    expect(CONTROL_PLANE_API_VERSION).toBe("2.6");
+    expect(CONTROL_PLANE_API_VERSION).toBe("2.7");
     expect(INGEST_CAPABILITIES).toEqual(["usage.write"]);
     // A browser session requests observability + command capabilities only.
     expect(COMMAND_CAPABILITIES).not.toContain("usage.write");
@@ -171,7 +171,7 @@ describe("POST /api/usage/records", () => {
     expect(first.json()).toMatchObject({ replayed: false, record: { eventId: "evt-1", runId: null, tokensIn: 100 } });
     const again = await post(record());
     expect(again.statusCode).toBe(200);
-    expect(again.json()).toEqual({ replayed: true, record: first.json().record });
+    expect(again.json()).toEqual({ replayed: true, record: first.json().record, link: "unmatched" });
     const conflict = await post(record({ tokensIn: 101 }));
     expect(conflict.statusCode).toBe(409);
     expect(conflict.json().record.tokensIn).toBe(100);

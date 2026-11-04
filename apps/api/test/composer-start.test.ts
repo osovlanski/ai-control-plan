@@ -537,6 +537,71 @@ describe("POST /api/tasks/:id/start with the composer on", () => {
   });
 });
 
+describe("the revision's model binds the launch (plan §3.1, BIND)", () => {
+  const TWO_MODELS = { "fake-claude": { provider: "fake", options: { models: [{ id: "fake-big" }, { id: "fake-small" }] } } } as ResolvedConfig["assistants"];
+  const launched = (runId: string) => db.prepare("SELECT model_requested, model_requested_source, model_resolved FROM runs WHERE id = ?").get(runId) as
+    { model_requested: string | null; model_requested_source: string | null; model_resolved: string | null };
+  const requestModel = (taskId: string) => (db.prepare("SELECT model FROM execution_requests WHERE task_id = ?").get(taskId) as { model: string | null }).model;
+
+  it("launches the revision's model.primary and records that the revision chose it", async () => {
+    await boot({ assistants: TWO_MODELS });
+    const id = task("Add a typed helper to the parser module");
+    const preview = await compose(id);
+    expect(preview.body.specDraft!.model.primary.id).toBe("fake-big");
+    const res = await start(id, { compositionDigest: preview.body.compositionDigest });
+    expect(res.status).toBe(200);
+    expect(await built!.orchestrator.waitForSettled(id)).toBe("COMPLETED");
+    expect(JSON.parse(requestModel(id)!)).toEqual({ id: "fake-big" });
+    // The fake echoes the requested model into run.started, so the served model is the bound one.
+    expect(launched(res.body.runId!)).toEqual({ model_requested: "fake-big", model_requested_source: "revision", model_resolved: "fake-big" });
+  });
+
+  it("lets the task's model override beat the revision, and records the override as the source", async () => {
+    await boot({ assistants: TWO_MODELS });
+    const id = built!.tasks.create({ goal: "Add a typed helper to the parser module", repoPath: repo, overrides: { model: "fake-small" } }).taskId;
+    // A stage-2 override pins the revision to fake-big; the task's own override still wins at launch.
+    const overrides = { harness_model: { model: "fake-big" } };
+    const preview = await compose(id, { overrides });
+    expect(preview.body.specDraft!.model.primary.id).toBe("fake-big");
+    const res = await start(id, { compositionDigest: preview.body.compositionDigest, overrides });
+    expect(res.status).toBe(200);
+    expect(await built!.orchestrator.waitForSettled(id)).toBe("COMPLETED");
+    expect(launched(res.body.runId!)).toEqual({ model_requested: "fake-small", model_requested_source: "task-override", model_resolved: "fake-small" });
+  });
+
+  it("launches an operator's stage-2 override outside the manifest list: the operator chose it", async () => {
+    await boot({ assistants: TWO_MODELS });
+    const id = task("Add a typed helper to the parser module");
+    const overrides = { harness_model: { model: "fake-unlisted" } };
+    const preview = await compose(id, { overrides });
+    const res = await start(id, { compositionDigest: preview.body.compositionDigest, overrides });
+    expect(res.status).toBe(200);
+    expect(await built!.orchestrator.waitForSettled(id)).toBe("COMPLETED");
+    expect(launched(res.body.runId!)).toMatchObject({ model_requested: "fake-unlisted", model_requested_source: "revision" });
+  });
+
+  it("fails the start with revision_model_refused when the assistant no longer offers the bound model; no run, no fallback", async () => {
+    await boot({ assistants: TWO_MODELS });
+    const first = task("Add a typed helper to the parser module");
+    const res = await start(first);
+    expect(res.status).toBe(200);
+    await built!.orchestrator.waitForSettled(first);
+    const revisionId = res.body.composition!.compositionRevisionId!;
+    const spec = (await history(first)).revisions[0]!.spec;
+
+    // The assistant's manifest moves on (a K11 continuation reusing that revision sees this).
+    const manifest = built!.registry.manifest("fake-claude")!;
+    db.prepare("UPDATE assistants SET manifest = ? WHERE id = ?").run(JSON.stringify({ ...manifest, core: { ...manifest.core, models: [{ id: "fake-small" }] } }), "fake-claude");
+
+    const second = task("Add a typed helper to the parser module");
+    built!.tasks.transition(second, "ROUTING");
+    const reused = { required: false, bind: () => ({ ok: true as const, compositionRevisionId: revisionId, policy: spec.policy }), attachRun: () => {} };
+    await expect(built!.orchestrator.startTask(second, "fake-claude" as never, { composition: reused }))
+      .rejects.toMatchObject({ name: "LaunchModelRefusedError", reason: "revision_model_refused", model: "fake-big" });
+    expect(db.prepare("SELECT COUNT(*) AS n FROM runs WHERE task_id = ?").get(second)).toEqual({ n: 0 });
+  });
+});
+
 describe("createTaskWorktree baseCommit", () => {
   it("branches from the pinned commit, not from a HEAD that moved", async () => {
     const pinned = git(["rev-parse", "HEAD"]);

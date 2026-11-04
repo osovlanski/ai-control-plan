@@ -24,4 +24,5 @@ export * from "./session-input-opt-in.js";
 export * from "./canonical-json.js";
 export * from "./composition-types.js";
 export * from "./provisioning.js";
+export * from "./asset-telemetry.js";
 export * from "./composer/index.js";

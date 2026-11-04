@@ -35,7 +35,7 @@ afterEach(async () => {
  * Replays the fixture; init lists the provisioned plugin, its skills and the tools that
  * `allowedTools` rules opt in (Grep, Glob), as Claude Code would.
  */
-function replay(model?: string): Query {
+function replay(model?: string, dropCost = false): Query {
   return ((params: { options?: { plugins?: Array<{ path: string }>; allowedTools?: string[] } }) => (async function* () {
     const pluginDir = params.options?.plugins?.[0]?.path;
     const optedIn = (params.options?.allowedTools ?? []).map((rule) => rule.replace(/\(.*$/, ""));
@@ -43,17 +43,20 @@ function replay(model?: string): Query {
     for (const m of FIXTURE.messages) {
       if (m.type === "system") {
         yield { ...m, ...(model ? { model } : {}), tools: [...(m.tools as string[]), ...optedIn], skills, plugins: pluginDir ? [{ name: PLUGIN_NAME, path: pluginDir }] : [] } as never;
+      } else if (dropCost && m.type === "result") {
+        const { total_cost_usd: _drop, ...rest } = m;
+        yield rest as never;
       } else yield m as never;
     }
   })()) as unknown as Query;
 }
 
-async function bootClaude(maxTokens: number, model?: string): Promise<Rig> {
+async function bootClaude(maxTokens: number, model?: string, dropCost = false): Promise<Rig> {
   // The manifest's auth comes from the environment; a runner with no Claude login would route nothing.
   vi.stubEnv("ANTHROPIC_API_KEY", "FAKE-anthropic-key-not-real-slice1");
   // The seed's prices apply to an API account; a subscription has no list price to estimate from.
   const r = await bootRig({ assistants: { claude: { provider: "anthropic", accountKind: "api" } }, budget: { maxTokens } });
-  (r.built.registry as unknown as { adapters: Map<string, unknown> }).adapters.set("claude", new ClaudeAdapter("claude" as AssistantId, replay(model)));
+  (r.built.registry as unknown as { adapters: Map<string, unknown> }).adapters.set("claude", new ClaudeAdapter("claude" as AssistantId, replay(model, dropCost)));
   await r.built.registry.syncAll();
   // K7 price evidence: the seed is loaded by a refresh (offline sources only in tests).
   await r.built.modelCatalog.refresh();
@@ -74,7 +77,7 @@ async function budget(taskId: string) {
   return res.json() as {
     consumed: { tokens: number; costMethod: string; costUsd: number };
     remaining: Record<string, number>;
-    runs: Array<{ accounting: string; model: string | null; tokens: number; source: string; inRunTokens: number; cost: { method: string; usd?: number } }>;
+    runs: Array<{ accounting: string; model: string | null; tokens: number; source: string; inRunTokens: number; recordTokens: number; recordCount: number; cost: { method: string; usd?: number; basis?: string } }>;
     overruns: Array<{ cap: string; capValue: number; settled: number; amount: number; source: string }>;
   };
 }
@@ -83,13 +86,13 @@ async function budget(taskId: string) {
 const COUNTED = 8 + 12_406 + 1_334;
 
 describe("a composed Claude run settles its result usage", () => {
-  it("counts the recorded result under cumulative accounting; an unpriced served model leaves the cost unknown", async () => {
+  it("counts the recorded result under cumulative accounting; the result's own cost is measured even for an unpriced model", async () => {
     // claude-sonnet-5 is priced since the 2026-10-30 seed; claude-haiku-5-5 is still left unpriced there.
     rig = await bootClaude(1_000_000, "claude-haiku-5-5");
     const { taskId, runId } = await composedRun();
     const b = await budget(taskId);
-    expect(b.runs).toEqual([expect.objectContaining({ accounting: "cumulative", model: "claude-haiku-5-5", tokens: COUNTED, source: "in_run", inRunTokens: COUNTED, cost: { method: "unknown" } })]);
-    expect(b.consumed).toMatchObject({ tokens: COUNTED, costMethod: "unknown" });
+    expect(b.runs).toEqual([expect.objectContaining({ accounting: "cumulative", model: "claude-haiku-5-5", tokens: COUNTED, source: "in_run", inRunTokens: COUNTED, cost: { method: "measured", usd: 0.225, basis: "in_run" } })]);
+    expect(b.consumed).toMatchObject({ tokens: COUNTED, costMethod: "measured", costUsd: 0.225 });
     expect(b.remaining).toEqual({ max_tokens: 1_000_000 - COUNTED });
     // The terminal result's accounting is the manifest's.
     const result = rig.db.prepare("SELECT json_extract(result, '$.usage') AS u FROM execution_results WHERE session_id = ?").get(runId) as { u: string };
@@ -99,13 +102,33 @@ describe("a composed Claude run settles its result usage", () => {
     expect(quota.map((q) => Object.keys(JSON.parse(q.payload) as object).includes("quota"))).toEqual([true, false]);
   });
 
-  it("a served model the catalog prices settles to an estimated cost", async () => {
-    rig = await bootClaude(1_000_000, "claude-sonnet-4-5");
+  it("with no provider cost, a priced model estimates cache creation at the cache-write rate", async () => {
+    rig = await bootClaude(1_000_000, "claude-sonnet-4-5", true);
     const { taskId } = await composedRun();
     const run = (await budget(taskId)).runs[0]!;
-    // 12,414 input at $3/Mtok + 1,334 output at $15/Mtok. Cache creation is priced at the input rate
-    // here, and the result's measured $0.225 is not read by settlement: both are findings, not fixed.
-    expect(run).toMatchObject({ model: "claude-sonnet-4-5", tokens: COUNTED, cost: { method: "estimated", usd: 0.057252 } });
+    // 8 uncached at $3/Mtok + 12,406 cache creation at $3.75/Mtok + 1,334 output at $15/Mtok.
+    expect(run).toMatchObject({ model: "claude-sonnet-4-5", tokens: COUNTED, cost: { method: "estimated", usd: 0.066557 } });
+    expect(run.cost.basis).toBeUndefined();
+  });
+
+  it("records beside the in-run cost: max for tokens and cost, never the sum; a replay changes nothing", async () => {
+    rig = await bootClaude(1_000_000, "claude-sonnet-4-5");
+    const { taskId, runId } = await composedRun();
+    expect((await budget(taskId)).runs[0]!.cost).toEqual({ method: "measured", usd: 0.225, basis: "in_run" });
+    // A smaller measured record: the in-run figure stays, nothing is added.
+    expect((await rig.postUsage({ eventId: "FAKE-evt-small", runId, accounting: "cumulative", tokensIn: 400, tokensOut: 22, costUsd: 0.02 })).status).toBe(201);
+    let b = await budget(taskId);
+    expect(b.runs[0]).toMatchObject({ tokens: COUNTED, source: "in_run", recordTokens: 422, recordCount: 1, cost: { method: "measured", usd: 0.225, basis: "in_run" } });
+    expect(b.consumed).toMatchObject({ tokens: COUNTED, costUsd: 0.225 });
+    // A larger cumulative record wins both.
+    expect((await rig.postUsage({ eventId: "FAKE-evt-large", runId, accounting: "cumulative", tokensIn: 20_000, tokensOut: 2_000, costUsd: 0.3 })).status).toBe(201);
+    b = await budget(taskId);
+    expect(b.runs[0]).toMatchObject({ tokens: 22_000, source: "records", recordCount: 2, cost: { method: "measured", usd: 0.3, basis: "records" } });
+    const before = JSON.stringify(b);
+    // Replaying the same import is deduplicated by the ledger and moves nothing.
+    await rig.postUsage({ eventId: "FAKE-evt-small", runId, accounting: "cumulative", tokensIn: 400, tokensOut: 22, costUsd: 0.02 });
+    await rig.postUsage({ eventId: "FAKE-evt-large", runId, accounting: "cumulative", tokensIn: 20_000, tokensOut: 2_000, costUsd: 0.3 });
+    expect(JSON.stringify(await budget(taskId))).toBe(before);
   });
 
   it("a run over max_tokens raises one in-run budget.overrun and changes nothing else", async () => {
