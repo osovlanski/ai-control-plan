@@ -21,9 +21,13 @@ import {
   resourceNextStep,
   waitKindLabel,
   visibleBodies,
+  verificationCheckView,
+  verificationFromEvent,
+  verificationVerdict,
   type ActualExecution,
 } from "./orbital.js";
-import type { TaskEvent } from "./api.js";
+import type { TaskEvent, VerificationCheckView } from "./api.js";
+import type { VerificationCheckResult } from "@agent-plane/core";
 
 describe("operator presentation boundaries", () => {
   it("keeps scheduler, human, and limit waits distinct", () => {
@@ -399,5 +403,54 @@ describe("constellation clearance", () => {
       for (const other of placed.slice(i + 1)) expect(bodiesCollide(placed[i]!, other, .5)).toBe(false);
     }
     expect(tasks).toHaveLength(8);
+  });
+});
+
+describe("verification check status (blocked / skipped)", () => {
+  const skipped: VerificationCheckResult = {
+    checkId: "project:test", name: "pnpm test", kind: "tests", required: false, status: "skipped", passed: false,
+    summary: "project verification skipped: the run changed nothing relative to its base (no diff, no new commits)",
+  };
+  const blocked: VerificationCheckResult = {
+    checkId: "project:typecheck", name: "pnpm typecheck", kind: "typecheck", required: true, status: "blocked", passed: false,
+    summary: "blocked: pnpm-lock.yaml present but node_modules is missing; run `pnpm install`",
+  };
+  const failed: VerificationCheckResult = { name: "lint", kind: "lint", required: true, status: "failed", passed: false, summary: "2 errors" };
+  const legacyPass: VerificationCheckResult = { name: "build", kind: "command", required: true, passed: true, summary: "ok" };
+  const legacyFail: VerificationCheckResult = { name: "build", kind: "command", required: true, passed: false, summary: "exit 1" };
+
+  it("the web check type accepts every core check shape", () => {
+    const views: VerificationCheckView[] = [skipped, blocked, failed, legacyPass, legacyFail];
+    expect(views).toHaveLength(5);
+  });
+
+  it("reads skipped with its reason and blocked with its install summary", () => {
+    expect(verificationCheckView(skipped)).toEqual({ label: "skipped", tone: "tone-neutral", required: false, detail: skipped.summary });
+    expect(verificationCheckView(blocked)).toEqual({ label: "blocked", tone: "tone-human", required: true, detail: blocked.summary });
+    expect(verificationCheckView(failed).label).toBe("failed");
+  });
+
+  it("a check with no status keeps the plain passed/failed reading", () => {
+    expect(verificationCheckView(legacyPass)).toMatchObject({ label: "passed", tone: "tone-complete" });
+    expect(verificationCheckView(legacyFail)).toMatchObject({ label: "failed", tone: "tone-failed" });
+  });
+
+  it("the verdict keeps the plane's passed and names blocked only when nothing ran and failed", () => {
+    expect(verificationVerdict({ passed: true, checks: [skipped, skipped] })).toEqual({ label: "passed", skipped: 2, blocked: 0 });
+    expect(verificationVerdict({ passed: false, checks: [blocked, skipped] })).toEqual({ label: "blocked", skipped: 1, blocked: 1 });
+    expect(verificationVerdict({ passed: false, checks: [blocked, failed] })).toEqual({ label: "failed", skipped: 0, blocked: 1 });
+    expect(verificationVerdict({ passed: false, checks: [legacyFail] }).label).toBe("failed");
+    // Never recomputed: a plane verdict of failed with no readable failing check stays failed.
+    expect(verificationVerdict({ passed: false, checks: [] }).label).toBe("failed");
+  });
+
+  it("reads a verification.result event and refuses other shapes", () => {
+    const event = { type: "verification.result", payload: { passed: false, checks: [blocked, { ...skipped, status: "bogus" }] } };
+    const read = verificationFromEvent(event);
+    expect(read?.checks[0]).toMatchObject({ status: "blocked", required: true });
+    expect(read?.checks[1]?.status).toBeUndefined();
+    expect(verificationFromEvent({ type: "run.started", payload: { passed: true, checks: [] } })).toBeNull();
+    expect(verificationFromEvent({ type: "verification.result", payload: { passed: "yes", checks: [] } })).toBeNull();
+    expect(verificationFromEvent({ type: "verification.result", payload: null })).toBeNull();
   });
 });

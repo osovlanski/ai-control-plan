@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api.js";
-import { actualLifecycle, describeState, modelIdentityView, nextStep, observedModel, resourceNextStep, waitKindLabel } from "../orbital.js";
+import { actualLifecycle, describeState, modelIdentityView, nextStep, observedModel, resourceNextStep, verificationFromEvent, waitKindLabel } from "../orbital.js";
+import { VerificationChecks, VerificationVerdict } from "../VerificationChecks.js";
 import { QuotaReadout, ContextReadout, ModelRecommendationReadout, DecisionSummary, ScheduleQueueReadout } from "./readouts.js";
 import { executionRead, missionState, type Mission } from "./execution.js";
 import { WorkspaceCompositionPanel } from "../TaskDetail.js";
@@ -43,6 +44,13 @@ export function Inspector({
   );
   // Persisted provider evidence, falling back to this run's own start event for
   // rows written before K7. Never the requested selector.
+  // This run's latest recorded verification evidence, read as the plane wrote it.
+  const verification =
+    snapshot?.events
+      .filter((e) => e.run_id === run?.id)
+      .map(verificationFromEvent)
+      .filter((v) => v !== null)
+      .at(-1) ?? null;
   const identity = modelIdentityView(run?.modelIdentity, observedModel(snapshot?.events ?? [], run?.id));
   const latestRun = snapshot?.detail.runs.at(-1);
   const currentExecution = snapshot ? executionRead(snapshot.detail, snapshot.sessions) : undefined;
@@ -228,6 +236,17 @@ export function Inspector({
             only from this run’s own provider evidence — never from today’s aliases
             or catalog.
           </p>
+          {verification && (
+            <>
+              <div className="section-label">
+                Verification <span>This run’s recorded checks</span>
+              </div>
+              <p>
+                Verification <VerificationVerdict verification={verification} />
+              </p>
+              <VerificationChecks verification={verification} />
+            </>
+          )}
           <div className="section-label">
             Recent run activity <span>Recorded events</span>
           </div>

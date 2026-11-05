@@ -1,5 +1,5 @@
 import type { ModelRecommendation } from "@agent-plane/core";
-import type { ResourceWaitStatus, TaskEvent, TaskWait } from "./api.js";
+import type { ResourceWaitStatus, TaskEvent, TaskWait, VerificationCheckView, VerificationView } from "./api.js";
 import { missionState, type ExecutionRead } from "./board/execution.js";
 
 /** Presentation vocabulary only; this does not extend the kernel state machine. */
@@ -603,4 +603,60 @@ export function modelNodes(
     };
   });
   return nodes.sort((a, b) => Number(a.eligible === false) - Number(b.eligible === false));
+}
+
+export type VerificationCheckLabel = "passed" | "failed" | "skipped" | "blocked";
+
+/**
+ * How one verification check reads. The plane's `status` wins when present: a
+ * skipped check reads as skipped with its reason, a blocked one as blocked with
+ * its summary (which carries the install command). A legacy check with no
+ * status keeps the plain passed/failed reading.
+ */
+export function verificationCheckView(check: VerificationCheckView): {
+  label: VerificationCheckLabel;
+  tone: "tone-complete" | "tone-failed" | "tone-neutral" | "tone-human";
+  required: boolean;
+  detail: string;
+} {
+  const label: VerificationCheckLabel = check.status ?? (check.passed ? "passed" : "failed");
+  const tone =
+    label === "passed" ? "tone-complete" : label === "skipped" ? "tone-neutral" : label === "blocked" ? "tone-human" : "tone-failed";
+  return { label, tone, required: check.required, detail: check.summary };
+}
+
+/**
+ * The aggregate line. `passed` is the plane's verdict and is never recomputed;
+ * a non-passed verdict whose only non-passing required checks are blocked reads
+ * as blocked (nothing ran and failed), and skipped checks are counted.
+ */
+export function verificationVerdict(v: VerificationView): { label: "passed" | "failed" | "blocked"; skipped: number; blocked: number } {
+  const views = v.checks.map(verificationCheckView);
+  const skipped = views.filter((c) => c.label === "skipped").length;
+  const blocked = views.filter((c) => c.label === "blocked").length;
+  if (v.passed) return { label: "passed", skipped, blocked };
+  const failing = views.filter((c) => c.required && c.label !== "passed" && c.label !== "skipped");
+  const label = failing.length > 0 && failing.every((c) => c.label === "blocked") ? "blocked" : "failed";
+  return { label, skipped, blocked };
+}
+
+/** The checks of a `verification.result` event payload, or null when it is not one this UI can read. */
+export function verificationFromEvent(event: Pick<TaskEvent, "type" | "payload">): VerificationView | null {
+  if (event.type !== "verification.result" || !event.payload) return null;
+  const { passed, checks } = event.payload as { passed?: unknown; checks?: unknown };
+  if (typeof passed !== "boolean" || !Array.isArray(checks)) return null;
+  const statuses = new Set(["passed", "failed", "skipped", "blocked"]);
+  const read: VerificationCheckView[] = [];
+  for (const c of checks as Array<Record<string, unknown>>) {
+    if (!c || typeof c.name !== "string" || typeof c.passed !== "boolean") return null;
+    read.push({
+      ...(typeof c.checkId === "string" ? { checkId: c.checkId } : {}),
+      name: c.name,
+      passed: c.passed,
+      required: c.required === true,
+      summary: typeof c.summary === "string" ? c.summary : "",
+      ...(typeof c.status === "string" && statuses.has(c.status) ? { status: c.status as VerificationCheckView["status"] } : {}),
+    });
+  }
+  return { passed, checks: read };
 }
