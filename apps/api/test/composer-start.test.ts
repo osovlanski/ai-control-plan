@@ -11,8 +11,8 @@ import type { AddressInfo } from "node:net";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { AgentSpec, CompositionDecision, ExecutionPolicy } from "@agent-plane/core";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { AgentSpec, CompositionDecision, ExecutionPolicy, ModelRecommendation } from "@agent-plane/core";
 import { credentialPath, readCredential } from "../src/auth/credential-file.js";
 import { assembleBundle, fileDigest, type BundleRequest } from "../src/bundle-contract.js";
 import { validateAgentSpec, validateCompositionDecision } from "../src/composition-contract.js";
@@ -23,6 +23,28 @@ import type { PreviewResponse } from "../src/modules/composer/service.js";
 import { computeSnapshotDigest, REGISTRY_VERSION_HEADER, type RegistryAsset } from "../src/registry-contract.js";
 import { createTaskWorktree } from "../src/repo/git.js";
 import { buildServer, type BuiltServer } from "../src/server.js";
+import type * as RouterModule from "../src/modules/router.js";
+
+/**
+ * K13 in applied mode needs a week of cohort telemetry; the D2 precedence matrix only needs its
+ * outcome. When `k13.selector` is set, every routing explanation carries an applied commitment of
+ * that selector for the chosen assistant, exactly the shape `explainRoute` writes once every gate
+ * passes. Unset (every other test), routing is untouched.
+ */
+const k13 = vi.hoisted(() => ({ selector: undefined as string | undefined }));
+vi.mock("../src/modules/router.js", async (importOriginal) => {
+  const real = await importOriginal<typeof RouterModule>();
+  return {
+    ...real,
+    explainRoute: (...args: Parameters<typeof real.explainRoute>) => {
+      const explanation = real.explainRoute(...args);
+      if (!k13.selector || !explanation.chosen) return explanation;
+      const label = `${explanation.chosen}/${k13.selector}`;
+      const base = explanation.modelRecommendation ?? ({ schemaVersion: 2, candidates: [], missingEvidence: [], reason: "test", activation: { active: true, gates: [] } } as unknown as ModelRecommendation);
+      return { ...explanation, modelRecommendation: { ...base, mode: "applied", recommended: label, applied: { assistantId: explanation.chosen, selector: k13.selector, label } } };
+    },
+  };
+});
 
 const TOKEN = "FAKE-cockpit-registry-token-not-real-s5";
 const HOST = "fake-host-s5.example";
@@ -157,6 +179,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  k13.selector = undefined;
   await built?.app.close();
   built = undefined;
   db?.close();
@@ -590,13 +613,15 @@ describe("the revision's model binds the launch (plan §3.1, BIND)", () => {
     expect(launched(res.body.runId!)).toEqual({ model_requested: "fake-big", model_requested_source: "revision", model_resolved: "fake-big" });
   });
 
-  it("lets the task's model override beat the revision, and records the override as the source", async () => {
+  it("lets the task's model override beat a stage-2 override in the revision too (D2), and records the override as the source", async () => {
     await boot({ assistants: TWO_MODELS });
     const id = built!.tasks.create({ goal: "Add a typed helper to the parser module", repoPath: repo, overrides: { model: "fake-small" } }).taskId;
-    // A stage-2 override pins the revision to fake-big; the task's own override still wins at launch.
+    // The stage-2 override names fake-big; the task's own override outranks it in stage 2 and at launch.
     const overrides = { harness_model: { model: "fake-big" } };
     const preview = await compose(id, { overrides });
-    expect(preview.body.specDraft!.model.primary.id).toBe("fake-big");
+    expect(preview.body.specDraft!.model.primary.id).toBe("fake-small");
+    expect(stage(preview.body.decision!, "harness_model").why)
+      .toContain("model fake-small from the task's model override, which outranks the operator's stage-2 override (fake-big)");
     const res = await start(id, { compositionDigest: preview.body.compositionDigest, overrides });
     expect(res.status).toBe(200);
     expect(await built!.orchestrator.waitForSettled(id)).toBe("COMPLETED");
@@ -611,7 +636,7 @@ describe("the revision's model binds the launch (plan §3.1, BIND)", () => {
     const res = await start(id, { compositionDigest: preview.body.compositionDigest, overrides });
     expect(res.status).toBe(200);
     expect(await built!.orchestrator.waitForSettled(id)).toBe("COMPLETED");
-    expect(launched(res.body.runId!)).toMatchObject({ model_requested: "fake-unlisted", model_requested_source: "revision" });
+    expect(launched(res.body.runId!)).toMatchObject({ model_requested: "fake-unlisted", model_requested_source: "stage-override" });
   });
 
   it("fails the start with revision_model_refused when the assistant no longer offers the bound model; no run, no fallback", async () => {
@@ -633,6 +658,61 @@ describe("the revision's model binds the launch (plan §3.1, BIND)", () => {
     await expect(built!.orchestrator.startTask(second, "fake-claude" as never, { composition: reused }))
       .rejects.toMatchObject({ name: "LaunchModelRefusedError", reason: "revision_model_refused", model: "fake-big" });
     expect(db.prepare("SELECT COUNT(*) AS n FROM runs WHERE task_id = ?").get(second)).toEqual({ n: 0 });
+  });
+});
+
+describe("one model order for the preview, the revision and the launch (decision D2)", () => {
+  const FOUR_MODELS = { "fake-claude": { provider: "fake", options: { models: [{ id: "fake-big" }, { id: "fake-small" }, { id: "fake-mid" }, { id: "fake-k13" }] } } } as ResolvedConfig["assistants"];
+  const SOURCE_WHY: Record<string, string> = {
+    "task-override": "the task's model override", "stage-override": "the operator's stage-2 override",
+    "k13-applied": "a selector K13 committed in applied mode", revision: "the manifest's first model",
+  };
+  const combos = [undefined, "fake-small"].flatMap((taskOverride) => [undefined, "fake-mid"].flatMap((stageOverride) =>
+    [undefined, "fake-k13"].map((k13Applied) => ({ taskOverride, stageOverride, k13Applied }))));
+
+  it.each(combos)("task $taskOverride, stage-2 $stageOverride, K13 $k13Applied, default fake-big: preview, revision and run agree", async ({ taskOverride, stageOverride, k13Applied }) => {
+    const [expected, source] = taskOverride ? [taskOverride, "task-override"] : stageOverride ? [stageOverride, "stage-override"]
+      : k13Applied ? [k13Applied, "k13-applied"] : ["fake-big", "revision"];
+    await boot({ assistants: FOUR_MODELS });
+    k13.selector = k13Applied;
+    const id = built!.tasks.create({ goal: "Add a typed helper to the parser module", repoPath: repo, ...(taskOverride ? { overrides: { model: taskOverride } } : {}) }).taskId;
+    const overrides = stageOverride ? { harness_model: { model: stageOverride } } : {};
+
+    const preview = await compose(id, { overrides });
+    expect(preview.status).toBe(200);
+    expect((await compose(id, { overrides })).body.compositionDigest).toBe(preview.body.compositionDigest);
+    expect(preview.body.specDraft!.model.primary.id).toBe(expected);
+    expect(stage(preview.body.decision!, "harness_model").why).toContain(`model ${expected} from ${SOURCE_WHY[source]}`);
+
+    const res = await start(id, { compositionDigest: preview.body.compositionDigest, overrides });
+    expect(res.status).toBe(200);
+    expect(await built!.orchestrator.waitForSettled(id)).toBe("COMPLETED");
+    const stored = db.prepare("SELECT spec_json FROM agent_specs WHERE composition_revision_id = ?").get(res.body.composition!.compositionRevisionId) as { spec_json: string };
+    expect((JSON.parse(stored.spec_json) as AgentSpec).model.primary.id).toBe(expected);
+    const run = db.prepare("SELECT model_requested, model_requested_source, model_resolved FROM runs WHERE id = ?").get(res.body.runId) as Record<string, string | null>;
+    expect(run).toEqual({ model_requested: expected, model_requested_source: source, model_resolved: expected });
+  });
+
+  it("a revision reused by a task whose override differs: the task's override wins and the outranked revision model is said out loud", async () => {
+    await boot({ assistants: FOUR_MODELS });
+    const first = task("Add a typed helper to the parser module");
+    const res = await start(first);
+    expect(res.status).toBe(200);
+    await built!.orchestrator.waitForSettled(first);
+    const revisionId = res.body.composition!.compositionRevisionId!;
+    const spec = (await history(first)).revisions[0]!.spec;
+    expect(spec.model.primary.id).toBe("fake-big");
+
+    const second = built!.tasks.create({ goal: "Add a typed helper to the parser module", repoPath: repo, overrides: { model: "fake-small" } }).taskId;
+    const notices: string[] = [];
+    built!.bus.subscribe(second, (e: { kind: string; notice?: { text: string } }) => { if (e.kind === "notice") notices.push(e.notice!.text); });
+    built!.tasks.transition(second, "ROUTING");
+    const reused = { required: false, bind: () => ({ ok: true as const, compositionRevisionId: revisionId, policy: spec.policy }), attachRun: () => {} };
+    const started = await built!.orchestrator.startTask(second, "fake-claude" as never, { composition: reused });
+    await built!.orchestrator.waitForSettled(second);
+    expect(db.prepare("SELECT model_requested, model_requested_source FROM runs WHERE id = ?").get(started.runId))
+      .toEqual({ model_requested: "fake-small", model_requested_source: "task-override" });
+    expect(notices).toContain("run requests model fake-small from task-override, which outranks the bound revision's model fake-big");
   });
 });
 
