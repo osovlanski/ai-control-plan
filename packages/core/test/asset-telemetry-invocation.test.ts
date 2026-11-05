@@ -102,12 +102,13 @@ describe("asset invocation (S2)", () => {
     expect(inv(rows, "mcp_server")).toEqual(["tool_event", 0, 0]);
   });
 
-  it.each(["skill", "name"])("a Skill call naming the profile skill under input key %j counts once per toolUseId (Q6)", (key) => {
+  it("a Skill call naming the profile skill under the probed input key `skill` counts once per toolUseId (Q6)", () => {
     const rows = derive([
-      call("s1", "Skill", { [key]: "agent-plane-profile:ts-review" }), done("s1"),
-      call("s2", "Skill", { [key]: "ts-review" }), fail("s2"),
-      call("s3", "Skill", { [key]: "other-plugin:ts-review" }),
-      call("s4", "Skill", { [key]: "agent-plane-profile:other" }),
+      call("s1", "Skill", { skill: "agent-plane-profile:ts-review" }), done("s1"),
+      call("s2", "Skill", { skill: "ts-review" }), fail("s2"),
+      call("s3", "Skill", { skill: "other-plugin:ts-review" }),
+      call("s4", "Skill", { skill: "agent-plane-profile:other" }),
+      call("s5", "Skill", { name: "agent-plane-profile:ts-review" }), // the probe saw no `name` key
     ]);
     expect(inv(rows, "skill")).toEqual(["tool_event", 2, 1]);
   });

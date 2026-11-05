@@ -154,8 +154,8 @@ function readEvents(events: readonly AssetUsageEvent[]): {
 /** Claude names a profile skill `agent-plane-profile:<skill>` (adapters' PLUGIN_NAME). */
 const PROFILE_PLUGIN = "agent-plane-profile";
 const BUNDLE_SKILL = /^\.claude\/skills\/([^/]+)\/SKILL\.md$/;
-/** The probe (scripts/probe-claude-skill-input.ts) pins which key Claude uses; both are accepted until then. */
-const SKILL_INPUT_KEYS = ["skill", "name"] as const;
+/** Pinned by scripts/probe-claude-skill-input.ts (2026-11-05, Claude login): the Skill tool input has the key `skill` and no other. */
+const SKILL_INPUT_KEY = "skill";
 
 interface ToolCall { tools: string[]; input?: Record<string, unknown>; failed: boolean }
 
@@ -194,7 +194,7 @@ function mcpServerOf(tool: string, servers: readonly string[]): string | undefin
 function usesSkill(call: ToolCall, skill: string): boolean {
   const input = call.input ?? {};
   if (call.tools.includes("Skill")) {
-    return SKILL_INPUT_KEYS.some((k) => input[k] === `${PROFILE_PLUGIN}:${skill}` || input[k] === skill);
+    return input[SKILL_INPUT_KEY] === `${PROFILE_PLUGIN}:${skill}` || input[SKILL_INPUT_KEY] === skill;
   }
   if (call.tools.includes("Read")) {
     const path = input.file_path;

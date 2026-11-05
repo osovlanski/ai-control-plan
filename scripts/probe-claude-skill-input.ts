@@ -4,7 +4,7 @@
 // Skill tool input KEYS only: never values, messages or the transcript. Spends a little quota.
 // Needs a Claude login. From the repo root:
 //   pnpm --filter @agent-plane/api exec tsx ../../scripts/probe-claude-skill-input.ts
-// The matcher (packages/core/src/asset-telemetry.ts, SKILL_INPUT_KEYS) accepts "skill" and "name".
+// 2026-11-05 run: inputKeys [["skill"]]. The matcher (packages/core/src/asset-telemetry.ts, SKILL_INPUT_KEY) is pinned to "skill".
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
