@@ -2,10 +2,10 @@
 
 **Conversational shell (2026-09-17):** [current architecture, audit, ownership and acceptance](ui/agentic-os-ui-v3.md). Supersedes the historical three-tab navigation; existing kernel behavior is preserved.
 
-**K12/K14 status — 2026-09-14:** K12 **PARTIAL** overall: both operator
-presentations are implemented (K9 web gauge and Cockpit #37); the joint K9/K12
-live-provider warning-pressure acceptance in kernel-services §5.2.4 remains
-unverified. K14 **COMPLETE**: K7/K8 evidence and Cockpit #38 deliver the catalog,
+**K12/K14 status — 2026-09-14, updated 2026-11-05:** K12 **COMPLETE**: both operator
+presentations are implemented (K9 web gauge and Cockpit #37), and the joint K9/K12
+live-provider warning-pressure acceptance in kernel-services §5.2.4 was recorded on
+2026-09-15 (#41, `agentic-os-k12-live-acceptance.md`). K14 **COMPLETE**: K7/K8 evidence and Cockpit #38 deliver the catalog,
 price provenance, offline snapshot and shared Usage/Retro pricing. See
 [K12/K14 closure matrices and evidence](agentic-os-k12-k14-closure.md).
 These are implementation-status annotations; the historical design below is
@@ -455,7 +455,7 @@ None block the core; each lists its prerequisite.
 |---|---|---|
 | **6 — Contracts, threat model & registry** | M0, M8, M4 | Versioned contract tests pass in both repos; catalog sync handles digests, deletions, auth and a stale cache |
 | **7 — Bundles, Composer & provisioning** | M9, M5, M1, M2, M3, M7, M11 | Deterministic bundle and verified isolated profile; resume, failover and parallel-run lifecycle demonstrated; one deduped usage stream once M1's ingestion boundary exists |
-| **7b — Kernel services** (may run in parallel with 7; slices independent, see kernel-services §6) | M13 (K1 → K2 → K3; K4 before increment 11; K5/K6 on demand), M12 part 1 (K7, then K8; K14 presentation), M14 (K9/K12 observation, then K11, then K10) | "run tonight" parks, wakes exactly once, routes at wake and survives crashes at every step with at most one owner; "continue when quota resets" re-parks on evidence and revalidates before it starts; every run records requested and resolved model identity (or `unknown`); `/api/models` lists capacity and price evidence with provenance; the context gauge (ex-O10) shows occupancy, window, method and freshness including unknown; a Harness run at critical pressure with fresh observations continues from a specific checkpoint on the same model, bounded per task |
+| **7b — Kernel services** (may run in parallel with 7; slices independent, see kernel-services §6). **Closed 2026-11-05 with named exclusions:** K10 is out of scope, and K11 was shown on a fake provider only. See PROJECT_MEMORY "2026-11-05 — Phase 7b close record" | M13 (K1 → K2 → K3; K4 before increment 11; K5/K6 on demand), M12 part 1 (K7, then K8; K14 presentation), M14 (K9/K12 observation, then K11, then K10) | "run tonight" parks, wakes exactly once, routes at wake and survives crashes at every step with at most one owner; "continue when quota resets" re-parks on evidence and revalidates before it starts; every run records requested and resolved model identity (or `unknown`); `/api/models` lists capacity and price evidence with provenance; the context gauge (ex-O10) shows occupancy, window, method and freshness including unknown; a Harness run at critical pressure with fresh observations continues from a specific checkpoint on the same model, bounded per task |
 | **8 — Learning loop & memory** | M6, M10, O6, M12 part 2 (K13 shadow selection, then gated activation) | Telemetry is idempotent; shadow scoring is inspectable; a stale memory bundle is visibly demoted without automatically changing production selection; per-model telemetry with resolved identity weighs more than priors as `n` grows, and activation waits for the shadow gate |
 | **9 — Economics & insights** | O1–O4 | Dashboard matches mockups with honest chips; tier advice derived from real ledger (price evidence from the M12 catalog with labelled source, CR-19). Needs K7 price evidence and K14 presentation; **does not wait for K8, K13, K10/K11 or the deferred M15** |
 | **10 — Depth** | O5, O7, O8, O9, O11, O12 | per feature |
