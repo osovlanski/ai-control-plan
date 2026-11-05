@@ -1,6 +1,6 @@
-# O6 memory write-back and stale-memory demotion: plan (PROPOSED 2026-11-05; not built)
+# O6 memory write-back and stale-memory demotion: plan (APPROVED 2026-11-05; not built)
 
-> **Status.** Proposed. Nothing here is built and nothing starts until itay answers §6 (or says go on the bold defaults). Read against ai-control-plan `main` at `db048e8` and cockpit `main` at `d019f5e`. Same shape as `docs/agentic-os-m6-composition-telemetry.md`. PR rules: stacked PRs merge with merge commits only, retarget to main before merging, agents never merge.
+> **Status.** itay approved this plan on 2026-11-05 with the **bold default answer to every question Q1–Q5** in §6. Nothing here is built yet; slices start per §5. Read against ai-control-plan `main` at `db048e8` and cockpit `main` at `d019f5e`. Same shape as `docs/agentic-os-m6-composition-telemetry.md`. PR rules: stacked PRs merge with merge commits only, retarget to main before merging, agents never merge.
 
 Source: `docs/agentic-os-plan.md` §3.6 (Memory Service), §5 O6, the Phase 8 row and its success condition "a stale memory bundle is visibly demoted without automatically changing production selection"; cockpit `docs/specs/E-agentic-os-role.md` (Memory bundle contract, O6) and `docs/specs/D-memory-garden.md`.
 
@@ -84,7 +84,7 @@ Gate for every plane slice: `pnpm typecheck && pnpm lint && pnpm test`, plus `pn
 
 **Order and parallelism.** S0 (OCI) ∥ S1 (cloud) now. Then S2 ∥ S5 (disjoint repos). S3 waits on M6 S4 and C1 because all three touch composer `service.ts`; S4 after S3; S6 last. S3 and S5 each add one route block to `server.ts`; whichever merges second merges main first (merge commit).
 
-## 6. Questions for itay (my default in bold)
+## 6. Questions for itay (answered 2026-11-05: the bold default for each)
 
 - **Q1** A memory bundle is an operator-declared entry in Cockpit config (`memory.bundles`), not one bundle per memory project dir found on disk? **Declared.** Auto-discovery would expose every project's memory to composition by default; spec E's `visibility` needs an owner.
 - **Q2** Proposals come from a fenced block the agent writes at the end of a successful run, asked for by a configured fragment, and parsed without a second model call? **Yes.** It costs no quota, is deterministic, and keeps the plane out of transcript summarizing. An LLM summarizer can come later as an opt-in slice.
