@@ -1,6 +1,7 @@
 import type {
   AgentSpec, AgentSpecDraft, BudgetCaps, BudgetOverrunPayload, ComposerOutcome, CompositionDecision, CompositionDecisionDraft,
   ModelRecommendation, Schedule, ScheduleOccurrence, ScheduleOverlap, SessionSettlement, TaskConsumption, UsageAccountingMode,
+  VerificationCheckStatus,
 } from "@agent-plane/core";
 export interface Workspace {
   workspace: string;
@@ -622,11 +623,30 @@ export interface SessionSummary {
   endedAt: string | null;
 }
 
+/**
+ * One check of `verification.result` (core `VerificationCheckResult`). `status`
+ * is absent on legacy results, where `passed` alone is the truth; `skipped` and
+ * `blocked` arrive with `passed: false` and their reason in `summary`.
+ */
+export interface VerificationCheckView {
+  checkId?: string;
+  name: string;
+  passed: boolean;
+  required: boolean;
+  summary: string;
+  status?: VerificationCheckStatus;
+}
+
+export interface VerificationView {
+  passed: boolean;
+  checks: VerificationCheckView[];
+}
+
 export interface SessionResult {
   outcome: "completed" | "failed" | "cancelled" | "timed_out" | "yielded";
   terminalState: string;
   failure?: { kind: string; retryable: boolean; message: string };
-  verification?: { passed: boolean; checks: Array<{ name: string; passed: boolean; required: boolean; summary: string }> };
+  verification?: VerificationView;
   /** Optional in the type because a corrupt durable row can be missing it. */
   enforcement?: { tools: string; budget: string; isolation: string };
   usage?: { inputTokens?: number; outputTokens?: number; accounting: string };

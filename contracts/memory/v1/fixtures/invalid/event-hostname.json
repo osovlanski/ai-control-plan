@@ -1,0 +1,28 @@
+{
+  "schemaVersion": "1.0",
+  "proposalId": "mp1_bf4cee82d9baa433fb69893fa90e430bc1e427da06f592f46d73505183c2998f",
+  "seq": 3,
+  "sessionId": "run_01",
+  "taskId": "task_01",
+  "compositionRevisionId": "rev_01",
+  "checkpointId": "cp_01",
+  "harness": "claude-code",
+  "model": "claude-sonnet-5-5",
+  "kind": "decision",
+  "name": "stacked-pr-merges",
+  "description": "The plane listens on 127.0.0.1:8787",
+  "body": "Stacked PRs merge with merge commits only; retarget to main first.\n",
+  "target": {
+    "bundleId": "plane-decisions",
+    "bundleDigest": "sha256:86ee941c2a4a1d8c01bfc7af21e15725cf169295e402f41442a06c2a4b136c49"
+  },
+  "supersedes": [
+    "a.md"
+  ],
+  "evidence": {
+    "outcome": "success",
+    "verificationPassed": true,
+    "changedFiles": 4
+  },
+  "at": "2026-11-05T09:10:00.000Z"
+}

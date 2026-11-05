@@ -274,7 +274,7 @@ describe("open-web launcher", () => {
   });
 
   it("a credential minted before 2.7 still opens the UI; its session gets 403 on the asset usage feed until rotated", async () => {
-    const pre27 = [...OBSERVABILITY_CAPABILITIES.filter((c) => c !== "telemetry.read"), ...COMMAND_CAPABILITIES, ...INGEST_CAPABILITIES];
+    const pre27 = [...OBSERVABILITY_CAPABILITIES.filter((c) => c !== "telemetry.read" && c !== "memory.read"), ...COMMAND_CAPABILITIES, ...INGEST_CAPABILITIES];
     const db = openDb(config.dbPath);
     const built = buildServer({ config, db });
     // A rotation mints a new kid; the plane's credential cache is keyed by kid.

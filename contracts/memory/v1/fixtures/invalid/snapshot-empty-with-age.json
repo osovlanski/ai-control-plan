@@ -1,0 +1,25 @@
+{
+  "schemaVersion": "1.0",
+  "snapshotDigest": "sha256:89a664d1c55b415a978c9575840b59428c43c3a26d09cf4ca0f15f814cbd9c1f",
+  "observedAt": "2026-11-05T09:00:00.000Z",
+  "bundles": [
+    {
+      "id": "empty-scratch",
+      "digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "tags": [],
+      "repoScopes": [],
+      "visibility": "any_repo",
+      "members": [],
+      "estimatedTokens": 0,
+      "health": {
+        "members": 0,
+        "staleMembers": 0,
+        "oldestAgeDays": 0,
+        "duplicatePairs": 0,
+        "ghosts": 0,
+        "oversized": 0,
+        "findingsDigest": "sha256:07e92cbf0d0925fe7b9f5a0c447fa18be9c27cf6dd5db978491aa4b14c884555"
+      }
+    }
+  ]
+}

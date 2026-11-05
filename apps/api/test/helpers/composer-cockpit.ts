@@ -53,6 +53,8 @@ async function fakeCockpit(extraAssets: readonly RegistryAsset[] = []): Promise<
           rendered.push({ relPath, content: SKILL_BODY });
           included.push({ kind: "skill", ref: pin.id, digest: pin.digest, relPath, reason: "selected by the composition" });
         }
+        // O6 S5 tests pin memory bundles; real Cockpit renders none until O6 S2, this stand-in does.
+        for (const pin of request.memoryBundles) included.push({ kind: "memory_bundle", ref: pin.id, digest: pin.digest, reason: "pinned by the composition" });
         return send(200, assembleBundle({ request, rendered, compiler: { name: "fake-cockpit", version: "1.0.0" }, included, excluded: [] }));
       }
       return send(404, { error: { code: "not_found", message: "no route" } });

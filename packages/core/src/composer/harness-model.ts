@@ -36,8 +36,9 @@ const FILTER_REASONS: Readonly<Record<HarnessFilterName, (kinds: string[]) => st
 };
 
 const MODEL_SOURCE_WHY: Readonly<Record<HarnessModelChoice["modelSource"], string>> = {
-  "k13-applied": "a selector K13 committed in applied mode",
   "intent-override": "the task's model override",
+  "stage-override": "the operator's stage-2 override",
+  "k13-applied": "a selector K13 committed in applied mode",
   "manifest-first": "the manifest's first model",
 };
 
@@ -67,7 +68,9 @@ function filtersOf(projection: HarnessModelProjection, candidates: readonly RawC
 function whyOf(projection: HarnessModelProjection): string {
   const { chosen, ruleFired } = projection;
   if (!chosen) return ruleFired === "no-eligible-candidate" ? "no-eligible-candidate" : `${ruleFired}: no eligible candidate`;
-  return `${ruleFired}; harness ${chosen.harness}; model ${chosen.modelId} from ${MODEL_SOURCE_WHY[chosen.modelSource]}`;
+  const lost = (chosen.outranked ?? []).map((o) => `${MODEL_SOURCE_WHY[o.source]} (${o.modelId})`);
+  const outranks = lost.length ? `, which outranks ${lost.join(" and ")}` : "";
+  return `${ruleFired}; harness ${chosen.harness}; model ${chosen.modelId} from ${MODEL_SOURCE_WHY[chosen.modelSource]}${outranks}`;
 }
 
 export interface HarnessModelStageResult {

@@ -92,6 +92,40 @@ describe("RegistryFederation", () => {
     expect(await fed.sync()).toMatchObject({ ok: true, changes: 0 });
   });
 
+  it("serves a re-tag that keeps the digest, and heals metadata an older plane froze at first sight", async () => {
+    const source = new FakeSource();
+    const fed = new RegistryFederation(db, cockpit(), source, () => clock);
+    await fed.sync();
+    const [agent, skill, mcp] = valid().assets;
+    const retagged: RegistryAsset = { ...skill!, tags: [...skill!.tags, "retagged"].sort() };
+    expect(retagged.digest).toBe(skill!.digest);
+    source.next = withAssets([agent!, retagged, mcp!]);
+    // A re-tag moves the snapshot digest, not the asset digest, so it is no digest_changed row.
+    expect(await fed.sync()).toMatchObject({ ok: true, changes: 0 });
+    const view = fed.read();
+    expect(view.snapshotDigest).toBe(source.next.snapshotDigest);
+    expect(view.assets.find((a) => a.id === skill!.id)!.tags).toEqual(retagged.tags);
+    expect(computeSnapshotDigest(view.assets)).toBe(view.snapshotDigest);
+    expect(fed.recentChanges()).toEqual([]);
+    // One row per (id, digest): the revision is the digest, its metadata is the newest observed.
+    const rows = db.prepare("SELECT first_seen_at FROM registry_assets WHERE asset_id = ?").all(skill!.id) as Array<{ first_seen_at: string }>;
+    expect(rows).toEqual([{ first_seen_at: clock.toISOString() }]);
+
+    // Back to the original tags, and an unchanged resync leaves the row as it is.
+    source.next = valid();
+    await fed.sync();
+    expect(fed.read().assets).toEqual(valid().assets);
+    expect(await fed.sync()).toMatchObject({ ok: true, changes: 0 });
+    expect(fed.read().assets).toEqual(valid().assets);
+
+    // A database written before this fix holds the stale tags under the current snapshot digest;
+    // the next sync of the same snapshot repairs it.
+    db.prepare("UPDATE registry_assets SET metadata = ? WHERE asset_id = ?").run(JSON.stringify({ ...skill!, tags: ["stale"] }), skill!.id);
+    expect(fed.read().assets.find((a) => a.id === skill!.id)!.tags).toEqual(["stale"]);
+    await fed.sync();
+    expect(fed.read().assets).toEqual(valid().assets);
+  });
+
   it("keeps the last good snapshot on failure and turns stale past maxCacheAgeHours", async () => {
     const source = new FakeSource();
     const warn = vi.fn();
@@ -275,7 +309,7 @@ describe("GET /api/registry/assets", () => {
 
   it("serves the cached snapshot under registry.read and advertises 2.5", async () => {
     const cfgDir = loadConfig({ AGENT_PLANE_HOME: home }).dir;
-    expect(CONTROL_PLANE_API_VERSION).toBe("2.7");
+    expect(CONTROL_PLANE_API_VERSION).toBe("2.8");
     expect(OBSERVABILITY_CAPABILITIES).toContain("registry.read");
     const ok = await built.app.inject({ method: "GET", url: "/api/registry/assets", headers: { authorization: `Bearer ${secretWith(cfgDir, ["registry.read"])}` } });
     expect(ok.statusCode).toBe(200);

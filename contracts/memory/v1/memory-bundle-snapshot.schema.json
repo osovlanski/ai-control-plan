@@ -1,0 +1,187 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-plane.local/contracts/memory/v1/memory-bundle-snapshot.schema.json",
+  "title": "MemoryBundleSnapshot",
+  "description": "Memory v1: every operator-declared memory bundle Cockpit can render, with its members and health (GET /api/v1/registry/memory/bundles). Cockpit serves it, the Control Plane consumes it. Closed objects; bundles sorted by id, members by path, tags and repoScopes sorted. snapshotDigest covers bundles (health included) and not observedAt. Normative text: docs/contracts/memory-v1.md.",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "snapshotDigest",
+    "observedAt",
+    "bundles"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {
+      "$ref": "#/$defs/schemaVersion"
+    },
+    "snapshotDigest": {
+      "description": "sha256 over the RFC 8785 JSON of `bundles`.",
+      "$ref": "#/$defs/digest"
+    },
+    "observedAt": {
+      "description": "When Cockpit read the memory files for this snapshot. The time base for every age in it. Not digested.",
+      "type": "string",
+      "format": "date-time"
+    },
+    "bundles": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "$ref": "#/$defs/MemoryBundle"
+      }
+    }
+  },
+  "$defs": {
+    "schemaVersion": {
+      "type": "string",
+      "pattern": "^1\\.(0|[1-9][0-9]*)$"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "bundleId": {
+      "description": "The bundle v1 memory bundle id pattern.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "memberPath": {
+      "description": "A memory file relative to the bundle's memory/ directory: no leading slash, no '.' or '..' segment, no backslash or NUL, ending in .md. Cockpit v1 emits a single file name.",
+      "type": "string",
+      "minLength": 4,
+      "maxLength": 255,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.?(?:/|$))[^\\u0000\\\\]+\\.md$"
+    },
+    "count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1000000
+    },
+    "MemoryBundle": {
+      "type": "object",
+      "required": [
+        "id",
+        "digest",
+        "tags",
+        "repoScopes",
+        "visibility",
+        "members",
+        "estimatedTokens",
+        "health"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/bundleId"
+        },
+        "digest": {
+          "description": "The registry v1 asset digest over the members: sha256 of `<hex member digest> <path>\\n` lines sorted by path bytes. Recomputable from members.",
+          "$ref": "#/$defs/digest"
+        },
+        "tags": {
+          "type": "array",
+          "uniqueItems": true,
+          "maxItems": 64,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9._:-]{0,63}$"
+          }
+        },
+        "repoScopes": {
+          "description": "Repositories as `owner/name`. Empty exactly when visibility is any_repo.",
+          "type": "array",
+          "uniqueItems": true,
+          "maxItems": 64,
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,99}/[A-Za-z0-9._-]{1,100}$"
+          }
+        },
+        "visibility": {
+          "description": "repo_scoped: offered only to tasks in repoScopes. any_repo: offered to any task. Neither is rendered unless a composition pins it.",
+          "enum": [
+            "repo_scoped",
+            "any_repo"
+          ]
+        },
+        "members": {
+          "type": "array",
+          "maxItems": 1000,
+          "items": {
+            "type": "object",
+            "required": [
+              "path",
+              "digest"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "$ref": "#/$defs/memberPath"
+              },
+              "digest": {
+                "description": "sha256 of the file's raw bytes.",
+                "$ref": "#/$defs/digest"
+              }
+            }
+          }
+        },
+        "estimatedTokens": {
+          "description": "Cockpit's estimate for rendering every member. Advisory.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100000000
+        },
+        "health": {
+          "$ref": "#/$defs/Health"
+        }
+      }
+    },
+    "Health": {
+      "description": "Garden findings whose nodes are members of this bundle, as Cockpit computed them at observedAt.",
+      "type": "object",
+      "required": [
+        "members",
+        "staleMembers",
+        "oldestAgeDays",
+        "duplicatePairs",
+        "ghosts",
+        "oversized",
+        "findingsDigest"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "members": {
+          "description": "Equals the length of the bundle's members.",
+          "$ref": "#/$defs/count"
+        },
+        "staleMembers": {
+          "description": "Members older than the Garden's staleDays, age from frontmatter metadata.modified before file mtime. At most members.",
+          "$ref": "#/$defs/count"
+        },
+        "oldestAgeDays": {
+          "description": "Whole days from the oldest member's age basis to observedAt. null exactly when the bundle has no members.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 100000
+        },
+        "duplicatePairs": {
+          "$ref": "#/$defs/count"
+        },
+        "ghosts": {
+          "$ref": "#/$defs/count"
+        },
+        "oversized": {
+          "$ref": "#/$defs/count"
+        },
+        "findingsDigest": {
+          "description": "Opaque to the plane: changes exactly when the findings behind these counts change.",
+          "$ref": "#/$defs/digest"
+        }
+      }
+    }
+  }
+}
