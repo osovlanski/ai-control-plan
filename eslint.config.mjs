@@ -29,8 +29,9 @@ export default tseslint.config(
   {
     // The M2 Composer is a pure function (plans/m2-composer.md §4.1): no clock, randomness,
     // environment, locale or I/O. Hashing is injected. A regression here fails `pnpm lint`.
-    // The M6 asset-usage deriver is held to the same rule (m6 plan §2.2).
-    files: ["packages/core/src/composer/**/*.ts", "packages/core/src/asset-telemetry.ts"],
+    // The M6 asset-usage deriver is held to the same rule (m6 plan §2.2), and so is the O6
+    // memory proposal parser (o6 plan §5 S5).
+    files: ["packages/core/src/composer/**/*.ts", "packages/core/src/asset-telemetry.ts", "packages/core/src/memory-proposals.ts"],
     rules: {
       "no-restricted-globals": [
         "error",
