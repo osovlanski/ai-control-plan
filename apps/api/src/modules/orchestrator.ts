@@ -228,6 +228,8 @@ export class Orchestrator {
   dispatchComposer?: DispatchComposer;
   /** M6 S1: projects a settled revision-bound session into `asset_usage`. Never throws. */
   assetTelemetry?: { project(sessionId: string): unknown; backfill(): unknown };
+  /** O6 S5: settled composed sessions propose memory from their last message; boot backfills. */
+  memoryProposals?: { propose(sessionId: string): unknown; backfill(): unknown };
   /** K11 thresholds and task-level bounds; injectable for deterministic tests. */
   contextPolicy?: ContextPolicy;
   /**
@@ -568,6 +570,7 @@ export class Orchestrator {
     });
     // M6: a session settled before a crash (or before M6) with no projection yet.
     this.assetTelemetry?.backfill();
+    this.memoryProposals?.backfill();
     return reconciled;
   }
 
@@ -1257,10 +1260,11 @@ export class Orchestrator {
     }
   }
 
-  /** A session has a terminal result: settle its usage against its revision (M2 S6) and project its assets (M6). */
+  /** A session has a terminal result: settle its usage against its revision (M2 S6), project its assets (M6) and extract its memory proposals (O6 S5). */
   private sessionSettled(sessionId: string): void {
     this.dispatchComposer?.settled(sessionId);
     this.assetTelemetry?.project(sessionId);
+    this.memoryProposals?.propose(sessionId);
   }
 
   /**

@@ -94,6 +94,37 @@ function parseLateSessionMarker(prompt: string): string | true | undefined {
   return m[1] ?? true;
 }
 
+/**
+ * O6 S5: `[FAKE:MEMORY:<json>]` makes the run's last message end with the fenced
+ * `agent-plane-memory` block an operator fragment asks a real agent to write, holding `<json>`
+ * verbatim (so a malformed block can be scripted too). `<json>` runs from the colon to its
+ * balanced closing bracket or brace, strings honoured, so it may contain `]`. Returns the JSON
+ * text, or undefined when there is no marker or it never closes.
+ */
+export function parseMemoryMarker(prompt: string): string | undefined {
+  const tag = "[FAKE:MEMORY:";
+  const start = prompt.indexOf(tag);
+  if (start < 0) return undefined;
+  const from = start + tag.length;
+  let depth = 0;
+  let inString = false;
+  for (let i = from; i < prompt.length; i += 1) {
+    const ch = prompt[i]!;
+    if (inString) {
+      if (ch === "\\") i += 1;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === "[" || ch === "{") depth += 1;
+    else if (ch === "]" || ch === "}") {
+      if (depth === 0) return prompt.slice(from, i);
+      depth -= 1;
+    }
+  }
+  return undefined;
+}
+
 /** The harness a fake assistant presents itself as (the AgentSpec harness vocabulary). */
 export type FakeHarness = AgentSpec["harness"];
 
@@ -291,6 +322,13 @@ export class FakeAdapter implements AgentAdapter {
       const filePath = m[1]!.replaceAll("{cwd}", run.workdir);
       emit({ type: "tool.started", summary: `Read ${filePath}`, payload: { toolUseId: `read${read}`, tool: "Read", input: { file_path: filePath } } });
       emit({ type: "tool.completed", summary: `Read ${filePath} → ok`, payload: { toolUseId: `read${read}`, exitCode: 0 } });
+    }
+    // O6 S5: the memory block is the run's last message, emitted before a scripted limit or
+    // failure so a failed run carries one too (and must still propose nothing).
+    const memory = parseMemoryMarker(run.prompt);
+    if (memory !== undefined && !state.cancelled) {
+      const text = `Recording what I learned.\n\n\`\`\`agent-plane-memory\n${memory}\n\`\`\``;
+      emit({ type: "message", summary: "Recording what I learned.", payload: { text } });
     }
     // Scripted provider auto-compaction (K9). Emitted AFTER the script events so
     // the Harness's next observation samples the post-compaction relief below.

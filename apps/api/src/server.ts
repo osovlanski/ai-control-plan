@@ -61,6 +61,8 @@ import { ClaudeAdapter, ClaudeCodeSessionInputAdapter, CodexAdapter, FakeSession
 import { CredentialStore, credentialPath } from "./auth/credential-file.js";
 import { onRunSessionRef, UsageLedger, validateUsageRecord } from "./modules/usage.js";
 import { AssetTelemetry } from "./modules/asset-telemetry.js";
+import { MemoryProposals, parseMemoryFeedQuery, readMemoryProposalPage } from "./modules/memory-proposals.js";
+import { validateMemoryProposalPage } from "./memory-contract.js";
 import { parseFeedQuery, readAssetUsagePage, validateAssetUsagePage } from "./asset-usage-contract.js";
 
 export interface ServerDeps {
@@ -148,6 +150,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   const write = { config: { auth: { require: "commands.write" } } } as const;
   const usageWrite = { config: { auth: { require: "usage.write" } } } as const;
   const telemetryRead = { config: { auth: { require: "telemetry.read" } } } as const;
+  const memoryRead = { config: { auth: { require: "memory.read" } } } as const;
 
   // The internal bridge + recovery are wired for every real composition root
   // (extracted to modules/harness/composition.ts so a test factory can build a
@@ -346,6 +349,23 @@ export function buildServer(deps: ServerDeps): BuiltServer {
       // Event ids only: a detail could quote stored content.
       req.log.error({ eventIds: page.events.map((e) => e.eventId) }, "asset usage page failed its own contract");
       return reply.status(500).send({ error: "asset usage page failed the asset usage v1 contract" });
+    }
+    return page;
+  });
+
+  // ---- Memory proposal feed (O6 S5, memory v1, API 2.8; Cockpit S6 pulls it) ----
+  // Candidate memories in ingest order after the `after` cursor. Read-only: the plane has no route
+  // that accepts, rejects or writes memory. The page is validated against memory v1 before it
+  // leaves: a row that does not conform is a 500, never sent.
+  app.get<{ Querystring: { after?: string; limit?: string } }>("/api/memory/proposals", memoryRead, (req, reply) => {
+    const query = parseMemoryFeedQuery(req.query);
+    if (!query.ok) return reply.status(400).send({ error: query.error });
+    const page = readMemoryProposalPage(db, query.after, query.limit);
+    const checked = validateMemoryProposalPage(page);
+    if (!checked.ok) {
+      // Proposal ids only: a detail could quote a proposal's text.
+      req.log.error({ proposalIds: page.events.map((e) => e.proposalId) }, "memory proposal page failed its own contract");
+      return reply.status(500).send({ error: "memory proposal page failed the memory v1 contract" });
     }
     return page;
   });
@@ -554,6 +574,8 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   if (composer) orchestrator.dispatchComposer = composer;
   // M6 S1: settles project composed sessions into asset_usage; reconcileOnBoot backfills the rest.
   orchestrator.assetTelemetry = new AssetTelemetry(db, app.log);
+  // O6 S5: settles extract memory proposals from composed sessions; reconcileOnBoot backfills.
+  orchestrator.memoryProposals = new MemoryProposals(db, app.log);
   // Boot pass: bind usage records stored before their run's session was known (or before 036).
   try {
     const backfill = usage.backfillRunLinks();
