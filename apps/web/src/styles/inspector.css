@@ -444,3 +444,17 @@ meter {
 .relationship-key .key-shadow i { border-top: 2px dashed var(--tone-human); }
 .relationship-key .key-excluded i { border-top: 2px dotted var(--text-3); }
 .inspector-content > .decision-evidence { margin-top: 0; padding-top: 0; border-top: 0; }
+
+.verification-checks {
+  margin: 0.3rem 0 0.4rem;
+  padding-left: 1.1rem;
+  font-size: 0.82rem;
+}
+.verification-checks li + li {
+  margin-top: 0.25rem;
+}
+.verification-check-detail {
+  color: var(--text-2, inherit);
+  overflow-wrap: anywhere;
+  font-size: 0.78rem;
+}
