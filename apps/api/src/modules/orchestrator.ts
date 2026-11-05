@@ -36,7 +36,9 @@ import {
   isTerminal as isTerminalState,
   newHandoffId,
   redactEvent,
+  pickModel,
   redactText,
+  type ModelPrecedenceSource,
 } from "@agent-plane/core";
 import type { ResolvedConfig } from "../config.js";
 import type { Db } from "../db/index.js";
@@ -156,9 +158,16 @@ export interface StartComposition {
 
 /**
  * The model a run requests and which rule chose it (`runs.model_requested_source`): the task's
- * model override, a K13 selector committed in applied mode, or the bound revision's model.primary.
+ * model override, the bound revision's stage-2 operator override, a K13 selector committed in
+ * applied mode, or the bound revision's model.primary. `revisionModel` is set only when a bound
+ * revision names a different model than the one requested: the source is the named reason.
  */
-export interface LaunchModel { id: string; source: 'task-override' | 'k13-applied' | 'revision' }
+export interface LaunchModel { id: string; source: 'task-override' | 'stage-override' | 'k13-applied' | 'revision'; revisionModel?: string }
+
+/** `pickModel`'s source names as `runs.model_requested_source` values; at launch the default is the revision. */
+const LAUNCH_MODEL_SOURCE: Readonly<Record<ModelPrecedenceSource, LaunchModel['source']>> = {
+  'task-override': 'task-override', 'stage-override': 'stage-override', 'k13-applied': 'k13-applied', default: 'revision',
+};
 
 /** A bound revision names a model its assistant does not offer: the start fails, never falls back. */
 export class LaunchModelRefusedError extends Error {
@@ -227,78 +236,110 @@ export class Orchestrator {
    * the same dispatch reuses the committed request instead of calling this.
    */
   /**
-   * The selector this run will REQUEST (CR-33), and which rule chose it. Three sources, in
-   * priority order:
+   * The selector this run will REQUEST (CR-33), and which rule chose it. One order, the same
+   * `pickModel` the composer's stage 2 uses (decision D2: the task's override wins everywhere):
    *
    *  1. the operator's explicit `intent.overrides.model` — hard intent, and it
    *     outranks any recommendation;
-   *  2. the model an ACTIVE K13 decision committed, read back from the durable
+   *  2. an operator's stage-2 model override;
+   *  3. the model an ACTIVE K13 decision committed, read back from the durable
    *     routing decision this dispatch already owns;
-   *  3. the bound revision's `model.primary` (plan §3.1: the revision binds the run). A
+   *  4. the bound revision's `model.primary` (plan §3.1: the revision binds the run). A
    *     failover recomposes, so its destination's own revision applies.
+   *
+   * A bound revision's `model.primary` IS the composer's answer to 2–4 (stage 2 ran this order), so
+   * with a revision bound, 2 and 3 take part only as the revision recorded them: a stage-2 override
+   * its decision records, a K13 selector equal to its model. A run therefore requests the task's
+   * override or the revision's model, never a third. When the task's override differs from the
+   * revision's model (a revision reused by another task), `revisionModel` names the outranked one.
    *
    * It is only ever READ from committed records, never recomputed here: a
    * recovery of an already committed dispatch must re-materialize the same
    * request, not a newer opinion formed from telemetry that arrived since.
    * Whatever this returns becomes `ExecutionRequest.model`, and the bridge
    * remains the only place that becomes `RunSpec.model`. A revision model the
-   * assistant does not offer throws `LaunchModelRefusedError`; it never falls
-   * back to the CLI default.
+   * assistant does not offer throws `LaunchModelRefusedError` (unless the revision's stage 2
+   * records an operator override to exactly that model); it never falls back to the CLI default.
    */
   private requestedModel(taskId: string, assistantId?: AssistantId, routingDecisionRef?: string, compositionRevisionId?: string): LaunchModel | undefined {
     const row = this.tasks.get(taskId);
-    const override = row ? (JSON.parse(row.intent_json) as TaskIntent).overrides?.model : undefined;
-    if (override) return { id: override, source: 'task-override' };
+    const taskOverride = row ? (JSON.parse(row.intent_json) as TaskIntent).overrides?.model : undefined;
     const applied = this.appliedModel(assistantId, routingDecisionRef);
-    if (applied) return { id: applied, source: 'k13-applied' };
-    const revision = this.revisionModel(compositionRevisionId, assistantId);
-    return revision ? { id: revision, source: 'revision' } : undefined;
+    // A task override outranks the revision, so an unoffered revision model does not refuse it.
+    const revision = this.boundRevision(compositionRevisionId, assistantId, !taskOverride);
+    const picked = pickModel(revision
+      ? {
+        'task-override': taskOverride,
+        'stage-override': revision.stageOverride,
+        'k13-applied': applied !== undefined && applied === revision.model ? applied : undefined,
+        default: revision.model,
+      }
+      : { 'task-override': taskOverride, 'k13-applied': applied });
+    if (!picked) return undefined;
+    return {
+      id: picked.id,
+      source: LAUNCH_MODEL_SOURCE[picked.source],
+      ...(revision?.model !== undefined && revision.model !== picked.id ? { revisionModel: revision.model } : {}),
+    };
   }
 
   /**
-   * The bound revision's `model.primary`. The assistant refuses it when its manifest lists models
-   * and this is not one of them, unless the revision's own stage 2 records an operator override
-   * to exactly this model (an override outside the manifest list is the operator's call).
+   * The bound revision's `model.primary`, and the model its stage 2 records as an operator override
+   * (the decision moved this assistant's model). With `refuse`, a `model.primary` the assistant does
+   * not offer throws, unless that stage 2 records an operator override to exactly it.
    */
-  private revisionModel(compositionRevisionId: string | undefined, assistantId: AssistantId | undefined): string | undefined {
+  private boundRevision(compositionRevisionId: string | undefined, assistantId: AssistantId | undefined, refuse: boolean): { model?: string; stageOverride?: string } | undefined {
     if (!compositionRevisionId || !assistantId) return undefined;
     const row = this.db.prepare('SELECT spec_json FROM agent_specs WHERE composition_revision_id = ?')
       .get(compositionRevisionId) as { spec_json: string } | undefined;
     if (!row) throw new Error(`Bound revision ${compositionRevisionId} does not exist`);
-    const model = (JSON.parse(row.spec_json) as AgentSpec).model?.primary?.id;
-    if (!model) return undefined;
-    const offered = this.registry.manifest(assistantId)?.core.models ?? [];
-    if (offered.length && !offered.some((m) => m.id === model) && !this.operatorChoseModel(compositionRevisionId, `${assistantId}/${model}`)) {
-      throw new LaunchModelRefusedError(compositionRevisionId, assistantId, model, offered.map((m) => m.id));
+    const model = (JSON.parse(row.spec_json) as AgentSpec).model?.primary?.id || undefined;
+    const override = this.stageOverride(compositionRevisionId);
+    const ref = `${assistantId}/`;
+    const modelOf = (refs: readonly string[] | undefined) => refs?.find((r) => r.startsWith(ref))?.slice(ref.length);
+    const to = modelOf(override?.to);
+    const from = modelOf(override?.from);
+    const stageOverride = to !== undefined && from !== undefined && to !== from ? to : undefined;
+    if (refuse && model) {
+      const offered = this.registry.manifest(assistantId)?.core.models ?? [];
+      if (offered.length && !offered.some((m) => m.id === model) && !(override?.to.includes(`${ref}${model}`) ?? false)) {
+        throw new LaunchModelRefusedError(compositionRevisionId, assistantId, model, offered.map((m) => m.id));
+      }
     }
-    return model;
+    return { ...(model ? { model } : {}), ...(stageOverride ? { stageOverride } : {}) };
   }
 
-  private operatorChoseModel(compositionRevisionId: string, ref: string): boolean {
+  private stageOverride(compositionRevisionId: string): { from: readonly string[]; to: readonly string[] } | undefined {
     const row = this.db.prepare('SELECT decision_json FROM composition_decisions WHERE composition_revision_id = ?')
       .get(compositionRevisionId) as { decision_json: string } | undefined;
-    if (!row) return false;
-    const stage = (JSON.parse(row.decision_json) as CompositionDecision).stages.find((s) => s.stage === 'harness_model');
-    return stage?.override?.to.includes(ref) ?? false;
+    if (!row) return undefined;
+    return (JSON.parse(row.decision_json) as CompositionDecision).stages.find((s) => s.stage === 'harness_model')?.override ?? undefined;
   }
 
   /**
    * Which rule chose a committed request's model, for a replayed dispatch. The sources are
    * immutable records, so re-resolving gives the same answer; anything else is left unknown.
    */
-  private committedModelSource(request: ExecutionRequest): LaunchModel['source'] | undefined {
+  private committedModelSource(request: ExecutionRequest): LaunchModel | undefined {
     if (!request.model?.id) return undefined;
     try {
       const resolved = this.requestedModel(request.taskId, request.assistantId, request.routingDecisionRef, request.compositionRevisionId);
-      return resolved?.id === request.model.id ? resolved.source : undefined;
+      return resolved?.id === request.model.id ? resolved : undefined;
     } catch {
       return undefined;
     }
   }
 
-  /** `runs.model_requested_source`: which rule chose `model_requested` (migration 035). */
-  private recordModelSource(runId: string, source: LaunchModel['source'] | undefined): void {
-    if (source) this.db.prepare('UPDATE runs SET model_requested_source = ? WHERE id = ?').run(source, runId);
+  /**
+   * `runs.model_requested_source`: which rule chose `model_requested` (migration 035). When a bound
+   * revision names another model, that source is the recorded reason, and the task hears it.
+   */
+  private recordModelSource(taskId: string, runId: string, launch: LaunchModel | undefined): void {
+    if (!launch) return;
+    this.db.prepare('UPDATE runs SET model_requested_source = ? WHERE id = ?').run(launch.source, runId);
+    if (launch.revisionModel !== undefined) {
+      this.notice(taskId, 'info', `run requests model ${launch.id} from ${launch.source}, which outranks the bound revision's model ${launch.revisionModel}`);
+    }
   }
 
   /** The committed K13 selector for this routing decision, if it committed one. */
@@ -571,7 +612,7 @@ export class Orchestrator {
         request.runSpec.prompt = this.dispatchPrompt(request, options);
         new SessionStore(this.db).recordRequest(request); // fingerprint witnesses semantic replay
         const replayed = await this.executeDispatch(request, options);
-        this.recordModelSource(replayed.runId, this.committedModelSource(request));
+        this.recordModelSource(taskId, replayed.runId, this.committedModelSource(request));
         // M2 S6: the saved request already names its revision; the replayed run binds to it.
         if (request.compositionRevisionId) this.dispatchComposer?.attachRun(replayed.runId, request.compositionRevisionId);
         return replayed;
@@ -666,7 +707,7 @@ export class Orchestrator {
         } else { request.runSpec.prompt = this.dispatchPrompt(request, options); insert(); }
       })();
       const started = await this.executeDispatch(request, options);
-      this.recordModelSource(started.runId, launchModel?.source);
+      this.recordModelSource(taskId, started.runId, launchModel);
       // `runs.composition_revision_id` is written once, here (M1 attachRun).
       if (composed) options.composition!.attachRun(started.runId, composed.compositionRevisionId);
       return started;
@@ -732,7 +773,7 @@ export class Orchestrator {
         },
         (result, sid) => this.settleFromResult(taskId, assistantId, sid, result),
       );
-      this.recordModelSource(runId, launchModel?.source);
+      this.recordModelSource(taskId, runId, launchModel);
       // `runs.composition_revision_id` is written once, here (M1 attachRun).
       if (composed) options.composition!.attachRun(runId, composed.compositionRevisionId);
       if (options.dispatchId && this.tasks.get(taskId)?.state === "ROUTING") this.tasks.transition(taskId, "RUNNING");
@@ -2075,7 +2116,7 @@ export class Orchestrator {
       );
       // The comparison diffs and merges by the run's own worktree and branch.
       this.db.prepare("UPDATE runs SET worktree_path = ?, branch = ? WHERE id = ?").run(wt.worktreePath, wt.branch, runId);
-      this.recordModelSource(runId, launchModel?.source);
+      this.recordModelSource(taskId, runId, launchModel);
       if (composed) plan.composition!.attachRun(runId, composed.compositionRevisionId);
       started.push({ runId, assistantId });
     }

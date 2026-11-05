@@ -1,13 +1,21 @@
 name: Eval
 
+# Manual only (D3, 2026-11-05): run it from the Actions tab, "Eval", "Run
+# workflow" on main. The nightly schedule was removed: with no provider
+# secrets configured it was red every night and measured nothing.
 on:
-  schedule:
-    - cron: "0 9 * * *" # 09:00 UTC nightly
   workflow_dispatch: {}
 
 jobs:
   eval:
     runs-on: ubuntu-latest
+    # Least the steps need: contents write for the promote step's git push
+    # (every run is now a workflow_dispatch, so promote runs on green), issues
+    # write for "Open an issue on a red run". Without this block the default
+    # read-only token made that step fail with 403.
+    permissions:
+      contents: write
+      issues: write
     # Non-blocking: this never gates a PR or a push to main. It is the
     # credential-gated real-provider eval program (increment 3,
     # docs/agentic-os-eval-plan.md areas 1/2/6), separate from the per-PR
@@ -84,8 +92,8 @@ jobs:
           path: eval/out/
           retention-days: 90
 
-      # Promotion is manual-dispatch only — never every nightly (plan §4 step
-      # 23) — so docs/eval-history/ doesn't churn on every scheduled run.
+      # Promotion runs on manual dispatch (plan §4 step 23); the workflow is
+      # now manual only, so this guard always holds and is kept as a safety net.
       - name: Promote scorecard to docs/eval-history/
         if: github.event_name == 'workflow_dispatch'
         run: |
@@ -101,7 +109,7 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            const title = "Nightly eval failed";
+            const title = "Eval failed";
             const body = `Run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
             const existing = await github.rest.issues.listForRepo({
               owner: context.repo.owner, repo: context.repo.repo, state: "open", labels: "nightly-eval",
