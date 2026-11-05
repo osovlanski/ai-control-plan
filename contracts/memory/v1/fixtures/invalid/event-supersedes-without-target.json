@@ -1,0 +1,25 @@
+{
+  "schemaVersion": "1.0",
+  "proposalId": "mp1_f827bc6073fa494966feaf6179b5a2ba1e0f2ca89bd5a0c9dc516a2260181655",
+  "seq": 9,
+  "sessionId": "run_02",
+  "taskId": "task_01",
+  "compositionRevisionId": "rev_01",
+  "checkpointId": "cp_02",
+  "harness": "codex",
+  "model": null,
+  "kind": "gotcha",
+  "name": "close-rig-in-aftereach",
+  "description": "Close the test rig in afterEach or teardown flakes",
+  "body": "Vitest teardown flakes when a rig is not closed in afterEach.\n",
+  "target": null,
+  "supersedes": [
+    "a.md"
+  ],
+  "evidence": {
+    "outcome": "success",
+    "verificationPassed": null,
+    "changedFiles": 1
+  },
+  "at": "2026-11-05T09:20:00.000Z"
+}

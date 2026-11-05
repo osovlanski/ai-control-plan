@@ -25,7 +25,12 @@
 // the asset usage v1 feed Cockpit pulls (M10). Credentials minted before 2.7
 // lack it and get 403 there until rotated with `--capabilities`. A browser
 // session does not need it, so `open` still accepts such a credential.
-export const CONTROL_PLANE_API_VERSION = "2.7";
+// 2.8 (additive, O6 S1): `memory.read`, reserved for `GET /api/memory/proposals`
+// (memory v1 proposal feed, Cockpit pulls; route lands in O6 S5). Separate from
+// `telemetry.read` because proposal bodies are memory content, not counts.
+// Browser-optional like `telemetry.read`; credentials minted before 2.8 lack it
+// and get 403 on the feed until rotated with `--capabilities`.
+export const CONTROL_PLANE_API_VERSION = "2.8";
 export const NORMALIZED_EVENT_VERSION = "1.0";
 
 export const OBSERVABILITY_CAPABILITIES = [
@@ -47,12 +52,14 @@ export const OBSERVABILITY_CAPABILITIES = [
   "registry.read",
   // M6 S3: the asset usage feed (M10).
   "telemetry.read",
+  // O6 S1: the memory proposal feed (memory v1).
+  "memory.read",
 ] as const;
 
 // Observability capabilities the web UI does not use. `open` requests them when
 // the credential holds them and never refuses a credential that lacks them, so a
 // credential minted before they existed still opens the UI.
-export const BROWSER_OPTIONAL_CAPABILITIES = ["telemetry.read"] as const;
+export const BROWSER_OPTIONAL_CAPABILITIES = ["telemetry.read", "memory.read"] as const;
 
 export const COMMAND_CAPABILITIES = ["commands.write"] as const;
 

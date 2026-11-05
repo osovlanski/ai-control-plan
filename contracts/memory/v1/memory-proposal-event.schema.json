@@ -1,0 +1,178 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-plane.local/contracts/memory/v1/memory-proposal-event.schema.json",
+  "title": "MemoryProposalEvent",
+  "description": "Memory v1: one candidate memory the Control Plane extracted from a successful composed run (GET /api/memory/proposals, memory.read). A proposal is never a write: only an operator's accept in Cockpit writes memory. Closed; idempotent on proposalId; stored proposals are immutable. Normative text: docs/contracts/memory-v1.md.",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "proposalId",
+    "seq",
+    "sessionId",
+    "taskId",
+    "compositionRevisionId",
+    "checkpointId",
+    "harness",
+    "model",
+    "kind",
+    "name",
+    "description",
+    "body",
+    "target",
+    "supersedes",
+    "evidence",
+    "at"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {
+      "type": "string",
+      "pattern": "^1\\.(0|[1-9][0-9]*)$"
+    },
+    "proposalId": {
+      "description": "\"mp1_\" + hex sha256 over JCS of {v: 1, sessionId, index, bodyDigest}.",
+      "type": "string",
+      "pattern": "^mp1_[0-9a-f]{64}$"
+    },
+    "seq": {
+      "description": "The plane's ingest order, strictly increasing, assigned once. The feed cursor.",
+      "$ref": "#/$defs/seq"
+    },
+    "sessionId": {
+      "$ref": "#/$defs/id"
+    },
+    "taskId": {
+      "$ref": "#/$defs/id"
+    },
+    "compositionRevisionId": {
+      "$ref": "#/$defs/id"
+    },
+    "checkpointId": {
+      "$ref": "#/$defs/id"
+    },
+    "harness": {
+      "enum": [
+        "claude-code",
+        "codex",
+        "cursor",
+        "bedrock"
+      ]
+    },
+    "model": {
+      "description": "The session's resolved model, or null when the harness did not report one.",
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/\\[\\]-]{0,127}$"
+    },
+    "kind": {
+      "enum": [
+        "decision",
+        "gotcha",
+        "fact"
+      ]
+    },
+    "name": {
+      "description": "Kebab-case slug; the memory file name without .md.",
+      "type": "string",
+      "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+      "maxLength": 64
+    },
+    "description": {
+      "description": "One line.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 300,
+      "pattern": "^[^\\r\\n]+$"
+    },
+    "body": {
+      "description": "The memory text. At most 4096 UTF-8 bytes (checked by the reference validator).",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096
+    },
+    "target": {
+      "description": "A bundle the revision pinned, at the pinned digest; null when the agent named none or named one the revision did not pin.",
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "required": [
+            "bundleId",
+            "bundleDigest"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "bundleId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+            },
+            "bundleDigest": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            }
+          }
+        }
+      ]
+    },
+    "supersedes": {
+      "description": "Member paths in the target bundle this proposal replaces. Sorted; empty when target is null.",
+      "type": "array",
+      "uniqueItems": true,
+      "maxItems": 16,
+      "items": {
+        "description": "A memory file relative to the bundle's memory/ directory: no leading slash, no '.' or '..' segment, no backslash or NUL, ending in .md. Cockpit v1 emits a single file name.",
+        "type": "string",
+        "minLength": 4,
+        "maxLength": 255,
+        "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.?(?:/|$))[^\\u0000\\\\]+\\.md$"
+      }
+    },
+    "evidence": {
+      "description": "Counts only: no transcript, no file names.",
+      "type": "object",
+      "required": [
+        "outcome",
+        "verificationPassed",
+        "changedFiles"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "outcome": {
+          "description": "v1 proposes only from runs that ended success.",
+          "const": "success"
+        },
+        "verificationPassed": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "changedFiles": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        }
+      }
+    },
+    "at": {
+      "description": "The completion checkpoint's time, never the time of extraction.",
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    }
+  }
+}

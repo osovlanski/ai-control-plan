@@ -1,0 +1,57 @@
+{
+  "schemaVersion": "1.0",
+  "events": [
+    {
+      "schemaVersion": "1.0",
+      "proposalId": "mp1_bf4cee82d9baa433fb69893fa90e430bc1e427da06f592f46d73505183c2998f",
+      "seq": 3,
+      "sessionId": "run_01",
+      "taskId": "task_01",
+      "compositionRevisionId": "rev_01",
+      "checkpointId": "cp_01",
+      "harness": "claude-code",
+      "model": "claude-sonnet-5-5",
+      "kind": "decision",
+      "name": "stacked-pr-merges",
+      "description": "Stacked PRs merge with merge commits after retargeting to main",
+      "body": "Stacked PRs merge with merge commits only; retarget to main first.\n",
+      "target": {
+        "bundleId": "plane-decisions",
+        "bundleDigest": "sha256:86ee941c2a4a1d8c01bfc7af21e15725cf169295e402f41442a06c2a4b136c49"
+      },
+      "supersedes": [
+        "a.md"
+      ],
+      "evidence": {
+        "outcome": "success",
+        "verificationPassed": true,
+        "changedFiles": 4
+      },
+      "at": "2026-11-05T09:10:00.000Z"
+    },
+    {
+      "schemaVersion": "1.0",
+      "proposalId": "mp1_f827bc6073fa494966feaf6179b5a2ba1e0f2ca89bd5a0c9dc516a2260181655",
+      "seq": 9,
+      "sessionId": "run_02",
+      "taskId": "task_01",
+      "compositionRevisionId": "rev_01",
+      "checkpointId": "cp_02",
+      "harness": "codex",
+      "model": null,
+      "kind": "gotcha",
+      "name": "close-rig-in-aftereach",
+      "description": "Close the test rig in afterEach or teardown flakes",
+      "body": "Vitest teardown flakes when a rig is not closed in afterEach.\n",
+      "target": null,
+      "supersedes": [],
+      "evidence": {
+        "outcome": "success",
+        "verificationPassed": null,
+        "changedFiles": 1
+      },
+      "at": "2026-11-05T09:20:00.000Z"
+    }
+  ],
+  "next": 3
+}
