@@ -766,3 +766,9 @@ Owner decision D4 (accepted 2026-11-05): close 7b from existing evidence instead
 - **K12 is not open. This corrects the K12/K14 section above and the plan header.** Both still say PARTIAL, but #41 (2026-09-15) recorded the warning-band drive that was missing. The 2026-11-05 planning note named this gap as open. The repo says closed, so this record follows the repo.
 - **What a real K11 drive would need:** a provider login on the drive machine, not in the repo. A real Claude session on a 200k-window model (Haiku). One prompt sized past 0.92 of the window, the way #41 reached 0.9691, inside a disposable `AGENT_PLANE_HOME` and Git fixture. Then assert a `YIELDED(context)`, a successor dispatch whose `checkpoint_id` matches, and the same `model_resolved` on both runs. A test asserting the successor's requested model would close the "same model" gap without spending any quota.
 - **Not changed:** K13 stays SHADOW. Activation is M12 part 2, in Phase 8.
+
+## 2026-11-05 SHIPPED: O6 S0 probe, composed Claude runs and the operator's memory directory
+
+- `scripts/probe-claude-memory-write.ts` provisions a verified profile as a composed run does (`provisionedOptions`, `settingSources: ["project"]`, operator `CLAUDE_CONFIG_DIR`), runs one auto-approve turn in a scratch worktree asking Claude to remember a fake fact, and prints only paths created, changed or removed under `projects/*/memory/`.
+- Result: **PASS**. 55 files listed before and after; nothing created, changed or removed under `projects/*/memory/`. S0b is not needed and does not block plan slice S5.
+- Scope of the claim: one run, one prompt, this machine's SDK and login. It does not prove auto memory is off; it shows a "remember" request wrote nothing. Re-run the probe after an SDK upgrade. The turn's session transcript still lands under `projects/`, outside `memory/`.
