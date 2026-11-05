@@ -14,11 +14,17 @@ import { join } from "node:path";
 import {
   harnessForProvider, ProvisioningError, type AgentSpec, type ProvisioningPort, type ProvisioningPredictRequest, type ProvisioningPrediction, type ApprovalMode, type AssistantId, type BundlePort, type BundlePortResult, type BundleRenderDraft,
   type CapabilityManifest, type Harness, type HarnessModelCandidate, type HarnessModelChoice, type HarnessModelFilter,
-  type HarnessModelPort, type HarnessModelProjection, type HarnessModelRequest, type ModelPrice, type RoutingExplanation,
+  type HarnessModelPort, type HarnessModelProjection, type HarnessModelRequest, type ModelPrice, type ModelPrecedenceSource, type ModelSource, type RoutingExplanation,
+  pickModel,
 } from "@agent-plane/core";
 import type { BundledComposition, RenderedBundle } from "../bundle-request.js";
 import { COST_REFERENCE_MIX, priceApplicability, resolveCandidateIdentity } from "../model-selection.js";
 import { explainRoute, persistRoutingDecision, route, routeInputs, type RouteDeps, type RouteInputs, type RouteOptions, type RouteOrigin } from "../router.js";
+
+/** `pickModel`'s source names as stage 2's `modelSource` (the composer's names predate D2). */
+const COMPOSER_MODEL_SOURCE: Readonly<Record<ModelPrecedenceSource, ModelSource>> = {
+  "task-override": "intent-override", "stage-override": "stage-override", "k13-applied": "k13-applied", default: "manifest-first",
+};
 
 /**
  * The approval modes each harness's adapter enforces; it refuses the rest before a process starts
@@ -182,16 +188,23 @@ export class RouteHarnessModelPort implements HarnessModelPort {
     const harness = manifest ? harnessOf(manifest) : undefined;
     if (!manifest || !harness) return { ...projection, ruleFired: `${ruleFired}; the chosen assistant has no known harness` };
 
-    // Model order (§2 stage 2): the operator's stage-2 override, a selector K13 committed in
-    // applied mode for this assistant, the task's model override, the manifest's first model.
+    // Model order (§2 stage 2, decision D2): one rule for the composer and the launch, `pickModel`
+    // in core — the task's model override, the operator's stage-2 override, a selector K13
+    // committed in applied mode for this assistant, the manifest's first model.
     const applied = recommendation?.applied?.assistantId === chosenId ? recommendation.applied.selector : undefined;
-    const intentModel = inputs.intent.overrides?.model;
-    const pick: { modelId: string; modelSource: HarnessModelChoice["modelSource"] } | undefined =
-      override?.model !== undefined ? { modelId: override.model, modelSource: "intent-override" }
-        : applied !== undefined ? { modelId: applied, modelSource: "k13-applied" }
-          : intentModel !== undefined ? { modelId: intentModel, modelSource: "intent-override" }
-            : manifest.core.models[0] ? { modelId: manifest.core.models[0].id, modelSource: "manifest-first" }
-              : undefined;
+    const picked = pickModel({
+      "task-override": inputs.intent.overrides?.model,
+      "stage-override": override?.model,
+      "k13-applied": applied,
+      default: manifest.core.models[0]?.id,
+    });
+    const pick = picked
+      ? {
+        modelId: picked.id,
+        modelSource: COMPOSER_MODEL_SOURCE[picked.source],
+        ...(picked.outranked.length ? { outranked: picked.outranked.map((o) => ({ source: COMPOSER_MODEL_SOURCE[o.source], modelId: o.id })) } : {}),
+      }
+      : undefined;
     if (!pick) return { ...projection, ruleFired: `${ruleFired}; the chosen assistant lists no model` };
 
     const price = row ? this.price(String(chosenId), row.provider, pick.modelId) : undefined;
