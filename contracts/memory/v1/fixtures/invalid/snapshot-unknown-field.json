@@ -1,0 +1,93 @@
+{
+  "schemaVersion": "1.0",
+  "snapshotDigest": "sha256:399b74e14fe0626172d69f8d15357a08111c76b7e2da8e15caba2d0b2f085aeb",
+  "observedAt": "2026-11-05T09:00:00.000Z",
+  "bundles": [
+    {
+      "id": "plane-decisions",
+      "digest": "sha256:86ee941c2a4a1d8c01bfc7af21e15725cf169295e402f41442a06c2a4b136c49",
+      "tags": [
+        "decisions",
+        "plane"
+      ],
+      "repoScopes": [
+        "osovlanski/ai-control-plan"
+      ],
+      "visibility": "repo_scoped",
+      "members": [
+        {
+          "path": "MEMORY.md",
+          "digest": "sha256:28ebb07621d33b209dfac0c073049e1792efe10e9260bb84cfdceb78005538b3"
+        },
+        {
+          "path": "a.md",
+          "digest": "sha256:5e6a5b58e3a151467f11282a0069d6f1c6326584171d978b891f5f669b134871"
+        },
+        {
+          "path": "b.md",
+          "digest": "sha256:2041ca5eb826816052f04099f801be7ab9dca46b174ab049289405965c1471f4"
+        }
+      ],
+      "estimatedTokens": 42,
+      "health": {
+        "members": 3,
+        "staleMembers": 0,
+        "oldestAgeDays": 12,
+        "duplicatePairs": 0,
+        "ghosts": 0,
+        "oversized": 0,
+        "findingsDigest": "sha256:07e92cbf0d0925fe7b9f5a0c447fa18be9c27cf6dd5db978491aa4b14c884555"
+      },
+      "dir": "projects/x/memory"
+    },
+    {
+      "id": "stale-gotchas",
+      "digest": "sha256:1a9ba27ed5ea954d93110dbcc53f348c459188fb210b0dd402bba4fbdacae41a",
+      "tags": [
+        "gotchas"
+      ],
+      "repoScopes": [],
+      "visibility": "any_repo",
+      "members": [
+        {
+          "path": "MEMORY.md",
+          "digest": "sha256:f816b480f87144ec4de5862adf028ff66cc6964250325d53fd22bf8922824b6f"
+        },
+        {
+          "path": "g1.md",
+          "digest": "sha256:f8fb65c97421c6f536de369c53bf83dc52c9c7d8bbeaf9089e710a44b2420e13"
+        },
+        {
+          "path": "g2.md",
+          "digest": "sha256:182ae0d71bda09608d9825a0eaf77265768df647e0c445d6170ddea38cd59396"
+        },
+        {
+          "path": "g3.md",
+          "digest": "sha256:5aede0d7dd3c5c1abd230b7b77a72503049891d47a52b21622d9a38393613e63"
+        },
+        {
+          "path": "g4.md",
+          "digest": "sha256:81b42259ced6cd0b66da2b43f7eafe71d24ee568aecd5b1b0eabf9ed8a575103"
+        },
+        {
+          "path": "g5.md",
+          "digest": "sha256:2d8aa68cae48d183d93bac78c472f093759dde57ad63fdd4d34745e80b802bd0"
+        },
+        {
+          "path": "g6.md",
+          "digest": "sha256:6661719dd93930844d6415a6d6f69e8bdf57fafac8e6360a4e1c55c54e845a2b"
+        }
+      ],
+      "estimatedTokens": 120,
+      "health": {
+        "members": 7,
+        "staleMembers": 4,
+        "oldestAgeDays": 214,
+        "duplicatePairs": 1,
+        "ghosts": 0,
+        "oversized": 0,
+        "findingsDigest": "sha256:503ba710d4645e693778be675437d4343c4d8d61c3a4dbd05710ea4cd5dad47a"
+      }
+    }
+  ]
+}

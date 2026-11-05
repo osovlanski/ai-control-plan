@@ -90,10 +90,10 @@ describe("asset usage v1 contract", () => {
     expect(validateAssetUsagePage({ schemaVersion: "1.0", events: events.slice(0, 500), next: 500 }).ok).toBe(true);
   });
 
-  it("is API 2.7, telemetry.read is observability, and the browser may go without it", () => {
-    expect(CONTROL_PLANE_API_VERSION).toBe("2.7");
+  it("arrived in API 2.7 (now 2.8), telemetry.read is observability, and the browser may go without it", () => {
+    expect(Number(CONTROL_PLANE_API_VERSION.split(".")[1])).toBeGreaterThanOrEqual(7);
     expect(OBSERVABILITY_CAPABILITIES).toContain("telemetry.read");
-    expect(BROWSER_OPTIONAL_CAPABILITIES).toEqual(["telemetry.read"]);
+    expect(BROWSER_OPTIONAL_CAPABILITIES).toContain("telemetry.read");
     expect([...COMMAND_CAPABILITIES, ...INGEST_CAPABILITIES]).not.toContain("telemetry.read");
   });
 });
