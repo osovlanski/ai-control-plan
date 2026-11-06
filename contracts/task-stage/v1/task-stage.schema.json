@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-plane.local/contracts/task-stage/v1/task-stage.schema.json",
+  "title": "TaskStage",
+  "description": "Task stage v1: the plane-computed stage of a task and the one rule that produced it, served on GET /api/tasks and on SSE state frames from API 2.9. Normative text: docs/contracts/task-stage-v1.md.",
+  "type": "object",
+  "required": [
+    "value",
+    "rule"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "value": {
+      "enum": [
+        "done",
+        "needs-you",
+        "verifying",
+        "working",
+        "queued"
+      ]
+    },
+    "rule": {
+      "enum": [
+        "terminal",
+        "waiting-input",
+        "limit-paused",
+        "awaiting-approval",
+        "verification-running",
+        "run-ended-unsettled",
+        "live-run",
+        "run-starting",
+        "wait-condition",
+        "no-run"
+      ]
+    }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "value": {
+          "const": "done"
+        },
+        "rule": {
+          "enum": [
+            "terminal"
+          ]
+        }
+      }
+    },
+    {
+      "properties": {
+        "value": {
+          "const": "needs-you"
+        },
+        "rule": {
+          "enum": [
+            "waiting-input",
+            "limit-paused",
+            "awaiting-approval"
+          ]
+        }
+      }
+    },
+    {
+      "properties": {
+        "value": {
+          "const": "verifying"
+        },
+        "rule": {
+          "enum": [
+            "verification-running",
+            "run-ended-unsettled"
+          ]
+        }
+      }
+    },
+    {
+      "properties": {
+        "value": {
+          "const": "working"
+        },
+        "rule": {
+          "enum": [
+            "live-run",
+            "run-starting"
+          ]
+        }
+      }
+    },
+    {
+      "properties": {
+        "value": {
+          "const": "queued"
+        },
+        "rule": {
+          "enum": [
+            "wait-condition",
+            "no-run"
+          ]
+        }
+      }
+    }
+  ]
+}

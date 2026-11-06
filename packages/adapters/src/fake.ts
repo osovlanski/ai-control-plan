@@ -82,6 +82,15 @@ function parseContextMarker(prompt: string): FakeRunState["context"] | undefined
 }
 
 /**
+ * `[FAKE:CLI_VERSION:<v>]`: run.started reports `version: <v>`, the way the Claude CLI reports
+ * `claude_code_version` on `system/init`. Absent ⇒ no version is reported (what Codex does today),
+ * so the plane's `runs.harness_cli_version` stays NULL.
+ */
+function parseCliVersionMarker(prompt: string): string | undefined {
+  return prompt.match(/\[FAKE:CLI_VERSION:([^\]\s]+)\]/)?.[1];
+}
+
+/**
  * `[FAKE:LATE_SESSION]` / `[FAKE:LATE_SESSION:<ref>]`: the run's handle carries no
  * providerSessionRef when start() returns, and the ref is reported only by run.started,
  * the way the Claude CLI learns its session id from `system/init`. With `<ref>`, that is
@@ -284,6 +293,7 @@ export class FakeAdapter implements AgentAdapter {
       payload: {
         providerSessionRef: handle.providerSessionRef,
         model: run.model?.id ?? "fake-1",
+        ...(parseCliVersionMarker(run.prompt) ? { version: parseCliVersionMarker(run.prompt) } : {}),
         ...(run.profile && this.harness === "claude-code" ? fakeInitEvidence(run.profile, run.prompt) : {}),
       },
     });
@@ -312,6 +322,19 @@ export class FakeAdapter implements AgentAdapter {
       mcp += 1;
       emit({ type: "tool.started", summary: `MCP ${m[1]}`, payload: { toolUseId: `mcp${mcp}`, tool: m[1], input: { query: "fake" } } });
       emit({ type: "tool.completed", summary: `MCP ${m[1]} → ok`, payload: { toolUseId: `mcp${mcp}`, exitCode: 0 } });
+    }
+    // M6 S2: `[FAKE:SKILL:<name>]` emits a Skill tool call naming the profile skill and a Read of
+    // the profile's SKILL.md, two toolUseIds, as Claude does (plan Q6). Without a profile the Read
+    // path is relative and matches nothing.
+    let skill = 0;
+    for (const m of run.prompt.matchAll(/\[FAKE:SKILL:([A-Za-z0-9][\w.-]*)\]/g)) {
+      if (state.cancelled) break;
+      skill += 1;
+      const skillMd = join(run.profile?.root ?? "", "plugin", "skills", m[1]!, "SKILL.md");
+      emit({ type: "tool.started", summary: `Skill ${m[1]}`, payload: { toolUseId: `skill${skill}`, tool: "Skill", input: { skill: `${PLUGIN_NAME}:${m[1]}` } } });
+      emit({ type: "tool.completed", summary: `Skill ${m[1]} → ok`, payload: { toolUseId: `skill${skill}`, exitCode: 0 } });
+      emit({ type: "tool.started", summary: `Read ${skillMd}`, payload: { toolUseId: `skillread${skill}`, tool: "Read", input: { file_path: skillMd } } });
+      emit({ type: "tool.completed", summary: `Read ${skillMd} → ok`, payload: { toolUseId: `skillread${skill}`, exitCode: 0 } });
     }
     // K19k: `[FAKE:READ:<path>]` emits one Read per marker; `{cwd}` is the run's
     // workdir, so a path inside a task's scratch directory can be scripted.

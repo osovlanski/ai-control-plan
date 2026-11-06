@@ -6,6 +6,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { assembleBundle, fileDigest, type BundleRequest } from "../../api/src/bundle-contract.js";
+import type { MemoryBundleSnapshot } from "../../api/src/memory-contract.js";
 import { computeSnapshotDigest, REGISTRY_VERSION_HEADER, type RegistryAsset } from "../../api/src/registry-contract.js";
 
 export const FAKE_COCKPIT_TOKEN = "FAKE-cockpit-registry-token-not-real-m7";
@@ -15,6 +16,8 @@ export interface FakeCockpit {
   /** Skill id (`claude-skills:name`) to its body and the facts stage 3 reads. */
   skills: Map<string, { body: string; tags: string[]; assistants: string[] }>;
   fragments: Map<string, string>;
+  /** O6 S3: what `GET /api/v1/registry/memory/bundles` answers; null is a 404 (a Cockpit that predates memory v1). */
+  memory: { snapshot: MemoryBundleSnapshot | null };
   requests: Array<{ method?: string; url?: string }>;
   close(): Promise<void>;
 }
@@ -39,6 +42,7 @@ function render(c: FakeCockpit, request: BundleRequest): { status: number; body:
     sections.push(c.fragments.get(name)!);
     included.push({ kind: "fragment", ref: name, digest: fileDigest(c.fragments.get(name)!), reason: "requested by the composition" });
   }
+  for (const pin of request.memoryBundles) included.push({ kind: "memory_bundle", ref: pin.id, digest: pin.digest, reason: "pinned by the composition" });
   const rendered = [{ relPath: "CLAUDE.md", content: sections.join("\n\n") || "# Project context" }];
   for (const pin of request.skills) {
     const relPath = `.claude/skills/${pin.id.split(":")[1]}/SKILL.md`;
@@ -49,7 +53,7 @@ function render(c: FakeCockpit, request: BundleRequest): { status: number; body:
 }
 
 export async function fakeCockpit(): Promise<FakeCockpit> {
-  const state: FakeCockpit = { url: "", skills: new Map(), fragments: new Map(), requests: [], close: async () => {} };
+  const state: FakeCockpit = { url: "", skills: new Map(), fragments: new Map(), memory: { snapshot: null }, requests: [], close: async () => {} };
   const server: Server = createServer((req: IncomingMessage, res: ServerResponse) => {
     let body = "";
     req.on("data", (chunk: Buffer) => { body += chunk.toString("utf8"); });
@@ -63,6 +67,10 @@ export async function fakeCockpit(): Promise<FakeCockpit> {
       if (req.method === "GET" && req.url === "/api/v1/registry/assets") {
         const assets = assetsOf(state);
         return send(200, { schemaVersion: "1.0", snapshotDigest: computeSnapshotDigest(assets), assets }, { [REGISTRY_VERSION_HEADER]: "1.0" });
+      }
+      if (req.method === "GET" && req.url === "/api/v1/registry/memory/bundles") {
+        if (!state.memory.snapshot) return send(404, { error: { code: "not_found", message: "no such registry route" } });
+        return send(200, state.memory.snapshot, { [REGISTRY_VERSION_HEADER]: "1.0" });
       }
       if (req.method === "POST" && req.url === "/api/v1/registry/bundle") {
         const out = render(state, JSON.parse(body) as BundleRequest);

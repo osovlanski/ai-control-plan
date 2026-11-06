@@ -90,7 +90,7 @@ describe("asset usage v1 contract", () => {
     expect(validateAssetUsagePage({ schemaVersion: "1.0", events: events.slice(0, 500), next: 500 }).ok).toBe(true);
   });
 
-  it("arrived in API 2.7 (now 2.8), telemetry.read is observability, and the browser may go without it", () => {
+  it("arrived in API 2.7 (now 2.9), telemetry.read is observability, and the browser may go without it", () => {
     expect(Number(CONTROL_PLANE_API_VERSION.split(".")[1])).toBeGreaterThanOrEqual(7);
     expect(OBSERVABILITY_CAPABILITIES).toContain("telemetry.read");
     expect(BROWSER_OPTIONAL_CAPABILITIES).toContain("telemetry.read");
@@ -130,7 +130,7 @@ describe("GET /api/composition/asset-usage", () => {
       "assetDigest", "assetId", "assetKind", "at", "attached", "attributionMethod", "compositionRevisionId", "deriverVersion", "eventId",
       "fidelity", "harness", "invocation", "schemaVersion", "seq", "sessionId", "sessionOutcome", "taskId", "validation", "verificationPassed",
     ]);
-    expect(event.invocation).toEqual({ method: "not_observable", count: null, failed: null });
+    expect(event.invocation).toEqual({ method: "tool_event", count: 0, failed: 0 });
   });
 
   it("maps a tool_event row's counts and serves it unchanged on every read", async () => {

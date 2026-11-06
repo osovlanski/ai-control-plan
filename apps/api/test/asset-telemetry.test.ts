@@ -1,8 +1,8 @@
 /**
  * M6 S1 (docs/agentic-os-m6-composition-telemetry.md §5 row S1): a settled, revision-bound session
  * is projected into `asset_usage` once — from the settle path, a crash restart's release, or the
- * boot backfill. Replays write nothing, a different body under a key is a counted conflict, and
- * invocation is `not_observable` everywhere.
+ * boot backfill. Replays write nothing and a different body under a key is a counted conflict.
+ * S2: the fake's `[FAKE:SKILL:<name>]` marker is counted from the stored tool events.
  */
 import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -41,9 +41,9 @@ const count = (table: string) => (rig!.db.prepare(`SELECT COUNT(*) AS n FROM ${t
 const telemetry = () => new AssetTelemetry(rig!.db);
 
 describe("asset_usage projection at settle", () => {
-  it("a composed Claude run: skill runtime_confirmed, fragment files_verified, success, invocation not observable; a replay writes nothing", async () => {
+  it("a composed Claude run: skill runtime_confirmed and invoked from stored tool events, fragment files_verified and not applicable, success; a replay writes nothing", async () => {
     rig = await bootRig();
-    const { state, sessionId } = await startComposed(GOAL);
+    const { state, sessionId } = await startComposed(`${GOAL} [FAKE:SKILL:ts-review]`);
     expect(state).toBe("COMPLETED");
     const rows = rowsOf(sessionId);
     expect(rows.map((r) => [r.asset_kind, r.asset_id, r.attached, r.validation])).toEqual([
@@ -51,10 +51,12 @@ describe("asset_usage projection at settle", () => {
       ["fragment", "typescript-style", 1, "files_verified"],
     ]);
     for (const r of rows) {
-      expect(r).toMatchObject({ fidelity: "full", harness: "claude-code", invocation_method: "not_observable", invocation_count: null, invocation_failed: null, session_outcome: "success", attribution_method: "co-occurrence/v1", deriver_version: 1 });
+      expect(r).toMatchObject({ fidelity: "full", harness: "claude-code", session_outcome: "success", attribution_method: "co-occurrence/v1", deriver_version: 2 });
       expect(r.at).toBe((rig.db.prepare("SELECT at FROM execution_results WHERE session_id = ?").get(sessionId) as { at: string }).at);
     }
-    expect(ledgerOf(sessionId)).toMatchObject({ rows: 2, deriver_version: 1 });
+    // One marker is a Skill call and a Read of the profile's SKILL.md: two toolUseIds.
+    expect(rows.map((r) => [r.invocation_method, r.invocation_count, r.invocation_failed])).toEqual([["tool_event", 2, 0], ["not_applicable", null, null]]);
+    expect(ledgerOf(sessionId)).toMatchObject({ rows: 2, deriver_version: 2 });
 
     const before = count("asset_usage");
     expect(telemetry().project(sessionId)).toEqual({ status: "projected", rows: 2, inserted: 0, conflicts: 0 });

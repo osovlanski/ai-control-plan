@@ -5,7 +5,7 @@
  * `unknown` rather than becoming a zero.
  */
 import type { AgentSpec, AgentSpecDraft, ComposerStage, DecisionStage } from "@agent-plane/core";
-import type { BudgetRunSettlement, CompositionBudget, CompositionHistory } from "./api.js";
+import type { BudgetRunSettlement, CompositionBudget, CompositionHistory, MemoryShadowRow } from "./api.js";
 
 /** How a number was obtained. `unknown` is a first-class answer, never rendered as 0. */
 export type Method = "guessed" | "estimated" | "measured" | "unknown";
@@ -232,4 +232,27 @@ export function boundRevisions(history: CompositionHistory, runs: ReadonlyArray<
 export function unboundRevisions(history: CompositionHistory, bound: readonly BoundRevision[]): CompositionHistory["revisions"] {
   const taken = new Set(bound.map((b) => b.revision.compositionRevisionId));
   return history.revisions.filter((r) => !taken.has(r.compositionRevisionId));
+}
+
+// ---- memory shadow (O6 S4) -----------------------------------------------------------------------
+
+export interface MemoryChip { bundleId: string; action: "demote" | "drifted" | "unknown"; label: string; title: string; production: string | null }
+const CHIP_LABEL = { demote: "would demote", drifted: "drifted", unknown: "unknown" } as const;
+
+/**
+ * Chips for the newest attempt's shadow rows (the rows arrive oldest first). `keep`, an error row
+ * (no bundle) and no row at all render nothing. The wording is the plane's `reason`; nothing is
+ * recomputed here.
+ */
+export function memoryChips(rows: readonly MemoryShadowRow[], rule: string): MemoryChip[] {
+  const latest = rows.at(-1)?.attemptId;
+  return rows
+    .filter((r) => r.attemptId === latest && r.status === "scored" && r.bundleId !== null && r.shadow !== null && r.shadow.action !== "keep")
+    .map((r) => ({
+      bundleId: r.bundleId!,
+      action: r.shadow!.action as MemoryChip["action"],
+      label: CHIP_LABEL[r.shadow!.action as MemoryChip["action"]],
+      title: `${rule}: ${r.shadow!.reason}`,
+      production: r.production ? r.production.action : null,
+    }));
 }
