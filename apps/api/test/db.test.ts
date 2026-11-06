@@ -49,7 +49,7 @@ describe("migrations", () => {
         (site, provider, question_set_hash, answers_json, latency_ms, mode, created_at)
         VALUES ('tool-gate', 'rules', 'test-hash', '{}', 0, 'shadow', '2026-09-24')`).run();
       const record = baseline.prepare("SELECT * FROM decision_records").get();
-      expect(migrate(baseline)).toEqual(["028_session_input.sql", "029_session_input_commands.sql", "030_approval_settled_reason.sql", "031_task_classifier.sql", "032_registry_federation.sql", "033_composition.sql", "034_composition_attempts.sql", "035_run_model_requested_source.sql", "036_usage_run_link.sql", "037_asset_usage.sql", "038_asset_shadow_log.sql", "039_memory_proposals.sql", "040_memory_shadow.sql"]);
+      expect(migrate(baseline)).toEqual(["028_session_input.sql", "029_session_input_commands.sql", "030_approval_settled_reason.sql", "031_task_classifier.sql", "032_registry_federation.sql", "033_composition.sql", "034_composition_attempts.sql", "035_run_model_requested_source.sql", "036_usage_run_link.sql", "037_asset_usage.sql", "038_asset_shadow_log.sql", "039_memory_proposals.sql", "040_memory_shadow.sql", "041_run_harness_cli_version.sql"]);
       // 031 adds `rules_json`; an existing record gets NULL, never a backfilled rule.
       expect(baseline.prepare("SELECT * FROM decision_records").get()).toEqual({ ...(record as object), rules_json: null });
       expect(baseline.prepare("SELECT COUNT(*) AS n FROM session_inputs").get()).toEqual({ n: 0 });
@@ -77,6 +77,30 @@ describe("migrations", () => {
       expect(appliedMigrations(upgraded)).toEqual(onDisk);
       expect(upgraded.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'asset_shadow_log'").get()).toEqual({ name: "asset_shadow_log" });
       expect(migrate(upgraded)).toEqual([]);
+    } finally {
+      upgraded.close();
+    }
+  });
+
+  it("041 adds runs.harness_cli_version as a nullable column and leaves existing runs NULL (K13 A2)", () => {
+    const migrations = new URL("../src/db/migrations/", import.meta.url);
+    const before041 = mkdtempSync(join(dir, "pre-041-migrations-"));
+    for (const name of readdirSync(migrations).filter((f) => f.endsWith(".sql") && f !== "041_run_harness_cli_version.sql")) {
+      copyFileSync(new URL(name, migrations), join(before041, name));
+    }
+    const upgraded = new Database(join(dir, "pre-041.db"));
+    try {
+      upgraded.pragma("foreign_keys = ON");
+      expect(migrate(upgraded, before041)).not.toContain("041_run_harness_cli_version.sql");
+      expect(upgraded.prepare("SELECT name FROM pragma_table_info('runs') WHERE name = 'harness_cli_version'").get()).toBeUndefined();
+      upgraded.prepare("INSERT INTO assistants (id, provider) VALUES ('a1','fake')").run();
+      upgraded.prepare("INSERT INTO tasks (id, goal, envelope, created_at, updated_at) VALUES ('AG-1','g','{}','t','t')").run();
+      upgraded.prepare("INSERT INTO runs (id, task_id, assistant_id, state, started_at) VALUES ('run-old','AG-1','a1','COMPLETED','t')").run();
+      expect(migrate(upgraded)).toEqual(["041_run_harness_cli_version.sql"]);
+      // Forward only: a run recorded before 041 never had its CLI version captured, so it stays unknown.
+      expect(upgraded.prepare("SELECT harness_cli_version FROM runs WHERE id = 'run-old'").get()).toEqual({ harness_cli_version: null });
+      const column = upgraded.prepare("SELECT type, \"notnull\" AS nn, dflt_value FROM pragma_table_info('runs') WHERE name = 'harness_cli_version'").get();
+      expect(column).toEqual({ type: "TEXT", nn: 0, dflt_value: null });
     } finally {
       upgraded.close();
     }

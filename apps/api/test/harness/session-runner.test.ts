@@ -1376,3 +1376,59 @@ describe("a provider that learns its session id after start (Claude's system/ini
     expect(store.get(sessionOf())!.providerSessionRef).toBe("FAKE-acked-not-real");
   });
 });
+
+describe("the provider CLI version on the run row (K13 A2)", () => {
+  const versionOf = () =>
+    (db.prepare("SELECT harness_cli_version AS v FROM runs WHERE id = ?").get(sessionOf()) as { v: string | null }).v;
+
+  /** Emits the given run.started payloads in order, then ends the run. */
+  function startedAdapter(payloads: Array<Record<string, unknown> | undefined>): AgentAdapter {
+    return {
+      id: "a1" as AssistantId,
+      describe: async () => MANIFEST,
+      start: async () => ({ runId: "h4", assistantId: "a1" as AssistantId }),
+      resume: async () => ({ runId: "h4", assistantId: "a1" as AssistantId }),
+      events: async function* () {
+        for (const payload of payloads) {
+          yield { runId: "h4" as RunId, ts: new Date().toISOString(), type: "run.started", summary: "started", payload };
+        }
+        yield { runId: "h4" as RunId, ts: new Date().toISOString(), type: "run.ended", summary: "done", payload: { ok: true } };
+      },
+      cancel: async () => {},
+    };
+  }
+
+  it("stores the version run.started reported, as the provider reported it", async () => {
+    const result = await new SessionRunner(deps(startedAdapter([{ model: "fake-1", version: "2.1.238" }]))).run(request());
+    expect(result.terminalState).toBe("COMPLETED");
+    expect(versionOf()).toBe("2.1.238");
+  });
+
+  it.each([
+    ["no payload", undefined],
+    ["no version", { model: "fake-1" }],
+    ["a blank version", { version: "  " }],
+    ["a non-string version", { version: 2 }],
+  ] as const)("is NULL when run.started carries %s", async (_label, payload) => {
+    await new SessionRunner(deps(startedAdapter([payload]))).run(request());
+    expect(versionOf()).toBeNull();
+  });
+
+  it("is write-once: a later run.started naming another version does not rewrite it", async () => {
+    await new SessionRunner(deps(startedAdapter([{ version: "2.1.238" }, { version: "9.9.9" }]))).run(request());
+    expect(versionOf()).toBe("2.1.238");
+  });
+
+  it("FakeAdapter [FAKE:CLI_VERSION:v] marker reports a version; without it the column stays NULL", async () => {
+    const withMarker = await new SessionRunner(deps(new FakeAdapter("a1" as AssistantId))).run(
+      request({ runSpec: { ...request().runSpec, prompt: "do it [FAKE:CLI_VERSION:2.1.238]" } }),
+    );
+    expect(withMarker.terminalState).toBe("COMPLETED");
+    expect(versionOf()).toBe("2.1.238");
+  });
+
+  it("is not taken from the model or the session ref", async () => {
+    await new SessionRunner(deps(startedAdapter([{ model: "claude-sonnet-5-5", providerSessionRef: "FAKE-ref-not-real" }]))).run(request());
+    expect(versionOf()).toBeNull();
+  });
+});

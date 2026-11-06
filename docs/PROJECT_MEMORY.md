@@ -824,6 +824,10 @@ Owner decision D4 (accepted 2026-11-05): close 7b from existing evidence instead
 `CompositionPanel` also reads `GET /api/composition/memory-shadow?taskId` (`api.memoryShadow`; an absent route or a missing `telemetry.read` shows nothing) and `MemoryShadowChips` renders one labelled chip per bundle of the **newest attempt** whose shadow action is `demote` ("would demote"), `drifted` or `unknown`, with `<rule>: <reason>` from the plane as tooltip. `keep`, an error row and no row render nothing; the web never recomputes health. Files beyond the plan's row: `api.ts` (route type), `composition.ts` (`memoryChips`), `composition.css`, and `e2e/fake-cockpit.ts` (memory v1 route + `memory_bundle` pins). e2e drove a real in-process plane with a fake Cockpit, not Cockpit main on loopback.
 
 
+## 2026-11-06 — K13 A2 CLI version on runs (SHIPPED; evidence only)
+
+Migration 041 adds `runs.harness_cli_version` (TEXT NULL, forward only, no backfill). The session runner writes it once from `run.started` `payload.version` (Claude: `claude_code_version`); a blank or non-string version, or none at all (Codex today), leaves NULL, and the first report wins. Nothing reads it yet: A0/A1 use it later to key identity evidence by CLI build. Test-only `[FAKE:CLI_VERSION:<v>]` marker makes the fake adapter report a version. Drive PASS: `/mnt/project-files/k13-a2-cli-version/`.
+
 ## 2026-11-06 — K13 A1 last-N alias binding (SHIPPED; shadow only)
 
 - **Rule** (`resolveCandidateIdentity`, Q1/Q2 of `docs/agentic-os-k13-alias-identity.md`): an alias binds as `observed-resolution` only when the newest `OBSERVED_RESOLUTION_RUNS` = 3 runs on that assistant that requested it, with a non-NULL `model_resolved`, all report one id and the newest `started_at` is within `OBSERVED_RESOLUTION_FRESHNESS_DAYS` = 14 days. Older runs never block. Replaces "all runs in 30 days agree".
