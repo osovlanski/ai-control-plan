@@ -64,6 +64,7 @@ import { onRunSessionRef, UsageLedger, validateUsageRecord } from "./modules/usa
 import { AssetTelemetry } from "./modules/asset-telemetry.js";
 import { AssetShadow, parseScoresQuery, parseShadowQuery, type ShadowScorer } from "./modules/asset-shadow.js";
 import { MemoryProposals, parseMemoryFeedQuery, readMemoryProposalPage } from "./modules/memory-proposals.js";
+import { MemoryFederation, MemoryShadowLog, memoryShadowResponse, parseMemoryShadowQuery, type MemorySnapshotSource, type MemoryShadowScorer } from "./modules/memory-federation.js";
 import { validateMemoryProposalPage } from "./memory-contract.js";
 import { parseFeedQuery, readAssetUsagePage, validateAssetUsagePage } from "./asset-usage-contract.js";
 
@@ -99,6 +100,10 @@ export interface ServerDeps {
   composerHostname?: string;
   /** M6 S4: the shadow scorer. Test only (a throwing scorer must not fail a compose); defaults to core's. */
   assetShadowScorer?: ShadowScorer;
+  /** O6 S3: where the memory bundle snapshot comes from. Test only; defaults to Cockpit's memory v1 route. */
+  memorySnapshotSource?: MemorySnapshotSource;
+  /** O6 S3: the memory shadow rule. Test only (a throwing one must not fail a compose); defaults to core's. */
+  memoryShadowScorer?: MemoryShadowScorer;
 }
 
 export interface BuiltServer {
@@ -114,6 +119,8 @@ export interface BuiltServer {
   quotaProbes: QuotaProbeService;
   modelCatalog: ModelCatalogService;
   registryFederation: RegistryFederation;
+  /** O6 S3: Cockpit's memory bundle snapshot, synced beside the registry at boot and daily. */
+  memoryFederation: MemoryFederation;
   /** Present only when `sessionInput.enabled` is true. */
   sessionInputs?: SessionInputService;
   /**
@@ -160,6 +167,9 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   const memoryRead = { config: { auth: { require: "memory.read" } } } as const;
   // M6 S4: the shadow scorer. The composer logs through it; the two telemetry.read routes read it.
   const assetShadow = new AssetShadow(db, registry, app.log, { now, ...(deps.assetShadowScorer ? { scorer: deps.assetShadowScorer } : {}) });
+  // O6 S3: the last good memory bundle snapshot, and the shadow the composer logs through.
+  const memoryFederation = new MemoryFederation(db, config.registry.cockpit, deps.memorySnapshotSource, now, app.log);
+  const memoryShadow = new MemoryShadowLog(db, memoryFederation, app.log, { now, ...(deps.memoryShadowScorer ? { scorer: deps.memoryShadowScorer } : {}) });
 
   // The internal bridge + recovery are wired for every real composition root
   // (extracted to modules/harness/composition.ts so a test factory can build a
@@ -376,6 +386,16 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     return assetShadow.shadowLog(query.since, query.limit);
   });
 
+  // ---- Memory shadow (O6 S3; shadow only: production selection is unchanged) ----
+  // Per pinned memory bundle per attempt: what stage 4 did and what memory-shadow/v1 would do
+  // (keep, demote, unknown, drifted), with the last good snapshot's state. No API version bump.
+  app.get<{ Querystring: { taskId?: string; limit?: string } }>("/api/composition/memory-shadow", telemetryRead, (req, reply) => {
+    const query = parseMemoryShadowQuery(req.query);
+    if (!query.ok) return reply.status(400).send({ error: query.error });
+    if (query.taskId !== undefined && !tasks.get(query.taskId)) return reply.status(404).send({ error: "not found" });
+    return memoryShadowResponse(db, memoryFederation, query);
+  });
+
   // ---- Memory proposal feed (O6 S5, memory v1, API 2.8; Cockpit S6 pulls it) ----
   // Candidate memories in ingest order after the `after` cursor. Read-only: the plane has no route
   // that accepts, rejects or writes memory. The page is validated against memory v1 before it
@@ -588,6 +608,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   const composer = config.composer.enabled
     ? new ComposerService({
       assetShadow,
+      memoryShadow,
       db, config, tasks, registry, cooldowns, now, ...(modelCatalog ? { catalog: modelCatalog } : {}),
       federation: registryFederation,
       bundled: new BundledComposition(db, new CockpitBundleClient(config.registry.cockpit.baseUrl, config.registry.cockpit.tokenPath), {
@@ -1460,7 +1481,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     });
   }
 
-  return { app, registry, orchestrator, tasks, bus, checkpoints, cooldowns, telemetry, scheduler, quotaProbes: probes, modelCatalog, registryFederation, sessionInputs, sessionInputRedelivery };
+  return { app, registry, orchestrator, tasks, bus, checkpoints, cooldowns, telemetry, scheduler, quotaProbes: probes, modelCatalog, registryFederation, memoryFederation, sessionInputs, sessionInputRedelivery };
 }
 
 function sseHeaders(reply: FastifyReply): void {

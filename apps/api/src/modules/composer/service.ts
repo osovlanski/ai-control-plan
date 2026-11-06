@@ -35,6 +35,7 @@ import type { Db } from "../../db/index.js";
 import type { CompositionDecision } from "../../composition-contract.js";
 import type { ShadowAttempt } from "../asset-shadow.js";
 import type { BundledComposition } from "../bundle-request.js";
+import type { MemoryShadowAttempt } from "../memory-federation.js";
 import { CompositionStore } from "../composition.js";
 import type { CompositionWorkspace, DispatchComposer, DispatchComposition, RecomposeOrigin, StartComposition } from "../orchestrator.js";
 import type { RegistryFederation } from "../registry-federation.js";
@@ -63,6 +64,8 @@ export interface ComposerServiceDeps extends RouteDeps {
   env?: NodeJS.ProcessEnv;
   /** M6 S4: logs a shadow rank per attempt that reached stage 3. It never feeds back into a composition. */
   assetShadow?: { record(attempt: ShadowAttempt): void };
+  /** O6 S3: logs a memory shadow verdict per pinned bundle of an attempt that reached stage 4. Never feeds back. */
+  memoryShadow?: { record(attempt: MemoryShadowAttempt): void };
 }
 
 export interface PreviewResponse {
@@ -142,11 +145,14 @@ type PersistedStart =
   | { ok: true; attempt: StartAttempt; compositionRevisionId: string; policy: AgentSpec["policy"] }
   | { ok: false; attempt: StartAttempt; reason: string };
 
-/** What the M6 S4 shadow reads of a composition: the decision, the inputs it ran on, stage 2's assistant. */
-type ShadowSource = Omit<ShadowAttempt, "attemptId" | "taskId">;
+/**
+ * What the shadows read of a composition: the decision, the inputs it ran on, stage 2's assistant
+ * (M6 S4), and the outcome, which tells a memory pin Cockpit refused from one never rendered (O6 S3).
+ */
+type ShadowSource = Omit<ShadowAttempt, "attemptId" | "taskId"> & { outcome: ComposerOutcome };
 const shadowSource = ({ inputs, result, harnessModel }: Composed): ShadowSource => {
   const chosen = harnessModel.usedExplanation()?.chosen;
-  return { decision: result.decision, inputs, assistantId: chosen ? String(chosen) : undefined };
+  return { decision: result.decision, inputs, assistantId: chosen ? String(chosen) : undefined, outcome: result.outcome };
 };
 
 /** The attempt reason of a K11 continuation that reuses its predecessor's revision. */
@@ -402,8 +408,15 @@ export class ComposerService implements DispatchComposer {
    * attempt row is committed and outside its transaction; best-effort, so it never fails a compose.
    */
   private shadow(attemptId: string, taskId: string, source: ShadowSource | undefined): void {
-    if (!source || !this.deps.assetShadow) return;
-    try { this.deps.assetShadow.record({ attemptId, taskId, ...source }); } catch { /* the shadow never fails a compose */ }
+    if (!source) return;
+    const { outcome, ...asset } = source;
+    if (this.deps.assetShadow) {
+      try { this.deps.assetShadow.record({ attemptId, taskId, ...asset }); } catch { /* the shadow never fails a compose */ }
+    }
+    // O6 S3 (plan §2.2): beside the asset shadow, same rules; stage 4's pins and health, never the decision.
+    if (this.deps.memoryShadow) {
+      try { this.deps.memoryShadow.record({ attemptId, taskId, decision: asset.decision, outcome }); } catch { /* never fails a compose */ }
+    }
   }
 
   private insertAttempt(a: {
