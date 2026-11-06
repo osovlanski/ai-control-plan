@@ -633,11 +633,12 @@ rule-allowed tools; neither changed here.
 - **Probe fact (codex 0.154.0):** `debug prompt-input` starts every configured MCP server. The probe therefore leaves `mcp_servers` out and says so in a `prompt_input_mcp` check; verify never runs a server's command. It runs with a scratch CODEX_HOME, HOME and cwd (the cwd's AGENTS.md is read otherwise) and an env of only PATH, HOME and CODEX_HOME, and needs no credentials.
 - The SDK does not export its `--config` serializer; `codexConfigArgs` mirrors it and a test pins it against the argv the SDK spawns. Recheck that test when `@openai/codex-sdk` moves.
 
-## 2026-10-21 — Jev judges floor discovery (SHIPPED; owner decision; live call not driven, egress blocked in the build container)
+## 2026-10-21 — Jev judges floor discovery (SHIPPED; owner decision; live call driven 2026-11-05)
 
 - **`decisions.discoveryProvider: typesafe | model`**, read only by `decision:floor-discovery`. Default `typesafe` when `typesafeApiKeyRef` is named, else `model`; `typesafe` without the reference fails at load. The chain is `typesafe` (pinned `jev-1.13`, `DISCOVERY_TYPESAFE_MODEL`) → `model` → rules.
 - **I-D7 keys on the input, not just the config.** Jev sees only calls from the personal workspace's own DB. `--actions`, or `--db` of any other path, goes to `model` unless `--input-workspace personal` declares the origin; the file header and stderr say why.
 - **Defect fixed: a fallback answer was unreadable.** `resolveToolGate` prompts on any `degraded` outcome before it reads an answer, so a model answer after a Jev failure became a candidate whatever it said. Discovery now counts `provider === "rules"` as unjudged, strips `degraded` from a judge's answer before resolving it, and reports fallbacks separately (`judgedBy`, `fallbacks`, per-candidate `judge`/`fallbackFrom`).
+- **Live call driven 2026-11-05, on main `b5e76f4`, through the `openrouter` route (the key is an OpenRouter key).** Against the personal workspace's own DB with `--input-workspace personal`: 21 calls, 11 distinct, 7 floored, 4 judged by `typesafe`, 0 by `model`, 0 fallbacks, 0 unjudged, 0 candidates. With `--input-workspace none` the same input was not sent to TypeSafe (I-D7): 0 judged, 4 unjudged because `model` had no credential. The run used a scratch config home naming `typesafeApiKeyRef`, because the operator's config names none. With 0 candidates, no per-candidate `judge`/`fallbackFrom` row was exercised.
 
 ## 2026-10-21 — M3 parallel-run lifecycle: compare and race candidates own their profiles (SHIPPED; composer on only)
 
