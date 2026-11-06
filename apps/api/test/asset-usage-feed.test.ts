@@ -130,7 +130,7 @@ describe("GET /api/composition/asset-usage", () => {
       "assetDigest", "assetId", "assetKind", "at", "attached", "attributionMethod", "compositionRevisionId", "deriverVersion", "eventId",
       "fidelity", "harness", "invocation", "schemaVersion", "seq", "sessionId", "sessionOutcome", "taskId", "validation", "verificationPassed",
     ]);
-    expect(event.invocation).toEqual({ method: "not_observable", count: null, failed: null });
+    expect(event.invocation).toEqual({ method: "tool_event", count: 0, failed: 0 });
   });
 
   it("maps a tool_event row's counts and serves it unchanged on every read", async () => {

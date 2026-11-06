@@ -75,7 +75,7 @@ export class AssetTelemetry {
       .get(run.composition_revision_id) as { spec_json: string; bundle_response_json: string };
     const events = (this.db.prepare(
       `SELECT type, payload, raw FROM events WHERE run_id = ?
-         AND type IN ('provisioning.verified', 'provisioning.ambient', 'run.started') ORDER BY seq`,
+         AND type IN ('provisioning.verified', 'provisioning.ambient', 'run.started', 'tool.started', 'tool.completed', 'tool.failed') ORDER BY seq`,
     ).all(sessionId) as Array<{ type: string; payload: string | null; raw: string | null }>)
       .map((e): AssetUsageEvent => ({
         type: e.type,
