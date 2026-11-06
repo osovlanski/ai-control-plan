@@ -46,10 +46,47 @@ export const HARNESS_MAJOR = "1";
 export type CandidateIdentityBasis =
   /** The selector IS a catalog model id for this provider — no resolution needed. */
   | "catalog-exact"
-  /** This workspace's own runs prove the selector resolved to exactly one model. */
+  /**
+   * This workspace's own runs prove the selector resolved to exactly one model:
+   * the last {@link OBSERVED_RESOLUTION_RUNS} runs on this assistant that
+   * requested it all report the same id, the newest within
+   * {@link OBSERVED_RESOLUTION_FRESHNESS_DAYS} days (K13 A1, last-N agreement).
+   */
   | "observed-resolution"
   /** Nothing proves what this selector resolves to. Priors may not attach. */
   | "unresolved";
+
+/**
+ * K13 A1 — N: how many most-recent provider-reported resolutions of a selector
+ * must agree before an alias binds. Small enough for a personal plane, large
+ * enough that one odd run cannot bind (docs/agentic-os-k13-alias-identity.md Q1).
+ */
+export const OBSERVED_RESOLUTION_RUNS = 3;
+/** K13 A1 — F: the newest of those N runs must have started within this many days. */
+export const OBSERVED_RESOLUTION_FRESHNESS_DAYS = 14;
+/** Names the binding rule in the persisted identity, so a later rule change is auditable. */
+export const OBSERVED_RESOLUTION_RULE = "last-n-agreement-v1";
+
+/**
+ * What the last-N rule looked at, persisted with the identity whether it bound
+ * or refused, so an audit can see why. Present only when the selector is not a
+ * catalog id and the plane looked at its own runs.
+ */
+export interface IdentityObservation {
+  rule: typeof OBSERVED_RESOLUTION_RULE;
+  /** N — agreeing runs required. */
+  requiredRuns: number;
+  /** F — the newest examined run must be at most this old. */
+  freshnessDays: number;
+  /** Runs examined: the newest ≤ N on this assistant requesting this selector with a reported resolution. */
+  runsExamined: number;
+  /** Distinct provider-reported ids among the examined runs, sorted. */
+  resolvedIds: string[];
+  /** `started_at` of the newest examined run. */
+  newestObservedAt?: string;
+  /** Distinct CLI versions the examined runs' `run.started` reported, sorted. Empty = none reported. */
+  cliVersions: string[];
+}
 
 /**
  * The K13 candidate identity contract (§1 of the K13 brief).
@@ -67,6 +104,8 @@ export interface CandidateIdentity {
   resolvedModelKey?: string;
   /** Human-readable proof, persisted in the explanation. */
   evidence: string;
+  /** The own-run observation behind an `observed-resolution` binding, or behind its refusal. */
+  observation?: IdentityObservation;
   /**
    * Execution configuration in force for this candidate (reasoning effort,
    * sandbox mode…). A prior benchmarked at a different configuration is not
