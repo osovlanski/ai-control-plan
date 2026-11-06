@@ -28,5 +28,6 @@ export * from "./provisioning.js";
 export * from "./asset-telemetry.js";
 export * from "./asset-shadow.js";
 export * from "./memory-proposals.js";
+export * from "./memory-shadow.js";
 export * from "./task-stage.js";
 export * from "./composer/index.js";
