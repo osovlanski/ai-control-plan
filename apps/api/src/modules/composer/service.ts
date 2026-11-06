@@ -33,6 +33,7 @@ import {
 import type { ResolvedConfig } from "../../config.js";
 import type { Db } from "../../db/index.js";
 import type { CompositionDecision } from "../../composition-contract.js";
+import type { ShadowAttempt } from "../asset-shadow.js";
 import type { BundledComposition } from "../bundle-request.js";
 import { CompositionStore } from "../composition.js";
 import type { CompositionWorkspace, DispatchComposer, DispatchComposition, RecomposeOrigin, StartComposition } from "../orchestrator.js";
@@ -60,6 +61,8 @@ export interface ComposerServiceDeps extends RouteDeps {
   hostname?: string;
   /** The environment whose variable NAMES and PATH are read. Defaults to `process.env`. */
   env?: NodeJS.ProcessEnv;
+  /** M6 S4: logs a shadow rank per attempt that reached stage 3. It never feeds back into a composition. */
+  assetShadow?: { record(attempt: ShadowAttempt): void };
 }
 
 export interface PreviewResponse {
@@ -135,6 +138,17 @@ interface Composed {
   resynced: boolean;
 }
 
+type PersistedStart =
+  | { ok: true; attempt: StartAttempt; compositionRevisionId: string; policy: AgentSpec["policy"] }
+  | { ok: false; attempt: StartAttempt; reason: string };
+
+/** What the M6 S4 shadow reads of a composition: the decision, the inputs it ran on, stage 2's assistant. */
+type ShadowSource = Omit<ShadowAttempt, "attemptId" | "taskId">;
+const shadowSource = ({ inputs, result, harnessModel }: Composed): ShadowSource => {
+  const chosen = harnessModel.usedExplanation()?.chosen;
+  return { decision: result.decision, inputs, assistantId: chosen ? String(chosen) : undefined };
+};
+
 /** The attempt reason of a K11 continuation that reuses its predecessor's revision. */
 export const REVISION_REUSED = "revision_reused";
 
@@ -186,6 +200,7 @@ export class ComposerService implements DispatchComposer {
         const routingDecisionId = harnessModel.persistUsed()!;
         return { routingDecisionId, attempt: this.insertAttempt({ taskId, origin: START_ORIGIN, routingDecisionId, compositionDigest: null, inputsDigest, outcome: status, reason }) };
       })();
+      this.shadow(recorded.attempt.attemptId, taskId, shadowSource(composed));
       // route() chose nobody: /start's 422, as before. A composition that stopped for any other
       // reason still has route()'s choice, and the start runs it route-only (Q3).
       if (!explanation.chosen) return { kind: "no_candidate", explanation, attempt: recorded.attempt };
@@ -205,7 +220,7 @@ export class ComposerService implements DispatchComposer {
       explanation,
       binding: new StartBinding(this, {
         taskId, origin: START_ORIGIN, routingDecisionId, inputsDigest, compositionDigest: result.compositionDigest, required: this.config.composer.requireRevision,
-        specDraft: result.specDraft, decision: result.decision, bundle: rendered, ...(baseCommit !== undefined ? { baseCommit } : {}),
+        specDraft: result.specDraft, decision: result.decision, bundle: rendered, ...(baseCommit !== undefined ? { baseCommit } : {}), shadow: shadowSource(composed),
       }),
     };
   }
@@ -218,10 +233,14 @@ export class ComposerService implements DispatchComposer {
     return this.insertAttempt({ taskId, origin: START_ORIGIN, routingDecisionId, compositionDigest: null, inputsDigest: null, outcome: "skipped", reason });
   }
 
-  /** Persists a confirmed revision with its workspace, and its `persisted` attempt, in one transaction. */
-  persistStart(b: StartBindingData, workspace: CompositionWorkspace | undefined):
-    | { ok: true; attempt: StartAttempt; compositionRevisionId: string; policy: AgentSpec["policy"] }
-    | { ok: false; attempt: StartAttempt; reason: string } {
+  /** Persists a confirmed revision with its workspace, and its `persisted` attempt, in one transaction; then the shadow row. */
+  persistStart(b: StartBindingData, workspace: CompositionWorkspace | undefined): PersistedStart {
+    const out = this.persistRows(b, workspace);
+    this.shadow(out.attempt.attemptId, b.taskId, b.shadow);
+    return out;
+  }
+
+  private persistRows(b: StartBindingData, workspace: CompositionWorkspace | undefined): PersistedStart {
     if (!workspace) {
       const attempt = this.insertAttempt({ ...b, compositionDigest: null, outcome: "skipped", reason: "no_worktree_identity" });
       return { ok: false, attempt, reason: "no_worktree_identity" };
@@ -306,7 +325,8 @@ export class ComposerService implements DispatchComposer {
     const inputsDigest = composerInputsDigest(composed.inputs, { sha256 });
     if (outcome.status !== "composed" || !result.specDraft || !result.compositionDigest) {
       const [status, reason] = outcome.status === "composed" ? ["failed" as const, "invalid_response"] : [outcome.status, outcome.reason];
-      this.insertAttempt({ taskId, origin, routingDecisionId, compositionDigest: null, inputsDigest, outcome: status, reason });
+      const attempt = this.insertAttempt({ taskId, origin, routingDecisionId, compositionDigest: null, inputsDigest, outcome: status, reason });
+      this.shadow(attempt.attemptId, taskId, shadowSource(composed));
       // No budget left is a policy answer, not a missing dependency: running route-only would spend past the cap.
       if (reason === "budget_exhausted") return { kind: "blocked", reason, pauseKind: "budget_exhausted" };
       return required ? { kind: "blocked", reason, pauseKind: "intervention_required" } : { kind: "route_only" };
@@ -320,7 +340,7 @@ export class ComposerService implements DispatchComposer {
       kind: "compose",
       composition: new StartBinding(this, {
         taskId, origin, routingDecisionId, inputsDigest, compositionDigest: result.compositionDigest, required,
-        specDraft: result.specDraft, decision: result.decision, bundle: rendered, ...(baseCommit !== undefined ? { baseCommit } : {}),
+        specDraft: result.specDraft, decision: result.decision, bundle: rendered, ...(baseCommit !== undefined ? { baseCommit } : {}), shadow: shadowSource(composed),
       }),
     };
   }
@@ -355,7 +375,8 @@ export class ComposerService implements DispatchComposer {
   }
 
   /** Records a preview: one routing row for the outcome stage 2 used and one attempt, in one transaction. */
-  private recordPreview(taskId: string, origin: string, { inputs, result, harnessModel, resynced }: Composed): PreviewResponse {
+  private recordPreview(taskId: string, origin: string, composed: Composed): PreviewResponse {
+    const { inputs, result, harnessModel, resynced } = composed;
     const outcome = result.outcome;
     const attempt = this.db.transaction(() => {
       const routingDecisionId = harnessModel.persistUsed() ?? null;
@@ -364,6 +385,7 @@ export class ComposerService implements DispatchComposer {
       const row = this.insertAttempt({ taskId, origin, routingDecisionId, compositionDigest: result.compositionDigest ?? null, inputsDigest: composerInputsDigest(inputs, { sha256 }), outcome: status, reason });
       return { id: row.attemptId, routingDecisionId };
     })();
+    this.shadow(attempt.id, taskId, shadowSource(composed));
     return {
       decision: result.decision,
       specDraft: result.specDraft ?? null,
@@ -373,6 +395,15 @@ export class ComposerService implements DispatchComposer {
       routingDecisionId: attempt.routingDecisionId,
       resynced,
     };
+  }
+
+  /**
+   * M6 S4 (plan §4.2): the shadow log row of an attempt that reached stage 3. Called only after the
+   * attempt row is committed and outside its transaction; best-effort, so it never fails a compose.
+   */
+  private shadow(attemptId: string, taskId: string, source: ShadowSource | undefined): void {
+    if (!source || !this.deps.assetShadow) return;
+    try { this.deps.assetShadow.record({ attemptId, taskId, ...source }); } catch { /* the shadow never fails a compose */ }
   }
 
   private insertAttempt(a: {
@@ -574,6 +605,8 @@ interface StartBindingData {
   specDraft: NonNullable<ComposeResult["specDraft"]>;
   decision: ComposeResult["decision"];
   bundle: NonNullable<ReturnType<CockpitBundlePort["lastRendered"]>>;
+  /** M6 S4: read by the shadow after the persist transaction, never by it. */
+  shadow?: ShadowSource;
 }
 
 /** The orchestrator's handle on a confirmed composition (`StartOptions.composition`). Binds once. */

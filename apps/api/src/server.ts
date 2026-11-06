@@ -61,6 +61,7 @@ import { ClaudeAdapter, ClaudeCodeSessionInputAdapter, CodexAdapter, FakeSession
 import { CredentialStore, credentialPath } from "./auth/credential-file.js";
 import { onRunSessionRef, UsageLedger, validateUsageRecord } from "./modules/usage.js";
 import { AssetTelemetry } from "./modules/asset-telemetry.js";
+import { AssetShadow, parseScoresQuery, parseShadowQuery, type ShadowScorer } from "./modules/asset-shadow.js";
 import { MemoryProposals, parseMemoryFeedQuery, readMemoryProposalPage } from "./modules/memory-proposals.js";
 import { validateMemoryProposalPage } from "./memory-contract.js";
 import { parseFeedQuery, readAssetUsagePage, validateAssetUsagePage } from "./asset-usage-contract.js";
@@ -95,6 +96,8 @@ export interface ServerDeps {
   decisionProviders?: DecisionProvider[];
   /** M2 Composer: the hostname its text guard refuses. Test only; defaults to `os.hostname()`. */
   composerHostname?: string;
+  /** M6 S4: the shadow scorer. Test only (a throwing scorer must not fail a compose); defaults to core's. */
+  assetShadowScorer?: ShadowScorer;
 }
 
 export interface BuiltServer {
@@ -151,6 +154,8 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   const usageWrite = { config: { auth: { require: "usage.write" } } } as const;
   const telemetryRead = { config: { auth: { require: "telemetry.read" } } } as const;
   const memoryRead = { config: { auth: { require: "memory.read" } } } as const;
+  // M6 S4: the shadow scorer. The composer logs through it; the two telemetry.read routes read it.
+  const assetShadow = new AssetShadow(db, registry, app.log, { now, ...(deps.assetShadowScorer ? { scorer: deps.assetShadowScorer } : {}) });
 
   // The internal bridge + recovery are wired for every real composition root
   // (extracted to modules/harness/composition.ts so a test factory can build a
@@ -351,6 +356,20 @@ export function buildServer(deps: ServerDeps): BuiltServer {
       return reply.status(500).send({ error: "asset usage page failed the asset usage v1 contract" });
     }
     return page;
+  });
+
+  // ---- Asset shadow scores and log (M6 S4; shadow only, no activation path, Q11) ----
+  // The plan §4.1 table per asset and cohort, as the plane computes it (Cockpit shows it, never
+  // recomputes it), and the composition attempts whose shadow rank would have chosen differently.
+  app.get<{ Querystring: { taskKind?: string; harness?: string } }>("/api/composition/asset-scores", telemetryRead, (req, reply) => {
+    const query = parseScoresQuery(req.query);
+    if (!query.ok) return reply.status(400).send({ error: query.error });
+    return assetShadow.scores({ ...(query.taskKind ? { taskKind: query.taskKind } : {}), ...(query.harness ? { harness: query.harness } : {}) });
+  });
+  app.get<{ Querystring: { since?: string; limit?: string } }>("/api/composition/shadow", telemetryRead, (req, reply) => {
+    const query = parseShadowQuery(req.query);
+    if (!query.ok) return reply.status(400).send({ error: query.error });
+    return assetShadow.shadowLog(query.since, query.limit);
   });
 
   // ---- Memory proposal feed (O6 S5, memory v1, API 2.8; Cockpit S6 pulls it) ----
@@ -562,6 +581,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   // three routes answer 404 `composer_disabled`; every other route is unchanged.
   const composer = config.composer.enabled
     ? new ComposerService({
+      assetShadow,
       db, config, tasks, registry, cooldowns, now, ...(modelCatalog ? { catalog: modelCatalog } : {}),
       federation: registryFederation,
       bundled: new BundledComposition(db, new CockpitBundleClient(config.registry.cockpit.baseUrl, config.registry.cockpit.tokenPath), {

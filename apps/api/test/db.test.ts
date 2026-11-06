@@ -49,13 +49,36 @@ describe("migrations", () => {
         (site, provider, question_set_hash, answers_json, latency_ms, mode, created_at)
         VALUES ('tool-gate', 'rules', 'test-hash', '{}', 0, 'shadow', '2026-09-24')`).run();
       const record = baseline.prepare("SELECT * FROM decision_records").get();
-      expect(migrate(baseline)).toEqual(["028_session_input.sql", "029_session_input_commands.sql", "030_approval_settled_reason.sql", "031_task_classifier.sql", "032_registry_federation.sql", "033_composition.sql", "034_composition_attempts.sql", "035_run_model_requested_source.sql", "036_usage_run_link.sql", "037_asset_usage.sql", "039_memory_proposals.sql"]);
+      expect(migrate(baseline)).toEqual(["028_session_input.sql", "029_session_input_commands.sql", "030_approval_settled_reason.sql", "031_task_classifier.sql", "032_registry_federation.sql", "033_composition.sql", "034_composition_attempts.sql", "035_run_model_requested_source.sql", "036_usage_run_link.sql", "037_asset_usage.sql", "038_asset_shadow_log.sql", "039_memory_proposals.sql"]);
       // 031 adds `rules_json`; an existing record gets NULL, never a backfilled rule.
       expect(baseline.prepare("SELECT * FROM decision_records").get()).toEqual({ ...(record as object), rules_json: null });
       expect(baseline.prepare("SELECT COUNT(*) AS n FROM session_inputs").get()).toEqual({ n: 0 });
       expect(migrate(baseline)).toEqual([]);
     } finally {
       baseline.close();
+    }
+  });
+
+  it("gives a database that already has 037 and 039 exactly 038, the reserved number that landed after 039", () => {
+    // O6 S5 shipped 039 while 038 was reserved for M6 S4: such a database must still gain 038,
+    // because the runner applies by name, not by highest number.
+    const migrations = new URL("../src/db/migrations/", import.meta.url);
+    const before038 = mkdtempSync(join(dir, "pre-038-migrations-"));
+    const onDisk = readdirSync(migrations).filter((f) => f.endsWith(".sql")).sort();
+    for (const name of onDisk.filter((n) => n !== "038_asset_shadow_log.sql")) copyFileSync(new URL(name, migrations), join(before038, name));
+    const upgraded = new Database(join(dir, "pre-038.db"));
+    try {
+      upgraded.pragma("foreign_keys = ON");
+      const first = migrate(upgraded, before038);
+      expect(first).toContain("037_asset_usage.sql");
+      expect(first).toContain("039_memory_proposals.sql");
+      expect(first).not.toContain("038_asset_shadow_log.sql");
+      expect(migrate(upgraded)).toEqual(["038_asset_shadow_log.sql"]);
+      expect(appliedMigrations(upgraded)).toEqual(onDisk);
+      expect(upgraded.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'asset_shadow_log'").get()).toEqual({ name: "asset_shadow_log" });
+      expect(migrate(upgraded)).toEqual([]);
+    } finally {
+      upgraded.close();
     }
   });
 
@@ -67,6 +90,7 @@ describe("migrations", () => {
     expect(tables).toEqual([
       "agent_specs",
       "approvals",
+      "asset_shadow_log",
       "asset_usage",
       "asset_usage_m1",
       "asset_usage_sessions",
