@@ -368,6 +368,18 @@ export interface CompositionRevision {
   createdAt: string;
 }
 
+/** One `GET /api/composition/memory-shadow` row (O6 S3): what stage 4 did with one pinned memory bundle and what `memory-shadow/v1` would do. Shadow only. */
+export interface MemoryShadowRow {
+  attemptId: string;
+  bundleId: string | null;
+  status: "scored" | "error";
+  production: { action: string; reason: string | null } | null;
+  shadow: { action: "keep" | "demote" | "unknown" | "drifted"; reason: string } | null;
+  error: string | null;
+  at: string;
+}
+export interface MemoryShadowRead { rule: string; taskId: string | null; rows: MemoryShadowRow[] }
+
 /** `GET /api/tasks/:id/composition`. */
 export interface CompositionHistory {
   taskId: string;
@@ -478,6 +490,7 @@ export const api = {
       body: JSON.stringify(assistantId ? { overrides: { harness_model: { assistantId } } } : {}),
     }),
   composition: (id: string) => req<CompositionHistory>(`/api/tasks/${id}/composition`),
+  memoryShadow: (id: string) => req<MemoryShadowRead>(`/api/composition/memory-shadow?taskId=${encodeURIComponent(id)}`),
   compositionBudget: (id: string) => req<CompositionBudget>(`/api/tasks/${id}/composition/budget`),
   events: (id: string) => req<TaskEvent[]>(`/api/tasks/${id}/events`),
   routing: (id: string) =>

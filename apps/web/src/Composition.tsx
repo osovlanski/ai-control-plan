@@ -8,10 +8,10 @@ import { useCallback, useEffect, useState } from "react";
 import type { AgentSpec, AgentSpecDraft, ComposerOutcome, DecisionStage } from "@agent-plane/core";
 import {
   ApiError, api,
-  type CompositionAttempt, type CompositionBudget, type CompositionHistory,
+  type CompositionAttempt, type CompositionBudget, type CompositionHistory, type MemoryShadowRead,
 } from "./api.js";
 import {
-  assetRows, boundRevisions, budgetLines, chosenRefs, fmtInt, fmtMs, fmtUsd, overrunText, rejectedRefs, runCost, runTokens,
+  assetRows, boundRevisions, memoryChips, budgetLines, chosenRefs, fmtInt, fmtMs, fmtUsd, overrunText, rejectedRefs, runCost, runTokens,
   shortDigest, specRows, STAGE_LABELS, stageState, unboundRevisions,
   type Figure, type Method,
 } from "./composition.js";
@@ -175,6 +175,28 @@ export function DecisionView({ decision, outcome, spec, digest, resynced }: {
   );
 }
 
+// ---- memory shadow ----------------------------------------------------------------------------
+
+/** Shadow only: production selection is unchanged. The tooltip is the plane's rule and reason. */
+export function MemoryShadowChips({ shadow }: { shadow: MemoryShadowRead }) {
+  const chips = memoryChips(shadow.rows, shadow.rule);
+  if (chips.length === 0) return null;
+  return (
+    <div className="comp-memory-shadow" aria-label="Memory shadow">
+      <h3 className="section-label">Memory shadow</h3>
+      <ul className="comp-assets">
+        {chips.map((c) => (
+          <li key={c.bundleId}>
+            <span className="comp-kind">memory</span> <code>{c.bundleId}</code>{" "}
+            <span className={`comp-shadow-chip shadow-${c.action}`} title={c.title} tabIndex={0}>{c.label}</span>
+            {c.production && <small className="comp-note"> shadow only; this run: {c.production.replace(/_/g, " ")}</small>}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 // ---- budget ---------------------------------------------------------------------------------
 
 function BudgetView({ budget }: { budget: CompositionBudget }) {
@@ -260,7 +282,7 @@ function AttemptsTable({ attempts }: { attempts: CompositionAttempt[] }) {
 // ---- the Task Detail tab --------------------------------------------------------------------
 
 type Read<T> = { state: "loading" } | { state: "ready"; value: T } | { state: "error"; message: string };
-type Panel = { history: Read<CompositionHistory>; budget: Read<CompositionBudget>; off: boolean };
+type Panel = { history: Read<CompositionHistory>; budget: Read<CompositionBudget>; shadow: MemoryShadowRead | null; off: boolean };
 
 const failure = (e: unknown): Read<never> => ({ state: "error", message: e instanceof Error ? e.message : String(e) });
 const isOff = (e: unknown) => e instanceof ApiError && e.reason === "composer_disabled";
@@ -274,26 +296,28 @@ export function CompositionPanel({ taskId, runs, refreshKey }: {
   runs: ReadonlyArray<{ id: string; compositionRevisionId?: string | null }>;
   refreshKey?: string;
 }) {
-  const [panel, setPanel] = useState<Panel>({ history: { state: "loading" }, budget: { state: "loading" }, off: false });
+  const [panel, setPanel] = useState<Panel>({ history: { state: "loading" }, budget: { state: "loading" }, shadow: null, off: false });
   const load = useCallback(() => {
-    void Promise.allSettled([api.composition(taskId), api.compositionBudget(taskId)]).then(([h, b]) => {
+    void Promise.allSettled([api.composition(taskId), api.compositionBudget(taskId), api.memoryShadow(taskId)]).then(([h, b, m]) => {
       if ((h.status === "rejected" && isOff(h.reason)) || (b.status === "rejected" && isOff(b.reason))) {
-        setPanel({ history: { state: "loading" }, budget: { state: "loading" }, off: true });
+        setPanel({ history: { state: "loading" }, budget: { state: "loading" }, shadow: null, off: true });
         return;
       }
       setPanel({
         off: false,
+        // A plane without the route, or a token without telemetry.read: no chip, no error.
+        shadow: m.status === "fulfilled" ? m.value : null,
         history: h.status === "fulfilled" ? { state: "ready", value: h.value } : failure(h.reason),
         budget: b.status === "fulfilled" ? { state: "ready", value: b.value } : failure(b.reason),
       });
     });
   }, [taskId]);
-  useEffect(() => { setPanel({ history: { state: "loading" }, budget: { state: "loading" }, off: false }); load(); }, [load, refreshKey]);
+  useEffect(() => { setPanel({ history: { state: "loading" }, budget: { state: "loading" }, shadow: null, off: false }); load(); }, [load, refreshKey]);
 
   if (panel.off) {
     return <p className="comp-off" role="status">The Composer is off for this workspace (<code>composer.enabled</code> is false), so this task has no composition revision and runs on routing alone.</p>;
   }
-  const { history, budget } = panel;
+  const { history, budget, shadow } = panel;
   const bound = history.state === "ready" && budget.state === "ready"
     ? boundRevisions(history.value, budget.value.runs.map((run) => ({ id: run.runId, compositionRevisionId: run.compositionRevisionId })))
     : [];
@@ -329,6 +353,8 @@ export function CompositionPanel({ taskId, runs, refreshKey }: {
         </section>
       ))}
       {stray.length > 0 && <p className="fine-print">{stray.length} persisted revision{stray.length === 1 ? " is" : "s are"} not bound to any run: {stray.map((r) => r.compositionRevisionId).join(", ")}.</p>}
+
+      {shadow && <MemoryShadowChips shadow={shadow} />}
 
       <h3 className="section-label">Budget</h3>
       {budget.state === "loading" && <p role="status" className="fine-print">Reading budget…</p>}

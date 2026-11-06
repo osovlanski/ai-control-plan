@@ -5,9 +5,9 @@
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { AgentSpecDraft, ComposerStage, DecisionStage } from "@agent-plane/core";
-import type { BudgetRunSettlement, CompositionBudget, CompositionHistory } from "./api.js";
-import { DecisionView } from "./Composition.js";
-import { boundRevisions, budgetLines, chosenRefs, rejectedRefs, runCost, runTokens, shortDigest, specRows, stageState, unboundRevisions } from "./composition.js";
+import type { BudgetRunSettlement, CompositionBudget, CompositionHistory, MemoryShadowRow } from "./api.js";
+import { DecisionView, MemoryShadowChips } from "./Composition.js";
+import { memoryChips, boundRevisions, budgetLines, chosenRefs, rejectedRefs, runCost, runTokens, shortDigest, specRows, stageState, unboundRevisions } from "./composition.js";
 
 const D = (c: string) => `sha256:${c.repeat(64)}`;
 
@@ -192,5 +192,32 @@ describe("bound revisions", () => {
       expect(runCost(run({ cost: { method: "measured", usd: 0.1, basis } }))).toMatchObject({ method: "measured", note: basis });
     }
     expect(runCost(run())).not.toHaveProperty("note");
+  });
+});
+
+const shadowRow = (attemptId: string, bundleId: string | null, action: "keep" | "demote" | "unknown" | "drifted", reason = `${action}: reason text`, over: Partial<MemoryShadowRow> = {}): MemoryShadowRow =>
+  ({ attemptId, bundleId, status: "scored", production: { action: "included", reason: null }, shadow: { action, reason }, error: null, at: "2026-11-06T10:00:00.000Z", ...over });
+
+describe("memory shadow chips", () => {
+  it("renders a labelled chip with the plane's rule and reason as tooltip for demote, drifted and unknown", () => {
+    const rows = [shadowRow("A2", "a", "demote", "demote: 4 of 7 members stale"), shadowRow("A2", "b", "drifted", "drifted: digest moved"), shadowRow("A2", "c", "unknown", "unknown: not in the memory snapshot")];
+    const html = renderToStaticMarkup(<MemoryShadowChips shadow={{ rule: "memory-shadow/v1", taskId: "AG-1", rows }} />);
+    expect(html).toContain(">would demote<");
+    expect(html).toContain(">drifted<");
+    expect(html).toContain(">unknown<");
+    expect(html).toContain('title="memory-shadow/v1: demote: 4 of 7 members stale"');
+    expect(html).toContain("shadow only");
+  });
+
+  it("shows nothing for keep, for an error row and when there is no row", () => {
+    const empty = (rows: MemoryShadowRow[]) => renderToStaticMarkup(<MemoryShadowChips shadow={{ rule: "memory-shadow/v1", taskId: "AG-1", rows }} />);
+    expect(empty([])).toBe("");
+    expect(empty([shadowRow("A1", "a", "keep")])).toBe("");
+    expect(empty([{ ...shadowRow("A1", null, "keep"), status: "error", shadow: null, error: "scorer_threw:Error" }])).toBe("");
+  });
+
+  it("reads only the newest attempt: a bundle that was demoted earlier and kept now shows nothing", () => {
+    const rows = [shadowRow("A1", "a", "demote"), shadowRow("A1", "b", "keep"), shadowRow("A2", "a", "keep"), shadowRow("A2", "b", "drifted")];
+    expect(memoryChips(rows, "memory-shadow/v1").map((c) => [c.bundleId, c.action])).toEqual([["b", "drifted"]]);
   });
 });
