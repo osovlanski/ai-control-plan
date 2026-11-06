@@ -139,6 +139,13 @@ misattribution (id-exact join + creator gate make a false positive impossible).
 |---|---|---|---|
 | `claude-4-1-opus` | `anthropic` | `claude-4-1-opus` | `anthropic` / `claude-opus-4-1` |
 | `claude-4-5-sonnet` | `anthropic` | `claude-4-5-sonnet` | `anthropic` / `claude-sonnet-4-5` |
+| `claude-5-opus` | `anthropic` | `claude-5-opus` | `anthropic` / `claude-opus-5` |
+| `claude-5-sonnet` | `anthropic` | `claude-5-sonnet` | `anthropic` / `claude-sonnet-5` |
+
+K13 A3 (2026-11-06) added the last two rows: they are the undated ids Claude
+`system/init` reports (K13 A0). Their `aaId` values follow the form of the rows
+above; no plane fixture or doc names them, and §17's live refresh could not
+confirm them (see there).
 
 Both catalog targets are the K7 **price-seed** identities. Neither is currently
 advertised by provider discovery (which lists the CLI alias selectors `opus` /
@@ -273,6 +280,28 @@ endpoint, pages fetched, `intelligence_index_version`, row count, mapped/unmatch
 count. Never record the key or the full source payload. The two `aaId` values in
 `AA_MODEL_MAP` must be confirmed against that refresh; a wrong `aaId` produces an
 unmatched row, never a misattribution.
+
+### 17.1 Live-refresh record, K13 A3 (2026-11-06) — BLOCKED
+
+- **Key.** The operator set `AA_API_KEY` through the §6 drop-in
+  (`EnvironmentFile=`), and `agent-plane-operator.service` restarted at
+  18:29:16Z. Every AA attempt in `model_catalog_refresh` before that restart
+  reads `artificial-analysis: not configured`; the last was the daily job at
+  07:00:19Z. No AA attempt has been recorded since the key was set.
+- **Refresh not triggered.** `POST /api/models/refresh` requires
+  `commands.write`. The only ways to call it, a bearer from the plane
+  credential or `pnpm --filter @agent-plane/api open`, both load the plane
+  credential, which this session was told not to read, so it was not sent. No
+  attempt status, page count, row count or mapped/unmatched count exists yet.
+- **The PR's new rows.** The running plane is `b02201d`, without them. A refresh
+  stores only mapped rows and a count label, never the payload, so the PR's code
+  cannot be run against a refresh result. The `claude-5-opus` / `claude-5-sonnet`
+  mapping is verified by tests only, and the `aaId`s stay unconfirmed.
+- **To finish.** The operator triggers one refresh (the UI's Refresh, or the
+  daily job at 07:00Z) and records here only the attempt status label, pages,
+  row count and mapped/unmatched counts from its `detail`. On `b02201d`, `0
+  mapped` with a non-zero row count means the 4.x `aaId`s are wrong too, not
+  just the 5.x guesses.
 
 ## 17a. K13 readiness check (goal §"K13 READINESS CHECK")
 

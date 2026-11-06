@@ -124,6 +124,31 @@ export const AA_MODEL_MAP: AaModelMapEntry[] = [
       'AA lists Anthropic Claude Sonnet 4.5 under this id; catalog id is the K7 price-seed identity for the same model. ' +
       'Base (non-effort) configuration — an AA "…max"/effort variant has its own id and is left unmatched.',
   },
+  // K13 A3: the ids Claude `system/init` reports today (A0, 2026-11-06) are the
+  // undated `claude-opus-5` / `claude-sonnet-5`. The `aaId`s follow this table's
+  // `claude-<version>-<family>` form; no plane fixture or doc names them, and
+  // the one live refresh (K8 §17) runs the old code, so they are NOT confirmed
+  // against AA. A wrong guess leaves the row unmatched, never misattributed.
+  {
+    aaId: 'claude-5-opus',
+    aaCreatorId: 'anthropic',
+    provider: 'anthropic',
+    modelId: 'claude-opus-5',
+    aaSlugHint: 'claude-5-opus',
+    evidence:
+      'Claude Opus 5; catalog id is the undated id Claude system/init reports (K13 A0) and the K7 price-seed identity. ' +
+      'Base (non-effort) configuration — an AA effort variant has its own id and is left unmatched. aaId unconfirmed live.',
+  },
+  {
+    aaId: 'claude-5-sonnet',
+    aaCreatorId: 'anthropic',
+    provider: 'anthropic',
+    modelId: 'claude-sonnet-5',
+    aaSlugHint: 'claude-5-sonnet',
+    evidence:
+      'Claude Sonnet 5; catalog id is the undated id Claude system/init reports (K13 A0) and the K7 price-seed identity. ' +
+      'Base (non-effort) configuration — an AA effort variant has its own id and is left unmatched. aaId unconfirmed live.',
+  },
 ];
 
 /**

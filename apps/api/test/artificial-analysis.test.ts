@@ -284,6 +284,25 @@ describe('model identity mapping (§12, §13, P1-B)', () => {
     expect(detail).toContain('1 creator-mismatch');
   });
 
+  it.each([
+    ['claude-5-opus', 'claude-opus-5'],
+    ['claude-5-sonnet', 'claude-sonnet-5'],
+  ])('K13 A3: AA id %s maps by exact id + creator to anthropic/%s', (aaId, modelId) => {
+    const { observations, detail } = parseRows([row({ id: aaId })]);
+    expect(observations).toHaveLength(1);
+    expect(observations[0]!.provider).toBe('anthropic');
+    expect(observations[0]!.modelId).toBe(modelId);
+    expect(detail).toContain('1 mapped');
+    const wrongCreator = parseRows([row({ id: aaId, model_creator: { id: 'not-anthropic' } })]);
+    expect(wrongCreator.observations).toHaveLength(0);
+  });
+
+  it('K13 A3: an effort variant of a 5.x id stays unmatched', () => {
+    const { observations, detail } = parseRows([row({ id: 'claude-5-opus-max', slug: 'claude-5-opus' })]);
+    expect(observations).toHaveLength(0);
+    expect(detail).toContain('1 unmatched');
+  });
+
   it('a reasoning/effort variant id is left unmatched; the base id keeps its own score (test #8)', async () => {
     // fixture carries `claude-4-5-sonnet-max` (anthropic) alongside the base `claude-4-5-sonnet`.
     await boot([aaFixtureSource()]);

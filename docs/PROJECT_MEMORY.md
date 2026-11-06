@@ -844,3 +844,7 @@ Migration 041 adds `runs.harness_cli_version` (TEXT NULL, forward only, no backf
 
 - **Contract:** optional `models.selection.baseConfigAttestedAt` (ISO 8601). A bound candidate's benchmark prior now attaches only while it is set, not in the future, and at most 30 days old (K13 alias note Q3). Otherwise the dimension has no prior and the candidate's `advisories` say why ("benchmark prior withheld: …").
 - **Behaviour change:** with the key unset, benchmark priors no longer attach to any bound candidate (catalog-exact included). The price prior is a tariff and is unchanged. Hard filters, eligibility and the activation gate are untouched. The router-model and model-identity-binding test fixtures now attest their fake workspace.
+
+## 2026-11-06 — K13 A0 served ids and A3 AA map (BLOCKED: live refresh)
+
+A0 (read-only, OCI operator DB, 30 days): Claude `system/init` reports the undated ids `claude-opus-5` and `claude-sonnet-5` (no date, no `[1m]` suffix), and neither init nor result reports effort. A3 maps both in `AA_MODEL_MAP` by exact id + creator as `claude-5-opus` / `claude-5-sonnet`, following the 4.x rows' form because no plane fixture or doc names them. Effort variants stay unmatched, and tests verify the mapping. The aaIds are not confirmed against AA: the one approved refresh was not sent, because calling `POST /api/models/refresh` needs the plane credential, which the session must not read. The operator still owes one refresh and its count record in K8 §17.1.
