@@ -5,13 +5,24 @@
  * must never mutate activation state, must not need the AA network, and must not
  * leak a secret into its output.
  */
-import { mkdtempSync, rmSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DIMENSION_K } from "@agent-plane/core";
-import { openDb, type Db } from "../src/db/index.js";
-import { buildShadowReport, renderShadowReport } from "../src/bin/model-shadow-report.js";
+import { migrate, openDb, type Db } from "../src/db/index.js";
+import {
+  buildShadowReport,
+  openReportDb,
+  renderShadowReport,
+  ReportSchemaError,
+} from "../src/bin/model-shadow-report.js";
+
+const MIGRATIONS_DIR = join(dirname(fileURLToPath(import.meta.url)), "../src/db/migrations");
+const sha = (path: string): string => createHash("sha256").update(readFileSync(path)).digest("hex");
 
 let home: string;
 let db: Db;
@@ -161,5 +172,98 @@ describe("shadow soak report", () => {
     const text = renderShadowReport(buildShadowReport(db));
     expect(text).not.toContain("sk-live-");
     expect(text).not.toContain(tokenShaped);
+  });
+});
+
+describe("shadow report opens the DB read-only and unmigrated", () => {
+  /** A DB file migrated only to the first `count` migrations, holding one shadow row. */
+  function dbAtMigration(count: number): string {
+    const partial = join(home, `migrations-${count}`);
+    mkdirSync(partial);
+    const files = readdirSync(MIGRATIONS_DIR).filter((f) => /^\d+_.+\.sql$/.test(f)).sort().slice(0, count);
+    for (const f of files) copyFileSync(join(MIGRATIONS_DIR, f), join(partial, f));
+    const path = join(home, `at-${count}.db`);
+    const old = new Database(path);
+    old.pragma("journal_mode = WAL");
+    migrate(old, partial);
+    old.pragma("foreign_keys = OFF");
+    old.prepare("INSERT INTO routing_decisions (task_id, chosen_assistant_id, explanation, at) VALUES (?, ?, ?, ?)")
+      .run("AG-old", null, JSON.stringify(shadowRec({ recommended: "fake-a/premium-max" })), "2026-09-26T00:00:00.000Z");
+    old.close();
+    return path;
+  }
+
+  const migrationRows = (path: string): number => {
+    const ro = new Database(path, { readonly: true });
+    const n = (ro.prepare("SELECT COUNT(*) AS n FROM schema_migrations").get() as { n: number }).n;
+    ro.close();
+    return n;
+  };
+
+  it("leaves a DB that is behind main exactly as it was (schema_migrations rows and file hash)", () => {
+    const path = dbAtMigration(30);
+    const rowsBefore = migrationRows(path);
+    const hashBefore = sha(path);
+    expect(rowsBefore).toBe(30);
+
+    const ro = openReportDb(path);
+    const report = buildShadowReport(ro);
+    ro.close();
+
+    expect(report.recommendations).toBe(1);
+    expect(report.recommendationsByModel).toEqual({ "fake-a/premium-max": 1 });
+    expect(migrationRows(path)).toBe(rowsBefore);
+    expect(sha(path)).toBe(hashBefore);
+  });
+
+  it("gives the same output on a current DB as the migrated handle does, without writing", () => {
+    record(shadowRec({ recommended: "fake-a/premium-max" }), "2026-09-01T00:00:00.000Z");
+    record(shadowRec({ recommended: "fake-b/swift-mini" }), "2026-09-02T00:00:00.000Z");
+    const expected = renderShadowReport(buildShadowReport(db));
+    const path = join(home, "agent-plane.db");
+    db.close();
+    const hashBefore = sha(path);
+
+    const ro = openReportDb(path);
+    const text = renderShadowReport(buildShadowReport(ro));
+    ro.close();
+
+    expect(text).toBe(expected);
+    expect(sha(path)).toBe(hashBefore);
+  });
+
+  it("names the missing migration when a table the report reads is absent, and still does not migrate", () => {
+    const path = join(home, "bare.db");
+    const bare = new Database(path);
+    bare.exec("CREATE TABLE schema_migrations (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL)");
+    bare.close();
+    const hashBefore = sha(path);
+
+    expect(() => openReportDb(path)).toThrow(ReportSchemaError);
+    expect(() => openReportDb(path)).toThrow(/table routing_decisions \(added by migration 001_init\.sql\)/);
+    expect(() => openReportDb(path)).toThrow(/never migrates/);
+    expect(sha(path)).toBe(hashBefore);
+    expect(migrationRows(path)).toBe(0);
+  });
+
+  it("names a missing column too", () => {
+    const path = join(home, "narrow.db");
+    const narrow = new Database(path);
+    narrow.exec("CREATE TABLE routing_decisions (id INTEGER PRIMARY KEY, explanation TEXT NOT NULL)");
+    narrow.close();
+    expect(() => openReportDb(path)).toThrow(/column routing_decisions\.at \(added by migration 001_init\.sql\)/);
+  });
+
+  it("refuses a path that does not exist instead of creating an empty DB", () => {
+    const path = join(home, "typo.db");
+    expect(() => openReportDb(path)).toThrow();
+    expect(existsSync(path)).toBe(false);
+  });
+
+  it("cannot write through the handle it returns", () => {
+    db.close();
+    const ro = openReportDb(join(home, "agent-plane.db"));
+    expect(() => ro.prepare("DELETE FROM routing_decisions").run()).toThrow(/readonly/i);
+    ro.close();
   });
 });
