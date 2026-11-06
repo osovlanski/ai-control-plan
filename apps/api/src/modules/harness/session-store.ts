@@ -503,6 +503,18 @@ export class SessionStore {
       .run(modelId, source, sessionId);
   }
 
+  /**
+   * Record the provider CLI version the PROVIDER reported on `run.started` (K13 A2). Evidence-only
+   * and write-once like `recordResolvedModel`: the first report wins, a blank or non-string
+   * version is ignored so the column stays NULL rather than holding a guess.
+   */
+  recordHarnessCliVersion(sessionId: string, version: unknown): void {
+    if (typeof version !== "string" || version.trim() === "") return;
+    this.db
+      .prepare("UPDATE runs SET harness_cli_version = ? WHERE id = ? AND harness_cli_version IS NULL")
+      .run(version.trim(), sessionId);
+  }
+
   ackHandle(
     sessionId: string,
     ref: ProviderSessionRef,
