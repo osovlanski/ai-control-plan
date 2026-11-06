@@ -313,6 +313,19 @@ export class FakeAdapter implements AgentAdapter {
       emit({ type: "tool.started", summary: `MCP ${m[1]}`, payload: { toolUseId: `mcp${mcp}`, tool: m[1], input: { query: "fake" } } });
       emit({ type: "tool.completed", summary: `MCP ${m[1]} → ok`, payload: { toolUseId: `mcp${mcp}`, exitCode: 0 } });
     }
+    // M6 S2: `[FAKE:SKILL:<name>]` emits a Skill tool call naming the profile skill and a Read of
+    // the profile's SKILL.md, two toolUseIds, as Claude does (plan Q6). Without a profile the Read
+    // path is relative and matches nothing.
+    let skill = 0;
+    for (const m of run.prompt.matchAll(/\[FAKE:SKILL:([A-Za-z0-9][\w.-]*)\]/g)) {
+      if (state.cancelled) break;
+      skill += 1;
+      const skillMd = join(run.profile?.root ?? "", "plugin", "skills", m[1]!, "SKILL.md");
+      emit({ type: "tool.started", summary: `Skill ${m[1]}`, payload: { toolUseId: `skill${skill}`, tool: "Skill", input: { skill: `${PLUGIN_NAME}:${m[1]}` } } });
+      emit({ type: "tool.completed", summary: `Skill ${m[1]} → ok`, payload: { toolUseId: `skill${skill}`, exitCode: 0 } });
+      emit({ type: "tool.started", summary: `Read ${skillMd}`, payload: { toolUseId: `skillread${skill}`, tool: "Read", input: { file_path: skillMd } } });
+      emit({ type: "tool.completed", summary: `Read ${skillMd} → ok`, payload: { toolUseId: `skillread${skill}`, exitCode: 0 } });
+    }
     // K19k: `[FAKE:READ:<path>]` emits one Read per marker; `{cwd}` is the run's
     // workdir, so a path inside a task's scratch directory can be scripted.
     let read = 0;
