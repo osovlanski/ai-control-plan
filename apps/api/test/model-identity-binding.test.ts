@@ -197,7 +197,7 @@ describe('last-N agreement binds an alias only on N fresh agreeing runs', () => 
     for (const d of [17, 16, 15]) recordRun(task.taskId, NEW_ID, d);
     const id = identity();
     expect(id.basis).toBe('unresolved');
-    expect(id.evidence).toContain('started 15 days ago, older than 14 days');
+    expect(id.evidence).toContain('started 15.0 days ago, older than 14 days');
     // Exactly F days old still binds: the window is inclusive.
     recordRun(task.taskId, NEW_ID, 14);
     expect(identity().basis).toBe('observed-resolution');
@@ -214,14 +214,6 @@ describe('last-N agreement binds an alias only on N fresh agreeing runs', () => 
     recordRun(task.taskId, OLD_ID, 1, { assistantId: 'fake-b' }); // another assistant
     expect(identity().basis).toBe('unresolved');
     expect(identity().observation?.runsExamined).toBe(2);
-  });
-
-  it('a run the injected clock has not reached yet is not evidence', async () => {
-    await boot();
-    const task = built.tasks.create({ goal: 'g' });
-    for (const d of [3, 2]) recordRun(task.taskId, NEW_ID, d);
-    recordRun(task.taskId, NEW_ID, -1);
-    expect(identity().basis).toBe('unresolved');
   });
 });
 

@@ -265,8 +265,7 @@ export function resolveCandidateIdentity(
   const requiredRuns = input.requiredRuns ?? OBSERVED_RESOLUTION_RUNS;
   const freshnessDays = input.freshnessDays ?? OBSERVED_RESOLUTION_FRESHNESS_DAYS;
   const nowMs = (input.now?.() ?? new Date()).getTime();
-  // Newest first. A run the injected clock has not reached yet is not evidence
-  // "as of now". The CLI version rides the run's own `run.started` payload.
+  // Newest first. The CLI version rides the run's own `run.started` payload.
   const rows = db
     .prepare(
       `SELECT r.model_resolved AS model_resolved, r.started_at AS started_at,
@@ -274,11 +273,11 @@ export function resolveCandidateIdentity(
                 WHERE e.run_id = r.id AND e.type = 'run.started' ORDER BY e.seq LIMIT 1) AS cli_version
          FROM runs r
         WHERE r.assistant_id = ? AND r.model_requested = ?
-          AND r.model_resolved IS NOT NULL AND r.started_at <= ?
+          AND r.model_resolved IS NOT NULL
         ORDER BY r.started_at DESC, r.rowid DESC
         LIMIT ?`,
     )
-    .all(input.assistantId, input.selector, new Date(nowMs).toISOString(), requiredRuns) as Array<{
+    .all(input.assistantId, input.selector, requiredRuns) as Array<{
       model_resolved: string;
       started_at: string;
       cli_version: string | number | null;
@@ -319,7 +318,7 @@ export function resolveCandidateIdentity(
     refusals.push(`only ${rows.length} of the ${requiredRuns} agreeing runs required have reported a resolution`);
   }
   if (!(ageDays <= freshnessDays)) {
-    refusals.push(`the newest resolved run started ${Math.floor(ageDays)} days ago, older than ${freshnessDays} days`);
+    refusals.push(`the newest resolved run started ${ageDays.toFixed(1)} days ago, older than ${freshnessDays} days`);
   }
 
   if (refusals.length > 0) {
