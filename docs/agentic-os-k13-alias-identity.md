@@ -1,6 +1,6 @@
 # K13 alias identity evidence — PROPOSED
 
-Status: **PROPOSED** (2026-11-05). Nothing here is implemented. K7, K8 and K13
+Status: **PROPOSED** (2026-11-05). Q1–Q4 answered by itay on 2026-11-06: all four recommended answers accepted (see section 7). Nothing here is implemented. K7, K8 and K13
 records win where this note and they disagree; the code wins over all three.
 
 ## Why this note exists
@@ -106,7 +106,7 @@ Activation stays M12 part 2, Phase 8, and stays off until every gate holds.
 |---|---|---|---|---|---|
 | A0 | Identity probe, read-only | OCI, after the operator upgrade and O7 dogfood; Sonnet 5.5 / medium | `/mnt/project-files/k13-alias/` drive output, 1 PROJECT_MEMORY line | — | per (assistant, `model_requested`, `model_resolved`, CLI version) counts for 30 days, read-only (`new Database(path, { readonly: true })`, never `openDb`); whether `system/init` model ids carry a date or a `[1m]`-style suffix; whether init or result reports effort. Verdict PASS if counts are shown |
 | A1 | Last-N binding | cloud, plane; Opus 5.5 / high | `resolveCandidateIdentity` in `apps/api/src/modules/model-selection.ts`, `CandidateIdentity` fields in `packages/core/src/model-selection.ts`, new `apps/api/test/model-identity-binding.test.ts` | N−1 agreeing runs ⇒ unresolved; N agreeing ⇒ bound; disagreement inside last N ⇒ unresolved naming both ids; older disagreeing runs outside the last N do not block; newest older than F ⇒ unresolved; bound candidate with a hard-filter failure still has no total; `opus` never binds through the price-seed alias | fake adapter reporting two dated ids over an injected clock; show a shadow recommendation flip from `unresolved` to `observed-resolution` in the persisted explanation |
-| A2 | CLI version on runs | cloud, plane; Sonnet 5.5 / high; after A1 | migration 040 (`runs.harness_cli_version`, forward only, not backfilled), the `run.started` writer in `session-runner.ts` / `session-store.ts`, its test | written once from `run.started` `version`; NULL when absent; old rows stay NULL | fake run, read the column back |
+| A2 | CLI version on runs | cloud, plane; Sonnet 5.5 / high; after A1 | migration 041 (`runs.harness_cli_version`; 040 is taken by O6 S3 `040_memory_shadow`; forward only, not backfilled), the `run.started` writer in `session-runner.ts` / `session-store.ts`, its test | written once from `run.started` `version`; NULL when absent; old rows stay NULL | fake run, read the column back |
 | A3 | AA map for served ids | OCI with the key set; Opus 5.5 / high | `AA_MODEL_MAP` in `artificial-analysis.ts`, its test, K8 §17 live-refresh record | the new ids map by exact id + creator; an effort variant id stays unmatched | ONE bounded live refresh; record pages, row count, mapped / unmatched, never the key or payload |
 | A4 | Base-config attestation | cloud, plane; Sonnet 5.5 / high; only if Q3 = yes | `models.selection.baseConfigAttestedAt` in config schema, `gatherEvidence`, its test | unset, future or older than 30 days ⇒ no prior; set and fresh ⇒ prior attaches; never touches any gate | config toggle on a fake workspace, read the explanation |
 
@@ -134,7 +134,9 @@ config file, the DB, a log or a repo. On the OCI host:
 
 ## 7. Questions for itay
 
-| # | Question | Recommended answer |
+Answered 2026-11-06: itay accepted all four recommended answers below. A4 is in scope because Q3 = yes.
+
+| # | Question | Answer (accepted) |
 |---|---|---|
 | Q1 | Values for N and F? | N = 3 agreeing runs, F = 14 days. Small enough for a personal plane, large enough that one odd run cannot bind |
 | Q2 | Replace the shipped "all runs in 30 days agree" rule with last-N agreement? | Yes. Old disagreeing runs then stop blocking a rebinding after an alias moves; a disagreement inside the last N still refuses |
