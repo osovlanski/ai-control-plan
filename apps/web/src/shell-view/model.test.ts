@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
-import type { Assistant, CompositionBudget, TaskDetail, TaskEvent } from "../api.js";
+import type { Assistant, CompositionBudget, SessionDetail, TaskContext, TaskDetail, TaskEvent, VerificationCheckView } from "../api.js";
 import type { Mission } from "../board/execution.js";
 import {
-  assistantStatus, formatAge, isTypingTarget, logLines, modelCell, processState, quotaBar, quotaPercent, sortRows, toRow, tokensCell,
+  approvalTools, assistantStatus, causeCell, checksCell, costCell, ctxCell, formatAge, isTypingTarget, logLines, modelCell, phaseCell,
+  processState, quotaFill, quotaPercent, restartOfferedIn, sortRows, toRow, tokensCell, COLUMNS,
   type ProcessDetail,
 } from "./model.js";
 import { readView, writeView, VIEW_KEY } from "./viewMode.js";
@@ -63,6 +64,90 @@ describe("row cells never invent a value", () => {
     expect(tokensCell(p(budget({ runs: [{ ...budget().runs[0]!, accounting: "none" }] })))).toBe("unknown");
     expect(tokensCell({ detail: detail([]), budget: budget() })).toBe("—");
   });
+  it("shows the provider-reported phase verbatim, — when none", () => {
+    expect(phaseCell(task({ phase: "editing" }))).toBe("editing");
+    expect(phaseCell(task())).toBe("—");
+  });
+  it("shows cost from costMethod: $x measured, ~$x estimated, unknown otherwise; never computed", () => {
+    const p = (b: ProcessDetail["budget"]): ProcessDetail => ({ detail: detail([run()]), budget: b });
+    const consumed = (costMethod: CompositionBudget["consumed"]["costMethod"], costUsd: number) => budget({ consumed: { ...budget().consumed, costMethod, costUsd } });
+    expect(costCell(undefined)).toBe("…");
+    expect(costCell({ detail: detail([]), budget: budget() })).toBe("—");
+    expect(costCell(p(consumed("measured", 0.1149)))).toBe("$0.11");
+    expect(costCell(p(consumed("estimated", 0.021803)))).toBe("~$0.02");
+    expect(costCell(p(consumed("estimated", 0.0045)))).toBe("~$0.0045");
+    expect(costCell(p(consumed("unknown", 0.5)))).toBe("unknown");
+    expect(costCell(p(consumed("none", 0)))).toBe("unknown");
+    expect(costCell(p("off"))).toBe("unknown");
+    expect(costCell(p("unavailable"))).toBe("unknown");
+    const noAccounting = budget({ consumed: { ...budget().consumed, costMethod: "measured", costUsd: 1 }, runs: [{ ...budget().runs[0]!, accounting: "none" }] });
+    expect(costCell(p(noAccounting))).toBe("unknown");
+  });
+  it("shows context pressure only for a known observation, flags stale, — otherwise", () => {
+    const obs = (o: Partial<NonNullable<TaskContext["observation"]>> = {}): TaskContext => ({ status: "known", observation: {
+      sequence: 1, observedAt: "", occupancySource: "provider-reported", effectiveWindowSource: "catalog", pressure: 0.31, freshness: "live", ...o } });
+    const p = (context: ProcessDetail["context"]): ProcessDetail => ({ detail: detail([run()]), budget: "off", context });
+    expect(ctxCell(p(obs()))).toEqual({ text: "31%", stale: false });
+    expect(ctxCell(p(obs({ freshness: "stale" })))).toEqual({ text: "31%", stale: true });
+    expect(ctxCell(p(obs({ pressure: undefined })))).toEqual({ text: "—", stale: false });
+    expect(ctxCell(p({ status: "unavailable", reason: "legacy execution path" }))).toEqual({ text: "—", stale: false });
+    expect(ctxCell(p("unavailable")).text).toBe("—");
+    expect(ctxCell(p(undefined)).text).toBe("—");
+  });
+  it("counts the last run's checks by status, skipped not counted, — while running", () => {
+    const check = (o: Partial<VerificationCheckView>): VerificationCheckView => ({ name: "c", passed: false, required: true, summary: "", ...o });
+    const session = (checks: VerificationCheckView[] | undefined) => ({
+      result: { outcome: "completed", terminalState: "ENDED_OK", ...(checks ? { verification: { passed: false, checks } } : {}) },
+    }) as unknown as SessionDetail;
+    const ended = (s: ProcessDetail["session"]): ProcessDetail => ({ detail: detail([run({ ended_at: "2026-10-29T11:59:00.000Z" })]), budget: "off", session: s });
+    const all = [check({ passed: true, status: "passed" }), check({ passed: true }), check({ passed: true, status: "passed" }),
+      check({ status: "failed" }), check({ status: "blocked" }), check({ status: "skipped" })];
+    expect(checksCell(ended(session(all)))).toEqual({ text: "3✓ 1✗ 1⊘", title: "3 passed, 1 failed, 1 blocked, 1 skipped" });
+    expect(checksCell(ended(session([check({ passed: false })]))).text).toBe("1✗");
+    expect(checksCell(ended(session([check({ status: "skipped" })]))).text).toBe("—");
+    expect(checksCell(ended(session(undefined))).text).toBe("—");
+    expect(checksCell(ended("unavailable")).text).toBe("unknown");
+    expect(checksCell({ detail: detail([run()]), budget: "off", session: session(all) }).text).toBe("—");
+    expect(checksCell({ detail: detail([]), budget: "off" }).text).toBe("—");
+  });
+  it("names a NEEDS-YOU row's cause from the reads, and leaves other rows' goals alone", () => {
+    const blocked = { result: { outcome: "completed", terminalState: "ENDED_OK", verification: { passed: false, checks: [{ name: "t", passed: false, required: true, summary: "", status: "blocked" }] } } } as unknown as SessionDetail;
+    const endedRun = detail([run({ ended_at: "2026-10-29T11:59:00.000Z" })]);
+    const waiting = task({ state: "WAITING_INPUT" });
+    const awaiting = task({ execution: { awaitingApproval: true, assistants: [], verified: true } });
+    const attention = (approvals: Array<{ requestId: string; tool: string | null }>, restartOffered = false): ProcessDetail =>
+      ({ detail: detail([run()]), budget: "off", attention: { approvals, restartOffered } });
+    expect(causeCell(awaiting, attention([{ requestId: "a1", tool: "Bash" }]))).toBe("approve: Bash");
+    expect(causeCell(awaiting, attention([{ requestId: "a1", tool: null }, { requestId: "a2", tool: "Write" }]))).toBe("approve: unknown tool (+1)");
+    expect(causeCell(task({ state: "LIMIT_PAUSED" }), undefined)).toBe("limit paused");
+    expect(causeCell(waiting, { ...attention([], true), detail: endedRun, session: blocked })).toBe("restart offered");
+    expect(causeCell(waiting, { ...attention([]), detail: endedRun, session: blocked })).toBe("verify: blocked");
+    expect(causeCell(waiting, attention([]))).toBeNull();
+    expect(causeCell(waiting, { ...attention([]), attention: "unavailable" })).toBeNull();
+    expect(causeCell(task(), attention([{ requestId: "a1", tool: "Bash" }]))).toBeNull();
+    const row = toRow(awaiting, attention([{ requestId: "a1", tool: "Bash" }]), NOW);
+    expect([row.cause, row.goal]).toEqual(["approve: Bash", "fix it"]);
+  });
+  it("reads restart offers and approval tools the same way the rest of the web does", () => {
+    const s = (o: Partial<SessionDetail>) => ({ taskId: "AG-1", endedAt: null, audit: [], ...o }) as unknown as SessionDetail;
+    const offer = { seq: 1, ts: "", type: "recovery.decision", summary: "", payload: { action: "resume_offered" } };
+    expect(restartOfferedIn("AG-1", "WAITING_INPUT", [s({ audit: [offer] })])).toBe(true);
+    expect(restartOfferedIn("AG-1", "RUNNING", [s({ audit: [offer] })])).toBe(false);
+    expect(restartOfferedIn("AG-1", "WAITING_INPUT", [s({ audit: [offer], endedAt: "x" })])).toBe(false);
+    expect(restartOfferedIn("AG-1", "WAITING_INPUT", [s({ audit: [{ ...offer, payload: { action: "orphan" } }] })])).toBe(false);
+    const e = (payload: Record<string, unknown> | null, type = "approval.requested") => ({ run_id: "r1", seq: 1, ts: "", type, phase: null, summary: "", payload, assistant_id: "a" }) as TaskEvent;
+    const tools = approvalTools([e({ requestId: "a1", tool: "Bash" }), e({ requestId: "a2" }), e({ requestId: "a3", tool: "X" }, "message"), e(null)]);
+    expect([...tools]).toEqual([["a1", "Bash"], ["a2", null]]);
+  });
+  it("lists the part B columns in order, and keeps PID, STATE, TOKENS and GOAL at phone width", () => {
+    expect(COLUMNS.map(c => c[1])).toEqual(["PID", "STATE", "PHASE", "ASSIST", "MODEL", "TOKENS", "COST", "CTX", "CHECKS", "AGE", "GOAL"]);
+    expect(COLUMNS.filter(c => !c[2]).map(c => c[1])).toEqual(["PID", "STATE", "TOKENS", "GOAL"]);
+  });
+  it("sorts cost and ctx numerically, unknown last", () => {
+    const rows = ["$0.11", "~$0.02", "unknown"].map((cost, i) => ({ ...toRow(task({ id: `T${i}` }), undefined, NOW), cost, ctx: ["5%", "40%", "—"][i]! }));
+    expect(sortRows(rows, { key: "cost", dir: -1 }).map(r => r.cost)).toEqual(["$0.11", "~$0.02", "unknown"]);
+    expect(sortRows(rows, { key: "ctx", dir: -1 }).map(r => r.ctx)).toEqual(["40%", "5%", "—"]);
+  });
   it("formats age", () => {
     expect(formatAge("2026-10-29T11:59:30.000Z", NOW)).toBe("30s");
     expect(formatAge("2026-10-29T11:48:00.000Z", NOW)).toBe("12m");
@@ -79,9 +164,10 @@ describe("top panel", () => {
   it("reads the highest reported quota window and says unknown when none is reported", () => {
     expect(quotaPercent(assistant([{ window: "5h", usedPercent: 62 }, { window: "7d", usedPercent: 20 }]))).toBe(62);
     expect(quotaPercent(assistant())).toBeNull();
-    expect(quotaBar(62)).toBe("▮▮▯▯");
-    expect(quotaBar(100)).toBe("▮▮▮▮");
-    expect(quotaBar(null)).toBe("unknown");
+    expect(quotaFill(62.4)).toBe(62);
+    expect(quotaFill(140)).toBe(100);
+    expect(quotaFill(-3)).toBe(0);
+    expect(quotaFill(Number.NaN)).toBe(0);
   });
   it("names off and cooling assistants", () => {
     expect(assistantStatus(assistant(undefined, false), [], NOW)).toBe("off");

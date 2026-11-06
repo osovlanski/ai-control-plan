@@ -8,8 +8,8 @@ import { useBoard } from "../board/useBoard.js";
 import { Inspector } from "../board/Inspector.js";
 import { useMissionSnapshot } from "../board/useMissionSnapshot.js";
 import {
-  COLUMNS, KEYMAP, assistantStatus, clock, isTypingTarget, logLines, quotaBar, quotaPercent, sortRows, toRow,
-  type Sort, type SortKey,
+  COLUMNS, KEYMAP, assistantStatus, clock, isTypingTarget, logLines, quotaFill, quotaPercent, sortRows, toRow,
+  type ProcessRow, type Sort, type SortKey,
 } from "./model.js";
 import { usePendingApprovals, useProcessDetails } from "./reads.js";
 
@@ -17,6 +17,13 @@ import { usePendingApprovals, useProcessDetails } from "./reads.js";
 const NO_SESSIONS: SessionSummary[] = [];
 interface Preview { repoPath: string; composed: Awaited<ReturnType<typeof composeFor>>; goal: string; taskId: string; chosen: string | null; rule: string; composition: string; digest: string | null }
 type Confirm = { kind: "deny"; taskId: string; requestId: string } | { kind: "cancel"; taskId: string };
+
+const dim = (v: string) => v === "unknown" || v === "—" ? "sv-muted" : "";
+
+/** The wide-only columns for the selected row, shown in the detail pane header at phone width. */
+const rowMeta = (r: ProcessRow): Array<[string, string]> => [
+  ["phase", r.phase], ["assist", r.assistant], ["model", r.model], ["cost", r.cost], ["ctx", r.ctx], ["checks", r.checks], ["age", r.age],
+];
 
 const compositionLine = (c: Awaited<ReturnType<typeof composeFor>>): [string, string | null] => {
   if (c.state === "off") return ["composer off", null];
@@ -230,8 +237,13 @@ export function ShellView({ active, workspace, repositories, onOpen }: { active:
           const pct = quotaPercent(a);
           const state = assistantStatus(a, cooldowns, now);
           return <li key={a.id} title={pct === null ? "The provider reports no quota windows" : "Highest reported quota window"}>
-            <b>{a.id}</b> <span className={pct === null ? "sv-muted" : "sv-bar"} aria-hidden={pct === null ? undefined : true}>{quotaBar(pct)}</span>
-            {pct !== null && <span> {Math.round(pct)}%</span>}
+            <b>{a.id}</b>{" "}
+            {pct === null ? <span className="sv-muted">unknown</span> : <>
+              <span className="sv-bar" role="meter" aria-label={`${a.id} quota used`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={quotaFill(pct)}>
+                <span className="sv-bar-fill" style={{ width: `${quotaFill(pct)}%` }} />
+              </span>
+              <span> {Math.round(pct)}%</span>
+            </>}
             {state !== "ready" && <span className="sv-flag"> {state}</span>}
           </li>;
         })}
@@ -246,7 +258,7 @@ export function ShellView({ active, workspace, repositories, onOpen }: { active:
 
     <div className="sv-procs" ref={list} aria-label="Process list" role="region" tabIndex={0}>
       <table>
-        <thead><tr>{COLUMNS.map(([key, label]) => <th key={key} aria-sort={sort.key === key ? (sort.dir === 1 ? "ascending" : "descending") : "none"}>
+        <thead><tr>{COLUMNS.map(([key, label, wide]) => <th key={key} className={wide ? "sv-wide" : undefined} aria-sort={sort.key === key ? (sort.dir === 1 ? "ascending" : "descending") : "none"}>
           <button type="button" onClick={() => sortBy(key)}>{label}{sort.key === key ? (sort.dir === 1 ? " ↑" : " ↓") : ""}</button>
         </th>)}</tr></thead>
         <tbody>
@@ -254,11 +266,15 @@ export function ShellView({ active, workspace, repositories, onOpen }: { active:
             onClick={() => { setSelectedId(r.pid); setConfirm(null); }} onDoubleClick={() => { setSelectedId(r.pid); setInspecting(true); }}>
             <td className="sv-pid">{r.pid}</td>
             <td title={r.rawState}>{r.state}</td>
-            <td>{r.assistant}</td>
-            <td className={r.model === "unknown" ? "sv-muted" : ""}>{r.model}</td>
-            <td className={r.tokens === "unknown" ? "sv-muted" : ""}>{r.tokens}</td>
-            <td>{r.age}</td>
-            <td className="sv-goal">{r.goal}</td>
+            <td className={`sv-wide ${dim(r.phase)}`}>{r.phase}</td>
+            <td className="sv-wide">{r.assistant}</td>
+            <td className={`sv-wide ${dim(r.model)}`}>{r.model}</td>
+            <td className={dim(r.tokens)}>{r.tokens}</td>
+            <td className={`sv-wide ${dim(r.cost)}`} title={r.cost.startsWith("~") ? "estimated" : r.cost.startsWith("$") ? "measured" : undefined}>{r.cost}</td>
+            <td className={`sv-wide ${r.ctxStale ? "sv-stale" : dim(r.ctx)}`} title={r.ctxStale ? "stale observation" : undefined}>{r.ctx}</td>
+            <td className={`sv-wide ${dim(r.checks)}`} title={r.checksTitle || undefined}>{r.checks}</td>
+            <td className="sv-wide">{r.age}</td>
+            {r.cause ? <td className="sv-goal sv-cause" title={r.goal}>{r.cause}</td> : <td className="sv-goal">{r.goal}</td>}
           </tr>)}
         </tbody>
       </table>
@@ -271,6 +287,7 @@ export function ShellView({ active, workspace, repositories, onOpen }: { active:
         <Inspector key={current.pid} task={current.task} onOpen={() => onOpen(current.pid)} />
       </> : <>
         <p className="sv-detail-head"><b>tail -f</b> {current ? current.pid : "—"} <span className="sv-muted">· Enter opens the Inspector</span></p>
+        {current && <p className="sv-meta" aria-label="Selected process">{rowMeta(current).map(([k, v]) => <span key={k}>{k} <b className={k === "ctx" && current.ctxStale ? "sv-stale" : dim(v)}>{v}</b></span>)}</p>}
         {focused && <p className="sv-approval" role="group" aria-label="Focused approval">
           approval.requested {focused.requestId}{pending.length > 1 ? ` (1 of ${pending.length})` : ""} · <kbd>a</kbd> approve <kbd>d</kbd> deny
         </p>}

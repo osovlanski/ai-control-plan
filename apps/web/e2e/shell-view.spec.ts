@@ -1,6 +1,6 @@
 /**
- * Shell view (part A): the Overview as a Linux-style shell, driven keyboard-only against the real
- * in-process API. Two fake assistants, one running task, one awaiting approval and one waiting.
+ * Shell view (parts A and B1): the Overview as a Linux-style shell, driven keyboard-only against the
+ * real in-process API. Two fake assistants, one running task, one awaiting approval and one waiting.
  */
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
@@ -74,7 +74,12 @@ test("keyboard drive: rows, log, inspector, approve, preview and run, remembered
   const page = await h.openApp(context);
   const shell = await openShell(page);
   const top = shell.getByLabel("Top panel");
-  await expect(top).toContainText(`${A} ▮▮▯▯ 62%`);
+  await expect(top).toContainText(`${A} 62%`);
+  // The quota bar is drawn by CSS, so a missing glyph cannot hide it.
+  const meter = top.getByRole("meter", { name: `${A} quota used` });
+  await expect(meter).toHaveAttribute("aria-valuenow", "62");
+  expect(await meter.locator(".sv-bar-fill").evaluate(el => el.getBoundingClientRect().width / el.parentElement!.getBoundingClientRect().width))
+    .toBeCloseTo(0.62, 1);
   await expect(top).toContainText(`${B} unknown`);
   await expect(top).toContainText("1 need you");
 
@@ -90,6 +95,18 @@ test("keyboard drive: rows, log, inspector, approve, preview and run, remembered
   // MODEL is the resolved model. Repo-less runs have no composition accounting, so TOKENS is unknown.
   await expect(rowOf(page, ids.running)).toContainText("fake-1");
   await expect(rowOf(page, ids.running)).toContainText("unknown");
+  const header = list.getByRole("row").first();
+  await expect(header).toHaveText(/PID\s*STATE\s*PHASE\s*ASSIST\s*MODEL\s*TOKENS\s*COST\s*CTX\s*CHECKS\s*AGE\s*GOAL/);
+  // PHASE is the provider's activity verbatim: the default fake script reports `planning`, the custom one none.
+  const cells = (id: string) => rowOf(page, id).getByRole("cell");
+  await expect(cells(ids.approval).nth(2)).toHaveText("planning");
+  await expect(cells(ids.running).nth(2)).toHaveText("—");
+  // COST follows TOKENS: no composition accounting, so unknown. CHECKS is — while the run is live.
+  await expect(cells(ids.running).nth(6)).toHaveText("unknown");
+  await expect(cells(ids.running).nth(8)).toHaveText("—");
+  // A NEEDS-YOU row names its cause in GOAL's place, the tool from the approval.requested event.
+  await expect(cells(ids.approval).nth(10)).toHaveText("approve: shell");
+  await expect(cells(ids.approval).nth(10)).toHaveAttribute("title", "Push the release branch [FAKE:APPROVAL]");
 
   await page.locator("body").click({ position: { x: 1, y: 1 } });
   const log = shell.getByRole("region", { name: "Event log" });
@@ -119,6 +136,7 @@ test("keyboard drive: rows, log, inspector, approve, preview and run, remembered
   await page.keyboard.press("a");
   await h.waitForState(ids.approval, "COMPLETED");
   await expect(rowOf(page, ids.approval)).toContainText("COMPLETED");
+  await expect(cells(ids.approval).nth(10)).toHaveText("Push the release branch [FAKE:APPROVAL]");
   await expect(top).toContainText("0 need you");
 
   // Keys do not fire from the command line; Esc leaves it.
@@ -190,6 +208,13 @@ for (const scheme of ["light", "dark"] as const) test(`follows the ${scheme} sys
     await page.setViewportSize({ width, height: 860 });
     await expect(shell.getByRole("textbox", { name: /agentic-os \[.*\]\$/ })).toBeInViewport();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    // At phone width only PID, STATE, TOKENS and GOAL stay; the rest move into the detail pane header.
+    const visible = await shell.getByRole("region", { name: "Process list" }).locator("th").evaluateAll(ths =>
+      ths.filter(th => getComputedStyle(th).display !== "none").map(th => th.textContent));
+    expect(visible).toEqual(width === 390 ? ["PID", "STATE", "TOKENS", "GOAL"] : ["PID", "STATE", "PHASE", "ASSIST", "MODEL", "TOKENS", "COST", "CTX", "CHECKS", "AGE", "GOAL"]);
+    const meta = shell.getByLabel("Selected process");
+    if (width === 390) await expect(meta).toContainText("phase planning");
+    else await expect(meta).toBeHidden();
     await page.screenshot({ path: info.outputPath(`shell-${scheme}-${width}.png`), fullPage: true });
   }
 });

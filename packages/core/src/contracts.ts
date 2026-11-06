@@ -30,7 +30,11 @@
 // `telemetry.read` because proposal bodies are memory content, not counts.
 // Browser-optional like `telemetry.read`; credentials minted before 2.8 lack it
 // and get 403 on the feed until rotated with `--capabilities`.
-export const CONTROL_PLANE_API_VERSION = "2.8";
+// 2.9 (additive, shell view part B slice B3): `stage: { value, rule }` on every
+// `GET /api/tasks` element and every SSE `state` frame (task-stage v1,
+// docs/contracts/task-stage-v1.md), derived in core by `deriveStage`. No new
+// route or capability; a client written before 2.9 ignores the field.
+export const CONTROL_PLANE_API_VERSION = "2.9";
 export const NORMALIZED_EVENT_VERSION = "1.0";
 
 export const OBSERVABILITY_CAPABILITIES = [
