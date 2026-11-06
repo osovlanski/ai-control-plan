@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { api, type SessionDetail, type TaskDetail } from "../api.js";
+import { ApiError, api, type SessionDetail, type SessionVerification, type TaskDetail } from "../api.js";
 import type { Mission } from "../board/execution.js";
 import { approvalTools, processState, restartOfferedIn, type Attention, type ProcessDetail } from "./model.js";
 
@@ -140,3 +140,44 @@ export function usePendingApprovals(taskId: string | null, wanted: boolean, revi
   }, [taskId, wanted, revision]);
   return { pending, error, loading };
 }
+
+export type TabRead<T> = { status: "idle" } | { status: "loading" } | { status: "ok"; value: T } | { status: "error"; message: string };
+
+/**
+ * One detail tab's own read. It runs only while `key` is set (the tab is visible and has something to
+ * read), again every 4 s while the task is live, and once more when the task stops being live or an
+ * action bumps `revision`. A different key starts from `loading`, never the previous task's value.
+ */
+export function useTabRead<T>(key: string | null, read: () => Promise<T>, live: boolean, revision: number): TabRead<T> {
+  const [state, setState] = useState<{ key: string | null; read: TabRead<T> }>({ key: null, read: { status: "idle" } });
+  const latest = useRef(read);
+  latest.current = read;
+  useEffect(() => {
+    if (key === null) return;
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    setState(s => (s.key === key ? s : { key, read: { status: "loading" } }));
+    const load = async () => {
+      try {
+        const value = await latest.current();
+        if (!disposed) setState({ key, read: { status: "ok", value } });
+      } catch (e) {
+        if (!disposed) setState({ key, read: { status: "error", message: (e as Error).message } });
+      } finally {
+        if (!disposed && live) timer = setTimeout(() => void load(), 4000);
+      }
+    };
+    void load();
+    return () => { disposed = true; clearTimeout(timer); };
+  }, [key, live, revision]);
+  if (key === null) return { status: "idle" };
+  return state.key === key ? state.read : { status: "loading" };
+}
+
+/** A run's session, or `undefined` for a run with no Harness session (the legacy path answers 404). */
+export const readSession = (runId: string): Promise<SessionDetail | undefined> =>
+  api.session(runId).catch(e => { if (e instanceof ApiError && e.status === 404) return undefined; throw e; });
+
+/** A run's verification plan and runs, or `null` where the route has none (404). */
+export const readVerification = (runId: string): Promise<SessionVerification | null> =>
+  api.verification(runId).catch(e => { if (e instanceof ApiError && e.status === 404) return null; throw e; });

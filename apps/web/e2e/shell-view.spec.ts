@@ -1,5 +1,5 @@
 /**
- * Shell view (parts A and B1): the Overview as a Linux-style shell, driven keyboard-only against the
+ * Shell view (parts A, B1 and B2): the Overview as a Linux-style shell, driven keyboard-only against the
  * real in-process API. Two fake assistants, one running task, one awaiting approval and one waiting.
  */
 import { execFileSync } from "node:child_process";
@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { fakeCockpit, FAKE_COCKPIT_TOKEN, type FakeCockpit } from "./fake-cockpit.js";
 import { expect, test, type Page } from "@playwright/test";
 import type { CapabilityManifest } from "@agent-plane/core";
+import type { TaskContext } from "../src/api.js";
 import { FakeAdapter } from "@agent-plane/adapters";
 import { boot, A, B, type Harness } from "./harness.js";
 
@@ -96,17 +97,24 @@ test("keyboard drive: rows, log, inspector, approve, preview and run, remembered
   await expect(rowOf(page, ids.running)).toContainText("fake-1");
   await expect(rowOf(page, ids.running)).toContainText("unknown");
   const header = list.getByRole("row").first();
-  await expect(header).toHaveText(/PID\s*STATE\s*PHASE\s*ASSIST\s*MODEL\s*TOKENS\s*COST\s*CTX\s*CHECKS\s*AGE\s*GOAL/);
+  await expect(header).toHaveText(/PID\s*STATE\s*STAGE\s*PHASE\s*ASSIST\s*MODEL\s*TOKENS\s*COST\s*CTX\s*CHECKS\s*AGE\s*GOAL/);
   // PHASE is the provider's activity verbatim: the default fake script reports `planning`, the custom one none.
   const cells = (id: string) => rowOf(page, id).getByRole("cell");
-  await expect(cells(ids.approval).nth(2)).toHaveText("planning");
-  await expect(cells(ids.running).nth(2)).toHaveText("—");
+  // STAGE is the plane's stage.value, its rule the cell's title: queued, working, needs-you; never derived here.
+  await expect(cells(ids.running).nth(2)).toHaveText("working");
+  await expect(cells(ids.running).nth(2)).toHaveAttribute("title", "live-run");
+  await expect(cells(ids.approval).nth(2)).toHaveText("needs-you");
+  await expect(cells(ids.approval).nth(2)).toHaveAttribute("title", "awaiting-approval");
+  await expect(cells(ids.waiting).nth(2)).toHaveText("queued");
+  await expect(cells(ids.waiting).nth(2)).toHaveAttribute("title", "wait-condition");
+  await expect(cells(ids.approval).nth(3)).toHaveText("planning");
+  await expect(cells(ids.running).nth(3)).toHaveText("—");
   // COST follows TOKENS: no composition accounting, so unknown. CHECKS is — while the run is live.
-  await expect(cells(ids.running).nth(6)).toHaveText("unknown");
-  await expect(cells(ids.running).nth(8)).toHaveText("—");
+  await expect(cells(ids.running).nth(7)).toHaveText("unknown");
+  await expect(cells(ids.running).nth(9)).toHaveText("—");
   // A NEEDS-YOU row names its cause in GOAL's place, the tool from the approval.requested event.
-  await expect(cells(ids.approval).nth(10)).toHaveText("approve: shell");
-  await expect(cells(ids.approval).nth(10)).toHaveAttribute("title", "Push the release branch [FAKE:APPROVAL]");
+  await expect(cells(ids.approval).nth(11)).toHaveText("approve: shell");
+  await expect(cells(ids.approval).nth(11)).toHaveAttribute("title", "Push the release branch [FAKE:APPROVAL]");
 
   await page.locator("body").click({ position: { x: 1, y: 1 } });
   const log = shell.getByRole("region", { name: "Event log" });
@@ -136,7 +144,9 @@ test("keyboard drive: rows, log, inspector, approve, preview and run, remembered
   await page.keyboard.press("a");
   await h.waitForState(ids.approval, "COMPLETED");
   await expect(rowOf(page, ids.approval)).toContainText("COMPLETED");
-  await expect(cells(ids.approval).nth(10)).toHaveText("Push the release branch [FAKE:APPROVAL]");
+  await expect(cells(ids.approval).nth(2)).toHaveText("done");
+  await expect(cells(ids.approval).nth(2)).toHaveAttribute("title", "terminal");
+  await expect(cells(ids.approval).nth(11)).toHaveText("Push the release branch [FAKE:APPROVAL]");
   await expect(top).toContainText("0 need you");
 
   // Keys do not fire from the command line; Esc leaves it.
@@ -162,6 +172,91 @@ test("keyboard drive: rows, log, inspector, approve, preview and run, remembered
   await page.reload();
   await expect(page.getByRole("region", { name: "Shell view" })).toBeVisible();
   await expect(page.getByRole("group", { name: "Overview view" }).getByRole("button", { name: "Shell", exact: true })).toHaveAttribute("aria-pressed", "true");
+});
+
+test("detail tabs: keyboard 1 to 4, Enter and Esc, from the plane's own reads", async ({ context }, info) => {
+  const api = await h.privileged();
+  // A checkpoint on the running task gives the files tab something to list.
+  const made = await api.post(`/api/tasks/${ids.running}/checkpoint`);
+  expect(made.ok()).toBe(true);
+  // The plane's K9 read, scripted at the route as operator-closure.spec does: the fake's own observation needs a sampler tick.
+  const observation: TaskContext = {
+    status: "known", sessionId: "es_tabs",
+    observation: { sequence: 2, observedAt: "2026-11-06T07:00:00Z", occupancyTokens: 82_000, occupancySource: "provider-reported",
+      effectiveWindowTokens: 180_000, effectiveWindowSource: "provider-reported", pressure: 0.46, freshness: "live",
+      breakdown: [{ category: "system", tokens: 4_000 }, { category: "messages", tokens: 78_000 }] },
+    autoCompaction: { observed: true, count: 1 },
+  };
+  await context.route(`**/api/tasks/${ids.running}/context`, route => route.fulfill({ json: observation }));
+  const page = await h.openApp(context);
+  const shell = await openShell(page);
+  await page.locator("body").click({ position: { x: 1, y: 1 } });
+  const tabs = shell.getByRole("tablist", { name: "Detail tabs" });
+  const selected = () => tabs.locator('[aria-selected="true"]');
+  await expect(selected()).toHaveText(/1\s*log/);
+  await expect(shell.getByRole("region", { name: "Event log" })).toContainText("approval.requested");
+
+  // Select the running task, then 2: verify. The task's run has not ended, so there is no result yet, and nothing is invented.
+  await page.keyboard.press("j");
+  await expect(rowOf(page, ids.running)).toHaveAttribute("aria-selected", "true");
+  await page.keyboard.press("2");
+  await expect(selected()).toHaveText(/2\s*verify/);
+  const verify = shell.getByRole("region", { name: "Verification" });
+  await expect(verify).toBeVisible();
+  await expect(verify).toContainText("no verification result yet");
+  await page.screenshot({ path: info.outputPath("tabs-verify-1280.png") });
+
+  // 3: files. Branch, changed files and the checkpoint with its git ref.
+  await page.keyboard.press("3");
+  await expect(selected()).toHaveText(/3\s*files/);
+  const files = shell.getByRole("region", { name: "Files" });
+  await expect(files).toContainText("branch");
+  await expect(files.getByRole("list", { name: "Checkpoints" }).getByRole("listitem")).toHaveCount(1);
+  await expect(files.getByRole("list", { name: "Checkpoints" })).toContainText((await made.json()).id);
+
+  // 4: ctx. The scripted 0.46 observation, shown as the plane sent it.
+  await page.keyboard.press("4");
+  await expect(selected()).toHaveText(/4\s*ctx/);
+  const ctx = shell.getByRole("region", { name: "Context" });
+  await expect(ctx.getByLabel("Context observation")).toContainText("46%");
+  await expect(ctx.getByLabel("Context observation")).toContainText("provider-reported");
+  await expect(ctx.getByLabel("Context observation")).toContainText("live");
+  await expect(ctx.getByLabel("Context observation")).toContainText("observed ×1");
+  await expect(ctx.getByRole("list", { name: "Context breakdown" })).toContainText("messages 78k");
+  // The CTX column reads the same observation.
+  await expect(rowOf(page, ids.running).getByRole("cell").nth(8)).toHaveText("46%");
+  // Stale: the percent stays but is dimmed, as in the column.
+  observation.observation!.freshness = "stale";
+  await expect(ctx.getByLabel("Context observation")).toContainText("stale", { timeout: 10_000 });
+  await page.screenshot({ path: info.outputPath("tabs-ctx-1280.png") });
+
+  // The tab holds while the selection moves; the other task has its own ctx read.
+  await page.keyboard.press("j");
+  await expect(selected()).toHaveText(/4\s*ctx/);
+  await page.keyboard.press("k");
+
+  // Enter opens the Inspector from any tab; a number key leaves it for that tab; Esc goes back, then to the log.
+  await page.keyboard.press("Enter");
+  await expect(shell.getByRole("region", { name: "Inspector", exact: true })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(shell.getByRole("region", { name: "Context" })).toBeVisible();
+  await page.keyboard.press("Enter");
+  await page.keyboard.press("2");
+  await expect(shell.getByRole("region", { name: "Verification" })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(selected()).toHaveText(/1\s*log/);
+  await expect(shell.getByRole("region", { name: "Event log" })).toBeVisible();
+
+  // Keys do not fire from the command line.
+  await page.keyboard.press("/");
+  await page.keyboard.type("3 files");
+  await expect(selected()).toHaveText(/1\s*log/);
+  await page.keyboard.press("Escape");
+  // The help names the tab keys.
+  await page.keyboard.press("?");
+  await expect(shell.getByRole("dialog", { name: "Keys" })).toContainText("detail tab: log, verify, files, ctx");
+  await page.keyboard.press("Escape");
+  await api.dispose();
 });
 
 test("deny and cancel confirm inline; n backs out", async ({ context }) => {
@@ -211,7 +306,7 @@ for (const scheme of ["light", "dark"] as const) test(`follows the ${scheme} sys
     // At phone width only PID, STATE, TOKENS and GOAL stay; the rest move into the detail pane header.
     const visible = await shell.getByRole("region", { name: "Process list" }).locator("th").evaluateAll(ths =>
       ths.filter(th => getComputedStyle(th).display !== "none").map(th => th.textContent));
-    expect(visible).toEqual(width === 390 ? ["PID", "STATE", "TOKENS", "GOAL"] : ["PID", "STATE", "PHASE", "ASSIST", "MODEL", "TOKENS", "COST", "CTX", "CHECKS", "AGE", "GOAL"]);
+    expect(visible).toEqual(width === 390 ? ["PID", "STATE", "TOKENS", "GOAL"] : ["PID", "STATE", "STAGE", "PHASE", "ASSIST", "MODEL", "TOKENS", "COST", "CTX", "CHECKS", "AGE", "GOAL"]);
     const meta = shell.getByLabel("Selected process");
     if (width === 390) await expect(meta).toContainText("phase planning");
     else await expect(meta).toBeHidden();
