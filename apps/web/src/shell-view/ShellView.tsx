@@ -11,7 +11,9 @@ import {
   COLUMNS, KEYMAP, assistantStatus, clock, isTypingTarget, logLines, quotaFill, quotaPercent, sortRows, toRow,
   type ProcessRow, type Sort, type SortKey,
 } from "./model.js";
-import { usePendingApprovals, useProcessDetails } from "./reads.js";
+import { readSession, readVerification, usePendingApprovals, useProcessDetails, useTabRead } from "./reads.js";
+import { DetailTabs, TAB_REGION, type FilesData, type VerifyData } from "./DetailTabs.js";
+import { TABS, lastRunId, type TabId } from "./tabs.js";
 
 /** What Tab showed for the current command line. Enter runs exactly this. */
 const NO_SESSIONS: SessionSummary[] = [];
@@ -22,7 +24,7 @@ const dim = (v: string) => v === "unknown" || v === "—" ? "sv-muted" : "";
 
 /** The wide-only columns for the selected row, shown in the detail pane header at phone width. */
 const rowMeta = (r: ProcessRow): Array<[string, string]> => [
-  ["phase", r.phase], ["assist", r.assistant], ["model", r.model], ["cost", r.cost], ["ctx", r.ctx], ["checks", r.checks], ["age", r.age],
+  ["stage", r.stage], ["phase", r.phase], ["assist", r.assistant], ["model", r.model], ["cost", r.cost], ["ctx", r.ctx], ["checks", r.checks], ["age", r.age],
 ];
 
 const compositionLine = (c: Awaited<ReturnType<typeof composeFor>>): [string, string | null] => {
@@ -49,6 +51,7 @@ export function ShellView({ active, workspace, repositories, onOpen }: { active:
   const [sort, setSort] = useState<Sort>({ key: null, dir: 1 });
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [inspecting, setInspecting] = useState(false);
+  const [detailTab, setDetailTab] = useState<TabId>("log");
   const [help, setHelp] = useState(false);
   const [confirm, setConfirm] = useState<Confirm | null>(null);
   const [status, setStatus] = useState("");
@@ -72,6 +75,20 @@ export function ShellView({ active, workspace, repositories, onOpen }: { active:
   const { pending, error: approvalError, loading: approvalLoading } = usePendingApprovals(current?.pid ?? null, active && ["AWAITING_APPROVAL", "WAITING_INPUT"].includes(current?.rawState ?? ""), actRev);
   const restartOffered = useRestartOffered(snapshotError ? null : snapshot?.detail.id ?? null, snapshot?.detail.state ?? "", snapshot?.sessions ?? NO_SESSIONS);
   const focused = pending[0];
+  // The verify and files tabs read only while they are the visible tab, every 4 s while the task is live.
+  const runId = lastRunId(snapshot?.detail);
+  const live = !!snapshot && !["COMPLETED", "FAILED", "CANCELLED"].includes(snapshot.detail.state);
+  const showing = (id: TabId) => active && !inspecting && detailTab === id && !!current;
+  const verifyRead = useTabRead<VerifyData>(showing("verify") && runId ? `verify:${runId}` : null,
+    async () => {
+      const [session, verification] = await Promise.all([readSession(runId!), readVerification(runId!)]);
+      return { session, verification };
+    }, live, actRev);
+  const filesRead = useTabRead<FilesData>(showing("files") && current ? `files:${current.pid}:${runId ?? ""}` : null,
+    async () => {
+      const [checkpoints, session] = await Promise.all([api.checkpoints(current!.pid), runId ? readSession(runId) : Promise.resolve(undefined)]);
+      return { checkpoints, session };
+    }, live, actRev);
   const lines = snapshot ? logLines(snapshot.events) : [];
 
   useEffect(() => {
@@ -205,7 +222,9 @@ export function ShellView({ active, workspace, repositories, onOpen }: { active:
           void act(`run now ${current.pid}`, () => api.runNow(current.pid, wait.generation));
         },
         "?": () => setHelp(v => !v),
-        Escape: () => { if (help) setHelp(false); else if (inspecting) setInspecting(false); else setStatus(""); },
+        Escape: () => { if (help) setHelp(false); else if (inspecting) setInspecting(false); else if (detailTab !== "log") setDetailTab("log"); else setStatus(""); },
+        // A tab key shows that tab: it leaves the Inspector, which has no tab of its own.
+        ...Object.fromEntries(TABS.map(t => [t.key, () => { setDetailTab(t.id); setInspecting(false); }])),
       };
       const fn = keys[e.key];
       // Enter on a focused control (a sort header, a toggle) keeps its own meaning.
@@ -266,6 +285,7 @@ export function ShellView({ active, workspace, repositories, onOpen }: { active:
             onClick={() => { setSelectedId(r.pid); setConfirm(null); }} onDoubleClick={() => { setSelectedId(r.pid); setInspecting(true); }}>
             <td className="sv-pid">{r.pid}</td>
             <td title={r.rawState}>{r.state}</td>
+            <td className={`sv-wide ${dim(r.stage)}`} title={r.stageRule || undefined}>{r.stage}</td>
             <td className={`sv-wide ${dim(r.phase)}`}>{r.phase}</td>
             <td className="sv-wide">{r.assistant}</td>
             <td className={`sv-wide ${dim(r.model)}`}>{r.model}</td>
@@ -281,23 +301,25 @@ export function ShellView({ active, workspace, repositories, onOpen }: { active:
       {!rows.length && <p className="sv-muted sv-empty">{loading ? "reading tasks…" : error ? "task list unavailable" : "no tasks. type a goal below and press Enter."}</p>}
     </div>
 
-    <div className="sv-detail" role="region" aria-label={inspecting ? "Inspector" : "Event log"}>
+    <div className="sv-detail" role="region" aria-label={inspecting ? "Inspector" : TAB_REGION[detailTab]}>
       {inspecting && current ? <>
         <p className="sv-detail-head"><b>inspector</b> {current.pid} <span className="sv-muted">· Esc back</span></p>
         <Inspector key={current.pid} task={current.task} onOpen={() => onOpen(current.pid)} />
-      </> : <>
-        <p className="sv-detail-head"><b>tail -f</b> {current ? current.pid : "—"} <span className="sv-muted">· Enter opens the Inspector</span></p>
-        {current && <p className="sv-meta" aria-label="Selected process">{rowMeta(current).map(([k, v]) => <span key={k}>{k} <b className={k === "ctx" && current.ctxStale ? "sv-stale" : dim(v)}>{v}</b></span>)}</p>}
-        {focused && <p className="sv-approval" role="group" aria-label="Focused approval">
-          approval.requested {focused.requestId}{pending.length > 1 ? ` (1 of ${pending.length})` : ""} · <kbd>a</kbd> approve <kbd>d</kbd> deny
-        </p>}
-        {approvalError && <p className="sv-error">approval state unavailable: {approvalError}</p>}
-        {!current ? null : snapshotError && !snapshot ? <p className="sv-error">event read failed: {snapshotError}</p>
+      </> : <DetailTabs tab={detailTab} onTab={setDetailTab} pid={current?.pid ?? null} detail={snapshot?.detail}
+        hasRun={snapshot ? snapshot.detail.runs.length > 0 : null} context={snapshot ? snapshot.context : undefined}
+        verify={verifyRead} files={filesRead}
+        before={<>
+          {current && <p className="sv-meta" aria-label="Selected process">{rowMeta(current).map(([k, v]) => <span key={k}>{k} <b className={k === "ctx" && current.ctxStale ? "sv-stale" : dim(v)}>{v}</b></span>)}</p>}
+          {focused && <p className="sv-approval" role="group" aria-label="Focused approval">
+            approval.requested {focused.requestId}{pending.length > 1 ? ` (1 of ${pending.length})` : ""} · <kbd>a</kbd> approve <kbd>d</kbd> deny
+          </p>}
+          {approvalError && <p className="sv-error">approval state unavailable: {approvalError}</p>}
+        </>}
+        log={!current ? null : snapshotError && !snapshot ? <p className="sv-error">event read failed: {snapshotError}</p>
           : !snapshot ? <p className="sv-muted">reading events…</p>
           : snapshot.unavailable.includes("Events") ? <p className="sv-error">event read unavailable</p>
           : !lines.length ? <p className="sv-muted">no events recorded</p>
-          : <ol className="sv-log" ref={logEnd}>{lines.map(l => <li key={l.key}><time>{l.time}</time> <b>{l.type}</b> {l.summary}</li>)}</ol>}
-      </>}
+          : <ol className="sv-log" ref={logEnd}>{lines.map(l => <li key={l.key}><time>{l.time}</time> <b>{l.type}</b> {l.summary}</li>)}</ol>} />}
     </div>
 
     <form className="sv-cmd" aria-label="Command line" onSubmit={e => { e.preventDefault(); void enter(); }}>

@@ -3,7 +3,7 @@ import type { Assistant, CompositionBudget, SessionDetail, TaskContext, TaskDeta
 import type { Mission } from "../board/execution.js";
 import {
   approvalTools, assistantStatus, causeCell, checksCell, costCell, ctxCell, formatAge, isTypingTarget, logLines, modelCell, phaseCell,
-  processState, quotaFill, quotaPercent, restartOfferedIn, sortRows, toRow, tokensCell, COLUMNS,
+  processState, stageCell, contextPressure, quotaFill, quotaPercent, restartOfferedIn, sortRows, toRow, tokensCell, COLUMNS,
   type ProcessDetail,
 } from "./model.js";
 import { readView, writeView, VIEW_KEY } from "./viewMode.js";
@@ -140,8 +140,32 @@ describe("row cells never invent a value", () => {
     expect([...tools]).toEqual([["a1", "Bash"], ["a2", null]]);
   });
   it("lists the part B columns in order, and keeps PID, STATE, TOKENS and GOAL at phone width", () => {
-    expect(COLUMNS.map(c => c[1])).toEqual(["PID", "STATE", "PHASE", "ASSIST", "MODEL", "TOKENS", "COST", "CTX", "CHECKS", "AGE", "GOAL"]);
+    expect(COLUMNS.map(c => c[1])).toEqual(["PID", "STATE", "STAGE", "PHASE", "ASSIST", "MODEL", "TOKENS", "COST", "CTX", "CHECKS", "AGE", "GOAL"]);
     expect(COLUMNS.filter(c => !c[2]).map(c => c[1])).toEqual(["PID", "STATE", "TOKENS", "GOAL"]);
+  });
+  it("shows the plane's stage as sent, the rule as its title, and — where the plane sent none", () => {
+    expect(stageCell(task({ stage: { value: "needs-you", rule: "awaiting-approval" } }))).toEqual({ text: "needs-you", rule: "awaiting-approval" });
+    // A value a newer plane adds is shown, not dropped or mapped.
+    expect(stageCell(task({ stage: { value: "reviewing", rule: "review-round" } })).text).toBe("reviewing");
+    // An older plane sends no stage. The cell does not derive one from the state.
+    expect(stageCell(task({ state: "COMPLETED" }))).toEqual({ text: "—", rule: "" });
+    expect(stageCell(task({ stage: { value: "", rule: "x" } })).text).toBe("—");
+    const row = toRow(task({ stage: { value: "working", rule: "live-run" } }), undefined, NOW);
+    expect([row.stage, row.stageRule]).toEqual(["working", "live-run"]);
+    expect(toRow(task(), undefined, NOW).stage).toBe("—");
+  });
+  it("sorts by the stage text", () => {
+    const rows = [["A", "working"], ["B", "done"], ["C", "queued"]].map(([id, value]) => toRow(task({ id, stage: { value: value!, rule: "r" } }), undefined, NOW));
+    expect(sortRows(rows, { key: "stage", dir: 1 }).map(r => r.pid)).toEqual(["B", "C", "A"]);
+  });
+  it("reads context pressure one way for the CTX column and the ctx tab", () => {
+    const ctx = (o: Partial<NonNullable<TaskContext["observation"]>>): TaskContext => ({ status: "known", observation: { sequence: 1, observedAt: "", occupancySource: "provider-reported", effectiveWindowSource: "provider-reported", freshness: "live", ...o } });
+    expect(contextPressure(ctx({ pressure: 0.314 }))).toEqual({ text: "31%", stale: false });
+    expect(contextPressure(ctx({ pressure: 0.5, freshness: "stale" }))).toEqual({ text: "50%", stale: true });
+    expect(contextPressure(ctx({}))).toEqual({ text: "—", stale: false });
+    expect(contextPressure("unavailable").text).toBe("—");
+    expect(contextPressure(undefined).text).toBe("—");
+    expect(contextPressure({ status: "unavailable", reason: "legacy execution path" }).text).toBe("—");
   });
   it("sorts cost and ctx numerically, unknown last", () => {
     const rows = ["$0.11", "~$0.02", "unknown"].map((cost, i) => ({ ...toRow(task({ id: `T${i}` }), undefined, NOW), cost, ctx: ["5%", "40%", "—"][i]! }));

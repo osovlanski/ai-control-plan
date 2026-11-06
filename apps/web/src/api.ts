@@ -152,7 +152,19 @@ export interface Dispatch {
   reason: string | null;
 }
 
+/**
+ * Task stage v1 (API 2.9, `docs/contracts/task-stage-v1.md`): the plane's coarse answer to "where is
+ * this task", with the one rule that produced it. Clients show it; they never derive it. `value` is
+ * typed as a string so a value a newer plane adds is shown, not dropped.
+ */
+export interface TaskStage {
+  value: string;
+  rule: string;
+}
+
 export interface TaskSummary {
+  /** Absent on a plane older than 2.9. */
+  stage?: TaskStage;
   wait?: TaskWait;
   schedulerEnabled?: boolean;
   id: string;

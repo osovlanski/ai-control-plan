@@ -48,6 +48,10 @@ export interface ProcessRow {
   pid: string;
   state: ProcessState;
   rawState: string;
+  /** The plane's `stage.value` verbatim; `—` when the plane sent none. */
+  stage: string;
+  /** The plane's `stage.rule`, the cell's title; empty when there is no stage. */
+  stageRule: string;
   phase: string;
   assistant: string;
   model: string;
@@ -107,6 +111,16 @@ export function tokensCell(p: ProcessDetail | undefined): string {
   return `${kTok(b.consumed.tokens)}${cap !== undefined ? `/${kTok(cap)}` : ""}`;
 }
 
+/**
+ * The plane's task stage (task-stage v1), read as sent. Never derived here: a plane older than 2.9
+ * sends none, and the cell says `—` rather than guess from the state.
+ */
+export function stageCell(task: Mission): { text: string; rule: string } {
+  const s = task.stage;
+  if (!s || typeof s.value !== "string" || !s.value) return { text: "—", rule: "" };
+  return { text: s.value, rule: typeof s.rule === "string" ? s.rule : "" };
+}
+
 /** Provider-reported activity (`activity_phase`), verbatim. Not a plane stage: only adapters that report one fill it. */
 export function phaseCell(task: Mission): string {
   return task.phase || "—";
@@ -133,9 +147,13 @@ export function costCell(p: ProcessDetail | undefined): string {
 
 /** Context pressure from the plane's K9 read: a percent only for a known observation; stale is flagged. */
 export function ctxCell(p: ProcessDetail | undefined): { text: string; stale: boolean } {
-  const none = { text: "—", stale: false };
   if (!p) return { text: "…", stale: false };
-  const c = p.context;
+  return contextPressure(p.context);
+}
+
+/** The pressure percent of one K9 read, shared by the CTX column and the ctx tab so they cannot disagree. */
+export function contextPressure(c: TaskContext | "unavailable" | undefined): { text: string; stale: boolean } {
+  const none = { text: "—", stale: false };
   if (!c || c === "unavailable" || c.status !== "known" || !c.observation) return none;
   const { pressure, freshness } = c.observation;
   if (typeof pressure !== "number" || !Number.isFinite(pressure) || pressure < 0) return none;
@@ -198,10 +216,13 @@ export function approvalTools(events: TaskEvent[]): Map<string, string | null> {
 export function toRow(task: Mission, p: ProcessDetail | undefined, now: number): ProcessRow {
   const ctx = ctxCell(p);
   const checks = checksCell(p);
+  const stage = stageCell(task);
   return {
     pid: task.id,
     state: processState(task),
     rawState: missionState(task),
+    stage: stage.text,
+    stageRule: stage.rule,
     phase: phaseCell(task),
     assistant: assistantCell(p),
     model: modelCell(p),
@@ -222,6 +243,7 @@ export function toRow(task: Mission, p: ProcessDetail | undefined, now: number):
 export const COLUMNS = [
   ["pid", "PID", false],
   ["state", "STATE", false],
+  ["stage", "STAGE", true],
   ["phase", "PHASE", true],
   ["assistant", "ASSIST", true],
   ["model", "MODEL", true],
@@ -300,6 +322,7 @@ export function isTypingTarget(target: EventTarget | null): boolean {
 
 export const KEYMAP: ReadonlyArray<readonly [string, string]> = [
   ["j / k", "move down / up"],
+  ["1 2 3 4", "detail tab: log, verify, files, ctx"],
   ["Enter", "open the Inspector"],
   ["/", "focus the command line"],
   ["a", "approve the focused approval"],
@@ -308,5 +331,5 @@ export const KEYMAP: ReadonlyArray<readonly [string, string]> = [
   ["h", "hand off the selected task"],
   ["r", "run a waiting task now"],
   ["?", "show or hide this help"],
-  ["Esc", "back"],
+  ["Esc", "back: Inspector, then the log tab"],
 ];

@@ -124,6 +124,26 @@
 .sv-log { list-style: none; margin: 0; padding: 0; }
 .sv-log li { white-space: pre-wrap; overflow-wrap: anywhere; }
 .sv-log time { color: var(--sv-dim); }
+/* Detail tabs: log | verify | files | ctx. */
+.sv-tabs { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 4px; margin-bottom: 2px; }
+.sv-tab { all: unset; cursor: pointer; padding: 0 8px; color: var(--sv-dim); border-bottom: 1px solid transparent; }
+.sv-tab kbd { color: var(--sv-dim); }
+.sv-tab[aria-selected="true"] { color: var(--sv-fg); border-bottom-color: var(--sv-accent); }
+.sv-tab:focus-visible { outline: 1px solid var(--sv-accent); }
+.sv-tabs-id { margin-left: auto; padding-left: 12px; }
+.sv-panel p { margin: 0; }
+.sv-checks, .sv-files { list-style: none; margin: 0 0 4px; padding: 0; }
+.sv-checks li, .sv-files li { white-space: pre-wrap; overflow-wrap: anywhere; }
+.sv-files time { color: var(--sv-dim); }
+.sv-check-passed { color: var(--sv-ok); }
+.sv-check-failed { color: var(--sv-err); }
+.sv-check-blocked { color: var(--sv-human); }
+.sv-check-skipped { color: var(--sv-dim); }
+.sv-check-summary { padding-left: 2ch; color: var(--sv-dim); white-space: pre-wrap; overflow-wrap: anywhere; }
+.sv-kv { margin: 0 0 4px; }
+.sv-kv div { display: grid; grid-template-columns: 16ch 1fr; gap: 8px; }
+.sv-kv dt { color: var(--sv-dim); }
+.sv-kv dd { margin: 0; overflow-wrap: anywhere; }
 /* The Inspector keeps its own console styling inside the pane. */
 .sv-detail .inspector { margin-top: 6px; font-family: var(--font-ui); }
 
