@@ -839,3 +839,8 @@ Migration 041 adds `runs.harness_cli_version` (TEXT NULL, forward only, no backf
 ## 2026-11-05 — `model:shadow-report` is read-only and unmigrated (SHIPPED)
 
 - Before this, the report opened the DB with `openDb`, which applies pending migrations, so running it against a live operator DB behind main (OCI's was at 30 of 37) would have migrated it. It now opens read-only with `fileMustExist`, takes `--db <path>` (config is not loaded then), and exits 1 naming the migration that adds any table or column it reads that is missing (`REPORT_SCHEMA`; today only `routing_decisions` from `001_init.sql`). Add to `REPORT_SCHEMA` when the report starts reading something newer.
+
+## 2026-11-06 — K13 A4 base-config attestation (SHIPPED; shadow only)
+
+- **Contract:** optional `models.selection.baseConfigAttestedAt` (ISO 8601). A bound candidate's benchmark prior now attaches only while it is set, not in the future, and at most 30 days old (K13 alias note Q3). Otherwise the dimension has no prior and the candidate's `advisories` say why ("benchmark prior withheld: …").
+- **Behaviour change:** with the key unset, benchmark priors no longer attach to any bound candidate (catalog-exact included). The price prior is a tariff and is unchanged. Hard filters, eligibility and the activation gate are untouched. The router-model and model-identity-binding test fixtures now attest their fake workspace.
