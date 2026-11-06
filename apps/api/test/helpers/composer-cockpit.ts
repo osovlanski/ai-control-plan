@@ -15,7 +15,7 @@ import { assembleBundle, fileDigest, type BundleRequest } from "../../src/bundle
 import { loadConfig, type ResolvedConfig } from "../../src/config.js";
 import { openDb, type Db } from "../../src/db/index.js";
 import { computeSnapshotDigest, REGISTRY_VERSION_HEADER, type RegistryAsset } from "../../src/registry-contract.js";
-import { buildServer, type BuiltServer } from "../../src/server.js";
+import { buildServer, type BuiltServer, type ServerDeps } from "../../src/server.js";
 
 export const COCKPIT_TOKEN = "FAKE-cockpit-registry-token-not-real-s6";
 export const TS_REVIEW = "claude-skills:ts-review";
@@ -90,6 +90,8 @@ export interface RigOptions {
   configure?: (config: ResolvedConfig) => void;
   /** More registry assets the stand-in Cockpit serves beside ts-review (M3 S4: MCP servers). */
   extraAssets?: RegistryAsset[];
+  /** M6 S4: replaces the shadow scorer (a throwing one must not fail a compose). */
+  assetShadowScorer?: ServerDeps["assetShadowScorer"];
 }
 
 const GIT_ENV = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.invalid", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.invalid" };
@@ -126,7 +128,10 @@ export async function bootRig(options: RigOptions = {}): Promise<Rig> {
   config.composer.policy.budget = options.budget ?? {};
   options.configure?.(config);
   const db = openDb(config.dbPath);
-  const built = buildServer({ config, db, composerHostname: "fake-host-s6.example", ...(options.now ? { now: options.now } : {}) });
+  const built = buildServer({
+    config, db, composerHostname: "fake-host-s6.example", ...(options.now ? { now: options.now } : {}),
+    ...(options.assetShadowScorer ? { assetShadowScorer: options.assetShadowScorer } : {}),
+  });
   built.registry.init();
   await built.registry.syncAll();
   await built.app.ready();

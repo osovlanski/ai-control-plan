@@ -26,6 +26,7 @@ export * from "./canonical-json.js";
 export * from "./composition-types.js";
 export * from "./provisioning.js";
 export * from "./asset-telemetry.js";
+export * from "./asset-shadow.js";
 export * from "./memory-proposals.js";
 export * from "./task-stage.js";
 export * from "./composer/index.js";
