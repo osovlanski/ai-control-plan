@@ -836,6 +836,10 @@ Migration 041 adds `runs.harness_cli_version` (TEXT NULL, forward only, no backf
 - **Defect fixed, not explained by the code alone:** capability discovery puts every advertised selector in the catalog, so Claude's `opus` / `sonnet` were `catalog-exact` as `anthropic:opus` (a row with no model, price or prior behind it) and never reached the observed path; the K13 alias note's "never true for opus / sonnet" was wrong. A selector that another catalog entry of the same provider lists as an alias is no longer `catalog-exact`. The alias list only withholds exactness; it never binds.
 - **Knock-on:** `modelPrice` (stage 2, settlement) uses the same identity, so an `opus` request on an `accountKind: api` assistant can now price through `claude-opus-5-5` once 3 fresh runs bind it; before it priced nothing.
 
+## 2026-11-05 — `model:shadow-report` is read-only and unmigrated (SHIPPED)
+
+- Before this, the report opened the DB with `openDb`, which applies pending migrations, so running it against a live operator DB behind main (OCI's was at 30 of 37) would have migrated it. It now opens read-only with `fileMustExist`, takes `--db <path>` (config is not loaded then), and exits 1 naming the migration that adds any table or column it reads that is missing (`REPORT_SCHEMA`; today only `routing_decisions` from `001_init.sql`). Add to `REPORT_SCHEMA` when the report starts reading something newer.
+
 ## 2026-11-06 — K13 A4 base-config attestation (SHIPPED; shadow only)
 
 - **Contract:** optional `models.selection.baseConfigAttestedAt` (ISO 8601). A bound candidate's benchmark prior now attaches only while it is set, not in the future, and at most 30 days old (K13 alias note Q3). Otherwise the dimension has no prior and the candidate's `advisories` say why ("benchmark prior withheld: …").
