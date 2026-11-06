@@ -99,6 +99,7 @@ export function recommendModel(
   const classification = classifyTask(intent);
   const catalog = deps.catalog.list();
   const cohorts = modelCohorts(deps.db, { taskKind: classification.taskKind, harnessMajor: HARNESS_MAJOR, now });
+  const baseConfig = baseConfigAttestation(deps.config.models.selection.baseConfigAttestedAt, at);
   const failuresByAssistant = new Map(assistantFilters.map((c) => [String(c.assistantId), c.filterFailures]));
 
   // A workspace security policy that is about the RUN, not the model, but that
@@ -157,6 +158,10 @@ export function recommendModel(
       } else if (capacity === undefined) {
         advisories.push('context window unknown (advisory: the task declares no minimum)');
       }
+      // Not an exclusion: a withheld prior only changes what evidence is offered.
+      if (!baseConfig.fresh && identity.resolvedModelKey && (entry?.benchmarkPriors?.length ?? 0) > 0) {
+        advisories.push(`benchmark prior withheld: ${baseConfig.reason}`);
+      }
 
       candidates.push({
         assistantId: assistant.id as AssistantId,
@@ -165,7 +170,7 @@ export function recommendModel(
         identity,
         filterFailures,
         advisories,
-        evidence: gatherEvidence(entry, identity, cohorts, {
+        evidence: gatherEvidence(entry, identity, cohorts, baseConfig, {
           servingProvider: assistant.provider,
           ...(deps.config.assistants[assistant.id]?.accountKind
             ? { accountKind: deps.config.assistants[assistant.id]!.accountKind! }
@@ -342,6 +347,45 @@ export function resolveCandidateIdentity(
 
 // --- evidence gathering -----------------------------------------------------
 
+export const BASE_CONFIG_ATTESTATION_DAYS = 30;
+
+export interface BaseConfigAttestation {
+  fresh: boolean;
+  /** Why the attestation does or does not count; persisted when it withholds a prior. */
+  reason: string;
+}
+
+/**
+ * Whether the operator's `models.selection.baseConfigAttestedAt` currently
+ * vouches that their own Claude configuration sets no effort or thinking
+ * override. Unset, unparseable, in the future, or older than 30 days all count
+ * as no attestation. Pure: the clock is the caller's.
+ */
+export function baseConfigAttestation(attestedAt: string | undefined, at: Date): BaseConfigAttestation {
+  const key = 'models.selection.baseConfigAttestedAt';
+  if (attestedAt === undefined) {
+    return {
+      fresh: false,
+      reason: `${key} is not set, so the operator has not attested that their own Claude settings set no effort or thinking override`,
+    };
+  }
+  const attestedMs = Date.parse(attestedAt);
+  if (!Number.isFinite(attestedMs)) {
+    return { fresh: false, reason: `${key} (${attestedAt}) is not a valid timestamp` };
+  }
+  const ageDays = (at.getTime() - attestedMs) / 86_400_000;
+  if (ageDays < 0) {
+    return { fresh: false, reason: `${key} (${attestedAt}) is in the future` };
+  }
+  if (ageDays > BASE_CONFIG_ATTESTATION_DAYS) {
+    return {
+      fresh: false,
+      reason: `${key} (${attestedAt}) is ${ageDays.toFixed(1)} days old, older than ${BASE_CONFIG_ATTESTATION_DAYS} days`,
+    };
+  }
+  return { fresh: true, reason: `${key} (${attestedAt}) is ${ageDays.toFixed(1)} days old, within ${BASE_CONFIG_ATTESTATION_DAYS} days` };
+}
+
 /**
  * Attach the priors and own telemetry a bound candidate is entitled to. An
  * unbound candidate gets neither: external evidence about some other model is
@@ -351,6 +395,7 @@ function gatherEvidence(
   entry: ModelCatalogEntry | undefined,
   identity: CandidateIdentity,
   cohorts: Map<string, ModelCohort>,
+  baseConfig: BaseConfigAttestation,
   account: AccountIdentity,
 ): Partial<Record<TaskDimension, DimensionEvidence>> {
   const evidence: Partial<Record<TaskDimension, DimensionEvidence>> = {};
@@ -363,7 +408,10 @@ function gatherEvidence(
   const configuredDifferently = Object.keys(identity.executionSettings ?? {}).length > 0;
 
   if (entry && !configuredDifferently) {
-    for (const prior of entry.benchmarkPriors ?? []) {
+    // The plane sets no effort, but it cannot see the operator's own Claude
+    // settings. Benchmark priors attach only under a fresh attestation that they
+    // set none; the price prior is a tariff, not a measurement at a configuration.
+    for (const prior of baseConfig.fresh ? (entry.benchmarkPriors ?? []) : []) {
       const target = evidence[prior.dimension];
       if (!target) continue;
       target.priors.push({

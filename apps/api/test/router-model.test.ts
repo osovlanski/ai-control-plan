@@ -48,6 +48,8 @@ async function boot(
   home = mkdtempSync(join(tmpdir(), 'k13-'));
   config = loadConfig({ AGENT_PLANE_HOME: home });
   config.assistants = assistants;
+  // A4: priors attach only under a fresh base-config attestation; these tests are about everything else.
+  config.models.selection.baseConfigAttestedAt = new Date(clock.getTime() - 86_400_000).toISOString();
   // Flag-ON single mode routes execution through the ExecutionRequest → RunSpec
   // bridge, which is the path CR-33 is about.
   config.execution.harnessModes.single = options.harness ?? false;

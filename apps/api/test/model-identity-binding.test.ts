@@ -79,6 +79,8 @@ async function boot(sources: CatalogSource[] = [datedIdSource()]) {
   home = mkdtempSync(join(tmpdir(), 'k13-a1-'));
   config = loadConfig({ AGENT_PLANE_HOME: home });
   config.assistants = { [A]: { provider: 'fake', options: { models: [{ id: ALIAS }] } } };
+  // A4: priors attach only under a fresh base-config attestation; these tests are about everything else.
+  config.models.selection.baseConfigAttestedAt = new Date(clock.getTime() - 86_400_000).toISOString();
   db = openDb(config.dbPath);
   built = buildServer({ config, db, now, modelCatalogSources: sources });
   built.registry.init();
