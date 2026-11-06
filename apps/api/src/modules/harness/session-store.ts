@@ -104,10 +104,27 @@ export interface TransitionInput {
 }
 
 export class SessionStore {
+  /**
+   * Told the session id after a state transition COMMITS (never inside an open transaction,
+   * so a rolled-back CAS is never announced). The composition root uses it to publish an SSE
+   * state frame when the task stage moved (task-stage v1). Best effort: a throwing listener
+   * never fails the write that already committed.
+   */
+  onCommittedTransition?: (sessionId: string) => void;
+
   constructor(
     private db: Db,
     private now: () => Date = () => new Date(),
   ) {}
+
+  private committed(sessionId: string): void {
+    if (!this.onCommittedTransition || this.db.inTransaction) return;
+    try {
+      this.onCommittedTransition(sessionId);
+    } catch {
+      // The transition is durable; a broken announcement must not undo the caller's progress.
+    }
+  }
 
   /** False once the underlying connection is closed — a detached heartbeat's cue to no-op. */
   get open(): boolean {
@@ -330,7 +347,9 @@ export class SessionStore {
   // --- CAS transitions (every session write is fenced on the lease, H-I12) ---
 
   transition(sessionId: string, input: TransitionInput): ExecutionSession {
-    return this.db.transaction(() => this.transitionInTransaction(sessionId, input))();
+    const next = this.db.transaction(() => this.transitionInTransaction(sessionId, input))();
+    this.committed(sessionId);
+    return next;
   }
 
   private transitionInTransaction(sessionId: string, input: TransitionInput): ExecutionSession {
@@ -426,6 +445,7 @@ export class SessionStore {
       input.extra?.(this.db);
     });
     tx();
+    this.committed(sessionId);
     return input.result;
   }
 
@@ -658,6 +678,7 @@ export class SessionStore {
       });
     });
     tx();
+    this.committed(sessionId);
     return this.get(sessionId)!;
   }
 
@@ -742,6 +763,7 @@ export class SessionStore {
       });
     });
     tx();
+    this.committed(sessionId);
     return this.get(sessionId)!;
   }
 
