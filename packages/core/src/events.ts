@@ -169,6 +169,8 @@ export interface GuardDecisionPayload {
 export interface RunStartedPayload {
   providerSessionRef?: string;
   model?: string;
+  /** The provider CLI's own version (Claude: `claude_code_version`). Recorded once on `runs.harness_cli_version`. */
+  version?: string;
 }
 
 export interface RunEndedPayload {
