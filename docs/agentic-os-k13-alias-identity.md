@@ -31,11 +31,16 @@ resolutions — exists. On OCI it yields nothing for three independent reasons:
 
 1. **No runs.** The operator DB had no routing decisions since 2026-09-26, so
    no run in the 30-day window resolves anything.
-2. **No AA map entry for what `opus` serves now.** Even a bound candidate
-   resolves to `anthropic:claude-opus-5-5` (or `-sonnet-5-5`); `AA_MODEL_MAP`
+2. **No AA map entry for what `opus` serves now.** `AA_MODEL_MAP`
    (`artificial-analysis.ts`) maps only `claude-opus-4-1` and
-   `claude-sonnet-4-5`. The bound catalog entry therefore has no
-   `benchmarkPriors`.
+   `claude-sonnet-4-5`, so a bound catalog entry has no `benchmarkPriors`.
+   *Correction (2026-11-07):* this note first said a bound candidate resolves
+   to `anthropic:claude-opus-5-5` (or `-sonnet-5-5`). The A0 OCI probe
+   (2026-11-06) saw the provider report the undated `claude-opus-5` (and
+   `claude-sonnet-5`) on CLI 2.1.238, so `opus` binds to
+   `anthropic:claude-opus-5` there. What a bound alias resolves to depends on
+   the CLI build, which is why the binding records `runs.harness_cli_version`
+   per run.
 3. **No AA key.** Without `AA_API_KEY` no benchmark row is ingested at all.
 
 The cost prior is a fourth, separate gap: price rows need `appliesTo` and a

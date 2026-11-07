@@ -84,7 +84,7 @@ export interface IdentityObservation {
   resolvedIds: string[];
   /** `started_at` of the newest examined run. */
   newestObservedAt?: string;
-  /** Distinct CLI versions the examined runs' `run.started` reported, sorted. Empty = none reported. */
+  /** Distinct CLI versions of the examined runs (`runs.harness_cli_version`, else their `run.started` payload), sorted. Empty = none reported. */
   cliVersions: string[];
 }
 

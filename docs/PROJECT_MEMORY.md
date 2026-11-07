@@ -827,7 +827,7 @@ Owner decision D4 (accepted 2026-11-05): close 7b from existing evidence instead
 
 ## 2026-11-06 — K13 A2 CLI version on runs (SHIPPED; evidence only)
 
-Migration 041 adds `runs.harness_cli_version` (TEXT NULL, forward only, no backfill). The session runner writes it once from `run.started` `payload.version` (Claude: `claude_code_version`); a blank or non-string version, or none at all (Codex today), leaves NULL, and the first report wins. Nothing reads it yet: A0/A1 use it later to key identity evidence by CLI build. Test-only `[FAKE:CLI_VERSION:<v>]` marker makes the fake adapter report a version. Drive PASS: `/mnt/project-files/k13-a2-cli-version/`.
+Migration 041 adds `runs.harness_cli_version` (TEXT NULL, forward only, no backfill). The session runner writes it once from `run.started` `payload.version` (Claude: `claude_code_version`); a blank or non-string version, or none at all (Codex today), leaves NULL, and the first report wins. Only the Harness session runner writes it: the legacy orchestrator path (`harnessModes.single` false, the shipped default) records `model_resolved` but leaves the column NULL. Since 2026-11-07 `resolveCandidateIdentity` reads it and falls back to the `run.started` payload only where it is NULL, so that fallback still carries every legacy-path run. Test-only `[FAKE:CLI_VERSION:<v>]` marker makes the fake adapter report a version. Drive PASS: `/mnt/project-files/k13-a2-cli-version/`.
 
 ## 2026-11-06 — K13 A1 last-N alias binding (SHIPPED; shadow only)
 

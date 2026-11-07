@@ -51,7 +51,7 @@ const gate = (name: string, passed: boolean) => ({ name, passed, detail: `${name
 /** A realistic shadow recommendation, with the knobs each test needs. */
 function shadowRec(over: {
   recommended?: string;
-  candidates?: Array<{ label: string; assistantId: string; eligible: boolean; filterFailures: string[]; dimensions: Array<{ dimension: string; n: number; missing?: string }> }>;
+  candidates?: Array<{ label: string; assistantId: string; eligible: boolean; filterFailures: string[]; identity?: object; dimensions: Array<{ dimension: string; n: number; missing?: string }> }>;
   gates?: Array<{ name: string; passed: boolean; detail: string }>;
 } = {}) {
   return {
@@ -144,6 +144,69 @@ describe("shadow soak report", () => {
     expect(report.activation.as_of).toBe("2026-09-05T00:00:00.000Z");
     expect(report.activation.passed).toBe(2);
     expect(report.activation.failed).toBe(1);
+  });
+
+  it("shows each candidate's identity basis from its newest record, with N, newest age and the unresolved reason", () => {
+    const cand = (label: string, identity: object) => ({
+      label, assistantId: label.split("/")[0]!, eligible: true, filterFailures: [], identity,
+      dimensions: [{ dimension: "coding", n: 0 }],
+    });
+    const unresolvedOld = { basis: "unresolved", evidence: "older refusal" };
+    const observed = {
+      basis: "observed-resolution",
+      resolvedModelKey: "anthropic:claude-opus-5",
+      evidence: "the last 3 runs …",
+      observation: {
+        rule: "last-n-agreement-v1", requiredRuns: 3, freshnessDays: 14, runsExamined: 3,
+        resolvedIds: ["claude-opus-5"], newestObservedAt: "2026-11-05T12:00:00.000Z", cliVersions: ["2.1.238"],
+      },
+    };
+    const exact = { basis: "catalog-exact", resolvedModelKey: "fake:premium-max", evidence: "catalog id" };
+    const unresolved = {
+      basis: "unresolved",
+      evidence: '"sonnet" on personal-claude is not bound by observed resolution: only 1 of the 3 agreeing runs required have reported a resolution',
+      observation: {
+        rule: "last-n-agreement-v1", requiredRuns: 3, freshnessDays: 14, runsExamined: 1,
+        resolvedIds: ["claude-sonnet-5"], newestObservedAt: "2026-11-01T12:00:00.000Z", cliVersions: [],
+      },
+    };
+    const noRuns = { basis: "unresolved", evidence: '"haiku" is not a catalog model id for anthropic and no run has reported what it resolves to' };
+    record(shadowRec({ candidates: [cand("personal-claude/opus", unresolvedOld)] }), "2026-11-04T00:00:00.000Z");
+    record(shadowRec({ candidates: [
+      cand("personal-claude/opus", observed),
+      cand("fake-a/premium-max", exact),
+      cand("personal-claude/sonnet", unresolved),
+      cand("personal-claude/haiku", noRuns),
+    ] }), "2026-11-06T00:00:00.000Z");
+
+    const report = buildShadowReport(db, { now: () => new Date("2026-11-07T00:00:00.000Z") });
+    expect(report.candidateIdentity).toEqual([
+      { label: "fake-a/premium-max", basis: "catalog-exact", resolvedModelKey: "fake:premium-max", recordedAt: "2026-11-06T00:00:00.000Z" },
+      { label: "personal-claude/haiku", basis: "unresolved", recordedAt: "2026-11-06T00:00:00.000Z", reason: noRuns.evidence },
+      {
+        label: "personal-claude/opus", basis: "observed-resolution", resolvedModelKey: "anthropic:claude-opus-5",
+        recordedAt: "2026-11-06T00:00:00.000Z", runsExamined: 3, requiredRuns: 3,
+        newestObservedAt: "2026-11-05T12:00:00.000Z", newestAgeDays: 1.5, cliVersions: ["2.1.238"],
+      },
+      {
+        label: "personal-claude/sonnet", basis: "unresolved", recordedAt: "2026-11-06T00:00:00.000Z",
+        runsExamined: 1, requiredRuns: 3, newestObservedAt: "2026-11-01T12:00:00.000Z", newestAgeDays: 5.5,
+        cliVersions: [], reason: unresolved.evidence,
+      },
+    ]);
+    const text = renderShadowReport(report);
+    expect(text).toContain("observed-resolution -> anthropic:claude-opus-5: 3 agreeing run(s), newest 2026-11-05T12:00:00.000Z (1.5d old), CLI 2.1.238");
+    expect(text).toContain("catalog-exact -> fake:premium-max");
+    expect(text).toContain("unresolved (1 run(s) examined of 3 required, newest 2026-11-01T12:00:00.000Z (5.5d old), CLI not reported): \"sonnet\"");
+    expect(text).toContain(`unresolved: ${noRuns.evidence}`);
+    expect(text).not.toContain("older refusal");
+  });
+
+  it("tolerates a recorded candidate with no identity (a row from before K13 identity)", () => {
+    record(shadowRec(), "2026-11-06T00:00:00.000Z");
+    const report = buildShadowReport(db);
+    expect(report.candidateIdentity).toEqual([]);
+    expect(renderShadowReport(report)).toContain("(no candidate identity recorded yet)");
   });
 
   it("does not mutate anything: identical output on a second run, and the row count is unchanged", () => {

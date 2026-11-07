@@ -270,12 +270,15 @@ export function resolveCandidateIdentity(
   const requiredRuns = input.requiredRuns ?? OBSERVED_RESOLUTION_RUNS;
   const freshnessDays = input.freshnessDays ?? OBSERVED_RESOLUTION_FRESHNESS_DAYS;
   const nowMs = (input.now?.() ?? new Date()).getTime();
-  // Newest first. The CLI version rides the run's own `run.started` payload.
+  // Newest first. The CLI version is `runs.harness_cli_version` (migration 041,
+  // written once from `run.started`). Rows from before 041 have it NULL, so only
+  // then fall back to the run's own `run.started` payload.
   const rows = db
     .prepare(
       `SELECT r.model_resolved AS model_resolved, r.started_at AS started_at,
-              (SELECT json_extract(e.payload, '$.version') FROM events e
-                WHERE e.run_id = r.id AND e.type = 'run.started' ORDER BY e.seq LIMIT 1) AS cli_version
+              COALESCE(r.harness_cli_version,
+                (SELECT json_extract(e.payload, '$.version') FROM events e
+                  WHERE e.run_id = r.id AND e.type = 'run.started' ORDER BY e.seq LIMIT 1)) AS cli_version
          FROM runs r
         WHERE r.assistant_id = ? AND r.model_requested = ?
           AND r.model_resolved IS NOT NULL
