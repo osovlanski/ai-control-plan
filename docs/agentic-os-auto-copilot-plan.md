@@ -1,6 +1,6 @@
 # Agentic OS — operating plan: from manual lanes to a proven autonomous loop
 
-Status: **PROPOSED**, revision 4, 2026-11-07 (D-13, D-14, D-15 decided by itay the same day). Plan only. Nothing here is implemented, enabled or
+Status: **PROPOSED**, revision 4, 2026-11-07 (D-2, D-13, D-14, D-15 decided by itay the same day). Plan only. Nothing here is implemented, enabled or
 deployed by this PR. Where this file and the diff disagree, the diff wins.
 
 Revision 2 answered itay's architecture review. Revision 3 answered the independent Codex review
@@ -581,7 +581,7 @@ anyone other than itay consume itay's subscription.
 | Lane | Claude | Codex |
 |---|---|---|
 | itay interactive (laptop, OCI over SSH) | subscription login | ChatGPT sign-in |
-| OCI autopilot (unattended, personal) | subscription login under `aos-agent` (D-1), with billing attestation (D-13) | **not in the first loop**; per D-2 when P1-0 adds it: API key (recommended) or ChatGPT sign-in |
+| OCI autopilot (unattended, personal) | subscription login under `aos-agent` (D-1), with billing attestation (D-13) | **not in the first loop**; from P1-0: ChatGPT sign-in under `aos-agent` (D-2), extra usage off |
 | OCI scorecard runs (§D.5) | same as the autopilot lane | same as the autopilot lane |
 | GitHub Actions `eval.yml` | API key secret (metered) | API key secret (metered) |
 | Claude Code cloud / Codex cloud | the provider's own product with itay's own login | the provider's own product with itay's own login |
@@ -840,7 +840,7 @@ Overall verdict PASS only when all nineteen pass.
 | # | Decision | Recommended default | Consequence |
 |---|---|---|---|
 | D-1 | Claude unattended on OCI with the subscription login, under `aos-agent` | **yes**, personal and individual volume (2026-10-07 update: Agent SDK and `claude -p` draw from plan limits) | spend stays inside the plan **only with D-13**; revision 3's "no metered spend; plan limits are a hard stop" is withdrawn |
-| D-2 | Codex unattended on OCI: ChatGPT sign-in or API key | **needed before P1-0** (the Claude→Codex fallback, D-13); an API key is metered, a ChatGPT sign-in draws on the plan, so given D-13's no-overage preference the recommendation becomes **ChatGPT sign-in under `aos-agent`, for personal use only**, unless OpenAI's terms rule that out (the help article did not load, UNVERIFIED). The docs read recommend an API key for programmatic workflows; if itay picks that, it gets a provider-side spend limit, which can be exceeded before it takes effect | Codex is not in the first loop; it is the fallback from P1-0 |
+| D-2 | Codex unattended on OCI: ChatGPT sign-in or API key | **decided 2026-11-07 (itay): ChatGPT sign-in under `aos-agent`, personal use only.** P1-0 first re-reads OpenAI's Codex-with-ChatGPT-plan terms and stops if they exclude unattended personal use. Context: needed before P1-0 (the Claude→Codex fallback, D-13); an API key is metered, a ChatGPT sign-in draws on the plan, so given D-13's no-overage preference the recommendation becomes **ChatGPT sign-in under `aos-agent`, for personal use only**, unless OpenAI's terms rule that out (the help article did not load, UNVERIFIED). The docs read recommend an API key for programmatic workflows; if itay picks that, it gets a provider-side spend limit, which can be exceeded before it takes effect | Codex is not in the first loop; it is the fallback from P1-0 |
 | D-3 | GitHub write token for the plane user: fine-grained, `contents:write` + `pull_requests:write`, two repos, **draft** PRs only | yes; held by the plane user, unreadable by `aos-agent` (§C.0). The separate publisher user of revision 3 is dropped | PRs appear without you; merging stays yours |
 | D-4 | Night window | 23:00–07:00 Asia/Jerusalem; sessions cut at the close | nothing autopilot runs in the day |
 | D-5 | Items per window, attempts per item, runtime budget per attempt | 3, 2, 90 min across all sessions of the attempt | the loop stops at the first limit hit |
