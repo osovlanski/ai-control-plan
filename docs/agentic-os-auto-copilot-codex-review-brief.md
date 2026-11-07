@@ -1,6 +1,9 @@
-# Codex review brief — Agentic OS operating plan (revision 2)
+# Codex review brief — Agentic OS operating plan
 
-Status: **PENDING** — written 2026-11-07; no Codex review has run yet. Paste the block below into
+Revision 2 was reviewed at `662e020` (FAIL, 13 findings; ledger in the plan §I.2).
+Revision 3 re-review: **PENDING**. For the re-review, also check every row of §I.2: is each
+resolution real in the plan, and does any new section (§C.2 autopilot, §C.2.1 publication, §C.5
+restore) introduce a new duplicate authority, bypass or unbounded loop? Paste the block below into
 Codex (cloud task on `osovlanski/ai-control-plan`, branch `claude/project-thread-qo32zd`, or Codex
 CLI in a fresh worktree of that branch). Record the result as a PR review comment in the format at
 the end; the plan's dispute log is updated from it.
@@ -8,7 +11,7 @@ the end; the plan's dispute log is updated from it.
 ```
 You are an independent reviewer. Repo osovlanski/ai-control-plan, branch claude/project-thread-qo32zd
 (PR #163). Read AGENTS.md and docs/PROJECT_MEMORY.md; they bind you. Review
-docs/agentic-os-auto-copilot-plan.md against the CODE, not against other docs. The diff and the code are
+docs/agentic-os-auto-copilot-plan.md (revision 3; also check each §I.2 resolution) against the CODE, not against other docs. The diff and the code are
 ground truth. Do not edit files, do not push, do not merge. Read-only.
 
 Check every row of §B (inventory) that cites a file: open the file and confirm or refute the claim.
