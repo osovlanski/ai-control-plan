@@ -70,6 +70,21 @@ export const AA_CODING_SCALE_MAX = 100; // the AA coding index is reported 0..10
 export const AA_SPEED_SCALE_MAX = 200; // output tokens/s that maps to a 1.0 speed prior
 
 /**
+ * Grounding diagnostic (§17). Every refresh lists, in its attempt `detail`, up
+ * to this many UNMATCHED rows whose creator is Anthropic, as `{ id, slug, name }`
+ * plus the distinct creator ids seen. It is the evidence `AA_MODEL_MAP` must be
+ * grounded in: the map is edited from this list, never from a guessed slug.
+ * Bounded so a large catalog cannot grow the refresh log; no other row field
+ * (evaluations, pricing, performance) is ever copied — this is not the payload.
+ */
+export const AA_DIAGNOSTIC_LIMIT = 50;
+/** Per-field cap for a diagnostic string; AA ids/slugs/names are far shorter. */
+const AA_DIAGNOSTIC_FIELD_MAX = 120;
+/** Distinct Anthropic creator ids recorded (AA may key the creator by UUID). */
+const AA_DIAGNOSTIC_CREATOR_IDS_MAX = 5;
+const AA_DIAGNOSTIC_CREATOR = 'anthropic';
+
+/**
  * Explicit, reviewable identity mapping (§12, P1-B). AA's STABLE `id` plus its
  * `model_creator.id` is the join authority — AA itself recommends the stable id
  * because slugs drift. A `slug` is kept only for display (`aaSlugHint`) and is
@@ -83,11 +98,13 @@ export const AA_SPEED_SCALE_MAX = 200; // output tokens/s that maps to a 1.0 spe
  * absent from this table and its row is unmatched. That is the intended
  * behaviour: a wrong benchmark attribution is worse than a missing prior.
  *
- * NOTE (no live key in this environment): the `aaId` values below are AA's
- * documented identifiers for these two models and must be confirmed against one
- * bounded live `/language/models/free` refresh. A wrong `aaId` yields an
- * unmatched row — never a misattribution (the id-exact join + creator gate make
- * a false positive impossible).
+ * NOTE (2026-11-07): the first live refresh mapped 0 of 726 rows. The `aaId`
+ * values below are slug-shaped guesses, not AA's stable ids, so they cannot
+ * join; they stay only until a grounded change replaces them. Every new `aaId`
+ * and `aaCreatorId` MUST be copied from the grounding list a refresh records
+ * (`AA_DIAGNOSTIC_LIMIT`, K8 doc §17.2), never from a slug or a mirror. AA's
+ * plain 5.5 slug is the max-effort row. A wrong `aaId` yields an unmatched row,
+ * never a misattribution (the id-exact join + creator gate rule that out).
  */
 export interface AaModelMapEntry {
   /** AA's stable model `id`. The join authority. */
@@ -141,6 +158,7 @@ export class CatalogSourceError extends Error {
 interface AaCreator {
   id?: unknown;
   name?: unknown;
+  slug?: unknown;
 }
 interface AaEvaluations {
   artificial_analysis_coding_index?: unknown;
@@ -179,6 +197,30 @@ const finite = (v: unknown): number | undefined =>
 
 const str = (v: unknown): string | undefined =>
   typeof v === 'string' && v.trim() ? v.trim() : undefined;
+
+/** One unmatched Anthropic row, as recorded in the grounding diagnostic. */
+export interface AaUnmatchedRow {
+  id: string | null;
+  slug: string | null;
+  name: string | null;
+}
+
+/** A diagnostic-safe copy of a short identifier: printable, single-line, capped. */
+function diagField(v: unknown): string | null {
+  const s = str(v);
+  if (!s) return null;
+  // eslint-disable-next-line no-control-regex
+  const clean = s.replace(/[\u0000-\u001f\u007f]/g, ' ');
+  return clean.length > AA_DIAGNOSTIC_FIELD_MAX ? `${clean.slice(0, AA_DIAGNOSTIC_FIELD_MAX)}…` : clean;
+}
+
+/** Is this row's creator Anthropic? AA's `model_creator.id` may be an opaque id,
+ *  so the creator's `slug` and `name` are also read — for the DIAGNOSTIC only.
+ *  The join itself still requires `model_creator.id === aaCreatorId`. */
+function isDiagnosticCreator(row: AaRow): boolean {
+  const c = row.model_creator ?? undefined;
+  return [c?.id, c?.slug, c?.name].some((v) => str(v)?.toLowerCase() === AA_DIAGNOSTIC_CREATOR);
+}
 
 /** The coding index, from the documented `evaluations` location (flat fallback for resilience). */
 function readCodingIndex(row: AaRow): number | undefined {
@@ -232,7 +274,8 @@ export function createArtificialAnalysisSource(opts: AaSourceOptions): CatalogSo
       const nowMs = at.getTime();
 
       if (opts.fixtureBody !== undefined) {
-        return parseAaBody(opts.fixtureBody, observedAt, nowMs);
+        const parsed = parseAaBody(opts.fixtureBody, observedAt, nowMs);
+        return { observations: parsed.observations, detail: parsed.detail };
       }
 
       const merged: unknown[] = [];
@@ -272,7 +315,7 @@ export function createArtificialAnalysisSource(opts: AaSourceOptions): CatalogSo
       }
 
       const parsed = parseAaBody({ intelligence_index_version: indexVersion, data: merged }, observedAt, nowMs);
-      return { ...parsed, detail: `${pages} page(s); ${parsed.detail}` };
+      return { observations: parsed.observations, detail: `${pages} page(s); ${parsed.detail}` };
     },
   };
 }
@@ -280,13 +323,19 @@ export function createArtificialAnalysisSource(opts: AaSourceOptions): CatalogSo
 /**
  * Deterministic parse + normalize of one (already-paginated) response body.
  * Returns the mapped observations and a diagnostic count (§13) — unmapped AA
- * models are skipped, never guessed onto a catalog entry.
+ * models are skipped, never guessed onto a catalog entry. The count line also
+ * carries the bounded Anthropic grounding list (§17, `AA_DIAGNOSTIC_LIMIT`),
+ * returned structured as `unmatchedAnthropic` too.
  */
 export function parseAaBody(
   body: unknown,
   observedAt: string,
   nowMs: number,
-): { observations: CatalogObservation[]; detail: string } {
+): {
+  observations: CatalogObservation[];
+  detail: string;
+  unmatchedAnthropic: { total: number; creatorIds: string[]; rows: AaUnmatchedRow[] };
+} {
   if (typeof body !== 'object' || body === null || !Array.isArray((body as AaBody).data)) {
     throw new CatalogSourceError('malformed response');
   }
@@ -301,6 +350,21 @@ export function parseAaBody(
   let creatorMismatch = 0;
   let noId = 0;
   let noRelease = 0;
+  const diagRows: AaUnmatchedRow[] = [];
+  const diagCreatorIds: string[] = [];
+  let diagTotal = 0;
+  /** Record an unmatched row in the grounding diagnostic iff its creator is Anthropic. */
+  const noteUnmatched = (row: AaRow) => {
+    if (!isDiagnosticCreator(row)) return;
+    diagTotal += 1;
+    const creatorId = diagField(row.model_creator?.id);
+    if (creatorId && !diagCreatorIds.includes(creatorId) && diagCreatorIds.length < AA_DIAGNOSTIC_CREATOR_IDS_MAX) {
+      diagCreatorIds.push(creatorId);
+    }
+    if (diagRows.length < AA_DIAGNOSTIC_LIMIT) {
+      diagRows.push({ id: diagField(row.id), slug: diagField(row.slug), name: diagField(row.name) });
+    }
+  };
 
   for (const raw of rows) {
     if (typeof raw !== 'object' || raw === null) continue;
@@ -310,17 +374,20 @@ export function parseAaBody(
     const id = str(row.id);
     if (!id) {
       noId += 1;
+      noteUnmatched(row);
       continue;
     }
     const target = byId.get(id);
     if (!target) {
       unmatched += 1;
+      noteUnmatched(row);
       continue;
     }
     // Creator must also match: an id collision alone must never map (P1-B).
     const creatorId = str(row.model_creator?.id);
     if (creatorId !== target.aaCreatorId) {
       creatorMismatch += 1;
+      noteUnmatched(row);
       continue;
     }
 
@@ -370,7 +437,18 @@ export function parseAaBody(
   if (creatorMismatch) parts.push(`${creatorMismatch} creator-mismatch`);
   if (noId) parts.push(`${noId} no-id`);
   if (noRelease) parts.push(`${noRelease} coding priors skipped (no benchmark release)`);
-  return { observations, detail: `${rows.length} rows: ${parts.join(', ')}` };
+  let detail = `${rows.length} rows: ${parts.join(', ')}`;
+  if (diagTotal > 0) {
+    // Grounding list (§17): ids/slugs/names only, bounded — never the payload.
+    detail +=
+      `; anthropic unmatched ${diagTotal} (listed ${diagRows.length}, cap ${AA_DIAGNOSTIC_LIMIT})` +
+      ` creatorIds=${JSON.stringify(diagCreatorIds)} rows=${JSON.stringify(diagRows)}`;
+  }
+  return {
+    observations,
+    detail,
+    unmatchedAnthropic: { total: diagTotal, creatorIds: diagCreatorIds, rows: diagRows },
+  };
 }
 
 function codingPrior(

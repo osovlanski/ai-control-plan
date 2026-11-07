@@ -25,6 +25,7 @@ import {
   AA_SPEED_SCALE_MAX,
   AA_SPEED_CONFIGURATION,
   AA_MODEL_MAP,
+  AA_DIAGNOSTIC_LIMIT,
 } from '../src/modules/artificial-analysis.js';
 import { ModelCatalogService } from '../src/modules/model-catalog.js';
 import { randomBytes } from 'node:crypto';
@@ -293,6 +294,103 @@ describe('model identity mapping (§12, §13, P1-B)', () => {
     // base row coding index is 66; the "max" variant's 78 must not leak in.
     expect(codingOf(sonnet)!.raw.value).toBe(66);
     expect(built.modelCatalog.list().map((m) => m.modelKey)).not.toContain('anthropic:claude-4-5-sonnet-max');
+  });
+});
+
+// --- grounding diagnostic (§17): the evidence AA_MODEL_MAP is edited from -----
+
+describe('unmatched Anthropic grounding diagnostic (§17)', () => {
+  // Shaped like the live free tier: opaque stable ids, creator keyed by UUID.
+  const UUID = (n: number) => `0b6a${String(n).padStart(4, '0')}-1f2e-4c3d-9a8b-7c6d5e4f3a2b`;
+  const ANTHROPIC = { id: 'f0e1d2c3-b4a5-4968-8776-655443322110', name: 'Anthropic', slug: 'anthropic' };
+  const live = (over: Record<string, unknown>) => ({
+    id: UUID(0), slug: 'x', name: 'X', model_creator: ANTHROPIC,
+    evaluations: { artificial_analysis_coding_index: 61.7 },
+    performance: { median_output_tokens_per_second: 77.3 },
+    pricing: { price_1m_input_tokens: 9.99 },
+    ...over,
+  });
+  const parseRows = (data: unknown[]) =>
+    parseAaBody({ intelligence_index_version: 4.1, data }, '2030-01-01T00:00:00Z', Date.parse('2030-01-01T00:00:00Z'));
+
+  it('a UUID-id row whose slug equals a mapped aaId stays unmatched and is listed', () => {
+    const aaId = AA_MODEL_MAP[0]!.aaId;
+    const { observations, detail, unmatchedAnthropic } = parseRows([
+      live({ id: UUID(1), slug: aaId, name: 'Claude Opus 4.1' }),
+    ]);
+    expect(observations).toHaveLength(0);
+    expect(detail).toContain('0 mapped, 1 unmatched');
+    expect(unmatchedAnthropic.total).toBe(1);
+    expect(unmatchedAnthropic.rows).toEqual([{ id: UUID(1), slug: aaId, name: 'Claude Opus 4.1' }]);
+    expect(unmatchedAnthropic.creatorIds).toEqual([ANTHROPIC.id]);
+    // The count line carries the same list, readable from model_catalog_refresh.
+    expect(detail).toContain('anthropic unmatched 1 (listed 1, cap 50)');
+    expect(detail).toContain(JSON.stringify({ id: UUID(1), slug: aaId, name: 'Claude Opus 4.1' }));
+  });
+
+  it('lists only Anthropic rows and never copies scores, speeds or prices', () => {
+    const { detail, unmatchedAnthropic } = parseRows([
+      live({ id: UUID(2), slug: 'claude-opus-5-5', name: 'Claude Opus 5.5 (max)' }),
+      live({ id: UUID(3), slug: 'other-model', name: 'Other', model_creator: { id: 'c-9', name: 'OtherCo', slug: 'otherco' } }),
+    ]);
+    expect(unmatchedAnthropic.rows.map((r) => r.slug)).toEqual(['claude-opus-5-5']);
+    expect(detail).toContain('2 unmatched');
+    for (const leaked of ['other-model', '61.7', '77.3', '9.99', 'evaluations', 'pricing']) {
+      expect(detail).not.toContain(leaked);
+    }
+  });
+
+  it('is bounded at AA_DIAGNOSTIC_LIMIT rows while still counting all of them', () => {
+    const data = Array.from({ length: AA_DIAGNOSTIC_LIMIT + 10 }, (_, i) =>
+      live({ id: UUID(100 + i), slug: `claude-s-${i}`, name: `Claude ${i}` }));
+    const { unmatchedAnthropic, detail } = parseRows(data);
+    expect(AA_DIAGNOSTIC_LIMIT).toBe(50);
+    expect(unmatchedAnthropic.total).toBe(60);
+    expect(unmatchedAnthropic.rows).toHaveLength(50);
+    expect(detail).toContain('anthropic unmatched 60 (listed 50, cap 50)');
+    expect(detail).not.toContain('claude-s-50');
+  });
+
+  it('a creator-mismatch row on a mapped id is listed too; a mapped row is not', () => {
+    const { observations, unmatchedAnthropic } = parseRows([
+      live({ id: AA_MODEL_MAP[0]!.aaId, slug: 'opus-by-uuid-creator' }), // creator id is a UUID, not 'anthropic'
+      live({ id: AA_MODEL_MAP[1]!.aaId, slug: 'sonnet-ok', model_creator: { id: 'anthropic', name: 'Anthropic' } }),
+    ]);
+    expect(observations).toHaveLength(1);
+    expect(unmatchedAnthropic.rows.map((r) => r.slug)).toEqual(['opus-by-uuid-creator']);
+  });
+
+  it('control characters and over-long fields are neutralised before they reach the log', () => {
+    const { unmatchedAnthropic } = parseRows([live({ id: UUID(4), slug: 'a\nb', name: 'n'.repeat(500) })]);
+    expect(unmatchedAnthropic.rows[0]!.slug).toBe('a b');
+    expect(unmatchedAnthropic.rows[0]!.name!.length).toBe(121);
+  });
+
+  it('a paginated refresh through a fake fetch records the list on the refresh attempt', async () => {
+    const page = (n: number, has_more: boolean, data: unknown[]) => ({
+      tier: 'free', intelligence_index_version: 4.1,
+      pagination: { page: n, page_size: 2, total_pages: 2, has_more }, data,
+    });
+    const pages = [
+      page(1, true, [live({ id: UUID(10), slug: 'claude-opus-5-5', name: 'Claude Opus 5.5' }),
+        live({ id: UUID(11), slug: 'claude-opus-5-5-high', name: 'Claude Opus 5.5 (high)' })]),
+      page(2, false, [live({ id: UUID(12), slug: 'gpt-x', name: 'GPT X', model_creator: { id: 'o-1', name: 'OpenAI' } })]),
+    ];
+    const urls: string[] = [];
+    const fakeFetch: typeof globalThis.fetch = async (input) => {
+      urls.push(String(input));
+      const n = Number(new URL(String(input)).searchParams.get('page'));
+      return new Response(JSON.stringify(pages[n - 1]), { status: 200, headers: { 'content-type': 'application/json' } });
+    };
+    await boot([createArtificialAnalysisSource({ apiKey: FAKE_KEY, now })], fakeFetch);
+    await built.modelCatalog.refresh();
+    expect(urls).toEqual([`${AA_ENDPOINT}?page=1`, `${AA_ENDPOINT}?page=2`]);
+    const rec = built.modelCatalog.refreshes().find((r) => r.source === 'artificial-analysis')!;
+    expect(rec.status).toBe('ok');
+    expect(rec.detail).toContain('2 page(s); 3 rows: 0 mapped, 3 unmatched; anthropic unmatched 2 (listed 2, cap 50)');
+    expect(rec.detail).toContain('"slug":"claude-opus-5-5-high"');
+    expect(rec.detail).not.toContain('gpt-x');
+    expect(rec.detail).not.toContain(FAKE_KEY);
   });
 });
 
