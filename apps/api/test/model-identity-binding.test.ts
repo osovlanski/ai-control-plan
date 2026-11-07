@@ -97,13 +97,22 @@ afterEach(async () => {
 });
 
 /** One finished run that requested `requested` and was reported served as `resolved`, `daysAgo` before the clock. */
-function recordRun(taskId: string, resolved: string | null, daysAgo: number, opts: { requested?: string; assistantId?: string; cliVersion?: string } = {}): void {
+/**
+ * `cliVersion` lands in the `run.started` payload only (a pre-041 row: the
+ * column stays NULL); `columnCliVersion` sets `runs.harness_cli_version`.
+ */
+function recordRun(
+  taskId: string,
+  resolved: string | null,
+  daysAgo: number,
+  opts: { requested?: string; assistantId?: string; cliVersion?: string; columnCliVersion?: string } = {},
+): void {
   const id = `run_${(seq += 1)}_${Math.random().toString(36).slice(2, 8)}`;
   const startedAt = new Date(clock.getTime() - daysAgo * DAY).toISOString();
   db.prepare(
-    `INSERT INTO runs (id, task_id, assistant_id, state, started_at, ended_at, model_requested, model_resolved, model_resolved_source, harness_major)
-     VALUES (?, ?, ?, 'ENDED_OK', ?, ?, ?, ?, 'run.started', ?)`,
-  ).run(id, taskId, opts.assistantId ?? A, startedAt, startedAt, opts.requested ?? ALIAS, resolved, HARNESS_MAJOR);
+    `INSERT INTO runs (id, task_id, assistant_id, state, started_at, ended_at, model_requested, model_resolved, model_resolved_source, harness_major, harness_cli_version)
+     VALUES (?, ?, ?, 'ENDED_OK', ?, ?, ?, ?, 'run.started', ?, ?)`,
+  ).run(id, taskId, opts.assistantId ?? A, startedAt, startedAt, opts.requested ?? ALIAS, resolved, HARNESS_MAJOR, opts.columnCliVersion ?? null);
   db.prepare("INSERT INTO events (run_id, seq, ts, type, payload) VALUES (?, 1, ?, 'run.started', ?)")
     .run(id, startedAt, JSON.stringify({ model: resolved, ...(opts.cliVersion ? { version: opts.cliVersion } : {}) }));
 }
@@ -168,6 +177,31 @@ describe('last-N agreement binds an alias only on N fresh agreeing runs', () => 
     expect(id.evidence).toContain('the last 3 runs');
     expect(id.evidence).toContain(`newest ${newest}`);
     expect(id.evidence).toContain('CLI 2.1.280, 2.1.284');
+  });
+
+  it('reads the CLI version from runs.harness_cli_version, over the run.started payload', async () => {
+    await boot();
+    const task = built.tasks.create({ goal: 'g' });
+    // The column wins even where the event disagrees: it is the recorded build.
+    recordRun(task.taskId, NEW_ID, 3, { columnCliVersion: '2.1.290', cliVersion: '9.9.9' });
+    recordRun(task.taskId, NEW_ID, 2, { columnCliVersion: '2.1.291' });
+    recordRun(task.taskId, NEW_ID, 1, { columnCliVersion: '2.1.291' });
+    const id = identity();
+    expect(id.basis).toBe('observed-resolution');
+    expect(id.observation?.cliVersions).toEqual(['2.1.290', '2.1.291']);
+    expect(id.evidence).toContain('CLI 2.1.290, 2.1.291');
+    expect(id.evidence).not.toContain('9.9.9');
+  });
+
+  it('falls back to the run.started payload only where the column is NULL (pre-041 rows)', async () => {
+    await boot();
+    const task = built.tasks.create({ goal: 'g' });
+    recordRun(task.taskId, NEW_ID, 3, { cliVersion: '2.1.238' }); // old row: column NULL
+    recordRun(task.taskId, NEW_ID, 2, { columnCliVersion: '2.1.290' });
+    recordRun(task.taskId, NEW_ID, 1); // neither: not reported
+    const id = identity();
+    expect(id.basis).toBe('observed-resolution');
+    expect(id.observation?.cliVersions).toEqual(['2.1.238', '2.1.290']);
   });
 
   it('a disagreement inside the last N ⇒ unresolved, naming both ids', async () => {
