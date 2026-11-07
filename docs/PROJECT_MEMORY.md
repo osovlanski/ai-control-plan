@@ -844,3 +844,9 @@ Migration 041 adds `runs.harness_cli_version` (TEXT NULL, forward only, no backf
 
 - **Contract:** optional `models.selection.baseConfigAttestedAt` (ISO 8601). A bound candidate's benchmark prior now attaches only while it is set, not in the future, and at most 30 days old (K13 alias note Q3). Otherwise the dimension has no prior and the candidate's `advisories` say why ("benchmark prior withheld: …").
 - **Behaviour change:** with the key unset, benchmark priors no longer attach to any bound candidate (catalog-exact included). The price prior is a tariff and is unchanged. Hard filters, eligibility and the activation gate are untouched. The router-model and model-identity-binding test fixtures now attest their fake workspace.
+
+## 2026-11-07 — K8 AA map grounding diagnostic (SHIPPED)
+
+- **Defect:** the first live AA refresh (OCI, 2026-11-07 07:00Z) mapped 0 of 726 rows. The join reads AA's stable `row.id`, and every `AA_MODEL_MAP.aaId` was a slug-shaped guess, so nothing could join. No misattribution, no priors.
+- **Change:** each refresh's `model_catalog_refresh.detail` now ends with a bounded grounding list: up to 50 unmatched Anthropic rows as `{ id, slug, name }` plus the distinct Anthropic `model_creator.id`s. Identifier fields only, never scores, prices or the payload.
+- **Decision:** `AA_MODEL_MAP` entries are copied from that list (K8 doc §17.2), never guessed. AA's plain 5.5 slug (`claude-opus-5-5`) is the max-effort row; `-xhigh/-high/-medium/-low` are the other efforts. The 4.x guesses stay until the grounded change replaces them. PR #158 (more slug guesses) is superseded.
