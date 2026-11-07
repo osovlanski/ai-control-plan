@@ -6,16 +6,26 @@ import { scheduleDailyJobs } from "./modules/jobs.js";
 
 const config = loadConfig();
 const db = openDb(config.dbPath);
-const { app, registry, orchestrator, scheduler, modelCatalog, registryFederation } = buildServer({ config, db });
+const { app, registry, orchestrator, scheduler, modelCatalog, registryFederation, memoryFederation } = buildServer({ config, db });
 
 registry.init();
 const reconciled = await orchestrator.reconcileOnBoot();
 await registry.syncChangedAll();
 // Never blocks boot: a failure keeps the cached snapshot and is logged with its reason.
 await registryFederation.sync();
+// O6 S3: Cockpit's memory bundle snapshot, same rules (feeds the memory shadow only).
+await memoryFederation.sync();
 await scheduler.reconcileOnBoot();
 scheduler.startTimer();
-const stopJobs = scheduleDailyJobs(config.sync.dailyHour, registry, new EventRetention(db), app.log, modelCatalog, registryFederation);
+// The daily job syncs the memory snapshot right after the registry's; a memory failure never fails the registry sync.
+const federations = {
+  sync: async () => {
+    const result = await registryFederation.sync();
+    await memoryFederation.sync().catch(() => undefined);
+    return result;
+  },
+};
+const stopJobs = scheduleDailyJobs(config.sync.dailyHour, registry, new EventRetention(db), app.log, modelCatalog, federations);
 
 app.log.info(
   {

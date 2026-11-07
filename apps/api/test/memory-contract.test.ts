@@ -122,9 +122,9 @@ describe("memory v1 contract", () => {
   });
 });
 
-describe("memory.read and API 2.8", () => {
+describe("memory.read (API 2.8, now 2.9)", () => {
   it("is an observability capability the browser may go without, and not a command or ingest one", () => {
-    expect(CONTROL_PLANE_API_VERSION).toBe("2.8");
+    expect(CONTROL_PLANE_API_VERSION).toBe("2.9");
     expect(OBSERVABILITY_CAPABILITIES).toContain("memory.read");
     expect(BROWSER_OPTIONAL_CAPABILITIES).toEqual(["telemetry.read", "memory.read"]);
     expect([...COMMAND_CAPABILITIES, ...INGEST_CAPABILITIES]).not.toContain("memory.read");
@@ -141,7 +141,7 @@ describe("memory.read and API 2.8", () => {
       const res = await built.app.inject({ method: "GET", url: "/api/meta", headers: { authorization: `Bearer ${secret.secret}` } });
       expect(res.statusCode).toBe(200);
       const meta = res.json() as { apiVersion: string; capabilities: string[] };
-      expect(meta.apiVersion).toBe("2.8");
+      expect(meta.apiVersion).toBe("2.9");
       expect(meta.capabilities).toContain("memory.read");
     } finally {
       await built.app.close();

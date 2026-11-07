@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
 import { fileDigest } from "../../api/src/bundle-contract.js";
+import { computeMemoryBundleDigest, computeMemorySnapshotDigest, type MemoryBundle } from "../../api/src/memory-contract.js";
 import { boot, A, B, composerProbe, type Harness } from "./harness.js";
 import { fakeCockpit, FAKE_COCKPIT_TOKEN, type FakeCockpit } from "./fake-cockpit.js";
 
@@ -27,7 +28,16 @@ function git(...args: string[]) {
   execFileSync("git", ["-C", repo, ...args], { env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.invalid", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.invalid" } });
 }
 
-async function start(port: number, composerOn: boolean) {
+/** A memory v1 bundle with `members` files of which `stale` are stale (the plane's shadow rule reads only these counts). */
+function memoryBundle(id: string, members: number, stale: number): MemoryBundle {
+  const files = Array.from({ length: members }, (_, i) => ({ path: `m${i}.md`, digest: `sha256:${Buffer.from(`${id}${i}`).toString("hex").padEnd(64, "0").slice(0, 64)}` }));
+  return {
+    id, digest: computeMemoryBundleDigest(files), tags: [], repoScopes: [], visibility: "any_repo", members: files, estimatedTokens: 10 * members,
+    health: { members, staleMembers: stale, oldestAgeDays: stale ? 214 : 30, duplicatePairs: 0, ghosts: 0, oversized: 0, findingsDigest: `sha256:${(stale ? "5" : "6").repeat(64)}` },
+  };
+}
+
+async function start(port: number, composerOn: boolean, memory: MemoryBundle[] = []) {
   root = mkdtempSync(join(tmpdir(), "m7-composition-"));
   repo = join(root, "repo");
   mkdirSync(repo);
@@ -41,6 +51,9 @@ async function start(port: number, composerOn: boolean) {
   cockpit = await fakeCockpit();
   cockpit.skills.set(SKILL, { body: SKILL_BODY, tags: ["coding", "typescript"], assistants: ["claude"] });
   cockpit.fragments.set("typescript-style", "Use strict TypeScript.");
+  if (memory.length) {
+    cockpit.memory.snapshot = { schemaVersion: "1.0", snapshotDigest: computeMemorySnapshotDigest(memory), observedAt: "2026-11-06T09:00:00.000Z", bundles: memory };
+  }
   consoleErrors = [];
   h = await boot(port, "m7-composition", { [A]: { provider: "fake" }, [B]: { provider: "fake" } }, undefined, (config) => {
     config.repoAllowlist = [repo];
@@ -50,6 +63,7 @@ async function start(port: number, composerOn: boolean) {
     config.composer.enabled = composerOn;
     config.composer.assets.allowlist = [{ id: SKILL, digest: fileDigest(SKILL_BODY) }];
     config.composer.context.fragments.default = ["typescript-style"];
+    config.composer.context.memoryBundles = memory.map((b) => ({ id: b.id, digest: b.digest, reason: "pinned for the O6 S4 spec" }));
     config.composer.policy.permitAmbient = true;
     config.composer.policy.budget = { maxTokens: 50_000 };
   });
@@ -270,6 +284,65 @@ test.describe("Composer on", () => {
     await inspector.getByText("Composition", { exact: true }).click();
     await expect(inspector.locator(".comp-panel .comp-stage")).toHaveCount(6);
     await expect(inspector.getByText("Planned", { exact: true })).toHaveCount(0);
+  });
+});
+
+// O6 S4: the plane's memory shadow, as chips. Shadow only: the run below is unaffected by any chip.
+const FRESH = memoryBundle("fresh", 3, 1);
+const STALE = memoryBundle("stale-gotchas", 7, 4);
+
+test.describe("Memory shadow chips", () => {
+  test.beforeEach(async ({ context }) => {
+    await start(4199, true, [FRESH, STALE]);
+    context.on("page", (page) => {
+      page.on("console", (m) => { if (m.type() === "error" && !composerProbe(m)) consoleErrors.push(m.text()); });
+      page.on("pageerror", (e) => consoleErrors.push(e.message));
+    });
+  });
+
+  test("a stale bundle shows a labelled chip with the plane's rule as tooltip; a healthy one shows nothing extra", async ({ context }, info) => {
+    expect((await h.built.memoryFederation.sync()).ok).toBe(true);
+    const api = await h.privileged();
+    const created = await (await api.post("/api/tasks", { data: { goal: GOAL, repoPath: repo } })).json();
+    const started = await api.post(`/api/tasks/${created.taskId}/start`, { data: {} });
+    expect(started.ok()).toBe(true);
+    await h.waitForState(created.taskId, "COMPLETED");
+    const served = await (await api.get(`/api/composition/memory-shadow?taskId=${created.taskId}`)).json();
+    const demote = served.rows.find((r: { bundleId: string }) => r.bundleId === "stale-gotchas");
+    expect(demote.shadow.action).toBe("demote");
+
+    const page = await h.openApp(context);
+    await page.setViewportSize({ width: 1280, height: 1000 });
+    await page.getByRole("button", { name: new RegExp(`Select task: ${GOAL}`) }).click();
+    const inspector = page.getByRole("region", { name: "Selected task inspector" });
+    await inspector.getByRole("button", { name: "Decision", exact: true }).click();
+    await inspector.getByText("Composition", { exact: true }).click();
+    const shadow = inspector.getByLabel("Memory shadow");
+    await expect(shadow).toBeVisible();
+    // keep renders nothing extra: only the stale bundle appears.
+    await expect(shadow.locator("li")).toHaveCount(1);
+    await expect(shadow.locator("li")).toContainText("stale-gotchas");
+    const chip = shadow.locator(".comp-shadow-chip");
+    await expect(chip).toHaveText("would demote");
+    await expect(chip).toHaveAttribute("title", `${served.rule}: ${demote.shadow.reason}`);
+    await expect(shadow).not.toContainText("fresh");
+    await page.screenshot({ path: info.outputPath("memory-shadow-chip-1280.png"), fullPage: true });
+    await page.setViewportSize({ width: 390, height: 900 });
+    await expect(chip).toBeVisible();
+    await page.screenshot({ path: info.outputPath("memory-shadow-chip-390.png"), fullPage: true });
+  });
+
+  test("no shadow row, no chip", async ({ context }) => {
+    const api = await h.privileged();
+    const created = await (await api.post("/api/tasks", { data: { goal: GOAL, repoPath: repo } })).json();
+    const page = await h.openApp(context);
+    await page.getByRole("button", { name: new RegExp(`Select task: ${GOAL}`) }).click();
+    const inspector = page.getByRole("region", { name: "Selected task inspector" });
+    await inspector.getByRole("button", { name: "Decision", exact: true }).click();
+    await inspector.getByText("Composition", { exact: true }).click();
+    await expect(inspector.getByText("Budget", { exact: true })).toBeVisible();
+    await expect(inspector.getByLabel("Memory shadow")).toHaveCount(0);
+    expect(created.taskId).toBeTruthy();
   });
 });
 

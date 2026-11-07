@@ -151,6 +151,16 @@ export function buildHarnessComposition(deps: HarnessCompositionDeps): HarnessCo
     (db.prepare("SELECT assistant_id FROM runs WHERE id = ?").get(sid) as { assistant_id?: string } | undefined)
       ?.assistant_id;
   const lastPublishedPhase = new Map<string, string | undefined>();
+  // Task stage v1: a session entering or leaving AWAITING_APPROVAL or VERIFYING moves the stage
+  // without a task-state change, so nothing else would announce it. One frame per stage move.
+  sessionStore.onCommittedTransition = (sessionId) => {
+    const taskId = taskOfSession(sessionId);
+    if (!taskId) return;
+    bus.publishIfStageChanged(taskId, () => {
+      const row = tasks.get(taskId);
+      return row ? { state: row.state, phase: row.activity_phase ?? undefined, assistantId: assistantOfSession(sessionId) } : undefined;
+    });
+  };
 
   const recorder = new EventRecorder(
     db,

@@ -152,7 +152,19 @@ export interface Dispatch {
   reason: string | null;
 }
 
+/**
+ * Task stage v1 (API 2.9, `docs/contracts/task-stage-v1.md`): the plane's coarse answer to "where is
+ * this task", with the one rule that produced it. Clients show it; they never derive it. `value` is
+ * typed as a string so a value a newer plane adds is shown, not dropped.
+ */
+export interface TaskStage {
+  value: string;
+  rule: string;
+}
+
 export interface TaskSummary {
+  /** Absent on a plane older than 2.9. */
+  stage?: TaskStage;
   wait?: TaskWait;
   schedulerEnabled?: boolean;
   id: string;
@@ -356,6 +368,18 @@ export interface CompositionRevision {
   createdAt: string;
 }
 
+/** One `GET /api/composition/memory-shadow` row (O6 S3): what stage 4 did with one pinned memory bundle and what `memory-shadow/v1` would do. Shadow only. */
+export interface MemoryShadowRow {
+  attemptId: string;
+  bundleId: string | null;
+  status: "scored" | "error";
+  production: { action: string; reason: string | null } | null;
+  shadow: { action: "keep" | "demote" | "unknown" | "drifted"; reason: string } | null;
+  error: string | null;
+  at: string;
+}
+export interface MemoryShadowRead { rule: string; taskId: string | null; rows: MemoryShadowRow[] }
+
 /** `GET /api/tasks/:id/composition`. */
 export interface CompositionHistory {
   taskId: string;
@@ -466,6 +490,7 @@ export const api = {
       body: JSON.stringify(assistantId ? { overrides: { harness_model: { assistantId } } } : {}),
     }),
   composition: (id: string) => req<CompositionHistory>(`/api/tasks/${id}/composition`),
+  memoryShadow: (id: string) => req<MemoryShadowRead>(`/api/composition/memory-shadow?taskId=${encodeURIComponent(id)}`),
   compositionBudget: (id: string) => req<CompositionBudget>(`/api/tasks/${id}/composition/budget`),
   events: (id: string) => req<TaskEvent[]>(`/api/tasks/${id}/events`),
   routing: (id: string) =>

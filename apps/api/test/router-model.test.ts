@@ -48,6 +48,8 @@ async function boot(
   home = mkdtempSync(join(tmpdir(), 'k13-'));
   config = loadConfig({ AGENT_PLANE_HOME: home });
   config.assistants = assistants;
+  // A4: priors attach only under a fresh base-config attestation; these tests are about everything else.
+  config.models.selection.baseConfigAttestedAt = new Date(clock.getTime() - 86_400_000).toISOString();
   // Flag-ON single mode routes execution through the ExecutionRequest → RunSpec
   // bridge, which is the path CR-33 is about.
   config.execution.harnessModes.single = options.harness ?? false;
@@ -419,7 +421,8 @@ describe('candidate identity gates every prior', () => {
   it('binds a selector this workspace\'s own runs prove the resolution of', async () => {
     await boot();
     const task = built.tasks.create({ goal: 'Implement the parser' });
-    recordRun({ taskId: task.taskId, assistantId: A, modelRequested: 'latest', modelResolved: FAKE_MODEL });
+    // K13 A1: last-N agreement, N = 3 (apps/api/test/model-identity-binding.test.ts covers the rule).
+    for (let i = 0; i < 3; i += 1) recordRun({ taskId: task.taskId, assistantId: A, modelRequested: 'latest', modelResolved: FAKE_MODEL });
     const identity = resolveCandidateIdentity(db, {
       assistantId: A, provider: 'fake', selector: 'latest', catalog: built.modelCatalog.list(), now,
     });

@@ -71,3 +71,7 @@
 @media (max-width: 760px) {
   .comp-table { display: block; overflow-x: auto; }
 }
+
+.comp-shadow-chip { display: inline-block; font-size: 11px; line-height: 1.5; padding: 0 7px; border-radius: var(--r-pill); border: 1px solid var(--line-strong); color: var(--text-2); cursor: help; }
+.shadow-demote { color: var(--tone-human); border-color: color-mix(in srgb, var(--tone-human) 60%, transparent); }
+.shadow-drifted, .shadow-unknown { color: var(--tone-human); border-style: dashed; border-color: color-mix(in srgb, var(--tone-human) 60%, transparent); }

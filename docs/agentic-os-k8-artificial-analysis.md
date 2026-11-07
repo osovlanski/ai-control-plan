@@ -270,9 +270,54 @@ structure**, not copied from a large live payload.
 
 When a key becomes available, run ONE bounded live refresh and record here:
 endpoint, pages fetched, `intelligence_index_version`, row count, mapped/unmatched
-count. Never record the key or the full source payload. The two `aaId` values in
-`AA_MODEL_MAP` must be confirmed against that refresh; a wrong `aaId` produces an
-unmatched row, never a misattribution.
+count. Never record the key or the full source payload.
+
+### 17.1 First live refresh (OCI, 2026-11-07 07:00Z): 0 of 726 mapped
+
+`ok — 4 page(s); 726 rows: 0 mapped, 726 unmatched`. Not even the 4.x rows
+joined. Cause: the join reads the row's stable `id`, but every `aaId` in
+`AA_MODEL_MAP` is a **slug-shaped guess** (`claude-4-1-opus`, …). The live ids
+are not those strings, so every row is unmatched. The join stayed safe (no
+misattribution) and useless. A third-party mirror seen 2026-11-06 lists only
+5.5-generation Anthropic rows, so the 4.x entries may have no live row at all.
+
+### 17.2 Grounding rule: the map is edited only from the refresh's own list
+
+Every refresh now records, in its `model_catalog_refresh.detail` count line, a
+bounded **grounding list**: up to `AA_DIAGNOSTIC_LIMIT` (50) unmatched rows whose
+creator is Anthropic (by `model_creator.id`, `.slug` or `.name`), each as
+`{ id, slug, name }`, plus up to 5 distinct Anthropic `model_creator.id`s.
+Example shape:
+
+```
+4 page(s); 726 rows: 0 mapped, 726 unmatched; anthropic unmatched 12 (listed 12, cap 50) creatorIds=["…"] rows=[{"id":"…","slug":"claude-opus-5-5","name":"…"}, …]
+```
+
+Only those three identifier fields are copied, each single-line and capped at
+120 characters. Scores, speeds, prices and every other row field stay out:
+this is a diagnostic, not the payload.
+
+Rules for the next `AA_MODEL_MAP` change:
+
+1. **Grounded, not guessed.** Each `aaId` is copied from the `id` field of a
+   row in the next refresh's grounding list, and each `aaCreatorId` from its
+   `creatorIds`. A slug, a display name, a mirror or a doc example is never
+   a source for `aaId`. Read the list with `GET /api/models` → `refreshes`
+   or straight from `model_catalog_refresh`.
+2. **AA's plain slug is the max-effort row.** For the 5.5 generation AA lists
+   `claude-opus-5-5` as the **max**-effort configuration and the other efforts
+   as `-xhigh` / `-high` / `-medium` / `-low` suffixed rows (same for
+   `claude-sonnet-5-5`). The un-suffixed slug is therefore not a "base" model.
+   Map it to a catalog identity only with the effort the plane actually runs
+   recorded in the `evidence` string (K13 Q3: `baseConfigAttestedAt`). Never
+   map it on the "base, non-effort" reasoning the 4.x entries used.
+3. **Nothing is removed or guessed meanwhile.** The 4.x entries stay as they
+   are. They are unverified, can only produce unmatched rows (the id-exact join
+   and the creator gate rule out a false positive), and are replaced or removed
+   in the grounded change, not before.
+4. The test `a UUID-id row whose slug equals a mapped aaId stays unmatched and
+   is listed` pins the rule: a slug match is never a join, and the row shows
+   up in the list for review.
 
 ## 17a. K13 readiness check (goal §"K13 READINESS CHECK")
 

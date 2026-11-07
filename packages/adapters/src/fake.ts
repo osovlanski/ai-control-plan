@@ -82,6 +82,15 @@ function parseContextMarker(prompt: string): FakeRunState["context"] | undefined
 }
 
 /**
+ * `[FAKE:CLI_VERSION:<v>]`: run.started reports `version: <v>`, the way the Claude CLI reports
+ * `claude_code_version` on `system/init`. Absent ⇒ no version is reported (what Codex does today),
+ * so the plane's `runs.harness_cli_version` stays NULL.
+ */
+function parseCliVersionMarker(prompt: string): string | undefined {
+  return prompt.match(/\[FAKE:CLI_VERSION:([^\]\s]+)\]/)?.[1];
+}
+
+/**
  * `[FAKE:LATE_SESSION]` / `[FAKE:LATE_SESSION:<ref>]`: the run's handle carries no
  * providerSessionRef when start() returns, and the ref is reported only by run.started,
  * the way the Claude CLI learns its session id from `system/init`. With `<ref>`, that is
@@ -284,6 +293,7 @@ export class FakeAdapter implements AgentAdapter {
       payload: {
         providerSessionRef: handle.providerSessionRef,
         model: run.model?.id ?? "fake-1",
+        ...(parseCliVersionMarker(run.prompt) ? { version: parseCliVersionMarker(run.prompt) } : {}),
         ...(run.profile && this.harness === "claude-code" ? fakeInitEvidence(run.profile, run.prompt) : {}),
       },
     });
