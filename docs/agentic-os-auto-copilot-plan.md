@@ -1,6 +1,6 @@
 # Agentic OS — operating plan: from manual lanes to a proven autonomous loop
 
-Status: **PROPOSED**, revision 4, 2026-11-07. Plan only. Nothing here is implemented, enabled or
+Status: **PROPOSED**, revision 4, 2026-11-07 (D-13, D-14, D-15 decided by itay the same day). Plan only. Nothing here is implemented, enabled or
 deployed by this PR. Where this file and the diff disagree, the diff wins.
 
 Revision 2 answered itay's architecture review. Revision 3 answered the independent Codex review
@@ -783,7 +783,7 @@ P0-6 follows P0-2 and P0-5. P0-7 and P0-10 follow P0-6. P0-1 runs on OCI any tim
 
 | Slice | What | Model / effort | Gate |
 |---|---|---|---|
-| P1-0 | **Codex joins the autopilot** after its own P0-A spike under `aos-agent` and separate drives of auth (per D-2), approval relay (today `approvalRelay: false`), cancel, usage and window cut | Opus 5.5 / high, then OCI | G-list rows G2–G8 repeated with Codex |
+| P1-0 | **Codex joins the autopilot**, first as the **quota fallback** itay asked for (D-13): when an attempt's Claude run is re-parked by K2 on a plan limit and Codex has no quota blocker, the next launch of that attempt routes to Codex inside the same attempt budget and window charge, as a fresh-prompt start from the checkpoint (the existing failover path, `failover.test.ts`). Preconditions: its own P0-A spike under `aos-agent`; drives of auth (per D-2), approval relay (today `approvalRelay: false`, so autopilot Codex runs use a policy that needs no relayed approval), cancel, usage and window cut. Codex extra usage stays off too | Opus 5.5 / high, then OCI | G2–G9 repeated with Codex; a fake Claude limit mid-attempt → the attempt finishes on Codex with one charge and one budget |
 | P1-1 | AA map grounding (O12 phase 2 ids → `AA_MODEL_MAP`; OpenAI rows) | OCI read (Codex / low), then cloud Opus 5.5 / high | `mapped > 0` on the next live refresh |
 | P1-2 | Full daily report as a projection (backlog + GitHub REST + plane reads), % of estimated scope points | Sonnet 5.5 / high | numbers reproduce from sources |
 | P1-3 | `aos` CLI-1 read-only (`ps`, `logs`, `attach`, `quota`, `models`, `autopilot status`) | Opus 5.5 / high | drive against `pnpm dev` |
@@ -840,7 +840,7 @@ Overall verdict PASS only when all nineteen pass.
 | # | Decision | Recommended default | Consequence |
 |---|---|---|---|
 | D-1 | Claude unattended on OCI with the subscription login, under `aos-agent` | **yes**, personal and individual volume (2026-10-07 update: Agent SDK and `claude -p` draw from plan limits) | spend stays inside the plan **only with D-13**; revision 3's "no metered spend; plan limits are a hard stop" is withdrawn |
-| D-2 | Codex unattended on OCI: ChatGPT sign-in or API key | **deferred to P1-0**; recommendation stays API key with a provider-side spend limit, noting that limit can be exceeded before it takes effect | Codex is not in the first loop |
+| D-2 | Codex unattended on OCI: ChatGPT sign-in or API key | **needed before P1-0** (the Claude→Codex fallback, D-13); an API key is metered, a ChatGPT sign-in draws on the plan, so given D-13's no-overage preference the recommendation becomes **ChatGPT sign-in under `aos-agent`, for personal use only**, unless OpenAI's terms rule that out (the help article did not load, UNVERIFIED). The docs read recommend an API key for programmatic workflows; if itay picks that, it gets a provider-side spend limit, which can be exceeded before it takes effect | Codex is not in the first loop; it is the fallback from P1-0 |
 | D-3 | GitHub write token for the plane user: fine-grained, `contents:write` + `pull_requests:write`, two repos, **draft** PRs only | yes; held by the plane user, unreadable by `aos-agent` (§C.0). The separate publisher user of revision 3 is dropped | PRs appear without you; merging stays yours |
 | D-4 | Night window | 23:00–07:00 Asia/Jerusalem; sessions cut at the close | nothing autopilot runs in the day |
 | D-5 | Items per window, attempts per item, runtime budget per attempt | 3, 2, 90 min across all sessions of the attempt | the loop stops at the first limit hit |
@@ -851,9 +851,9 @@ Overall verdict PASS only when all nineteen pass.
 | D-10 | Auto-merge | **off; not on the roadmap**; a future option would need its own approval, independently verified checks, head-SHA binding, branch protection, a kill switch, and a rule treating agent-instruction Markdown as code | `AGENTS.md` merge authority unchanged |
 | D-11 | Off-host backup destination | OCI Object Storage bucket in the same tenancy, client-side encrypted, 7-day retention | a small storage cost; restore needs the key |
 | D-12 | Who may start or release the autopilot | itay only, **enforced** by the `autopilot.operate` secret that lives on his machine (§C.0); anyone may stop | no agent can restart it |
-| D-13 | Billing attestation | itay confirms extra usage / usage credits / auto-reload are off (or capped at a stated amount) for the Claude plan used on OCI, re-checked every 30 days | without it the launch gate admits nothing |
-| D-14 | External heartbeat service | a free dead-man's-switch check (e.g. Healthchecks.io), email to itay, 10-min period inside the window | one outbound ping with no payload; an outage is noticed within ~20 min |
-| D-15 | User separation on OCI: a second Unix user `aos-agent`, linger, one sudoers rule for one wrapper, Claude re-login as that user | yes; P0-A is a spike first and the plan stops if it fails | providers lose access to the plane's state; one extra login |
+| D-13 | Billing attestation | **decided 2026-11-07 (itay): extra usage and auto-reload stay off.** The attestation records that, re-checked every 30 days. When Claude's plan limit is reached, work should continue on Codex if Codex has quota left (P1-0) | without the attestation the launch gate admits nothing; until P1-0 lands, a Claude limit re-parks the attempt to its reset or the next window |
+| D-14 | External heartbeat service | **decided 2026-11-07 (itay): yes.** A free dead-man's-switch check (e.g. Healthchecks.io), email to itay, 10-min period inside the window | one outbound ping with no payload; an outage is noticed within ~20 min |
+| D-15 | User separation on OCI: a second Unix user `aos-agent`, linger, one sudoers rule for one wrapper, Claude re-login as that user | **decided 2026-11-07 (itay): yes.** P0-A is a spike first and the plan stops if it fails | providers lose access to the plane's state; one extra login |
 | D-16 | Single-host risk | accept for the first loop; no hot standby; restore drilled on a replacement VM | an OCI outage stops the loop; nothing duplicates |
 
 ---
