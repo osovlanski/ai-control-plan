@@ -1,18 +1,74 @@
 # Agentic OS — operating plan: from manual lanes to a proven autonomous loop
 
-Status: **PROPOSED**, revision 4, 2026-11-07 (D-2, D-13, D-14, D-15 decided by itay the same day). Plan only. Nothing here is implemented, enabled or
+Status: **PROPOSED, freeze candidate**, revision 5, 2026-11-08 (D-2, D-13, D-14, D-15 decided by itay on 2026-11-07). Plan only. Nothing here is implemented, enabled or
 deployed by this PR. Where this file and the diff disagree, the diff wins.
 
 Revision 2 answered itay's architecture review. Revision 3 answered the independent Codex review
 of revision 2 at `662e020` (FAIL, 13 findings; ledger §I.2). Revision 4 answers the **Codex
 review of revision 3 at `a15ce6e`** (FAIL, 14 findings, three blockers; pasted by itay on
 2026-11-07). Every finding was re-checked against the code on this branch; all fourteen hold and
-the ledger is §I.4. Every claim below names its evidence: **test** means a repo test, **fake
+the ledger is §I.4. Revision 5 answers the **Codex review of revision 4 at `954ba49`** (FAIL,
+4 blockers, 8 high, 2 medium) and adopts itay's **Architecture Freeze Gate** (§0); the disposition
+of every finding, each mapped to a test, is §0.2. Every claim below names its evidence: **test** means a repo test, **fake
 drive** a recorded run against a fake provider, **live** a recorded run on the OCI operator plane
 with a real provider. Anything without one of those is UNVERIFIED.
 
 The Codex review brief is `docs/agentic-os-auto-copilot-codex-review-brief.md`. Reviews of
-revisions 2 and 3: **done (FAIL)**. Revision 4's re-review: **PENDING**.
+revisions 2, 3 and 4: **done (FAIL)**. Under the freeze gate there is **no further whole-document
+review**; later reviews look at implementation PRs (§0.1 rule 5).
+
+---
+
+## 0. Architecture Freeze Gate
+
+Three rounds of review between Claude and Codex have each found real defects. itay set the rule
+on 2026-11-08 for ending the rounds. Revision 5 adopts it as written:
+
+### 0.1 Rules
+
+1. A verified **blocker** must be fixed in the design before implementation starts.
+2. A verified **high** must have a resolution in the plan **and** an acceptance test, or an
+   explicit risk acceptance recorded by itay.
+3. A **medium or low** goes to the backlog with an owner, a priority and a test. It does not open
+   another review round.
+4. A settled decision is not reopened without **new evidence** (code, a recorded run or a changed
+   provider term). Disagreement alone is not new evidence.
+5. After the freeze, further reviews look at **implementation PRs and the code they change**, not
+   the whole architecture document. If a slice finds that the design is wrong, the slice changes
+   this document in the same PR and names the evidence.
+
+The freeze takes effect when itay merges this PR. A design blocker found later is handled under
+rule 5, inside the slice that hits it.
+
+### 0.2 Disposition of review 3 (`954ba49`, FAIL: 4 blockers, 8 high, 2 medium)
+
+Every finding was checked against the code at `954ba49`. All fourteen hold, and none is pushed
+back on in substance. Two are narrowed: 12, because this repo cannot see what Cockpit runs on OCI,
+and 14, because K3 is not used by the autopilot lane.
+
+| # | Sev. | Finding | Verified at | Disposition | Fix | Test |
+|---|---|---|---|---|---|---|
+| 1 | blocker | Two absent reads do not make an uncertain PR create safe to retry | §C.2.4 rev 4 | **fixed** | `publish_uncertain`; no automatic re-create; adopt by marker or itay resolves; late duplicates reported | G29 |
+| 2 | blocker | The gate beside `orchestrator.ts:609` precedes awaited provisioning and queueing; replay reuses its timeout | `orchestrator.ts:611–656`, `session-runner.ts:395–410` | **fixed** | early check plus a final check at `beforeProviderStart`; deadline recomputed there | G19, G2 |
+| 3 | blocker | The deadline dies with the plane; separate scopes outlive it | `session-runner.ts:398–407` | **fixed in design, mechanism UNVERIFIED** | `RuntimeMaxSec` on every scope plus a close timer in `aos-agent`'s user manager; the P0-A1 spike proves both on OCI's systemd | G20, G3 |
+| 4 | blocker | Native verification runs repository commands as the plane user | `verification-providers.ts:122`, `workspace-authority.ts:184` | **fixed** | `CommandVerifier` disabled for autopilot tasks; spawn inventory in P0-A2; the acceptance runner is the only executor | G21 |
+| 5 | high | No re-park path for a thrown launch refusal | `scheduler.ts:886–891`, `:903` | **fixed** | `AutopilotLaunchRefused` + `autopilotPark`, one transaction, no `autoWakes` | G22 |
+| 6 | high | Reservation commit not tied to the worktree base; force push could drop it | `repo/git.ts:92–98`, `orchestrator.ts:637–641` | **fixed** | fetch the reservation SHA and use it as `baseCommit`; ancestry required to publish; fast-forward push | G23 |
+| 7 | high | Final attempts can own runnable tasks; transitions missing | `tasks.ts:49–51`; §C.2.1/§C.2.5 rev 4 | **fixed** | one transition table; `suspended` non-final; unique constraints; final attempt cancels waits; runtime rows keyed by session | G24, G5 |
+| 8 | high | Acceptance and publication outside the budget and stop | §C.2.5/§C.2.7 rev 4 | **fixed** | budget covers acceptance; deadline caps it; stop table per phase; issued mutations reported unresolved | G25 |
+| 9 | high | Profiles are plane-only; the spike could pass on a bare prompt | `harness/composition.ts:99`, `provisioning.ts:302–312` | **fixed** | agent-readable, plane-owned profile root; no secret values in autopilot profiles; the spike runs a composed session | G26 |
+| 10 | high | Cockpit outage silently degrades to route-only | `config.ts:786`, `composer/service.ts:305, 338` | **fixed** | `requireRevision` and single mode checked at start; `composition_unavailable` refusal | G27 |
+| 11 | high | Detached checkout is not immutable; replay can repeat effects | §C.2.7 rev 4 | **fixed** | trusted commands from `origin/main`; fresh read-only snapshot; offline; tree hash; replay only if every command is `replaySafe` | G28, G10 |
+| 12 | high | Loopback services reachable by `aos-agent` | Cockpit `server.ts` at `011d4d9` (reviewer's checkout) | **fixed by a host rule, narrowed**: the deployed Cockpit version is not visible from here, so the rule does not depend on it | nftables `skuid aos-agent` drop to loopback, empty allowlist | G21 |
+| 13 | medium | Handoff-claim row stale; §D.1 still says "spike" | `orchestrator.ts:707`, `harness/handoff.ts:168–181` | **fixed now** (a doc edit is cheaper than a backlog row) | §B.4 split into envelope claim (shipped) and provider-native resume (deferred); §D.1 corrected | — |
+| 14 | medium | Operational claims labelled as verified; K3 account after separation; sixth Cockpit manifest | `quota-probe.ts:40–52`; `eval.yml` | **backlog**, owner: plane slice P0-8 for K3 (stays off for autopilot, §C.0); docs owner for labels. Narrowed: K3 is opt-in and off by default, so separation does not change any running behaviour | label secrets "configuration UNVERIFIED" in §B.5 (done); Cockpit SHA pin + sixth manifest check at the next Cockpit vendor PR | P0-8 test |
+
+Review 3 also re-graded the earlier ledgers (§I.2, §I.4). Each "disagree" there points to one of
+the findings above and is resolved with it. Old-host fencing (its comment on §I.2 row 8 and §I.4
+row 12) is added to §C.5.
+
+**Decisions after this round.** No blocker is open. All eight highs are fixed with a test, so no
+risk acceptance is requested. What remains is in §H: D-1, D-3, D-5, D-11, D-16 and the new D-17.
 
 ---
 
@@ -58,7 +114,13 @@ What revision 4 changes, and why:
    it going silent, restore is drilled on a replacement host and fails closed (finding 12).
 8. **The first loop is Claude-only (§F).** Codex joins after its own auth, approval, cancel and
    usage drives (finding 14).
-9. Kept from revision 3: token caps are advisory on both real providers (`claude.ts:120`,
+9. **Revision 5 closes the remaining gaps (§0.2).** Launch is checked twice, the second time at
+   the last point before a provider process exists. systemd enforces the deadline even when the
+   plane is dead. Repository commands never run as the plane user, and loopback and network are
+   denied to `aos-agent`. Every transition of attempts, reservations and publications is in one
+   table. An uncertain PR create waits for itay instead of a timer. Acceptance runs trusted,
+   offline, on a fresh read-only snapshot.
+10. Kept from revision 3: token caps are advisory on both real providers (`claude.ts:120`,
    `codex.ts:110`, `control-plane-bridge.ts:85`); the dispatcher is an in-plane `selectNext()`;
    AI Doctor, the provider manifest, Apps, mobile, graph and radar are outside launch acceptance;
    **auto-merge stays off and off the roadmap**, and `AGENTS.md` merge authority is unchanged.
@@ -69,7 +131,7 @@ What revision 4 changes, and why:
 |---|---|---|
 | 1 | What existing code already solves these requirements? | Scheduling, recovery, resource slots, quota handling, runtime deadlines, checkpoint commits, model evidence and shadow selection, context continuation, composition, approvals, verification, compare, the web shell and Cockpit integration. Inventory in §B. |
 | 2 | What is genuinely missing? | For the loop: agent/plane user separation and an operator-only start authority, a launch gate on every launch path, attempt-wide runtime budgets, stop conditions and admission accounting, host admission, item reservation and attempts, verification-to-SHA binding with explicit acceptance commands, durable publication, an in-plane dispatcher, system-level restore. Later: a native CLI, an OS-vs-solo scorecard on real providers, grounded AA ids, effort-aware cohorts. Remote auth stage 2, subtasks (vNext 10–13) and K10 are missing but not needed for the loop. |
-| 3 | What is the smallest autonomous workflow we can prove on OCI? | With agents running as `aos-agent`, the autopilot started by itay and the night window open: reserve `os/<item>` by create-ref → create the plane task and attempt in one transaction with a `resource` wait on `oci-heavy: 1` → K1 dispatch → launch gate → composed Harness run with **Claude** under the attempt's runtime budget → checkpoint commit → the item's acceptance commands on a detached checkout of that SHA → one draft PR identified by its publication marker → next item, until the count, the window, a failure limit or the stop switch ends it. Proven by experiments G0–G18 (§G). |
+| 3 | What is the smallest autonomous workflow we can prove on OCI? | With agents running as `aos-agent`, the autopilot started by itay and the night window open: reserve `os/<item>` by create-ref → create the plane task and attempt in one transaction with a `resource` wait on `oci-heavy: 1` → K1 dispatch → launch gate → composed Harness run with **Claude** under the attempt's runtime budget → checkpoint commit → the item's acceptance commands on a detached checkout of that SHA → one draft PR identified by its publication marker → next item, until the count, the window, a failure limit or the stop switch ends it. Proven by experiments G0–G29 (§G), staged as in §F. |
 | 4 | Which features improve measured outcomes versus adding complexity? | Improve: the loop, its stops and its recovery (work happens unattended and safely), the scorecard (tells us whether routing helps), grounded AA priors. Complexity until proven: multi-agent chains, Jev on new hot-path sites, Doctor escalation, a provider manifest, 3D graph, auto-merge. |
 | 5 | What depends on subscriptions, separate APIs or future integrations? | §D.2 binds each lane to one auth mode. OCI loop: Claude subscription login under `aos-agent`, with a billing attestation (D-1, D-13). Codex is not in the first loop; its lane and auth (D-2) come with P1-0. Eval in GitHub Actions: API keys. AA and Jev: their own keys. Plane → cloud workers: no integration exists. |
 | 6 | How do we evaluate model selection, effort and multi-agent coordination? | Shadow first; cohorts by exact identity, with effort added as a new key (it is not one today, §B.2) and unknown kept unknown; activation only through K13's six gates; multi-agent only as a scorecard arm until it beats single-agent under comparable controls. §D.4–D.5. |
@@ -159,7 +221,8 @@ Remaining K4b gaps, handled by the launch gate (P0-2) and the host gate (P0-3) r
 | Item | Status | Evidence |
 |---|---|---|
 | Cross-provider handoff / failover (fresh-prompt start of the successor) | SHIPPED | `harness-implementation-progress.md` deferral 1 note; `failover.test.ts` |
-| Handoff claim protocol (resume from provider session) | DESIGN-ONLY | standing deferral #7; scorecard 2026-09-05 "deliberately gated" |
+| Checkpoint-envelope handoff claim | SHIPPED | `HandoffService.bindSuccessor` (`orchestrator.ts:707`, `control-plane-bridge.ts:191`) stamps `origin: handoff` and claims the envelope (`harness/handoff.ts:168–181`); revision 4 called this design-only, which was wrong (review 3, finding 13) |
+| Provider-native resume (resume the provider's own session) | DESIGN-ONLY | standing deferral #7; scorecard 2026-09-05 "deliberately gated" |
 | Live session input, Claude | SHIPPED | `ClaudeCodeSessionInputAdapter`, delivery proved from the CLI's own transcript (`server.ts:1270–1290`); tests |
 | Live session input, Codex | **SHIPPED, opt-in** (revision 3 called it a spike — wrong, review 2 finding 13) | `CodexAdapter.sessionInput` exists only when the app-server runtime is configured (`codex.ts:78`, `codex-app-server-runtime.ts:31`); correlated receipts in `codex-session-input.ts`; wired at `server.ts:1279`. Not established: idempotent send, a consumption guarantee; SDK attach stays BLOCKED on 0.154.0; tests, live UNVERIFIED |
 | Restart after crash (`POST /api/tasks/:id/restart`) | SHIPPED | #119 |
@@ -171,7 +234,7 @@ Remaining K4b gaps, handled by the launch gate (P0-2) and the host gate (P0-3) r
 |---|---|---|
 | `pnpm eval`, scorecard schema, `pnpm eval:promote` | SHIPPED | `docs/agentic-os-eval-plan.md` |
 | Promoted scorecards | **one, fake scenarios only** | `docs/eval-history/scorecard-2026-09-05.md` (revision 1 said "none promoted": wrong) |
-| `.github/workflows/eval.yml` | **manual only** (`workflow_dispatch`), uses `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` secrets (metered API), not set | the workflow file; decision D3 2026-11-05 |
+| `.github/workflows/eval.yml` | **manual only** (`workflow_dispatch`), uses `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` secrets (metered API); whether the secrets are configured is **UNVERIFIED** (the workflow proves only the references) | the workflow file; decision D3 2026-11-05 |
 | Real-provider scorecard, OS-vs-solo corpus | MISSING | — |
 | Routing offline eval (labelled corpus) | SHIPPED | `routing-eval.test.ts` |
 
@@ -225,221 +288,337 @@ names a different product, it is not integrated anywhere in either repo.
 
 ### C.0 The root fix: agents do not run as the plane's Unix user
 
-Both Codex reviews kept finding one cause behind several defects: both real adapters declare
-`processIsolation: "none"` (`claude.ts:121`, `codex.ts:111`), so a provider tool can read and write
-anything the plane's Unix user can — the command-capable bearer credential
+Both Codex reviews of revisions 3 and 4 trace several defects to one cause. Both real adapters
+declare `processIsolation: "none"` (`claude.ts:121`, `codex.ts:111`), so a provider tool can read
+and write anything the plane's Unix user can: the command-capable bearer credential
 (`auth/credential-file.ts`, mode 0600 but owned by that same user), the SQLite database, and any
 GitHub token the plane holds. The API authorises by capability only (`auth/index.ts:23`), not by
-who is asking. With that layout, "only itay restarts the autopilot", "agents cannot alter
-accounting" and "agents cannot read the GitHub token" cannot be true.
+who is asking. Review 3 (findings 4, 9, 12) showed that a different UID for the provider binary is
+not enough on its own. Repository code also runs as the plane user today: the Harness discovers
+commands from the agent-editable project (`project-verification.ts:63–76`) and runs them through
+`WorkspaceAuthority.runCommand` (`verification-providers.ts:122` → `workspace-authority.ts:184`,
+`spawn(..., { shell: true })`, with no UID change). The per-run profiles are plane-only
+(`harness/composition.ts:99`, dirs 0700 and files 0600 in `provisioning.ts:302–312`). And an agent
+process is still a loopback client of the plane API and Cockpit.
 
-Revision 4 therefore makes **user separation** the first P0 slice (P0-A):
+**The boundary, stated once.** For an autopilot task, **no code that came from the repository or
+from a provider runs as the plane user, and nothing running as `aos-agent` can reach the plane's
+files, its API, Cockpit, or the network beyond what the provider needs.** Concretely:
 
-- **`aos-agent`** — a second Unix user that owns the provider logins (`~aos-agent/.claude`,
-  `~aos-agent/.codex`) and runs every provider process and every acceptance command. It cannot
-  read the plane's home, database, credential file or GitHub token, and it has a user manager
-  (`loginctl enable-linger aos-agent`) so each run gets its own systemd scope.
-- **Plane user** (today's operator user) — runs the plane, owns SQLite, the bearer credential
-  file and the GitHub token. It starts a run through a single sudoers rule that allows exactly one
-  wrapper, `/usr/local/lib/aos/run-as-agent`, as `aos-agent` with no other commands. The wrapper
-  starts the provider CLI inside `systemd-run --user --scope --unit=aos-run-<task>-<session>`. The
-  Agent SDK and Codex SDK both accept an executable-path override, so the adapters point at the
-  wrapper; **that this works end to end with each SDK is UNVERIFIED** and is what P0-A's spike
-  proves first.
-- Worktrees live under a directory owned by the plane user with group `aos`, group-writable,
-  `setgid`, and `aos-agent` in group `aos` — the agent can edit the task's worktree, not the
-  plane's state.
-- **Operator authority**: a new capability `autopilot.operate`, required by
-  `/api/autopilot/start`, `/release` and any change to windows or limits. Its secret is **not** in
-  the plane's credential file. The plane stores only its hash (in config, written by a
-  `rotate-credential`-style bin run by itay); itay holds the secret on his own machine and uses it
-  through the SSH tunnel. `stop` stays available to the ordinary `commands.write` credential —
-  stopping is always allowed, starting is not.
+| Surface | Rule | Proof |
+|---|---|---|
+| Provider process | `aos-agent`, through the wrapper below, in its own scope | G0, G26 |
+| Native Harness project verification (`CommandVerifier`) | **disabled for autopilot tasks** (policy flag on the execution request). The isolated acceptance runner (§C.2.7) is the only executor of repository commands | G21 |
+| Any other plane-side spawn | P0-A lists every `spawn`/`execFile` in `apps/api/src` (11 files today, most are git or SQLite) and classifies each as plane-owned input only or as touching worktree content; the second kind moves behind the wrapper or is refused for autopilot tasks | P0-A inventory, G21 |
+| Per-run profile (skills, MCP config) | written by the plane to `/var/lib/aos/profiles/<session>`, outside the plane's home: plane user owner, group `aos`, dirs 0750, files 0640, so the agent can read it but not change it. Autopilot profiles may not contain secret values (composer allowlist; the profile writer refuses a secret-shaped value) | G26 |
+| Worktrees | group `aos`, group-writable, setgid; the agent edits the task worktree only | G0 |
+| Loopback services | nftables output rule `meta skuid aos-agent` drops `127.0.0.0/8` and `::1` (plane API, Cockpit HTTP/WebSocket and PTY, anything else), apart from an explicit allowlist that is **empty** for the first loop | G21 |
+| Network egress | while a provider runs: the provider's own API hosts and GitHub over HTTPS only. While acceptance runs: **none** (§C.2.7) | G21, G28 |
+| Operator authority | capability `autopilot.operate` is needed for `/api/autopilot/start`, `/release`, `/resolve` and changes to windows or limits. Its secret is not in the plane's credential file: config stores only its hash, written by a `rotate-credential`-style bin that itay runs. `stop` stays available to the ordinary `commands.write` credential, so stopping is always allowed and starting is not | G0 |
 
-If P0-A's spike fails for an SDK, that vendor does not join the autopilot; nothing else in the
-design relies on a weaker fallback.
+**Mechanics.** `aos-agent` owns the provider logins (`~aos-agent/.claude`, later `~aos-agent/.codex`)
+and has linger enabled, so each run gets a transient unit from its user manager. The plane starts
+runs through a single sudoers rule that allows exactly one wrapper, `/usr/local/lib/aos/run-as-agent`,
+as `aos-agent`. The wrapper calls `systemd-run --user --scope --unit=aos-run-<task>-<session>
+--property=RuntimeMaxSec=<s>` (§C.2.5). The Agent SDK accepts an executable-path override, so the
+adapter points at the wrapper. **That this works end to end, for a composed session with a real
+skill and MCP server, is UNVERIFIED.** P0-A's spike proves it first, and if it fails the plan stops
+there.
+
+**K3 after separation** (review 3, finding 14). The quota probe reads the credential from the
+plane user's home (`quota-probe.ts:40–52`), and after the move that home holds no login. K3 stays
+off for the autopilot lane, which relies on K2's limit events. Reading `aos-agent`'s credential
+from the plane would break the boundary, so it is not done.
 
 ### C.1 Components and who owns what
 
 ```
- itay ──(SSH tunnel, autopilot.operate)──► Plane API (loopback)
+ itay ──(SSH tunnel, autopilot.operate)──► Plane API (loopback; unreachable from aos-agent)
                                              │
    plane user ┌──────────────────────────────┼──────────────────────────────────────┐
               │ autopilot: reservations, attempts, windows, acceptance, publications │
-              │ scheduler K1–K5 + K4b + launch gate (new, in startTask)              │
-              │ composer + router + K13 ─► Harness ─► run-as-agent wrapper ──────────┼─┐
+              │ scheduler K1–K5 + K4b · early gate (startTask) · final gate (runner) │
+              │ composer (required) + router + K13 ─► Harness ─► run-as-agent ───────┼─┐
               │ SQLite · bearer credential · GitHub token (plane user only)          │ │
               └──────────────┬───────────────────────────────────────────────────────┘ │
                              │ GitHub API (refs, pushes, draft PRs)                     │
                              ▼                                                          ▼
-                          GitHub ◄── manual lanes reserve via create-ref        aos-agent user
-                                                                                 systemd scope per run:
-                                                                                 provider CLI, acceptance
+                          GitHub ◄── manual lanes reserve via create-ref        aos-agent user manager
+                                                                                 scope per run, RuntimeMaxSec;
+                                                                                 provider CLI, acceptance (no net)
 ```
 
 | Concern | Single authority | Writers |
 |---|---|---|
 | Desired work | `docs/progress/backlog.yaml` at `origin/main` | merged PRs |
-| Reservation of an item, all lanes | GitHub ref `os/<item-id>` pointing at a **reservation commit** (§C.2.2) | create-ref only (never `git push`) |
+| Reservation of an item, all lanes | GitHub ref `os/<item-id>` whose history starts at a **reservation commit** (§C.2.2) | create-ref only (never `git push` to create) |
 | Attempts, windows, runtime used, acceptance, publications, task state | plane SQLite | plane user only |
 | Code, PRs, review, CI | GitHub | — |
 | Progress and the daily report | derived | nobody by hand |
-| Machine assistant config, skills, memory sources | Cockpit | Cockpit |
+| Machine assistant config, skills, memory sources, bundles | Cockpit | Cockpit |
 
 ### C.2 The autopilot
 
-#### C.2.1 Attempt lifecycle (serial ownership until the end)
+#### C.2.1 One transition table (attempt, task, reservation, publication)
 
-`autopilot_attempts.state`: `reserving → admitted → running → settled → accepting → accepted →
-publishing → published`, or a final `failed | blocked | cancelled | window_closed | conflict`.
-The loop is serial: **`selectNext()` refuses while any attempt is in a non-final state** — not
-"while a task is non-terminal". A task can be `COMPLETED` (`orchestrator.ts:1308`) while its
-attempt is still `accepting` or `publishing`, and that attempt still owns the loop.
+Review 3 (finding 7) found final attempts that could still own runnable tasks, and outcomes with no
+defined transition. Revision 5 replaces the state list with one table. **States:**
 
-Every state change is one SQLite transaction by the plane user. Each non-final state has a
-recovery rule run at boot and on the sweep:
+- Non-final: `reserving`, `admitted`, `running`, `suspended`, `settled`, `accepting`, `accepted`,
+  `publishing`, `publish_uncertain`.
+- Final: `published`, `closed`, `failed`, `blocked`, `cancelled`, `conflict`, `external`.
 
-| State | On boot / sweep with no live owner | Rule |
-|---|---|---|
-| `reserving` | reconcile the ref (§C.2.2) | owned → `admitted`; absent after grace → retry or release; external → `cancelled` (not ours) |
-| `admitted` / `running` | existing K1/K4b reconciliation for the task | plus the launch gate before any start |
-| `settled` | start acceptance | — |
-| `accepting` | acceptance run row without a live scope | discard the partial run, start a new run number |
-| `accepted` | insert the publication intent | idempotent on attempt id |
-| `publishing` | publication reconcile (§C.2.4) | never re-runs the provider |
+Invariants (each is a DB constraint or a check inside one transaction):
 
-#### C.2.2 Reservation — exclusive across lanes, owner recoverable remotely
+1. **One non-final attempt at a time.** `selectNext()` refuses while any attempt is non-final.
+   `suspended` and `publish_uncertain` are non-final, so a window boundary or an uncertain PR create
+   holds the loop.
+2. **One task per attempt and one attempt per task.** `autopilot_attempts.task_id` and
+   `reservation_id` are `UNIQUE`, and so is `(item_id, attempt_no)`. The attempt row and its task
+   are inserted in **one** transaction after the reservation is owned. `TaskStore.create()`
+   allocates a fresh id (`tasks.ts:49–51`), and the uniqueness on the attempt row is what makes
+   admission once-only.
+3. **Launch requires a non-final attempt that owns the task** (§C.2.3). A final attempt's task can
+   never launch. When an attempt goes final, the same transaction cancels the task's open waits and
+   dispatches.
+4. **Runtime is settled per session.** `autopilot_runtime(session_id PRIMARY KEY, attempt_id,
+   ms)` is written at session settlement, and at boot it is backfilled from the session rows for
+   any session that has none. The attempt's `runtime_used_ms` is the sum, so a crash cannot count a
+   session twice or lose it.
 
-`git push origin <base>:refs/heads/os/<id>` is **not** create-if-absent: if the ref already points
-at the same base the push succeeds as up to date, and a fast-forward can move an existing ref
-(review 2, finding 1). So every lane reserves with GitHub's create-ref API and requires
-**HTTP 201**:
+| From | Event | To | Same transaction also |
+|---|---|---|---|
+| — | `selectNext` picks an item | `reserving` | intent row (reservation id, commit SHA) |
+| `reserving` | create-ref 201 / owned 422 | `admitted` | insert task + wait `resource oci-heavy` + charge row deferred to launch |
+| `reserving` | foreign 422 | `external` | — |
+| `reserving` | uncertain, ref absent on re-read | `reserving` (retry create) | — |
+| `admitted` | launch refused: closed window, budget, billing, stopped, host | `admitted` | typed park (§C.2.3), no `autoWakes` |
+| `admitted` | provider started | `running` | charge row if first launch in this window |
+| `running` | session settles, more work needed (K2 re-park, K11, failover) | `admitted` | runtime row |
+| `running` | window close cuts the session | `suspended` | runtime row; time wait to next opening |
+| `suspended` | next window opens, launch admitted | `running` | charge row for the new window |
+| `running` | task `COMPLETED` | `settled` | runtime row |
+| `running` | task `FAILED`/`TIMED_OUT`, attempts left | `failed` | open waits cancelled; next attempt is a **new row** |
+| `running` | approval denied / expired (§C.2.8) | `blocked` | cancel session; waits cancelled |
+| any non-final | `stop now` | `cancelled` | cancel scope, waits, dispatches; issued remote effects listed as unresolved |
+| `settled` | acceptance started | `accepting` | `acceptance_runs` row |
+| `accepting` | passed | `accepted` | publication intent row |
+| `accepting` | failed / blocked / not replay-safe after crash | `failed` / `blocked` | — |
+| `accepted` | push + PR identified | `published` | — |
+| `publishing` | PR create outcome unknown | `publish_uncertain` | no further mutation (§C.2.4) |
+| `publish_uncertain` | reconcile finds our PR / itay resolves | `published` / per resolution | — |
+| `publishing` | PR closed or merged by someone | `closed` | never reopened |
+| `publishing` | head moved, wrong base, foreign PR | `conflict` | — |
 
-1. Build a **reservation commit**: tree = base commit's tree, parent = base, message
-   `aos-reservation item=<id> lane=<lane> reservation=<uuid>`, author/committer name, email and
-   date fixed from the reservation intent. Its SHA is computed locally before any request, so it is
-   unique per reservation and deterministic for retries.
-2. Persist the intent (`reservation_id`, `item_id`, `commit_sha`) — plane lanes in SQLite, manual
-   lanes in the prompt's own first output.
-3. `POST /git/commits` (same content → same SHA, so a retry is harmless), then
-   `POST /git/refs` with `ref=refs/heads/os/<id>`, `sha=<commit_sha>`.
-4. Outcomes: **201** → owned. **422 exists** → `GET` the ref: if it points at our `commit_sha` (or a
-   descendant whose root reservation commit is ours) → owned (a retry or a lost 201); otherwise →
-   external, recorded with the other reservation id read from the commit message, never re-run.
-   **Timeout / 5xx** → uncertain: re-read the ref; absent → retry the create; present → apply the
-   422 rule. Ownership is never inferred from the base SHA.
+Item status (§C.3) reads the **latest attempt row first**. "Ref exists with no PR" means running
+only when no plane attempt exists for that item, which is the manual-lane case. A failed or blocked
+plane attempt whose ref remains reads as its own state.
 
-Manual lanes (Claude Code cloud, Codex cloud, itay) run the same three API calls as their first
-step (`gh api` or the GitHub MCP `create_branch`, which is create-ref) and stop on anything but 201
-or an owned 422. The work then goes on top of the reservation commit, so the PR's first commit is
-an empty marker commit; that is the visible cost of a remotely recoverable owner.
+#### C.2.2 Reservation: exclusive across lanes, owner recoverable, lineage enforced
 
-The GitHub write token is the plane user's (C.0), so `selectNext()` can reserve without a second
-credential.
+Every lane reserves with GitHub's create-ref API and requires **HTTP 201** (an ordinary `git push`
+is not create-if-absent):
 
-#### C.2.3 Launch gate — at provider launch, on every path
+1. Build a **reservation commit**. Its tree is the base commit's tree and its parent is the base.
+   The message is `aos-reservation item=<id> lane=<lane> reservation=<uuid>`, and author/committer
+   name, email and date are fixed from the intent. Its SHA is computed locally before any request,
+   so it is unique per reservation and deterministic across retries.
+2. Persist the intent (`reservation_id`, `item_id`, `reservation_sha`). Plane lanes write it to
+   SQLite; manual lanes put it in the prompt's first output.
+3. `POST /git/commits` (same content gives the same SHA), then `POST /git/refs` with
+   `sha=<reservation_sha>`.
+4. Outcomes:
+   - **201** → owned.
+   - **422** → `GET` the ref and walk its first-parent history to the root reservation commit. If
+     that commit is ours, owned; otherwise `external`, never re-run.
+   - **Timeout or 5xx** → re-read the ref. If it is absent, retry the create; if it is present,
+     apply the 422 rule.
 
-Revision 3 put the stop/window/host checks in `wake()`. Review 2 showed why that is not enough:
-reserved dispatches are resumed through `continueDispatch()` → `start()` at boot and on the sweep
-(`scheduler.ts:973`, `:1057`, `:835`) without re-entering `wake()`, so a reservation made before
-07:00, or recovered after a restore with the autopilot stopped, would still launch.
+**Lineage** (review 3, finding 6). The plane `git fetch`es `refs/heads/os/<id>` and creates the task
+worktree with `createTaskWorktree(..., { baseCommit: reservation_sha })` (`repo/git.ts:92–98`).
+The autopilot sets `baseCommit` explicitly and the composer's base is not used. Publication is
+refused unless `git merge-base --is-ancestor <reservation_sha> <verified_sha>` holds. The push is
+therefore a fast-forward of `os/<id>`, and the reservation commit always stays in the branch's
+history, which is what makes ownership recoverable after a restore.
 
-Revision 4 puts one check, `assertAutopilotLaunch(taskId, dispatchId)`, **immediately before the
-provider launch, beside `assertLaunchClaim`** in `startTask` (`orchestrator.ts:609`), and makes the
-composed parallel path refuse any autopilot task outright (`startComposedCandidates` never sees
-one; the autopilot never creates parallel tasks, and the refusal is defence in depth). It applies to
-every launch of an autopilot task: first start, `continueDispatch` recovery, K2 wake, K11
-continuation, failover, handoff and `/restart`. It checks, in one read transaction:
+Manual lanes run the same calls as their first step (`gh api`, or the GitHub MCP `create_branch`,
+which is create-ref) and stop on anything but 201 or an owned 422. The PR's first commit is the
+empty reservation commit.
 
-- autopilot `running`;
-- now ∈ an open window **and** `closes_at − now ≥ minSliceMs` (default 10 min);
-- the attempt's remaining runtime budget > 0 (§C.2.5);
-- the window allowance for this attempt is charged or chargeable (§C.2.5);
-- billing attestation present for the launching assistant (§D.2);
-- host gate (§C.2.6).
+#### C.2.3 Launch gate: early and final, with a typed refusal
 
-A refusal happens before any provider process exists. It ends the start through the existing
-"failed start / no candidate re-park" path (dispatch released, claim released, task re-parked with a
-`time` wait to the next window opening, or to `WAITING_INPUT` when stopped), so no new recovery
-path is introduced.
+Review 3 (finding 2) showed that a check beside `assertLaunchClaim` (`orchestrator.ts:609`) runs
+before several awaited steps: worktree creation (`:637`), identity resolution (`:656`), dispatch
+preparation (`:922`), Harness provisioning (`session-runner.ts:395`) and the provider-start queue
+(`:410`). State can change in that time. Revision 5 checks twice, with the same function
+`autopilotLaunchCheck(taskId, dispatchId, phase)`:
 
-#### C.2.4 Publication — exactly-once by identity, not by lease
+- **Early**, in `startTask` beside `assertLaunchClaim`, so a doomed start does no work.
+- **Final**, in `SessionRunner` immediately before `adapter.start()` and after the start queue has
+  been acquired, through a `beforeProviderStart` hook that the bridge passes in. This is the last
+  point before a provider process exists. A resume uses the same hook.
 
-The plane is a single process, so there is one publisher and the DB lease of revision 3 is dropped;
-it could not fence an outstanding GitHub request anyway (review 2, finding 6). Instead:
+Checks, in one read transaction:
 
-- **Identity.** A publication is (`repo`, head `os/<id>`, base branch, `verified_sha`,
-  `publication_id`). The PR body must carry `aos-publication: <publication_id>`. A PR is adopted
-  only if repo, head ref, head SHA, base branch and marker all match.
-- **Push** uses `--force-with-lease=os/<id>:<expected>` where `expected` is the reservation commit
-  or the last pushed SHA, so a moved branch fails atomically on GitHub's side.
-- **Uncertain requests.** After a timeout or unreadable response on a push or PR create, the
-  publisher issues **no further mutation** for that publication until a reconcile read finds the
-  effect (adopt) or finds it absent twice, at least `uncertainGraceMs` (default 2 min) apart.
-  Because the publisher is the only writer of `os/<id>` and of PRs carrying the marker, "absent
-  after grace" cannot be a request still in flight from another publisher.
-- **Re-check before each mutation**: autopilot not stopped, attempt still `publishing`, remote ref
-  at `expected`, no PR for the head in any state with another marker. Closed or merged → `closed`,
-  never reopened. Head changed → `conflict`.
-- **Auth failure** (401/403) → publication `failed`, autopilot `stopped` with reason `github-auth`.
-  429/5xx → backoff, bounded attempts, then `failed`.
+1. The attempt is non-final and owns this task (§C.2.1 invariant 3).
+2. The dispatch still holds its K4b claim.
+3. The autopilot is `running`.
+4. Now is inside an open window, with `closes_at − now ≥ minSliceMs` (10 min).
+5. The remaining attempt budget is greater than zero.
+6. The window charge is present or chargeable.
+7. The billing attestation is current (§D.2).
+8. The host gate passes (§C.2.6).
+9. Composition is verified (§C.2.10).
 
-#### C.2.5 Bounds — per attempt and per window, across continuations
+The final check also **recomputes the absolute deadline**:
+`deadline = min(now + budget − used, closes_at − graceMs)`. It is passed to the session and to the
+scope's `RuntimeMaxSec`. A replayed saved request never reuses its stored timeout
+(`orchestrator.ts:611–617`).
 
-Review 2 (finding 8) showed each Harness session gets its own fresh hard timeout
-(`control-plane-bridge.ts:128`, `session-runner.ts:354–357`), so failover, restart and K11
-continuation would each get a full allowance. Revision 4:
+The composed compare/race path (`startComposedCandidates` → `HarnessBridge.start`,
+`orchestrator.ts:2102`) refuses autopilot tasks outright, and the autopilot never creates parallel
+tasks. `/restart` reaches `startTask` through attach/run-now (`server.ts:874–875`), so both checks
+cover it.
 
-- **Attempt runtime budget.** `autopilot_attempts.runtime_budget_ms` (default 90 min) and
-  `runtime_used_ms`, updated at every session settlement from the session's start/end. Each new
-  session of an autopilot task gets
-  `maxRuntimeMs = min(workspace cap, budget − used, closes_at − now − graceMs)`, so a session
-  started at 06:50 is cut at 07:00 minus the grace, and continuations share one budget.
-- **Closing time with active work.** The per-session deadline above ends the active session at the
-  window's close; its attempt becomes `window_closed` (retryable, runtime used carried) and parks to
-  the next window. Nothing autopilot runs in the day.
-- **Window allowance.** The count is charged **at the first launch of an attempt in a window**, not
-  at task creation: a row `autopilot_window_charges(window_id, attempt_id)` is inserted by the
-  launch gate, unique per pair. A quota-parked attempt carried into tonight consumes one of
-  tonight's units when it launches; it never runs uncharged.
+**Typed refusal** (review 3, finding 5). Today a start exception before `start_attempted` leaves the
+dispatch reserved, and the sweep retries it (`scheduler.ts:886–891`). `repark()` (`:903`) also
+increments `autoWakes` and applies quota logic. A refusal is therefore the error type
+`AutopilotLaunchRefused { reason }`, where `reason` is one of `stopped`, `window_closed`,
+`budget_exhausted`, `billing_expired`, `host_busy`, `composition_unavailable` or `not_owner`. The
+scheduler catches that type before `start_attempted`, and a new `autopilotPark(dispatch, reason)`
+does in one transaction:
+
+- sets the dispatch phase to `reparked` and supersedes its execution request;
+- releases the K4b claim and keeps the task's pool requirement;
+- leaves `autoWakes` untouched;
+- inserts one wait chosen by the reason:
+
+| Reason | Wait |
+|---|---|
+| `window_closed`, `budget_exhausted` | `time` wait to the next opening; the attempt is `suspended` or `failed` |
+| `host_busy` | `time` wait of `hostRetryMs` (2 min) |
+| `stopped`, `billing_expired`, `composition_unavailable` | `WAITING_INPUT` with the reason as a blocker |
+| `not_owner` | the task is cancelled |
+
+A refusal at the final check comes after provisioning. The runner then disposes of the profile
+through the existing disposal path, and the attempt follows the same park.
+
+#### C.2.4 Publication: exactly-once by identity, and uncertainty stops
+
+Identity is `repo` + head `os/<id>` + base branch + `verified_sha` + `publication_id`. The PR body
+carries `aos-publication: <publication_id>`. A PR is adopted only if all five match.
+
+- **Push.** A fast-forward of `os/<id>` to `verified_sha`, sent with
+  `--force-with-lease=os/<id>:<expected>` so a moved branch fails on GitHub's side. An uncertain push
+  is safe to re-read and repeat: the lease and the ancestry rule make a second identical push a
+  no-op.
+- **PR create** (review 3, finding 1). If the response is a timeout, a 5xx or unreadable, the
+  publication moves to `publish_uncertain` and the publisher **never creates again on its own**.
+  Elapsed time is not taken as proof that the request did not happen. The sweep keeps reconciling.
+  If a PR with our marker appears, it is adopted and the publication becomes `published`. If none
+  appears, it stays uncertain until itay resolves it (`/api/autopilot/publications/:id/resolve`,
+  needs `autopilot.operate`) with `retry` or `abandon`. The loop is held in the meantime
+  (invariant 1). A delayed create that lands after a resolution is matched by its marker and
+  recorded as a duplicate for itay. This is reported, never deleted.
+- **Re-check before each mutation.** The autopilot is not stopped, the publication is still
+  `publishing`, the remote ref is at `expected`, and no PR exists for the head in any state.
+  Closed or merged gives `closed`. Head changed, wrong base or a foreign marker gives `conflict`.
+- **Auth failure** (401/403) fails the publication and stops the autopilot with reason
+  `github-auth`. 429 and 5xx on reads get a bounded backoff.
+- **Old processes.** There is one plane process per host. A revived old host is fenced by token
+  rotation (§C.5), not by a lease.
+
+#### C.2.5 Bounds per attempt and per window, enforced outside the plane too
+
+- **Attempt runtime budget.** `runtime_budget_ms` defaults to 90 min and covers provider sessions
+  **and** acceptance. Each new session or acceptance run gets the deadline from §C.2.3.
+- **Enforced by systemd, not only by the plane** (review 3, finding 3). The Harness hard deadline
+  is a plane heartbeat (`session-runner.ts:398–407`) and dies with the plane. So:
+  - every scope is started with `RuntimeMaxSec=` set to that deadline, and systemd kills the whole
+    scope when it passes;
+  - a timer in `aos-agent`'s user manager fires at each window's `closes_at` and runs
+    `systemctl --user stop 'aos-run-*.scope'`, followed by a check that the slice is empty;
+  - both work with the plane dead.
+
+  That `RuntimeMaxSec=` applies to transient scopes on OCI's systemd version is UNVERIFIED, and the
+  P0-A spike checks it. The close timer stays even if it holds.
+- **Closing time with active work.** The session is cut by both mechanisms and the attempt becomes
+  `suspended` (§C.2.1). A suspended attempt is resumed in the next window and charged again there.
+  Nothing autopilot runs in the day.
+- **Window allowance.** `autopilot_window_charges(window_id, attempt_id)` is unique and inserted at
+  the first launch of an attempt in a window, so a carried attempt always pays tonight.
 - K2's `maxAutoWakes` and the per-item attempt limit remain.
 
 #### C.2.6 Host gate
 
-Per `scheduler.admission.<pool>` (numeric `scheduler.resources` unchanged): load, free memory,
-free disk, and **no live agent process**. With C.0, every provider and acceptance process runs in
-an `aos-run-*` scope under `aos-agent`'s user manager. The check reads the `populated` field of
-`cgroup.events` for `aos-agent`'s `app.slice` — the kernel's recursive "any process in this
-subtree" signal, covering nested cgroups — rather than a `cgroup.procs` census, which revision 3
-wrongly called descendant-complete and PID-reuse-proof. A process that moves itself elsewhere inside
-`aos-agent`'s delegated tree is still in that user's slice, so the gate reads the whole
-`user-<uid>.slice` minus the user manager's own `init.scope`. Unreadable → not admitted.
+Per `scheduler.admission.<pool>` (numeric `scheduler.resources` unchanged), the gate checks load,
+free memory, free disk, and `populated` in `cgroup.events` for `aos-agent`'s whole
+`user-<uid>.slice` minus `init.scope`. The `populated` flag is recursive, so it covers nested
+cgroups. Unreadable means not admitted. This is **observation**: enforcement is the systemd bounds
+in §C.2.5.
 
-#### C.2.7 Acceptance — on an immutable tree, with its own lifecycle
+#### C.2.7 Acceptance: trusted commands on a fresh snapshot, offline, replay-safe
 
-At `settled`, after the launch scope of the run is empty (§C.2.6), the plane:
+Review 3 (finding 11) showed that a writable checkout checked for cleanliness afterwards is not
+immutable, and that blind replay can repeat side effects. Revision 5:
 
-1. commits the worktree with `commitCheckpoint` (`repo/git.ts:132–144`) → `sha`;
-2. creates a **fresh detached checkout** of `sha` in a separate directory (`git worktree add
-   --detach`), owned by group `aos`, so no late writer in the task worktree can affect it;
-3. inserts `acceptance_runs(attempt_id, run_no, sha, state=running)` and runs the item's explicit
-   commands there as `aos-agent` in their own scope, each with a timeout;
-4. records `{ command, exit, duration }` per command and the run as `passed | failed | blocked`;
-5. verifies after the run that the checkout's `HEAD` is still `sha` and the tree is clean; otherwise
-   `blocked`.
+1. **Trusted command source.** Commands come from the item's `acceptance` in the backlog at
+   `origin/main` (merged, reviewed), never from the worktree. Each command declares `replaySafe`.
+   The default is `false`; `typecheck`, `lint` and `test` targets with no network are marked `true`
+   in the backlog.
+2. At `settled`, after the run's scope is empty, the plane commits with `commitCheckpoint`
+   (`repo/git.ts:132–144`) to get `sha`, then checks lineage (§C.2.2).
+3. **Fresh snapshot per run.** `git worktree add --detach` of `sha` into a new directory for every
+   `run_no`, never reused. Tracked files are made read-only for `aos-agent` (owner plane user, group
+   `aos`, mode 0440 or 0550). Writable output goes to an explicitly listed set of paths
+   (`node_modules/.cache`, `dist`, `coverage`, temp), declared in the backlog.
+4. **Offline.** The run's scope has no network (§C.0 egress rule; dependencies come from the
+   store the plane prepared before the run), so its effects stay on the box.
+5. Capped by the attempt budget and the window (§C.2.3 deadline), with a per-command timeout.
+6. Before and after the run, the plane hashes the tracked tree (`git ls-files -s` plus content
+   hashes). If anything differs, the run is `blocked`.
+7. **Crash mid-run.** If every command of the run is `replaySafe`, a new `run_no` on a new
+   snapshot is allowed. Otherwise the attempt is `blocked`, and the effects that are not known are
+   listed for itay.
 
-An empty command list, a skipped discovery or a missing item `acceptance` is `blocked`, never
-`passed`. A crash mid-run leaves `running` with no live scope → discarded, new `run_no`. Success
-before the publication insert is recovered by the `accepted` rule in §C.2.1.
+An empty command list, a missing `acceptance` or a failed lineage check is `blocked`, never
+`passed`.
 
 #### C.2.8 Approvals in unattended runs
 
-The existing path delivers a denial to the provider and returns the session to `RUNNING`
-(`session-runner.ts:1507–1532`); expiry cancels the session (`:1498–1501`). Neither ends an
-autopilot attempt by itself. Autopilot policy: on any approval answer `denied` for an autopilot
-task, the autopilot requests cancellation through the existing cancel path and records the attempt
-`blocked` (non-retryable); a session cancelled by approval expiry is recorded the same way. The
-task's state machine is unchanged; only the attempt outcome is autopilot's.
+A denial today returns the session to `RUNNING` (`session-runner.ts:1507–1532`), and expiry cancels
+it (`:1498–1501`). For an autopilot task, a `denied` answer or an expiry does three things in one
+transaction:
+
+- marks the attempt `blocked` (non-retryable);
+- cancels the task's waits and dispatches, so no later launch can pass invariant 3;
+- requests cancellation of the session through the existing cancel path, which stops the scope.
+
+#### C.2.9 Stop semantics per phase
+
+`stop drain` admits nothing new and lets the current phase finish. `stop now` acts as follows:
+
+| Phase | `stop now` |
+|---|---|
+| `reserving` | finish or abandon the create per §C.2.2; never leave an unknown intent |
+| `admitted` | typed park `stopped` |
+| `running` | cancel the session and stop the scope; attempt `cancelled` |
+| `accepting` | stop the acceptance scope; run `blocked`; attempt `cancelled` |
+| `publishing` | no new mutation. An already-issued request is listed as **unresolved, not undone**, and is reconciled when started again |
+| `publish_uncertain` | unchanged; still waits for itay |
+
+#### C.2.10 Composition is a launch prerequisite
+
+`composer.requireRevision` defaults to `false` (`config.ts:786`), and a dispatch whose composition
+fails is downgraded to `route_only` (`composer/service.ts:302–338`, `orchestrator.ts:891–893`).
+That would silently change the promised composed run (review 3, finding 10). For autopilot tasks:
+
+- `execution.harnessModes.single = true` and `composer.requireRevision = true` are **checked at
+  autopilot start**, and the start is refused with the setting named;
+- the launch check refuses `composition_unavailable` when the dispatch's composition outcome is not
+  a verified bundle revision;
+- Cockpit's bundle service is a named dependency. While it is down, autopilot tasks park in
+  `WAITING_INPUT` with that blocker, and zero providers start.
 
 ### C.3 Backlog and progress
 
@@ -510,6 +689,10 @@ finding 12): its stale-tick flag lived in a report produced on the same box.
   from the docs, restore the latest off-host copy, log in as `aos-agent`, run the reconciliation, and
   compare its report with GitHub. The drill's time to a startable plane is recorded as the recovery
   time.
+- **Old-host fencing.** A restore onto a replacement host **rotates** the GitHub token and the
+  `autopilot.operate` secret before the new plane starts, and revokes the old ones. If the old host
+  comes back, its pushes and PR calls fail with 401, and that stops its autopilot (§C.2.4). Its
+  `aos-agent` scopes are still bounded by `RuntimeMaxSec` and the close timer (§C.2.5).
 - **Other outages:** GitHub auth failure stops the autopilot (§C.2.4). Disk below
   `minFreeDiskMb` closes the host gate. A token revocation needs a new token file and a start with
   `autopilot.operate`.
@@ -519,7 +702,7 @@ finding 12): its stale-tick flag lived in a report produced on the same box.
 Design kept for later (finding 13): deterministic daily job, fingerprinted findings ledger, hard
 budget, at most three findings, read-only, presented in Cockpit. `jobs.ts` is an in-process timer
 without durable occurrence catch-up (`jobs.ts:25`), which is acceptable for an advisory scan whose
-next run reads "changes since the last cursor". Starts only after G0–G18 pass and only with a
+next run reads "changes since the last cursor". Starts only after G0–G29 pass and only with a
 stated need.
 
 ### C.7 Provider manifest — deferred
@@ -541,7 +724,7 @@ loading of third-party code.
 | Typed decisions | via `ModelDecisionProvider` (Haiku) | not wired | no | yes (M16) | — |
 | External model intelligence | no | no | yes (K8) | no | — |
 | Unattended execution | yes on OCI via the plane | yes on OCI via the plane | daily refresh job | offline jobs | systemd |
-| Resume / checkpoints | plane checkpoints + K11 (fake-only proof); provider resume deferred (#7) | same; app-server input on a spike | n/a | n/a | — |
+| Resume / checkpoints | plane checkpoints + K11 (fake-only proof); provider resume deferred (#7) | same; app-server session input shipped opt-in (§B.4) | n/a | n/a | — |
 | Auth verified | subscription login on OCI (live) | subscription login on OCI (live) | API key on OCI | OpenRouter key (measured 2026-10-04) | — |
 | Observable quota / cost | K3 probe (Claude OAuth usage endpoint); counted usage on results | counted usage; rate-limit RPC unimplemented | n/a | `usage` tokens, $ per 1k | CPU/mem (P0-3) |
 | Where it runs | local, OCI | local, OCI | API | API | — |
@@ -751,87 +934,119 @@ Doctor view (deferred, §C.6).
 
 ---
 
-## F. Prioritised roadmap
+## F. Staged rollout
 
-Complexity: S ≈ half a day, M ≈ 1–2 days, L ≈ 3+ days of one session. Every slice: own worktree,
-named files, gate `pnpm typecheck && pnpm lint && pnpm test` (plane) or `npm test && npm run build`
-(Cockpit), a drive where it executes, one verdict, PR to main, never merged by an agent.
+Every slice has its own worktree and named files. The gate is `pnpm typecheck && pnpm lint &&
+pnpm test` (plane) or `npm test && npm run build` (Cockpit), plus a drive where the slice
+executes, one verdict, and a PR to main that no agent merges. Complexity: S ≈ half a day,
+M ≈ 1–2 days, L ≈ 3+ days. Each stage starts only when the previous stage's exit criterion is
+met, and it is reviewed **on its implementation PRs** (§0).
 
-### P0 — a bounded, recoverable autonomous loop, Claude only
+### Stage 1 — Close the architecture review (this PR)
 
-| Slice | What | Files | Model / effort | Acceptance (tests unless marked drive) | Size |
+Revision 5 answers review 3 and applies the freeze gate in §0. **Exit:** no open verified blocker,
+every high either resolved in the plan with a G-test or explicitly risk-accepted, and itay merges
+#163.
+
+### Stage 2 — P0-A: isolation spike on OCI, Claude only
+
+| Slice | What | Files | Model / effort | Acceptance | Size |
 |---|---|---|---|---|---|
-| P0-0 | This plan; Codex re-review of revision 4 | docs | itay runs the brief | findings recorded in §I | S |
-| P0-A | **User separation, spike then slice.** Spike on OCI: Claude Agent SDK launched through `run-as-agent` inside a `systemd-run --user --scope` as `aos-agent`, with a login owned by `aos-agent`; observe start, streaming, cancel (scope stop), exit code and usage. Then: the wrapper, the sudoers rule, the worktree group layout, the adapter's executable-path setting, and the `autopilot.operate` capability (hash in config, secret with itay) | `setup/run-as-agent`, `setup/sudoers.d/aos`, adapter config in `packages/adapters/src/claude.ts`, `auth/**`, `server.ts` (capability on the autopilot routes) | spike: OCI, Claude Code / Sonnet 5.5 medium; slice: Opus 5.5 / high | drive: the spike's run completes and cancels; tests + drive: a process as `aos-agent` cannot read the plane's credential file, DB or token, cannot call `/api/autopilot/start` with the ordinary credential, and cannot write autopilot tables | M (spike S) |
-| P0-1 | OCI config only: `scheduler.resources: { oci-heavy: 1 }`; confirm `execution.harnessModes.single`, composer settings; plane runs as its systemd unit | live config | OCI, Codex / low | `GET /api/scheduler/status` lists the pool; config backed up | S |
-| P0-2 | **Autopilot core + launch gate:** migration 042 (`autopilot_state`, `autopilot_windows`, `autopilot_window_charges`, `autopilot_attempts` with the §C.2.1 states and runtime budget, `billing_attestations`), stop/start/release routes (start and release need `autopilot.operate`), `assertAutopilotLaunch` beside `assertLaunchClaim` in `startTask`, composed-parallel refusal, per-session `maxRuntimeMs` from the attempt budget and the window close, approval denial/expiry → cancel + `blocked` | new `modules/autopilot.ts`, `orchestrator.ts` (gate call, parallel refusal), `harness/control-plane-bridge.ts` (runtime input), `session-runner.ts` (approval hook), `server.ts`, `config.ts`, migration lists in `db.test.ts`/`task-classifier.test.ts` | Opus 5.5 / high | default stopped; a reserved dispatch recovered by `continueDispatch` after 07:00 or while stopped is refused before any adapter call; continuation and failover share the budget; a session started 06:50 ends by 07:00 − grace; a carried attempt is charged at tonight's first launch; 4th charge in a window refused; denied approval with a provider that continues → attempt `blocked`, session cancelled; expiry → `blocked`; stop survives restart | L |
-| P0-3 | **Host gate:** `scheduler.admission.<pool>` (`maxLoad1`, `minFreeMemMb`, `minFreeDiskMb`, slice `populated`), called from the launch gate | new `modules/host-admission.ts`, `config.ts` | Opus 5.5 / high | a live process in `aos-agent`'s slice blocks the next launch; a process that moved to another cgroup in that slice still blocks; unreadable `cgroup.events` → refused with reason; existing `resource-slots.test.ts` unchanged and green | M |
-| P0-4 | **Acceptance on an immutable tree:** `acceptance_runs`, detached checkout of the checkpoint SHA, commands as `aos-agent` with timeouts, HEAD/clean check, recovery of `accepting` | new `modules/acceptance-run.ts`, migration 042 | Opus 5.5 / high | empty plan / skipped discovery → `blocked`; crash before, mid-command and after success before the publication insert each recover per §C.2.1; a writer touching the task worktree during the run does not change the result; result SHA = checkpoint SHA | M |
-| P0-5 | **Publications by identity:** migration 043, force-with-lease push, PR create with the marker, the uncertain-request rule, re-check before each mutation, in the plane process | new `modules/publications.ts` | Opus 5.5 / high | fake-GitHub tests: push response delayed past the grace then landing; PR create landing after a timeout; stale lookup result; old process revived after restart; stop / close / merge / head change between lookup and mutation; wrong base or missing marker → not adopted; 401/403 stops the autopilot; retry never re-runs the provider | L |
-| P0-6 | **`selectNext()` + reservation:** backlog fetch and validation, intent row, reservation commit, create-ref with the four outcomes, attempt + task in one transaction, triggers (attempt final, boot, sweep) | `modules/autopilot.ts`, `docs/progress/backlog.schema.json`, `scripts/backlog-check.mjs`, `docs/progress/manual-lane-reserve.md` | Opus 5.5 / high | fake GitHub: two plane retries of one intent → one owner; lost 201 → owned via 422; another lane's ref at the same base → external; manual-vs-plane at the same base SHA → exactly one 201; 3 items from an **empty** queue in one window, the 4th refused; no second attempt while one is `accepting` or `publishing` | M |
-| P0-7 | **Restore, heartbeat, backup:** `restored_at` marker, fail-closed boot, reconciliation report, start refused until read; external heartbeat (D-14); nightly encrypted off-host copy (D-11); replacement-host drill runbook | `modules/autopilot.ts`, `scripts/backup.sh`, `docs/runbooks/autopilot-restore.md` | Sonnet 5.5 / high | stale restore after a push and a PR → refs and PR reattached or external, nothing re-run; current window treated as exhausted; lost worktree → attempt `blocked`; missed heartbeat simulated → alert received | M |
-| P0-8 | K3 probe egress: production endpoint fixed to the Anthropic host, `redirect: "error"`, transport injection for tests | `quota-probe.ts`, its test | Sonnet 5.5 / high | a configured foreign endpoint is refused at load; a redirect is not followed | S |
-| P0-9 | `docs/progress/backlog.yaml` audited from both repos (incl. vNext 1–9 status), every `oci-loop` item with acceptance commands | `docs/progress/**` | Sonnet 5.5 / high | `backlog-check` passes | M |
-| P0-10 | **Minimum morning report** (moved up from P1 because an unattended night needs a readout): per attempt outcome, runtime used, tokens and overshoot, charges, stop reason, heartbeat gaps, billing attestation age; a plain-text endpoint and a file under the plane's data dir | `modules/autopilot.ts` (read route), `scripts/morning-report.mjs` | Sonnet 5.5 / high | numbers reproduce from the DB and GitHub | S |
-| P0-11 | Live proof G0–G18 on OCI | none (drives + evidence) | OCI, Claude Code / Sonnet 5.5 medium, one experiment per session | §G | M |
+| P0-A1 | **Spike** (throwaway branch, OCI): `aos-agent`, linger, the wrapper, `systemd-run --user --scope` with `RuntimeMaxSec`, the nftables `skuid` rules, profile dir `/var/lib/aos/profiles`. Run one **composed** Claude session with a real selected skill and one MCP server through the plane. Observe startup evidence, streaming, cancel (scope stop), the `RuntimeMaxSec` kill, profile disposal and restart recovery | spike notes only | OCI, Claude Code / Sonnet 5.5 medium | drive: G26, and G0 plus G21 run by hand | S–M |
+| P0-A2 | **Slice:** the wrapper, sudoers rule, worktree and profile group layout, adapter executable path, the policy that disables `CommandVerifier` for autopilot tasks, the spawn inventory and its fixes, the nftables unit, and `autopilot.operate` (hash in config, secret with itay) | `setup/run-as-agent`, `setup/sudoers.d/aos`, `setup/aos-agent-net.nft`, `packages/adapters/src/claude.ts`, `harness/composition.ts` (profile root), `harness/verification-providers.ts` (policy), `auth/**`, `server.ts` | Opus 5.5 / high | tests + drive: G0, G21, G26 | M |
 
-Order and parallel safety: P0-A first (it decides whether the design stands). P0-2 next; P0-3, P0-4
-and P0-5 touch disjoint files after it and can run in parallel. P0-8 and P0-9 run beside anything.
-P0-6 follows P0-2 and P0-5. P0-7 and P0-10 follow P0-6. P0-1 runs on OCI any time.
+**Exit: a real run plus proven secret isolation.** G0, G21 and G26 pass on OCI. If the spike fails,
+the plan stops here and goes back to itay.
 
-### P1 — Codex lane, visibility and intelligence
+### Stage 3 — The first autonomous loop: one task to a draft PR
 
-| Slice | What | Model / effort | Gate |
-|---|---|---|---|
-| P1-0 | **Codex joins the autopilot**, first as the **quota fallback** itay asked for (D-13): when an attempt's Claude run is re-parked by K2 on a plan limit and Codex has no quota blocker, the next launch of that attempt routes to Codex inside the same attempt budget and window charge, as a fresh-prompt start from the checkpoint (the existing failover path, `failover.test.ts`). Preconditions: its own P0-A spike under `aos-agent`; drives of auth (per D-2), approval relay (today `approvalRelay: false`, so autopilot Codex runs use a policy that needs no relayed approval), cancel, usage and window cut. Codex extra usage stays off too | Opus 5.5 / high, then OCI | G2–G9 repeated with Codex; a fake Claude limit mid-attempt → the attempt finishes on Codex with one charge and one budget |
-| P1-1 | AA map grounding (O12 phase 2 ids → `AA_MODEL_MAP`; OpenAI rows) | OCI read (Codex / low), then cloud Opus 5.5 / high | `mapped > 0` on the next live refresh |
-| P1-2 | Full daily report as a projection (backlog + GitHub REST + plane reads), % of estimated scope points | Sonnet 5.5 / high | numbers reproduce from sources |
-| P1-3 | `aos` CLI-1 read-only (`ps`, `logs`, `attach`, `quota`, `models`, `autopilot status`) | Opus 5.5 / high | drive against `pnpm dev` |
-| P1-4 | `aos` CLI-2/3: create with preview (with a `clientRequestId` for the CLI's own retries), stream, approvals, `autopilot stop` (start only with `autopilot.operate`) | Opus 5.5 / high | idempotent create |
-| P1-5 | Effort- and assistant-aware cohorts (`telemetry.ts` `modelCohorts`), `unknown` preserved | Opus 5.5 / high | identity-specific tests |
-| P1-6 | Scorecard corpus + baseline workspace + night runs as autopilot items | Sonnet 5.5 / high, then OCI | promoted scorecard |
-| P1-7 | Phase 8 close (readiness §4) with cohort runs as autopilot items | OCI + docs | close record |
-| P1-8 | Jev shadow site #1 (task classification) with calibration and a pre-stated pass bar | Opus 5.5 / high | D-7 |
-| P1-9 | AI Doctor D0, only with a stated need after G passes | Opus 5.5 / high | ≤ 3 findings, duplicate rate 0 on a replayed week |
+| Slice | What | Files | Model / effort | Acceptance | Size |
+|---|---|---|---|---|---|
+| P0-1 | OCI config: `scheduler.resources: { oci-heavy: 1 }`, `execution.harnessModes.single: true`, `composer.requireRevision: true` | live config | OCI, Codex / low | `GET /api/scheduler/status` lists the pool; autopilot start refuses without either setting (G27) | S |
+| P0-2 | **Autopilot core.** Migration 042: state, windows, charges, attempts with the §C.2.1 table and constraints, `autopilot_runtime`, billing attestations. Plus: routes (start, release and resolve need `autopilot.operate`), early and final launch checks, the typed refusal and `autopilotPark`, composed-parallel refusal, the deadline passed to the session and the scope, approval deny/expiry handling, and the composition prerequisite | new `modules/autopilot.ts`; `orchestrator.ts` (early check, parallel refusal); `scheduler.ts` (refusal catch, `autopilotPark`); `harness/session-runner.ts` (`beforeProviderStart` hook, approval hook); `harness/control-plane-bridge.ts`; `server.ts`; `config.ts`; migration lists | Opus 5.5 / high | G2, G4, G5, G6, G7, G9, G19, G22, G24, G27 as tests with fake providers | L |
+| P0-3 | Host gate (observation) and the close timer unit in `aos-agent`'s user manager | new `modules/host-admission.ts`, `setup/aos-close.timer` | Opus 5.5 / high | G8, G20 | M |
+| P0-4 | **Acceptance:** trusted commands from `origin/main`, a fresh read-only snapshot per run, offline, capped, tree hash before and after, replay-safe rule | new `modules/acceptance-run.ts`, migration 042 | Opus 5.5 / high | G10, G25, G28 | M |
+| P0-5 | **Publications:** migration 043, fast-forward push with lease, PR create with the marker, `publish_uncertain` and operator resolve, re-check before each mutation | new `modules/publications.ts` | Opus 5.5 / high | G12, G13, G29 on fake GitHub | L |
+| P0-6 | **`selectNext()` + reservation:** intent, reservation commit, create-ref outcomes, fetch and base on the reservation SHA, the ancestry rule, attempt + task in one transaction, the triggers | `modules/autopilot.ts`, `docs/progress/backlog.schema.json`, `scripts/backlog-check.mjs`, `docs/progress/manual-lane-reserve.md` | Opus 5.5 / high | G11, G23 | M |
+| P0-8 | K3 egress: fixed Anthropic endpoint, `redirect: "error"`; K3 stays off for the autopilot lane (§C.0) | `quota-probe.ts` | Sonnet 5.5 / high | a foreign endpoint is refused at load; a redirect is not followed | S |
+| P0-9 | `docs/progress/backlog.yaml` audited from both repos; every `oci-loop` item has acceptance commands with `replaySafe` and writable paths | `docs/progress/**` | Sonnet 5.5 / high | `backlog-check` passes | M |
+| P0-10 | Minimum morning report: outcomes, runtime, tokens and overshoot, charges, stop reason, unresolved remote effects, heartbeat gaps, attestation age | `modules/autopilot.ts`, `scripts/morning-report.mjs` | Sonnet 5.5 / high | numbers reproduce from the DB and GitHub | S |
 
-### P2 — integrated product
+Order: P0-2 first. P0-3, P0-4, P0-5, P0-8 and P0-9 touch disjoint files and can run in parallel
+after it. P0-6 follows P0-2 and P0-5, and P0-10 follows P0-6.
 
-U1–U5 (shell hierarchy), Cockpit 3D graph / retro / radar, remote-auth stage 2 then a Vercel UI
-(after the cloud note's four answers), vNext 10–13, K13 activation (after a week of shadow log
-and itay's review), the provider manifest and a remote worker contract (each only on demonstrated
-need).
+**Exit:** G15 on the real repo — one task goes to its tests and then to a draft PR with no human
+step in between — followed by G3, G12 and G29 (crash, restart, cancel, and GitHub calls whose
+outcome is unknown).
+
+### Stage 4 — Reliability proof
+
+P0-7: restore reconciliation, fail-closed boot, external heartbeat (D-14), off-host backup (D-11),
+the replacement-host drill with token rotation (§C.5), and the runbook. Then all of G0–G29,
+including G16 (a three-task night), G14 and G18. **Exit:** every G row passes. Only then is the
+nightly window enabled as a standing schedule, within D-4/D-5.
+
+### Stage 5 — Make it an Agentic OS
+
+| Slice | What | Gate |
+|---|---|---|
+| P1-0 | Codex joins as the quota fallback (D-13, D-2): its own P0-A spike under `aos-agent` with ChatGPT sign-in; drives of approvals (`approvalRelay: false`, so autopilot Codex runs use a policy that needs none), cancel, usage, scope kill and window cut | G2–G9 repeated with Codex; a fake Claude limit mid-attempt → the attempt finishes on Codex with one charge and one budget |
+| P1-3/4 | `aos` CLI, read-only first, then create/stream/approve/stop; a chat-first daily workflow in the shell | drive against `pnpm dev` |
+| P1-6/7 | Scorecard runs (OS vs solo) as autopilot items; Phase 8 close | promoted scorecard |
+| P1-1 | AA map grounding for routing | `mapped > 0` |
+| P1-5 | Effort- and assistant-aware cohorts; effort chosen per task by profile | identity-specific tests |
+| P1-8 | Jev shadow site for cheap decisions | D-7 |
+| P1-2 | Full daily report with % of estimated scope | reproduces from sources |
+
+### Stage 6 — AI Doctor and continuous improvement
+
+P1-9 AI Doctor D0 (§C.6), started once there is enough real data. Then the UI hierarchy, Cockpit
+as an installed app (graph, retro, radar), more providers, remote-auth stage 2 and Vercel, vNext
+10–13, K13 activation, and the provider manifest, each on demonstrated need.
 
 ---
 
-## G. Live proof plan (OCI, after P0-A…P0-10 merge)
+## G. Live proof plan (OCI)
 
-One experiment per session, load < 1.5 before each, backup first. Fake assistant first
-(`FAKE-*-not-real` for any secret), then real Claude where marked. A fake GitHub is used for
-G10–G13; G15 uses the real repo with a draft PR.
+One experiment per session, load < 1.5 before each, backup first. Run with the fake assistant
+first (`FAKE-*-not-real` for any secret), then with real Claude where marked. A fake GitHub is used
+for G10–G13 and G29; G15 uses the real repo with a draft PR. Each row names the fix it proves
+(§0.2 disposition).
 
 | # | Experiment | Pass |
 |---|---|---|
-| G0 | Isolation: from inside a run as `aos-agent`, try to read the credential file, DB and GitHub token; call `/api/autopilot/start` and `/release` with the ordinary credential; write an autopilot table | every attempt refused; autopilot state unchanged |
-| G1 | 3 autopilot items from an **empty** task queue in one window; a 4th eligible | 3 launched serially, 4th refused with reason "window count" |
-| G2 | Resource-bearing autopilot task against `/start`, compare and race (legacy and composed), replay, `/restart`, handoff, failover, K11 continuation | no provider start without both gates; parallel refused; refusals recorded |
-| G3 | `kill -9` the plane with an attempt in each of `reserving`, `admitted` (reserved dispatch), `accepting`, `publishing`; restart | each recovers per §C.2.1; no second provider start; charges unchanged |
-| G4 | Recovered reservation after 07:00, and with the autopilot stopped | refused before any adapter call; task re-parked |
-| G5 | Delayed composition crossing the close: launch at 06:50 | session ends by 07:00 − grace; attempt `window_closed`; nothing runs at 07:05 |
-| G6 | Continuation and failover inside one attempt | total runtime ≤ the attempt budget |
+| G0 | Isolation, provider path: from a provider tool as `aos-agent`, try to read the credential file, DB, GitHub token and plane config; call `/api/autopilot/start`, `/release` and `/resolve` with the ordinary credential; write an autopilot table | every attempt refused; autopilot state unchanged |
+| G1 | 3 autopilot items from an **empty** task queue in one window; a 4th eligible | 3 launched serially, 4th refused "window count" |
+| G2 | Resource-bearing autopilot task via `/start`, compare and race (legacy and composed), replay, `/restart`, handoff, failover, K11 continuation | no provider start without both checks; composed parallel refused; refusals typed |
+| G3 | `kill -9` the plane with an attempt in each of `reserving`, `admitted`, **`running`**, `accepting`, `publishing`, `publish_uncertain`; restart | each recovers per §C.2.1; no second provider start; charges and runtime rows unchanged; the `running` case: scope still bounded by `RuntimeMaxSec`, attempt reconciled |
+| G4 | Recovered reservation after 07:00, and with the autopilot stopped | refused before any adapter call; typed park |
+| G5 | Launch at 06:50 | session ends by 07:00 − grace; attempt `suspended`; nothing runs at 07:05; resumed and charged next window |
+| G6 | Continuation and failover inside one attempt | total runtime ≤ attempt budget |
 | G7 | Yesterday's quota-parked attempt woken tonight | charged once tonight at launch |
-| G8 | Host: child kept alive after settlement; a process moved to another cgroup in the slice; unreadable `cgroup.events`; disk below the floor | next launch refused in all four, reason shown |
-| G9 | Approval pause; denial with a provider that continues; expiry | slot held while paused; deny and expiry → session cancelled, attempt `blocked` |
-| G10 | Acceptance: empty plan, skipped discovery, FAIL, PASS, crash mid-command, writer touching the task worktree during the run | blocked, blocked, failed, PASS with the checkpoint SHA, re-run with a new `run_no`, result unaffected |
+| G8 | Host: child alive after settlement; a process moved to another cgroup in the slice; unreadable `cgroup.events`; disk below the floor | next launch refused in all four, reason `host_busy` |
+| G9 | Approval pause; denial with a provider that continues; expiry | slot held while paused; deny and expiry → session cancelled, attempt `blocked`, no later launch |
+| G10 | Acceptance: empty plan, missing `acceptance`, FAIL, PASS, crash mid-command (replay-safe), writer touching the task worktree during the run | blocked, blocked, failed, PASS with the checkpoint SHA, new `run_no` on a new snapshot, result unaffected |
 | G11 | Reservation on fake GitHub: retry of one intent, lost 201, another lane at the same base, manual vs plane race | one owner, owned, external, exactly one 201 |
-| G12 | Publication on fake GitHub: delayed push past the grace, PR create landing after timeout, stale lookup, revived old process, 401 | exactly one PR; no duplicate mutation; 401 stops the autopilot |
-| G13 | Closed PR; merged PR; branch moved; head changed; PR on the wrong base or without the marker | stop / stop / conflict / conflict / not adopted |
+| G12 | Publication on fake GitHub: delayed push response, stale lookup, 401 | push repeated as a no-op; no duplicate mutation; 401 stops the autopilot |
+| G13 | Closed PR; merged PR; branch moved; head changed; wrong base; missing marker | closed / closed / conflict / conflict / not adopted / not adopted |
 | G14 | Stale restore after a push and a PR; a deleted worktree | boots stopped, window exhausted, refs and PR reattached, worktree attempt blocked, start refused until the report is read |
-| G15 | Real Claude: one item end to end on the real repo, draft PR | one draft PR with the marker and the verdict in the body |
+| G15 | Real Claude: one item end to end on the real repo | one draft PR with the marker and verdict, no human step |
 | G16 | Real night: 3 items queued at 22:50 | morning report: 3 outcomes, runtime, overshoot, any K2 re-park, stop reason none |
-| G17 | Heartbeat: stop the plane for 20 min inside a window | external alert received |
-| G18 | Replacement-host restore drill | fresh VM reaches a startable plane; report matches GitHub; recovery time recorded |
+| G17 | Heartbeat: plane stopped for 20 min inside a window | external alert received |
+| G18 | Replacement-host restore drill | fresh VM startable; report matches GitHub; recovery time recorded; old host's token revoked (its push gets 401) |
+| G19 | Final check: flip stop, close the window and make the host busy **during provisioning** and while queued for a start slot; replay a previously materialised request | refused at `beforeProviderStart`; profile disposed; replay gets a recomputed deadline |
+| G20 | **Kill the plane during a real running session at 06:55** and leave it dead | the scope is killed by `RuntimeMaxSec` or the close timer by 07:00; `aos-agent`'s slice is empty afterwards (`populated 0`) |
+| G21 | Isolation, repository path: a modified project test and acceptance command that try to read plane files, call the plane API and Cockpit HTTP/WebSocket/PTY on loopback, and reach the network | native verifier never runs for the autopilot task; every access refused; acceptance has no network |
+| G22 | Each refusal reason on repeated sweeps | no claim leak (pool count back to free); `autoWakes` unchanged; correct wait per reason |
+| G23 | Lineage: stale local HEAD; verified SHA that does not descend from the reservation; restore after publication | task based on the reservation SHA; publication refused; ownership recovered from history |
+| G24 | Lifecycle: two concurrent reconciliations; crash between create-ref and task insert; attempt made final while its task still has a wait | one attempt, one task; `reserving` recovered; no launch of the final attempt's task |
+| G25 | Stop: `stop now` during a run, during acceptance; acceptance that would cross the close | scope stopped, attempt `cancelled`; acceptance not started (attempt `suspended`) or cut at the deadline |
+| G26 | Composed Claude session as `aos-agent` with a real skill and MCP server from `/var/lib/aos/profiles`; dispose; restart recovery | startup evidence shows the skill and MCP loaded; profile removed; recovery as today |
+| G27 | Cockpit bundle service down; `requireRevision` false at start | zero provider starts, blocker `composition_unavailable`; start refused naming the setting |
+| G28 | Acceptance replay: crash during a non-replay-safe command; a command that modifies the snapshot and restores it | attempt `blocked` with the unknown effect listed; tree-hash mismatch → `blocked` |
+| G29 | Uncertain PR create: response lost while the create lands later; response lost while the create never lands; a delayed create that lands after itay resolved `retry` | adopted by marker, no second create; `publish_uncertain` until itay resolves; duplicate reported, not deleted |
 
-Overall verdict PASS only when all nineteen pass.
+Overall verdict PASS only when all thirty pass.
 
 ---
 
@@ -843,7 +1058,7 @@ Overall verdict PASS only when all nineteen pass.
 | D-2 | Codex unattended on OCI: ChatGPT sign-in or API key | **decided 2026-11-07 (itay): ChatGPT sign-in under `aos-agent`, personal use only.** P1-0 first re-reads OpenAI's Codex-with-ChatGPT-plan terms and stops if they exclude unattended personal use. Context: needed before P1-0 (the Claude→Codex fallback, D-13); an API key is metered, a ChatGPT sign-in draws on the plan, so given D-13's no-overage preference the recommendation becomes **ChatGPT sign-in under `aos-agent`, for personal use only**, unless OpenAI's terms rule that out (the help article did not load, UNVERIFIED). The docs read recommend an API key for programmatic workflows; if itay picks that, it gets a provider-side spend limit, which can be exceeded before it takes effect | Codex is not in the first loop; it is the fallback from P1-0 |
 | D-3 | GitHub write token for the plane user: fine-grained, `contents:write` + `pull_requests:write`, two repos, **draft** PRs only | yes; held by the plane user, unreadable by `aos-agent` (§C.0). The separate publisher user of revision 3 is dropped | PRs appear without you; merging stays yours |
 | D-4 | Night window | 23:00–07:00 Asia/Jerusalem; sessions cut at the close | nothing autopilot runs in the day |
-| D-5 | Items per window, attempts per item, runtime budget per attempt | 3, 2, 90 min across all sessions of the attempt | the loop stops at the first limit hit |
+| D-5 | Items per window, attempts per item, runtime budget per attempt | 3, 2, 90 min across all sessions **and acceptance** of the attempt | the loop stops at the first limit hit |
 | D-6 | Cloud note (#133) four questions | as the note recommends | Vercel waits for stage 2 |
 | D-7 | Jev shadow experiment spend | ≤ $1 on OpenRouter, shadow only | measures Jev on classification |
 | D-8 | Phase 8 close basis | close on "gate holds and is shown live" after P1-7 | does not wait a week |
@@ -855,12 +1070,31 @@ Overall verdict PASS only when all nineteen pass.
 | D-14 | External heartbeat service | **decided 2026-11-07 (itay): yes.** A free dead-man's-switch check (e.g. Healthchecks.io), email to itay, 10-min period inside the window | one outbound ping with no payload; an outage is noticed within ~20 min |
 | D-15 | User separation on OCI: a second Unix user `aos-agent`, linger, one sudoers rule for one wrapper, Claude re-login as that user | **decided 2026-11-07 (itay): yes.** P0-A is a spike first and the plan stops if it fails | providers lose access to the plane's state; one extra login |
 | D-16 | Single-host risk | accept for the first loop; no hot standby; restore drilled on a replacement VM | an OCI outage stops the loop; nothing duplicates |
+| D-17 | Network policy for `aos-agent` (§C.0) | loopback denied with an empty allowlist; provider runs reach only the provider API hosts and GitHub over HTTPS; acceptance runs offline | an MCP server or test that needs other hosts fails until the host is added to the allowlist through a reviewed PR |
 
 ---
 
 ## I. What changed
 
-### I.1 Revision 4 versus revision 3
+### I.1 Revision 5 versus revision 4
+
+The freeze gate (§0) and the review-3 disposition (§0.2) are added. Fixes:
+
+- the final launch check and the typed refusal;
+- systemd-enforced bounds;
+- the repository-execution, profile and loopback boundary;
+- one transition table;
+- the lineage rule;
+- `publish_uncertain`;
+- acceptance that is trusted, offline, snapshot-based and replay-safe;
+- composition as a prerequisite;
+- stop semantics per phase;
+- old-host fencing.
+
+Inventory is corrected in §B.4, §B.5 and §D.1. The roadmap becomes stages 1–6 (§F), and the proof
+list becomes G0–G29. D-17 is added.
+
+### I.1b Revision 4 versus revision 3
 
 **Root cause addressed:** agents ran as the plane's Unix user with no process isolation → §C.0
 user separation and an operator-only start secret (P0-A, G0).
@@ -944,5 +1178,6 @@ row 6 (gate in the wake transaction), row 9 (publisher as a separate user).
 
 ## Verdict
 
-**SKIP** — plan document only; no runtime surface. Codex reviews of revisions 2 and 3: **FAIL,
-addressed above**. Codex re-review of revision 4: **PENDING**.
+**SKIP**: this is a plan document with no runtime surface. The Codex reviews of revisions 2, 3
+and 4 were each **FAIL** and are addressed above (§I.2, §I.4, §0.2). Under §0 there is no further
+review of the whole document. The architecture freezes when itay merges this PR.

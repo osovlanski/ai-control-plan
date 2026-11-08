@@ -1,15 +1,17 @@
 # Codex review brief — Agentic OS operating plan
 
-Revision 2 was reviewed at `662e020` (FAIL, 13 findings; ledger in the plan §I.2). Revision 3
-was reviewed at `a15ce6e` (FAIL, 14 findings; ledger in §I.4). Revision 4 re-review: **PENDING**.
-For the re-review, also check every row of §I.4: is each resolution real in the plan, and does
-any new section (§C.0 user separation, §C.2.1–§C.2.8 autopilot, §C.5 restore) introduce a new
-duplicate authority, bypass or unbounded loop? In particular: can anything running as `aos-agent`
-start, release or re-account the autopilot; is there a launch path that skips
-`assertAutopilotLaunch`; can any GitHub mutation be repeated after an uncertain response? Paste the block below into
-Codex (cloud task on `osovlanski/ai-control-plan`, branch `claude/project-thread-qo32zd`, or Codex
-CLI in a fresh worktree of that branch). Record the result as a PR review comment in the format at
-the end; the plan's dispute log is updated from it.
+Whole-document reviews are **closed**. Revision 2 was reviewed at `662e020` (FAIL, 13; ledger
+§I.2), revision 3 at `a15ce6e` (FAIL, 14; §I.4) and revision 4 at `954ba49` (FAIL, 14;
+disposition §0.2). Revision 5 adopts the Architecture Freeze Gate (plan §0): after #163 merges,
+reviews look at **implementation PRs** and the code they change.
+
+**For an implementation PR,** paste the block below with these changes. Replace "Review
+docs/agentic-os-auto-copilot-plan.md …" with "Review PR #<n> (slice <id>) against the plan sections
+it names". Limit the attack list to the slice's area. Check that every G-test the slice claims in
+§F/§G exists and passes. A finding that says the design itself is wrong must cite new evidence
+(§0.1 rule 4).
+
+Historical brief, kept for reference:
 
 ```
 You are an independent reviewer. Repo osovlanski/ai-control-plan, branch claude/project-thread-qo32zd
