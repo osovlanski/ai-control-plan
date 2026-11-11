@@ -1,6 +1,6 @@
 # P0-A1 isolation spike: notes (throwaway branch `spike/autopilot-isolation-20261111`)
 
-Plan: `docs/agentic-os-auto-copilot-plan.md` §F Stage 2. Status: **BLOCKED on operator approval of host changes** (2026-11-11).
+Plan: `docs/agentic-os-auto-copilot-plan.md` §F Stage 2. Status: **PREPARATION DONE; BLOCKED on approval of sudoers + nftables, and on an `aos-agent` Claude login by itay** (2026-11-11).
 
 ## Implementation state at `87d9274` (main after #163)
 
@@ -31,3 +31,17 @@ Everything else in P0-A1 changes host security controls: creating the `aos-agent
 2. Delete `/etc/sudoers.d/aos` (validate with `visudo -c` before and after).
 3. `nft delete table inet aos_agent_net` and remove the unit; confirm with `nft list ruleset`.
 4. Keep an SSH session open and schedule `at now + 10 min` to run the rollback while nftables rules are first tried.
+
+## Done under the staged authorization (2026-11-11)
+
+- `aos` group and `aos-agent` user (uid 1002, nologin, no sudo, home 0700), linger on, user manager `running`.
+- `/var/lib/aos/{profiles,worktrees}` owned `ubuntu:aos`: profiles 0750 (agent reads, cannot write), worktrees 2770 setgid (agent writes).
+- `/usr/local/lib/aos/run-as-agent` installed root:root 0755 (draft: `docs/spikes/p0-a1/run-as-agent`). Exercised via full sudo: runs as `aos-agent`, `RuntimeMaxSec=3` kills scope and child (exit 143), rejects a bad id and a cwd outside allowed roots (exit 64).
+- Degraded user manager (ubuntu): caused by my own two probe scopes (cleared with `reset-failed`) and a pre-existing failed `codex-0929.service`. Neither affects the spike.
+- `nft -c` and `visudo -c -f` pass on the drafts. Nothing applied.
+
+## Findings
+
+- `/home/ubuntu` is 0750, so `aos-agent` cannot read the main checkout or the plane's worktrees. Good isolation, but task worktrees must live under `/var/lib/aos/worktrees`, and a `git worktree` created from a `/home/ubuntu` repo keeps its metadata in the plane user's `.git`, which the agent cannot read. P0-6 must clone or give the agent a repo under the `aos` tree. Plan §C.0 says "worktrees group aos" but does not resolve this; recorded as slice evidence for P0-A2.
+- The Claude binary lives under `/home/ubuntu/.local`, so `aos-agent` cannot execute it ("Permission denied"). Copied 2.1.322 to `/usr/local/lib/aos/claude-2.1.322` (root-owned, symlink `claude`); this is the adapter executable path P0-A2 must make permanent, with an update procedure (a new CLI version is a root-side copy).
+- `aos-agent` has no Claude login. That is itay's credential action (subscription login only, no API key, nothing metered): `! sudo -u aos-agent -H env XDG_RUNTIME_DIR=/run/user/1002 /usr/local/lib/aos/claude` then `/login`. Until then G26 (a real composed session) cannot run.
