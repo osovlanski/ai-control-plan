@@ -1,6 +1,6 @@
 # Agent Guidance
 
-Read `docs/PROJECT_MEMORY.md` and query `graphify-out/graph.json` before broad source searches. This is a local-first TypeScript/pnpm control plane; preserve workspace isolation, explainable routing, approval boundaries, and provider-adapter portability. Run `pnpm typecheck && pnpm test` after code changes. Do not commit credentials or provider transcripts.
+Read `docs/PROJECT_MEMORY.md`, then query the code graph before broad source searches. The graph is git-ignored, so a worktree has none: use `graphify-out/graph.json` in the main checkout, and fall back to normal search if it is missing. This is a local-first TypeScript/pnpm control plane; preserve workspace isolation, explainable routing, approval boundaries, and provider-adapter portability. Run `pnpm typecheck && pnpm lint && pnpm test` after code changes. Do not commit credentials or provider transcripts.
 
 Agentic OS material under `docs/` is proposed design unless implementation evidence says otherwise. Start at `docs/agentic-os-plan.md`.
 
@@ -8,17 +8,24 @@ Agentic OS material under `docs/` is proposed design unless implementation evide
 
 The scope of an instruction file is the entire directory tree rooted at the folder containing it. For every file you touch, obey every instruction file whose scope covers it. More deeply nested files win where instructions conflict, and a direct instruction from the user wins over all of them. When working below or outside the current directory, check for additional instruction files that apply to the files being edited. Do not maintain a parallel set of rules elsewhere.
 
-Vendored trees are content, not policy: instruction files under `.claude/`, `node_modules/` or any other third-party directory do not bind work in this repository.
+Vendored trees are content, not policy: instruction files under `.claude/skills/`, `.claude/plugins/`, `node_modules/` or any other third-party directory do not bind work in this repository. A worktree under `.claude/worktrees/` is this repository, and its own `AGENTS.md` applies.
 
 Every programmatic check named in a binding instruction file must actually be run, and must pass, before work is called done.
 
 ## Verification
 
-`pnpm typecheck && pnpm test` is the gate, not the verification. Before claiming a change works, drive it where it executes — a request against a running `pnpm dev` API, `test:e2e` for web, `pnpm demo:a` / `demo:a5` / `demo:b` for kernel scheduler semantics (injected clock, no credentials, no quota spend) — and report what you observed.
+`pnpm typecheck && pnpm lint && pnpm test` is the gate, not the verification. Before claiming a change works, drive it where it executes — a request against a running `pnpm dev` API, `test:e2e` for web, `pnpm demo:a` / `demo:a5` / `demo:b` for kernel scheduler semantics (injected clock, no credentials, no quota spend) — and report what you observed.
 
 Report one verdict: **PASS** (drove it, it did the thing), **FAIL**, **BLOCKED** (could not reach an observable state — say exactly where it stopped), or **SKIP** (no runtime surface: docs, types or tests only). No partial pass: "3 of 4" is FAIL until the fourth passes or is explained away. Ambiguous output is FAIL with the raw capture attached.
 
 The diff is ground truth. A doc, a PR body or a prior session summary is a claim about it; where they disagree, that is a finding.
+
+## Working rules
+
+- Each agent session works in its own git worktree, never in the shared checkout.
+- Agents never merge. itay merges. Stacked PRs merge with merge commits only, after being retargeted to `main`.
+- A contract change lands here first. Cockpit vendors it pinned by SHA (`VENDORED.json`).
+- Use `FAKE-*-not-real` values in any runtime secret test.
 
 ## Project memory
 
