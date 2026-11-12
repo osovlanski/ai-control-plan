@@ -1,0 +1,25 @@
+{
+  "schemaVersion": "1.1",
+  "eventId": "au1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "seq": 7,
+  "compositionRevisionId": "rev_01",
+  "sessionId": "run_01",
+  "taskId": "task_01",
+  "assetKind": "mcp_server",
+  "assetId": "github-mcp",
+  "assetDigest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+  "harness": "claude-code",
+  "fidelity": "full",
+  "attached": true,
+  "validation": "runtime_confirmed",
+  "invocation": {
+    "method": "tool_event",
+    "count": 3,
+    "failed": 1
+  },
+  "sessionOutcome": "success",
+  "verificationPassed": true,
+  "attributionMethod": "co-occurrence/v1",
+  "deriverVersion": 1,
+  "at": "2026-11-01T12:00:00.000Z"
+}

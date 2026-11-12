@@ -51,12 +51,18 @@ function replay(model?: string, dropCost = false): Query {
   })()) as unknown as Query;
 }
 
+/**
+ * The rig's clock. Price evidence expires (the 2026-09-08 claude-sonnet-4-5 revision is past its
+ * validity window from 2026-11-07), so the settlement must not read the wall clock. One day after
+ * the 2026-10-30 seed, both seed revisions are inside their windows.
+ */
+const NOW = new Date("2026-10-31T00:00:00.000Z");
+
 async function bootClaude(maxTokens: number, model?: string, dropCost = false): Promise<Rig> {
   // The manifest's auth comes from the environment; a runner with no Claude login would route nothing.
   vi.stubEnv("ANTHROPIC_API_KEY", "FAKE-anthropic-key-not-real-slice1");
   // The seed's prices apply to an API account; a subscription has no list price to estimate from.
-  // Pinned clock: price freshness is read-time, so a real clock makes the estimate expire with the calendar.
-  const r = await bootRig({ assistants: { claude: { provider: "anthropic", accountKind: "api" } }, budget: { maxTokens }, now: () => new Date("2026-10-31T00:00:00.000Z") });
+  const r = await bootRig({ assistants: { claude: { provider: "anthropic", accountKind: "api" } }, budget: { maxTokens }, now: () => NOW });
   (r.built.registry as unknown as { adapters: Map<string, unknown> }).adapters.set("claude", new ClaudeAdapter("claude" as AssistantId, replay(model, dropCost)));
   await r.built.registry.syncAll();
   // K7 price evidence: the seed is loaded by a refresh (offline sources only in tests).

@@ -200,8 +200,14 @@ export class RegistryFederation {
     return this.db.transaction(() => {
       const previous = this.latest();
       const before = previous ? this.members(previous.id) : undefined;
+      // The digest covers an asset's content, not its tags or compatibility (those are in the
+      // snapshot digest only), so a re-tag keeps the digest. The newest observation's metadata
+      // wins; first_seen_at and every other revision stay. Rewriting only on a difference keeps
+      // an unchanged resync from touching the row.
       const insertAsset = this.db.prepare(
-        "INSERT OR IGNORE INTO registry_assets (asset_id, digest, kind, metadata, first_seen_at) VALUES (?, ?, ?, ?, ?)",
+        `INSERT INTO registry_assets (asset_id, digest, kind, metadata, first_seen_at) VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT (asset_id, digest) DO UPDATE SET kind = excluded.kind, metadata = excluded.metadata
+         WHERE registry_assets.metadata <> excluded.metadata OR registry_assets.kind <> excluded.kind`,
       );
       for (const asset of snapshot.assets) insertAsset.run(asset.id, asset.digest, asset.kind, JSON.stringify(asset), at);
       this.db.prepare(
@@ -278,7 +284,8 @@ export class RegistryFederation {
 
 /**
  * M3 S4: the MCP launch shape the registry recorded for an asset at one digest. `registry_assets`
- * is content-addressed and never rewritten, so a revision's pinned digest always finds the shape
+ * is keyed by digest and only its tags and other digest-free metadata are refreshed in place; the
+ * launch shape is part of the digest, so a revision's pinned digest always finds the shape
  * it was composed with, whatever the latest snapshot says.
  */
 export function mcpLaunchAt(db: Db, assetId: string, digest: string): RegistryAsset["mcp"] | undefined {

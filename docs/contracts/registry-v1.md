@@ -32,6 +32,8 @@ GET /api/v1/registry/assets/:id/content             → RegistryAssetContent (cu
 - `:id` is the asset `id`, percent-encoded as one path segment.
 - Every response carries `X-Cockpit-Registry-Version: <schemaVersion>`, including errors.
 - `/fragments`, `/memory/bundles`, `/memory/findings` and usage postbacks are not part of v1.
+  `/memory/bundles` is specified by [memory v1](memory-v1.md); `/memory/findings` stays out
+  (health travels inside the memory bundle snapshot).
 
 ## Authentication
 

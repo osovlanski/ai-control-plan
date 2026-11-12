@@ -82,6 +82,15 @@ function parseContextMarker(prompt: string): FakeRunState["context"] | undefined
 }
 
 /**
+ * `[FAKE:CLI_VERSION:<v>]`: run.started reports `version: <v>`, the way the Claude CLI reports
+ * `claude_code_version` on `system/init`. Absent ⇒ no version is reported (what Codex does today),
+ * so the plane's `runs.harness_cli_version` stays NULL.
+ */
+function parseCliVersionMarker(prompt: string): string | undefined {
+  return prompt.match(/\[FAKE:CLI_VERSION:([^\]\s]+)\]/)?.[1];
+}
+
+/**
  * `[FAKE:LATE_SESSION]` / `[FAKE:LATE_SESSION:<ref>]`: the run's handle carries no
  * providerSessionRef when start() returns, and the ref is reported only by run.started,
  * the way the Claude CLI learns its session id from `system/init`. With `<ref>`, that is
@@ -92,6 +101,37 @@ function parseLateSessionMarker(prompt: string): string | true | undefined {
   const m = prompt.match(/\[FAKE:LATE_SESSION(?::([^\]\s]+))?\]/);
   if (!m) return undefined;
   return m[1] ?? true;
+}
+
+/**
+ * O6 S5: `[FAKE:MEMORY:<json>]` makes the run's last message end with the fenced
+ * `agent-plane-memory` block an operator fragment asks a real agent to write, holding `<json>`
+ * verbatim (so a malformed block can be scripted too). `<json>` runs from the colon to its
+ * balanced closing bracket or brace, strings honoured, so it may contain `]`. Returns the JSON
+ * text, or undefined when there is no marker or it never closes.
+ */
+export function parseMemoryMarker(prompt: string): string | undefined {
+  const tag = "[FAKE:MEMORY:";
+  const start = prompt.indexOf(tag);
+  if (start < 0) return undefined;
+  const from = start + tag.length;
+  let depth = 0;
+  let inString = false;
+  for (let i = from; i < prompt.length; i += 1) {
+    const ch = prompt[i]!;
+    if (inString) {
+      if (ch === "\\") i += 1;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === "[" || ch === "{") depth += 1;
+    else if (ch === "]" || ch === "}") {
+      if (depth === 0) return prompt.slice(from, i);
+      depth -= 1;
+    }
+  }
+  return undefined;
 }
 
 /** The harness a fake assistant presents itself as (the AgentSpec harness vocabulary). */
@@ -253,6 +293,7 @@ export class FakeAdapter implements AgentAdapter {
       payload: {
         providerSessionRef: handle.providerSessionRef,
         model: run.model?.id ?? "fake-1",
+        ...(parseCliVersionMarker(run.prompt) ? { version: parseCliVersionMarker(run.prompt) } : {}),
         ...(run.profile && this.harness === "claude-code" ? fakeInitEvidence(run.profile, run.prompt) : {}),
       },
     });
@@ -282,6 +323,19 @@ export class FakeAdapter implements AgentAdapter {
       emit({ type: "tool.started", summary: `MCP ${m[1]}`, payload: { toolUseId: `mcp${mcp}`, tool: m[1], input: { query: "fake" } } });
       emit({ type: "tool.completed", summary: `MCP ${m[1]} → ok`, payload: { toolUseId: `mcp${mcp}`, exitCode: 0 } });
     }
+    // M6 S2: `[FAKE:SKILL:<name>]` emits a Skill tool call naming the profile skill and a Read of
+    // the profile's SKILL.md, two toolUseIds, as Claude does (plan Q6). Without a profile the Read
+    // path is relative and matches nothing.
+    let skill = 0;
+    for (const m of run.prompt.matchAll(/\[FAKE:SKILL:([A-Za-z0-9][\w.-]*)\]/g)) {
+      if (state.cancelled) break;
+      skill += 1;
+      const skillMd = join(run.profile?.root ?? "", "plugin", "skills", m[1]!, "SKILL.md");
+      emit({ type: "tool.started", summary: `Skill ${m[1]}`, payload: { toolUseId: `skill${skill}`, tool: "Skill", input: { skill: `${PLUGIN_NAME}:${m[1]}` } } });
+      emit({ type: "tool.completed", summary: `Skill ${m[1]} → ok`, payload: { toolUseId: `skill${skill}`, exitCode: 0 } });
+      emit({ type: "tool.started", summary: `Read ${skillMd}`, payload: { toolUseId: `skillread${skill}`, tool: "Read", input: { file_path: skillMd } } });
+      emit({ type: "tool.completed", summary: `Read ${skillMd} → ok`, payload: { toolUseId: `skillread${skill}`, exitCode: 0 } });
+    }
     // K19k: `[FAKE:READ:<path>]` emits one Read per marker; `{cwd}` is the run's
     // workdir, so a path inside a task's scratch directory can be scripted.
     let read = 0;
@@ -291,6 +345,13 @@ export class FakeAdapter implements AgentAdapter {
       const filePath = m[1]!.replaceAll("{cwd}", run.workdir);
       emit({ type: "tool.started", summary: `Read ${filePath}`, payload: { toolUseId: `read${read}`, tool: "Read", input: { file_path: filePath } } });
       emit({ type: "tool.completed", summary: `Read ${filePath} → ok`, payload: { toolUseId: `read${read}`, exitCode: 0 } });
+    }
+    // O6 S5: the memory block is the run's last message, emitted before a scripted limit or
+    // failure so a failed run carries one too (and must still propose nothing).
+    const memory = parseMemoryMarker(run.prompt);
+    if (memory !== undefined && !state.cancelled) {
+      const text = `Recording what I learned.\n\n\`\`\`agent-plane-memory\n${memory}\n\`\`\``;
+      emit({ type: "message", summary: "Recording what I learned.", payload: { text } });
     }
     // Scripted provider auto-compaction (K9). Emitted AFTER the script events so
     // the Harness's next observation samples the post-compaction relief below.

@@ -1,4 +1,4 @@
-import { Restart, useRestartOffered } from "./Restart.js";
+import { Restart, namesRestartRoute, useRestartOffered } from "./Restart.js";
 import { WaitingSummary } from "./WaitingSummary.js";
 import { useEffect, useRef, useState, type ComponentProps } from "react";
 import {
@@ -11,6 +11,7 @@ import {
   type TaskEvent,
 } from "./api.js";
 import { CompositionPanel } from "./Composition.js";
+import { VerificationChecks, VerificationVerdict } from "./VerificationChecks.js";
 import { Button, Card, StateBadge, tokens } from "./ui.jsx";
 
 type Tab = "activity" | "usage" | "routing" | "composition" | "progress" | "handoff" | "compare" | "sessions";
@@ -238,7 +239,7 @@ export function TaskDetail({ taskId, onBack }: { taskId: string; onBack: () => v
           </li>)}</ul>
         </details>
       )}
-      {sessionActionError && <p role="alert">{sessionActionError} {restartControl}</p>}
+      {sessionActionError && <p role="alert">{sessionActionError}{namesRestartRoute(sessionActionError) && <> {restartControl}</>}</p>}
       {notices.map((n, i) => (
         <Card
           key={i}
@@ -250,7 +251,7 @@ export function TaskDetail({ taskId, onBack }: { taskId: string; onBack: () => v
           }}
         >
           <span style={{ fontSize: "0.88rem" }}>
-            <strong>{n.level === "warn" ? "Failover" : "Handoff"}</strong> · {n.text} {restartControl}
+            <strong>{n.level === "warn" ? "Failover" : "Handoff"}</strong> · {n.text}
           </span>
         </Card>
       ))}
@@ -574,12 +575,12 @@ export function TaskDetail({ taskId, onBack }: { taskId: string; onBack: () => v
                   )}
                   {session.result.verification && (
                     <>
-                      {" · "}verification{" "}
-                      <strong>{session.result.verification.passed ? "passed" : "failed"}</strong>
+                      {" · "}verification <VerificationVerdict verification={session.result.verification} />
                     </>
                   )}
                 </p>
               )}
+              {session.result?.verification && <VerificationChecks verification={session.result.verification} />}
               {session.audit.length > 0 && (
                 <ul style={{ margin: "0.3rem 0 0", paddingLeft: "1.1rem", fontSize: "0.82rem" }}>
                   {session.audit.map((e) => (

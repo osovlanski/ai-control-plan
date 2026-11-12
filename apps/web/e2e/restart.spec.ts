@@ -35,10 +35,16 @@ test("restart requires a durable recovery decision and confirmation; conflicts k
   await page.route(`**/api/tasks/${taskId}/handoff`, route => route.fulfill({ status: 409, json: conflictBody }));
   await detail.getByRole("button", { name: "Hand off", exact: true }).click();
   await expect(detail.getByText(new RegExp(`POST /api/tasks/${taskId}/restart`))).toBeVisible();
+  // One Restart per place: the header only. A notice card naming the route never adds another.
+  await expect(detail.getByRole("button", { name: "Restart", exact: true })).toHaveCount(1);
+  await expect(detail.locator(".task-detail-toolbar").getByRole("button", { name: "Restart", exact: true })).toHaveCount(1);
   await detail.getByRole("button", { name: "Sessions", exact: true }).click();
   await detail.getByRole("button", { name: session.sessionId, exact: true }).click();
   await detail.getByRole("group", { name: "Pending session approval" }).getByRole("button", { name: "Approve", exact: true }).click();
   await expect(detail.getByRole("alert")).toContainText(`/api/tasks/${taskId}/restart`);
+  // The error that names the restart route gets its own Restart beside it: header + error, still one per place.
+  await expect(detail.getByRole("alert").getByRole("button", { name: "Restart", exact: true })).toHaveCount(1);
+  await expect(detail.getByRole("button", { name: "Restart", exact: true })).toHaveCount(2);
   let calls = 0;
   const reason = "Recovery cannot release this session; use POST /api/tasks/example/restart";
   await page.route(`**/api/tasks/${taskId}/restart`, route => { calls++; return route.fulfill({ status: 409, json: { error: reason } }); });

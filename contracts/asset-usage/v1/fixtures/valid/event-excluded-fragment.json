@@ -1,0 +1,25 @@
+{
+  "schemaVersion": "1.0",
+  "eventId": "au1_cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "seq": 9,
+  "compositionRevisionId": "rev_01",
+  "sessionId": "run_01",
+  "taskId": "task_01",
+  "assetKind": "fragment",
+  "assetId": "house-style",
+  "assetDigest": "excluded",
+  "harness": "codex",
+  "fidelity": "partial",
+  "attached": false,
+  "validation": "none",
+  "invocation": {
+    "method": "not_applicable",
+    "count": null,
+    "failed": null
+  },
+  "sessionOutcome": "not_run",
+  "verificationPassed": null,
+  "attributionMethod": "co-occurrence/v1",
+  "deriverVersion": 1,
+  "at": "2026-11-01T12:00:00.000Z"
+}

@@ -1,6 +1,9 @@
 import {
   DIMENSION_K,
   HARNESS_MAJOR,
+  OBSERVED_RESOLUTION_FRESHNESS_DAYS,
+  OBSERVED_RESOLUTION_RULE,
+  OBSERVED_RESOLUTION_RUNS,
   TASK_DIMENSIONS,
   classifyTask,
   evaluateActivationGate,
@@ -14,6 +17,7 @@ import type {
   DimensionEvidence,
   DimensionPrior,
   DimensionTelemetry,
+  IdentityObservation,
   ModelCandidateInput,
   ModelCatalogEntry,
   ModelRecommendation,
@@ -95,6 +99,7 @@ export function recommendModel(
   const classification = classifyTask(intent);
   const catalog = deps.catalog.list();
   const cohorts = modelCohorts(deps.db, { taskKind: classification.taskKind, harnessMajor: HARNESS_MAJOR, now });
+  const baseConfig = baseConfigAttestation(deps.config.models.selection.baseConfigAttestedAt, at);
   const failuresByAssistant = new Map(assistantFilters.map((c) => [String(c.assistantId), c.filterFailures]));
 
   // A workspace security policy that is about the RUN, not the model, but that
@@ -153,6 +158,10 @@ export function recommendModel(
       } else if (capacity === undefined) {
         advisories.push('context window unknown (advisory: the task declares no minimum)');
       }
+      // Not an exclusion: a withheld prior only changes what evidence is offered.
+      if (!baseConfig.fresh && identity.resolvedModelKey && (entry?.benchmarkPriors?.length ?? 0) > 0) {
+        advisories.push(`benchmark prior withheld: ${baseConfig.reason}`);
+      }
 
       candidates.push({
         assistantId: assistant.id as AssistantId,
@@ -161,7 +170,7 @@ export function recommendModel(
         identity,
         filterFailures,
         advisories,
-        evidence: gatherEvidence(entry, identity, cohorts, {
+        evidence: gatherEvidence(entry, identity, cohorts, baseConfig, {
           servingProvider: assistant.provider,
           ...(deps.config.assistants[assistant.id]?.accountKind
             ? { accountKind: deps.config.assistants[assistant.id]!.accountKind! }
@@ -205,10 +214,17 @@ export function recommendModel(
  * Two proofs are accepted, in order:
  *
  *  1. `catalog-exact` — the selector IS a model id the provider's own evidence
- *     established. Nothing to resolve.
- *  2. `observed-resolution` — this workspace's own runs on THIS assistant asked
- *     for THIS selector and the provider reported which model it served, and
- *     every such run agrees. That is a measurement, not an inference.
+ *     established. Nothing to resolve. A selector that some catalog entry of the
+ *     same provider lists as an ALIAS is not an id, even when capability
+ *     discovery advertised it (Claude's manifest names `opus` / `sonnet`, so the
+ *     catalog holds an `anthropic:opus` row with no model behind it). The alias
+ *     list is used only to WITHHOLD exactness, never to bind.
+ *  2. `observed-resolution` — last-N agreement (K13 A1): take this assistant's
+ *     newest runs that requested THIS selector and had the provider report what
+ *     it served, up to N. Bind only when there are exactly N, they all report
+ *     the same id, and the newest started within F days. Runs older than the
+ *     last N never block, so an alias that moved rebinds after N new runs. That
+ *     is a measurement, not an inference.
  *
  * An alias table is explicitly NOT a proof. `opus` is a moving CLI alias whose
  * meaning changes under us; binding it to today's catalog row is precisely the
@@ -224,61 +240,154 @@ export function resolveCandidateIdentity(
     selector: string;
     catalog: ModelCatalogEntry[];
     now?: () => Date;
-    windowDays?: number;
+    /** N. Default {@link OBSERVED_RESOLUTION_RUNS}. */
+    requiredRuns?: number;
+    /** F. Default {@link OBSERVED_RESOLUTION_FRESHNESS_DAYS}. */
+    freshnessDays?: number;
   },
 ): CandidateIdentity {
   const key = modelKey(input.provider, input.selector);
+  const aliasOf = input.catalog
+    .filter((e) => e.provider === input.provider && e.modelKey !== key && e.aliases.some((a) => a.value === input.selector))
+    .map((e) => e.modelKey)
+    .sort();
   const exact = input.catalog.find(
     // An entry established ONLY by external benchmark evidence cannot exist
     // (the catalog refuses it), so any hit here is provider/own evidence.
     (e) => e.modelKey === key,
   );
-  if (exact) {
+  if (exact && aliasOf.length === 0) {
     return {
       basis: 'catalog-exact',
       resolvedModelKey: key,
       evidence: `the selector is a catalog model id for ${input.provider}, established by ${exact.provenance.source}`,
     };
   }
+  const aliasNote = aliasOf.length
+    ? ` ("${input.selector}" is listed as an alias of ${aliasOf.join(', ')}; an alias is a lookup convenience, never a binding)`
+    : '';
 
-  const windowDays = input.windowDays ?? 30;
+  const requiredRuns = input.requiredRuns ?? OBSERVED_RESOLUTION_RUNS;
+  const freshnessDays = input.freshnessDays ?? OBSERVED_RESOLUTION_FRESHNESS_DAYS;
   const nowMs = (input.now?.() ?? new Date()).getTime();
-  const since = new Date(nowMs - windowDays * 86_400_000).toISOString();
+  // Newest first. The CLI version is `runs.harness_cli_version` (migration 041,
+  // written once from `run.started`). Rows from before 041 have it NULL, so only
+  // then fall back to the run's own `run.started` payload.
   const rows = db
     .prepare(
-      `SELECT DISTINCT r.model_resolved AS model_resolved
+      `SELECT r.model_resolved AS model_resolved, r.started_at AS started_at,
+              COALESCE(r.harness_cli_version,
+                (SELECT json_extract(e.payload, '$.version') FROM events e
+                  WHERE e.run_id = r.id AND e.type = 'run.started' ORDER BY e.seq LIMIT 1)) AS cli_version
          FROM runs r
         WHERE r.assistant_id = ? AND r.model_requested = ?
-          AND r.model_resolved IS NOT NULL AND r.started_at >= ?`,
+          AND r.model_resolved IS NOT NULL
+        ORDER BY r.started_at DESC, r.rowid DESC
+        LIMIT ?`,
     )
-    .all(input.assistantId, input.selector, since) as Array<{ model_resolved: string }>;
+    .all(input.assistantId, input.selector, requiredRuns) as Array<{
+      model_resolved: string;
+      started_at: string;
+      cli_version: string | number | null;
+    }>;
 
-  if (rows.length === 1) {
-    return {
-      basis: 'observed-resolution',
-      resolvedModelKey: modelKey(input.provider, rows[0]!.model_resolved),
-      evidence:
-        `this workspace's own runs on ${input.assistantId} requesting "${input.selector}" were all served as ` +
-        `"${rows[0]!.model_resolved}" (provider-reported, last ${windowDays} days)`,
-    };
-  }
-  if (rows.length > 1) {
+  if (rows.length === 0) {
     return {
       basis: 'unresolved',
       evidence:
-        `"${input.selector}" resolved to ${rows.length} different models on ${input.assistantId} in the last ` +
-        `${windowDays} days (${rows.map((r) => r.model_resolved).sort().join(', ')}) — an ambiguous selector carries no prior`,
+        `"${input.selector}" is not a catalog model id for ${input.provider} and no run on ${input.assistantId} has ` +
+        `reported what it resolves to; an alias is never resolved against today's catalog (I-M5)${aliasNote}`,
+    };
+  }
+
+  const resolvedIds = [...new Set(rows.map((r) => r.model_resolved))].sort();
+  const cliVersions = [...new Set(rows.flatMap((r) => (r.cli_version == null ? [] : [String(r.cli_version)])))].sort();
+  const newest = rows[0]!.started_at;
+  const ageDays = (nowMs - Date.parse(newest)) / 86_400_000;
+  const observation: IdentityObservation = {
+    rule: OBSERVED_RESOLUTION_RULE,
+    requiredRuns,
+    freshnessDays,
+    runsExamined: rows.length,
+    resolvedIds,
+    newestObservedAt: newest,
+    cliVersions,
+  };
+  const seen =
+    `newest ${newest}, CLI ${cliVersions.length ? cliVersions.join(', ') : 'version not reported'}`;
+
+  const refusals: string[] = [];
+  if (resolvedIds.length > 1) {
+    refusals.push(
+      `its last ${rows.length} resolved run(s) disagree (${resolvedIds.join(', ')}) — an ambiguous selector carries no prior`,
+    );
+  }
+  if (rows.length < requiredRuns) {
+    refusals.push(`only ${rows.length} of the ${requiredRuns} agreeing runs required have reported a resolution`);
+  }
+  if (!(ageDays <= freshnessDays)) {
+    refusals.push(`the newest resolved run started ${ageDays.toFixed(1)} days ago, older than ${freshnessDays} days`);
+  }
+
+  if (refusals.length > 0) {
+    return {
+      basis: 'unresolved',
+      evidence:
+        `"${input.selector}" on ${input.assistantId} is not bound by observed resolution: ${refusals.join('; ')} ` +
+        `(last-${requiredRuns} rule, ${seen})${aliasNote}`,
+      observation,
     };
   }
   return {
-    basis: 'unresolved',
+    basis: 'observed-resolution',
+    resolvedModelKey: modelKey(input.provider, resolvedIds[0]!),
     evidence:
-      `"${input.selector}" is not a catalog model id for ${input.provider} and no run on ${input.assistantId} has ` +
-      'reported what it resolves to; an alias is never resolved against today\'s catalog (I-M5)',
+      `the last ${requiredRuns} runs on ${input.assistantId} requesting "${input.selector}" were all served as ` +
+      `"${resolvedIds[0]}" (provider-reported; ${seen}; freshness ${freshnessDays} days)`,
+    observation,
   };
 }
 
 // --- evidence gathering -----------------------------------------------------
+
+export const BASE_CONFIG_ATTESTATION_DAYS = 30;
+
+export interface BaseConfigAttestation {
+  fresh: boolean;
+  /** Why the attestation does or does not count; persisted when it withholds a prior. */
+  reason: string;
+}
+
+/**
+ * Whether the operator's `models.selection.baseConfigAttestedAt` currently
+ * vouches that their own Claude configuration sets no effort or thinking
+ * override. Unset, unparseable, in the future, or older than 30 days all count
+ * as no attestation. Pure: the clock is the caller's.
+ */
+export function baseConfigAttestation(attestedAt: string | undefined, at: Date): BaseConfigAttestation {
+  const key = 'models.selection.baseConfigAttestedAt';
+  if (attestedAt === undefined) {
+    return {
+      fresh: false,
+      reason: `${key} is not set, so the operator has not attested that their own Claude settings set no effort or thinking override`,
+    };
+  }
+  const attestedMs = Date.parse(attestedAt);
+  if (!Number.isFinite(attestedMs)) {
+    return { fresh: false, reason: `${key} (${attestedAt}) is not a valid timestamp` };
+  }
+  const ageDays = (at.getTime() - attestedMs) / 86_400_000;
+  if (ageDays < 0) {
+    return { fresh: false, reason: `${key} (${attestedAt}) is in the future` };
+  }
+  if (ageDays > BASE_CONFIG_ATTESTATION_DAYS) {
+    return {
+      fresh: false,
+      reason: `${key} (${attestedAt}) is ${ageDays.toFixed(1)} days old, older than ${BASE_CONFIG_ATTESTATION_DAYS} days`,
+    };
+  }
+  return { fresh: true, reason: `${key} (${attestedAt}) is ${ageDays.toFixed(1)} days old, within ${BASE_CONFIG_ATTESTATION_DAYS} days` };
+}
 
 /**
  * Attach the priors and own telemetry a bound candidate is entitled to. An
@@ -289,6 +398,7 @@ function gatherEvidence(
   entry: ModelCatalogEntry | undefined,
   identity: CandidateIdentity,
   cohorts: Map<string, ModelCohort>,
+  baseConfig: BaseConfigAttestation,
   account: AccountIdentity,
 ): Partial<Record<TaskDimension, DimensionEvidence>> {
   const evidence: Partial<Record<TaskDimension, DimensionEvidence>> = {};
@@ -301,7 +411,10 @@ function gatherEvidence(
   const configuredDifferently = Object.keys(identity.executionSettings ?? {}).length > 0;
 
   if (entry && !configuredDifferently) {
-    for (const prior of entry.benchmarkPriors ?? []) {
+    // The plane sets no effort, but it cannot see the operator's own Claude
+    // settings. Benchmark priors attach only under a fresh attestation that they
+    // set none; the price prior is a tariff, not a measurement at a configuration.
+    for (const prior of baseConfig.fresh ? (entry.benchmarkPriors ?? []) : []) {
       const target = evidence[prior.dimension];
       if (!target) continue;
       target.priors.push({

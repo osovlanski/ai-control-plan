@@ -159,6 +159,14 @@ export interface WorkspaceConfig {
        * it expires after 30 days.
        */
       egressVerifiedAt?: string;
+      /**
+       * Operator attestation, ISO 8601: "my own Claude configuration sets no
+       * effort or thinking override". The plane cannot see those settings, so a
+       * benchmark prior attaches to a bound candidate only while this is set,
+       * not in the future, and under 30 days old (K13 alias identity, slice A4).
+       * It never touches the activation gate or any hard filter.
+       */
+      baseConfigAttestedAt?: string;
     };
   };
   /**
@@ -252,7 +260,7 @@ export interface ResolvedExecutionConfig {
 
 /** The resolved model block — always present, always fail-closed by default. */
 export interface ResolvedModelsConfig {
-  selection: { enabled: boolean; shadowReviewedAt?: string; egressVerifiedAt?: string };
+  selection: { enabled: boolean; shadowReviewedAt?: string; egressVerifiedAt?: string; baseConfigAttestedAt?: string };
 }
 
 /** The resolved decisions block — always present, always fail-closed to "rules". */
@@ -568,6 +576,7 @@ function resolveModels(file: WorkspaceConfig["models"], configPath: string): Res
       enabled: selection?.enabled === true,
       ...(selection?.shadowReviewedAt !== undefined ? { shadowReviewedAt: selection.shadowReviewedAt } : {}),
       ...(selection?.egressVerifiedAt !== undefined ? { egressVerifiedAt: selection.egressVerifiedAt } : {}),
+      ...(selection?.baseConfigAttestedAt !== undefined ? { baseConfigAttestedAt: selection.baseConfigAttestedAt } : {}),
     },
   };
 }
@@ -853,7 +862,7 @@ function resolveComposer(file: unknown, configPath: string): ResolvedComposerCon
 
 function validateModels(models: ResolvedModelsConfig, path: string): void {
   const problems: string[] = [];
-  for (const key of ["shadowReviewedAt", "egressVerifiedAt"] as const) {
+  for (const key of ["shadowReviewedAt", "egressVerifiedAt", "baseConfigAttestedAt"] as const) {
     const value = models.selection[key];
     if (value === undefined) continue;
     if (typeof value !== "string" || !Number.isFinite(Date.parse(value))) {

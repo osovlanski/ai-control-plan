@@ -21,7 +21,20 @@
 // `GET /api/tasks/:id/composition` under `tasks.read`. No new capability. With
 // `composer.enabled` false (the default) the three routes answer 404
 // `composer_disabled` and every other route is unchanged.
-export const CONTROL_PLANE_API_VERSION = "2.6";
+// 2.7 (additive, M6 S3): `telemetry.read` for `GET /api/composition/asset-usage`,
+// the asset usage v1 feed Cockpit pulls (M10). Credentials minted before 2.7
+// lack it and get 403 there until rotated with `--capabilities`. A browser
+// session does not need it, so `open` still accepts such a credential.
+// 2.8 (additive, O6 S1): `memory.read`, reserved for `GET /api/memory/proposals`
+// (memory v1 proposal feed, Cockpit pulls; route lands in O6 S5). Separate from
+// `telemetry.read` because proposal bodies are memory content, not counts.
+// Browser-optional like `telemetry.read`; credentials minted before 2.8 lack it
+// and get 403 on the feed until rotated with `--capabilities`.
+// 2.9 (additive, shell view part B slice B3): `stage: { value, rule }` on every
+// `GET /api/tasks` element and every SSE `state` frame (task-stage v1,
+// docs/contracts/task-stage-v1.md), derived in core by `deriveStage`. No new
+// route or capability; a client written before 2.9 ignores the field.
+export const CONTROL_PLANE_API_VERSION = "2.9";
 export const NORMALIZED_EVENT_VERSION = "1.0";
 
 export const OBSERVABILITY_CAPABILITIES = [
@@ -41,7 +54,16 @@ export const OBSERVABILITY_CAPABILITIES = [
   "decisions.read",
   // M4: cached Cockpit registry snapshot reads.
   "registry.read",
+  // M6 S3: the asset usage feed (M10).
+  "telemetry.read",
+  // O6 S1: the memory proposal feed (memory v1).
+  "memory.read",
 ] as const;
+
+// Observability capabilities the web UI does not use. `open` requests them when
+// the credential holds them and never refuses a credential that lacks them, so a
+// credential minted before they existed still opens the UI.
+export const BROWSER_OPTIONAL_CAPABILITIES = ["telemetry.read", "memory.read"] as const;
 
 export const COMMAND_CAPABILITIES = ["commands.write"] as const;
 

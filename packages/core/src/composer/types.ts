@@ -147,7 +147,11 @@ export const HARNESS_FILTERS = [
 ] as const;
 export type HarnessFilterName = (typeof HARNESS_FILTERS)[number];
 
-export type ModelSource = "k13-applied" | "intent-override" | "manifest-first";
+/**
+ * Which rule chose stage 2's model, in `pickModel`'s order (`model-precedence.ts`, decision D2):
+ * the task's override, the operator's stage-2 override, K13 applied, the manifest's first model.
+ */
+export type ModelSource = "intent-override" | "stage-override" | "k13-applied" | "manifest-first";
 
 export interface HarnessModelCandidate {
   assistantId: string;
@@ -171,6 +175,8 @@ export interface HarnessModelChoice {
   modelId: string;
   harness: Harness;
   modelSource: ModelSource;
+  /** Lower-ranked sources that named a different model and lost to `modelSource`; the why text names them. */
+  outranked?: ReadonlyArray<{ source: ModelSource; modelId: string }>;
   /** The approval modes this adapter enforces (it refuses the rest). */
   acceptedApprovalModes: readonly ApprovalMode[];
   /** The manifest declares a proven `harness.usageReporting`: only then can a token cap be bounded. */

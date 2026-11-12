@@ -15,13 +15,19 @@ import { assembleBundle, fileDigest, type BundleRequest } from "../../src/bundle
 import { loadConfig, type ResolvedConfig } from "../../src/config.js";
 import { openDb, type Db } from "../../src/db/index.js";
 import { computeSnapshotDigest, REGISTRY_VERSION_HEADER, type RegistryAsset } from "../../src/registry-contract.js";
-import { buildServer, type BuiltServer } from "../../src/server.js";
+import { buildServer, type BuiltServer, type ServerDeps } from "../../src/server.js";
 
 export const COCKPIT_TOKEN = "FAKE-cockpit-registry-token-not-real-s6";
 export const TS_REVIEW = "claude-skills:ts-review";
 const SKILL_BODY = "---\nname: ts-review\n---\nReview TypeScript.\n";
 
-interface FakeCockpit { url: string; renders: number; close(): Promise<void> }
+/**
+ * O6 S3: what the stand-in answers on `GET /api/v1/registry/memory/bundles`. `snapshot` null is a
+ * 404 (a Cockpit before O6 S2); `status` other than 200 answers that status instead (Cockpit down).
+ * Tests mutate it between calls.
+ */
+export interface FakeMemoryRoute { snapshot: unknown; status: number }
+interface FakeCockpit { url: string; renders: number; memory: FakeMemoryRoute; close(): Promise<void> }
 
 async function fakeCockpit(extraAssets: readonly RegistryAsset[] = []): Promise<FakeCockpit> {
   const asset: RegistryAsset = {
@@ -29,7 +35,7 @@ async function fakeCockpit(extraAssets: readonly RegistryAsset[] = []): Promise<
     tags: ["coding", "typescript"], targets: ["claude"], compatibility: { assistants: ["claude", "codex"] },
     requirements: { secretRefs: [] }, conflicts: [], lineage: { origin: "library" }, enabled: true, installedAt: "2026-10-01T09:00:00.000Z",
   };
-  const state: FakeCockpit = { url: "", renders: 0, close: async () => {} };
+  const state: FakeCockpit = { url: "", renders: 0, memory: { snapshot: null, status: 200 }, close: async () => {} };
   const server: Server = createServer((req: IncomingMessage, res: ServerResponse) => {
     let body = "";
     req.on("data", (chunk: Buffer) => { body += chunk.toString("utf8"); });
@@ -43,6 +49,11 @@ async function fakeCockpit(extraAssets: readonly RegistryAsset[] = []): Promise<
         const assets = [asset, ...extraAssets];
         return send(200, { schemaVersion: "1.0", snapshotDigest: computeSnapshotDigest(assets), assets }, { [REGISTRY_VERSION_HEADER]: "1.0" });
       }
+      if (req.method === "GET" && req.url === "/api/v1/registry/memory/bundles") {
+        if (state.memory.status !== 200) return send(state.memory.status, { error: { code: "unavailable", message: "down" } });
+        if (state.memory.snapshot === null) return send(404, { error: { code: "not_found", message: "no such registry route" } });
+        return send(200, state.memory.snapshot, { [REGISTRY_VERSION_HEADER]: "1.0" });
+      }
       if (req.method === "POST" && req.url === "/api/v1/registry/bundle") {
         state.renders++;
         const request = JSON.parse(body) as BundleRequest;
@@ -53,6 +64,8 @@ async function fakeCockpit(extraAssets: readonly RegistryAsset[] = []): Promise<
           rendered.push({ relPath, content: SKILL_BODY });
           included.push({ kind: "skill", ref: pin.id, digest: pin.digest, relPath, reason: "selected by the composition" });
         }
+        // O6 S5 tests pin memory bundles; real Cockpit renders none until O6 S2, this stand-in does.
+        for (const pin of request.memoryBundles) included.push({ kind: "memory_bundle", ref: pin.id, digest: pin.digest, reason: "pinned by the composition" });
         return send(200, assembleBundle({ request, rendered, compiler: { name: "fake-cockpit", version: "1.0.0" }, included, excluded: [] }));
       }
       return send(404, { error: { code: "not_found", message: "no route" } });
@@ -88,6 +101,10 @@ export interface RigOptions {
   configure?: (config: ResolvedConfig) => void;
   /** More registry assets the stand-in Cockpit serves beside ts-review (M3 S4: MCP servers). */
   extraAssets?: RegistryAsset[];
+  /** M6 S4: replaces the shadow scorer (a throwing one must not fail a compose). */
+  assetShadowScorer?: ServerDeps["assetShadowScorer"];
+  /** O6 S3: replaces the memory shadow rule (a throwing one must not fail a compose). */
+  memoryShadowScorer?: ServerDeps["memoryShadowScorer"];
 }
 
 const GIT_ENV = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.invalid", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.invalid" };
@@ -124,7 +141,11 @@ export async function bootRig(options: RigOptions = {}): Promise<Rig> {
   config.composer.policy.budget = options.budget ?? {};
   options.configure?.(config);
   const db = openDb(config.dbPath);
-  const built = buildServer({ config, db, composerHostname: "fake-host-s6.example", ...(options.now ? { now: options.now } : {}) });
+  const built = buildServer({
+    config, db, composerHostname: "fake-host-s6.example", ...(options.now ? { now: options.now } : {}),
+    ...(options.assetShadowScorer ? { assetShadowScorer: options.assetShadowScorer } : {}),
+    ...(options.memoryShadowScorer ? { memoryShadowScorer: options.memoryShadowScorer } : {}),
+  });
   built.registry.init();
   await built.registry.syncAll();
   await built.app.ready();

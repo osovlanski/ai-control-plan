@@ -32,6 +32,7 @@ import type { planProjectVerification } from "./modules/project-verification.js"
 import { Registry } from "./modules/registry.js";
 import { routingHistory } from "./modules/router.js";
 import { TaskEventBus } from "./modules/sse.js";
+import { TaskStageReader } from "./modules/task-stage.js";
 import { Scheduler } from "./modules/scheduler.js";
 import { QuotaProbeService, type QuotaProbeFn } from "./modules/quota-probe.js";
 import { ModelCatalogService, CATALOG_REVISION, type CatalogSource } from "./modules/model-catalog.js";
@@ -60,6 +61,12 @@ import { registerAuth, type SessionMap } from "./auth/index.js";
 import { ClaudeAdapter, ClaudeCodeSessionInputAdapter, CodexAdapter, FakeSessionInputAdapter } from "@agent-plane/adapters";
 import { CredentialStore, credentialPath } from "./auth/credential-file.js";
 import { onRunSessionRef, UsageLedger, validateUsageRecord } from "./modules/usage.js";
+import { AssetTelemetry } from "./modules/asset-telemetry.js";
+import { AssetShadow, parseScoresQuery, parseShadowQuery, type ShadowScorer } from "./modules/asset-shadow.js";
+import { MemoryProposals, parseMemoryFeedQuery, readMemoryProposalPage } from "./modules/memory-proposals.js";
+import { MemoryFederation, MemoryShadowLog, memoryShadowResponse, parseMemoryShadowQuery, type MemorySnapshotSource, type MemoryShadowScorer } from "./modules/memory-federation.js";
+import { validateMemoryProposalPage } from "./memory-contract.js";
+import { parseFeedQuery, readAssetUsagePage, validateAssetUsagePage } from "./asset-usage-contract.js";
 
 export interface ServerDeps {
   config: ResolvedConfig;
@@ -91,6 +98,12 @@ export interface ServerDeps {
   decisionProviders?: DecisionProvider[];
   /** M2 Composer: the hostname its text guard refuses. Test only; defaults to `os.hostname()`. */
   composerHostname?: string;
+  /** M6 S4: the shadow scorer. Test only (a throwing scorer must not fail a compose); defaults to core's. */
+  assetShadowScorer?: ShadowScorer;
+  /** O6 S3: where the memory bundle snapshot comes from. Test only; defaults to Cockpit's memory v1 route. */
+  memorySnapshotSource?: MemorySnapshotSource;
+  /** O6 S3: the memory shadow rule. Test only (a throwing one must not fail a compose); defaults to core's. */
+  memoryShadowScorer?: MemoryShadowScorer;
 }
 
 export interface BuiltServer {
@@ -106,6 +119,8 @@ export interface BuiltServer {
   quotaProbes: QuotaProbeService;
   modelCatalog: ModelCatalogService;
   registryFederation: RegistryFederation;
+  /** O6 S3: Cockpit's memory bundle snapshot, synced beside the registry at boot and daily. */
+  memoryFederation: MemoryFederation;
   /** Present only when `sessionInput.enabled` is true. */
   sessionInputs?: SessionInputService;
   /**
@@ -120,6 +135,9 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   const { config, db } = deps;
   const now = deps.now ?? (() => new Date());
   const bus = deps.bus ?? new TaskEventBus();
+  // Task stage v1 (API 2.9): every state frame on the bus is stamped from this one reader.
+  const stages = new TaskStageReader(db);
+  bus.setStageSource((taskId) => stages.of(taskId));
   const tasks = deps.tasks ?? new TaskStore(db);
   const registry = deps.registry ?? new Registry(db, config);
   const checkpoints = new CheckpointService(db, tasks);
@@ -145,6 +163,13 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   const registryRead = { config: { auth: { require: "registry.read" } } } as const;
   const write = { config: { auth: { require: "commands.write" } } } as const;
   const usageWrite = { config: { auth: { require: "usage.write" } } } as const;
+  const telemetryRead = { config: { auth: { require: "telemetry.read" } } } as const;
+  const memoryRead = { config: { auth: { require: "memory.read" } } } as const;
+  // M6 S4: the shadow scorer. The composer logs through it; the two telemetry.read routes read it.
+  const assetShadow = new AssetShadow(db, registry, app.log, { now, ...(deps.assetShadowScorer ? { scorer: deps.assetShadowScorer } : {}) });
+  // O6 S3: the last good memory bundle snapshot, and the shadow the composer logs through.
+  const memoryFederation = new MemoryFederation(db, config.registry.cockpit, deps.memorySnapshotSource, now, app.log);
+  const memoryShadow = new MemoryShadowLog(db, memoryFederation, app.log, { now, ...(deps.memoryShadowScorer ? { scorer: deps.memoryShadowScorer } : {}) });
 
   // The internal bridge + recovery are wired for every real composition root
   // (extracted to modules/harness/composition.ts so a test factory can build a
@@ -331,6 +356,63 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     return reply.status(result.status === "created" ? 201 : 200).send({ replayed: result.status === "replayed", record: result.record, link: result.link });
   });
 
+  // ---- Asset usage feed (M6 S3, API 2.7; Cockpit M10 pulls it) ----
+  // Append-only ledger rows after the `after` cursor, in ingest order. The page is validated
+  // against asset usage v1 before it leaves: a row that does not conform is a 500, never sent.
+  app.get<{ Querystring: { after?: string; limit?: string } }>("/api/composition/asset-usage", telemetryRead, (req, reply) => {
+    const query = parseFeedQuery(req.query);
+    if (!query.ok) return reply.status(400).send({ error: query.error });
+    const page = readAssetUsagePage(db, query.after, query.limit);
+    const checked = validateAssetUsagePage(page);
+    if (!checked.ok) {
+      // Event ids only: a detail could quote stored content.
+      req.log.error({ eventIds: page.events.map((e) => e.eventId) }, "asset usage page failed its own contract");
+      return reply.status(500).send({ error: "asset usage page failed the asset usage v1 contract" });
+    }
+    return page;
+  });
+
+  // ---- Asset shadow scores and log (M6 S4; shadow only, no activation path, Q11) ----
+  // The plan §4.1 table per asset and cohort, as the plane computes it (Cockpit shows it, never
+  // recomputes it), and the composition attempts whose shadow rank would have chosen differently.
+  app.get<{ Querystring: { taskKind?: string; harness?: string } }>("/api/composition/asset-scores", telemetryRead, (req, reply) => {
+    const query = parseScoresQuery(req.query);
+    if (!query.ok) return reply.status(400).send({ error: query.error });
+    return assetShadow.scores({ ...(query.taskKind ? { taskKind: query.taskKind } : {}), ...(query.harness ? { harness: query.harness } : {}) });
+  });
+  app.get<{ Querystring: { since?: string; limit?: string } }>("/api/composition/shadow", telemetryRead, (req, reply) => {
+    const query = parseShadowQuery(req.query);
+    if (!query.ok) return reply.status(400).send({ error: query.error });
+    return assetShadow.shadowLog(query.since, query.limit);
+  });
+
+  // ---- Memory shadow (O6 S3; shadow only: production selection is unchanged) ----
+  // Per pinned memory bundle per attempt: what stage 4 did and what memory-shadow/v1 would do
+  // (keep, demote, unknown, drifted), with the last good snapshot's state. No API version bump.
+  app.get<{ Querystring: { taskId?: string; limit?: string } }>("/api/composition/memory-shadow", telemetryRead, (req, reply) => {
+    const query = parseMemoryShadowQuery(req.query);
+    if (!query.ok) return reply.status(400).send({ error: query.error });
+    if (query.taskId !== undefined && !tasks.get(query.taskId)) return reply.status(404).send({ error: "not found" });
+    return memoryShadowResponse(db, memoryFederation, query);
+  });
+
+  // ---- Memory proposal feed (O6 S5, memory v1, API 2.8; Cockpit S6 pulls it) ----
+  // Candidate memories in ingest order after the `after` cursor. Read-only: the plane has no route
+  // that accepts, rejects or writes memory. The page is validated against memory v1 before it
+  // leaves: a row that does not conform is a 500, never sent.
+  app.get<{ Querystring: { after?: string; limit?: string } }>("/api/memory/proposals", memoryRead, (req, reply) => {
+    const query = parseMemoryFeedQuery(req.query);
+    if (!query.ok) return reply.status(400).send({ error: query.error });
+    const page = readMemoryProposalPage(db, query.after, query.limit);
+    const checked = validateMemoryProposalPage(page);
+    if (!checked.ok) {
+      // Proposal ids only: a detail could quote a proposal's text.
+      req.log.error({ proposalIds: page.events.map((e) => e.proposalId) }, "memory proposal page failed its own contract");
+      return reply.status(500).send({ error: "memory proposal page failed the memory v1 contract" });
+    }
+    return page;
+  });
+
   // ---- Decisions (K18 / M16) ----
   // Read-only. `site` and `limit` are the only filters — the K22 shadow
   // report and this route share the same `listDecisions` query.
@@ -387,8 +469,9 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     } catch (err) { return reply.status(400).send({ error: message(err) }); }
   });
 
-  app.get("/api/tasks", read.tasks, () =>
-    tasks.list().map((t) => ({
+  app.get("/api/tasks", read.tasks, () => {
+    const stageOf = stages.all();
+    return tasks.list().map((t) => ({
       id: t.id,
       goal: t.goal,
       state: t.state,
@@ -399,8 +482,9 @@ export function buildServer(deps: ServerDeps): BuiltServer {
       updatedAt: t.updated_at,
       wait: scheduler.condition(t.id),
       schedulerEnabled: scheduler.enabled,
-    })),
-  );
+      stage: stageOf.get(t.id),
+    }));
+  });
 
   app.get<{ Params: { id: string } }>("/api/tasks/:id", read.tasks, (req, reply) => {
     const row = tasks.get(req.params.id);
@@ -523,6 +607,8 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   // three routes answer 404 `composer_disabled`; every other route is unchanged.
   const composer = config.composer.enabled
     ? new ComposerService({
+      assetShadow,
+      memoryShadow,
       db, config, tasks, registry, cooldowns, now, ...(modelCatalog ? { catalog: modelCatalog } : {}),
       federation: registryFederation,
       bundled: new BundledComposition(db, new CockpitBundleClient(config.registry.cockpit.baseUrl, config.registry.cockpit.tokenPath), {
@@ -533,6 +619,10 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     : undefined;
   // M2 S6: wakes, run-now, failover and handoffs recompose at dispatch; settles record overruns.
   if (composer) orchestrator.dispatchComposer = composer;
+  // M6 S1: settles project composed sessions into asset_usage; reconcileOnBoot backfills the rest.
+  orchestrator.assetTelemetry = new AssetTelemetry(db, app.log);
+  // O6 S5: settles extract memory proposals from composed sessions; reconcileOnBoot backfills.
+  orchestrator.memoryProposals = new MemoryProposals(db, app.log);
   // Boot pass: bind usage records stored before their run's session was known (or before 036).
   try {
     const backfill = usage.backfillRunLinks();
@@ -885,7 +975,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     const row = tasks.get(req.params.id);
     if (!row) return reply.status(404).send({ error: "not found" });
     sseHeaders(reply);
-    send(reply, { kind: "state", state: { state: row.state, phase: row.activity_phase ?? undefined, wait: scheduler.condition(row.id), schedulerEnabled: scheduler.enabled } });
+    send(reply, { kind: "state", state: { state: row.state, phase: row.activity_phase ?? undefined, wait: scheduler.condition(row.id), schedulerEnabled: scheduler.enabled, stage: stages.of(row.id) } });
     const unsubscribe = bus.subscribe(req.params.id, (payload) => send(reply, payload));
     req.raw.on("close", unsubscribe);
   });
@@ -1391,7 +1481,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     });
   }
 
-  return { app, registry, orchestrator, tasks, bus, checkpoints, cooldowns, telemetry, scheduler, quotaProbes: probes, modelCatalog, registryFederation, sessionInputs, sessionInputRedelivery };
+  return { app, registry, orchestrator, tasks, bus, checkpoints, cooldowns, telemetry, scheduler, quotaProbes: probes, modelCatalog, registryFederation, memoryFederation, sessionInputs, sessionInputRedelivery };
 }
 
 function sseHeaders(reply: FastifyReply): void {
