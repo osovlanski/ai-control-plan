@@ -1,6 +1,9 @@
 # Own table only; never touches iptables-nft's "ip filter" table or tailscale's tables.
 # uid aos-agent (1002): drop loopback (except the resolved stub), tailnet, private ranges, metadata.
 # Allow HTTPS to the rest. Loopback allowlist is empty for the first loop.
+# Idempotent reload: declare, delete, redefine (one atomic transaction).
+table inet aos_agent_net
+delete table inet aos_agent_net
 table inet aos_agent_net {
   chain out {
     type filter hook output priority -1; policy accept;

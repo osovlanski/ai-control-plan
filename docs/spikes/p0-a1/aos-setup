@@ -1,0 +1,33 @@
+#!/bin/bash
+# Idempotent P0-A1 host setup. Run as root: sudo ./aos-setup [--no-net]
+# Creates only what is missing; re-running changes nothing on a healthy host.
+# --no-net skips sudoers + nftables (the step that needs the timed rollback).
+set -euo pipefail
+SRC="$(cd "$(dirname "$0")" && pwd)"
+L=/usr/local/lib/aos
+say(){ echo "aos-setup: $*"; }
+getent group aos >/dev/null || { groupadd aos; say "group aos created"; }
+id aos-agent >/dev/null 2>&1 || { useradd -u 1002 -g aos -m -d /home/aos-agent -s /usr/sbin/nologin aos-agent; say "user aos-agent created"; }
+[ "$(id -u aos-agent)" = 1002 ] || { echo "aos-agent uid is not 1002; nft rule would not match" >&2; exit 1; }
+chmod 0700 /home/aos-agent
+loginctl enable-linger aos-agent
+install -d -o ubuntu -g aos -m 0750 /var/lib/aos /var/lib/aos/profiles
+install -d -o ubuntu -g aos -m 2770 /var/lib/aos/worktrees
+install -d -o root -g root -m 0755 "$L"
+install -o root -g root -m 0755 "$SRC/run-as-agent" "$L/run-as-agent"
+if [ ! -x "$L/claude" ]; then
+  bin="$(readlink -f /home/ubuntu/.local/bin/claude)"; v="$(basename "$bin")"
+  install -o root -g root -m 0755 "$bin" "$L/claude-$v"; ln -sfn "claude-$v" "$L/claude"; say "claude $v copied"
+fi
+[ "${1:-}" = --no-net ] && { say "done (sudoers + nft skipped)"; exit 0; }
+visudo -cf "$SRC/aos-sudoers" >/dev/null
+install -o root -g root -m 0440 "$SRC/aos-sudoers" /etc/sudoers.d/aos
+visudo -c >/dev/null
+nft -c -f "$SRC/aos-agent-net.nft"
+install -o root -g root -m 0644 "$SRC/aos-agent-net.nft" "$L/aos-agent-net.nft"
+install -o root -g root -m 0644 "$SRC/aos-agent-net.service" /etc/systemd/system/aos-agent-net.service
+systemctl daemon-reload
+systemctl enable --quiet aos-agent-net.service
+systemctl restart aos-agent-net.service
+say "done"
+[ -f /home/aos-agent/.claude/.credentials.json ] || say "NOTE: aos-agent has no Claude login (itay: cd /var/lib/aos/worktrees, then sudo -u aos-agent -H env XDG_RUNTIME_DIR=/run/user/1002 $L/claude, /login)"
