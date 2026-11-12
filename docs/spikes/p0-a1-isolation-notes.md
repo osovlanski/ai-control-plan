@@ -91,3 +91,4 @@ Not runnable. The plane's Claude adapter spawns as `ubuntu` and has no path thro
 - G21: BLOCKED. Every loopback, tailnet, private and metadata access is refused, but the verifier and acceptance parts have no code yet.
 - G26: BLOCKED (see above).
 - Apply step: BLOCKED, because the rollback-cancel checks cannot run on a single-node tailnet.
+- 11:03:00Z: the rollback fired. `inet aos_agent_net` is gone ("No such file or directory"), `/etc/sudoers.d/aos` is gone, `visudo -c` OK, the `at` queue is empty. `aos-agent` and its Claude credential file remain. To re-apply: run the same two installs, and have itay do a fresh SSH login and a Tailscale ping **from his own device** inside the window, or authorize a host key for a loopback SSH check.
