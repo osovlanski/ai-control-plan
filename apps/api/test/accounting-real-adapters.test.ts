@@ -55,7 +55,8 @@ async function bootClaude(maxTokens: number, model?: string, dropCost = false): 
   // The manifest's auth comes from the environment; a runner with no Claude login would route nothing.
   vi.stubEnv("ANTHROPIC_API_KEY", "FAKE-anthropic-key-not-real-slice1");
   // The seed's prices apply to an API account; a subscription has no list price to estimate from.
-  const r = await bootRig({ assistants: { claude: { provider: "anthropic", accountKind: "api" } }, budget: { maxTokens } });
+  // Pinned clock: price freshness is read-time, so a real clock makes the estimate expire with the calendar.
+  const r = await bootRig({ assistants: { claude: { provider: "anthropic", accountKind: "api" } }, budget: { maxTokens }, now: () => new Date("2026-10-31T00:00:00.000Z") });
   (r.built.registry as unknown as { adapters: Map<string, unknown> }).adapters.set("claude", new ClaudeAdapter("claude" as AssistantId, replay(model, dropCost)));
   await r.built.registry.syncAll();
   // K7 price evidence: the seed is loaded by a refresh (offline sources only in tests).
