@@ -8,6 +8,7 @@ set -euo pipefail
 [ "$(id -u)" = 0 ] || { echo "aos-setup: run as root" >&2; exit 1; }
 case "${1:-}" in ""|--no-net) ;; *) echo "usage: aos-setup [--no-net]" >&2; exit 64;; esac
 SRC="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+cd /  # a cwd the agent user cannot stat (a home-dir checkout) makes the agent-side git calls fail
 L=/usr/local/lib/aos
 PLANE_USER=ubuntu
 say(){ echo "aos-setup: $*"; }

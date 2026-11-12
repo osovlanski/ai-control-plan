@@ -1,6 +1,7 @@
 #!/bin/bash
 # Read-only health check of the agent-user setup. Run as root. Exit 1 if anything is missing.
 bad=0
+cd /  # runuser keeps the caller's cwd; a cwd aos-agent cannot stat fails the git check
 c(){ if eval "$2" >/dev/null 2>&1; then echo "ok      $1"; else echo "MISSING $1"; bad=1; fi; }
 c "user aos-agent uid 1002"      '[ "$(id -u aos-agent)" = 1002 ]'
 c "linger"                       'loginctl show-user aos-agent -p Linger | grep -q yes'
