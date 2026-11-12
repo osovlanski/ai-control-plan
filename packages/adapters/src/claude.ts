@@ -42,6 +42,8 @@ interface ClaudeRunState {
   live?: LiveInputChannel;
   /** The CLI process this adapter spawned for the run (kernel liveness, F1/F2). */
   process?: { child: ChildProcess; spawnedAt: string; stderrTail: string };
+  /** P0-A2: set when this run launches as the agent user. */
+  agent?: AgentRun;
   /** The verified profile this run launched with (M3), judged against `system/init` (S5). */
   profile?: VerifiedProfile;
 }
@@ -118,7 +120,8 @@ export class ClaudeAdapter implements AgentAdapter {
       // Usage: the `result` message carries the run's totals, so its `usage.updated` is cumulative
       // for the run; the quota-only `usage.updated` from `rate_limit_event` carries no tokens and
       // adds nothing. No `usageReporting` contract is declared, so a token cap stays advisory.
-      harness: { usageAccounting: "cumulative", toolGating: "none", approvalRelay: true, processIsolation: "none", provisioning: "full" },
+      harness: { usageAccounting: "cumulative", toolGating: "none", approvalRelay: true, processIsolation: "none", provisioning: "full",
+        ...(this.options.agentLauncher ? { agentUser: true } : {}) },
       // M14 K9 — the Agent SDK's `getContextUsage` control request reports live
       // occupancy (`totalTokens`) against the resolved autocompaction window
       // (`rawMaxTokens`), which is a DIFFERENT fact from the model's advertised
@@ -167,6 +170,7 @@ export class ClaudeAdapter implements AgentAdapter {
 
   private async launch(run: RunSpec, resumeRef: ProviderSessionRef | undefined): Promise<RunHandle> {
     requireProfileHarness(run.profile, "claude-code"); // before any state or process exists
+    const agent = agentLaunch(run, this.options.agentLauncher); // refuses before any state or process exists
     // MCP secret values travel only in the provider's environment: `--mcp-config` is argv.
     const secretEnv = mcpSecretEnv(run.profile, run.secretEnv);
     const runId = newRunId();
@@ -176,6 +180,7 @@ export class ClaudeAdapter implements AgentAdapter {
       pendingApprovals: new Map(),
       pendingTools: new Map(),
       ...(run.profile ? { profile: run.profile } : {}),
+      ...(agent ? { agent } : {}),
     };
     this.runs.set(runId, state);
 
@@ -205,6 +210,8 @@ export class ClaudeAdapter implements AgentAdapter {
         resume: resumeRef,
         abortController: state.abort,
         ...(Object.keys(secretEnv).length > 0 ? { env: { ...process.env, ...secretEnv } } : {}),
+        // The agent user cannot execute the plane user's CLI; it runs the root-owned copy.
+        ...(agent ? { pathToClaudeCodeExecutable: agent.launcher.executable } : {}),
         spawnClaudeCodeProcess: (options) => this.spawnProvider(options, state),
         ...(run.profile
           ? provisionedOptions(run.profile)
@@ -562,9 +569,15 @@ export class ClaudeAdapter implements AgentAdapter {
    * forwarded abort signal), done here so the kernel can see the pid (F1/F2).
    */
   private spawnProvider(options: SpawnOptions, state: ClaudeRunState): SpawnedProcess {
-    const child = spawn(options.command, options.args, {
+    const agent = state.agent;
+    // P0-A2: as the agent user, the command line is the wrapper's. sudo resets the environment
+    // (the sudoers rule sets env_reset), so nothing of the plane's reaches the provider.
+    const [command, args] = agent
+      ? [agent.launcher.sudo, [...agentSudoArgs(agent.launcher), "run", agent.unit, String(agent.maxSeconds), options.cwd ?? agent.cwd, "--", options.command, ...options.args]]
+      : [options.command, options.args];
+    const child = spawn(command, args, {
       cwd: options.cwd,
-      env: options.env,
+      env: agent ? agentSudoEnv() : options.env,
       signal: options.signal,
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
@@ -586,7 +599,11 @@ export class ClaudeAdapter implements AgentAdapter {
     const child = this.runs.get(handle.runId)?.process;
     if (!child?.child.pid) return undefined;
     const c = child.child;
-    return { pid: c.pid!, spawnedAt: child.spawnedAt, alive: () => c.exitCode === null && c.signalCode === null };
+    const agent = this.runs.get(handle.runId)?.agent;
+    return {
+      pid: c.pid!, spawnedAt: child.spawnedAt, alive: () => c.exitCode === null && c.signalCode === null,
+      ...(agent ? { stop: () => stopAgentUnit(agent.launcher, agent.unit), agentUnit: agent.unit } : {}),
+    };
   }
 
   async cancel(handle: RunHandle): Promise<void> {
@@ -594,7 +611,64 @@ export class ClaudeAdapter implements AgentAdapter {
     if (!state) return;
     closeLive(state);
     state.abort.abort();
+    // The abort signals sudo, which the plane user may not signal; the scope is stopped by name.
+    if (state.agent && state.process) await stopAgentUnit(state.agent.launcher, state.agent.unit);
   }
+}
+
+/** P0-A2: where the plane's single sudoers rule and the root-owned provider copy live. */
+export interface AgentLauncher {
+  /** `sudo` binary. */
+  sudo: string;
+  /** The agent Unix user and group the sudoers rule names. */
+  user: string;
+  group: string;
+  /** The one command the sudoers rule allows (`run-as-agent`). */
+  wrapper: string;
+  /** The provider CLI the agent user can execute (a root-owned copy; the plane user's is unreadable to it). */
+  executable: string;
+}
+
+interface AgentRun { launcher: AgentLauncher; unit: string; maxSeconds: number; cwd: string }
+
+const AGENT_UNIT = /^[A-Za-z0-9_-]{1,64}$/;
+/** The wrapper's own bounds (`RuntimeMaxSec`), restated so a bad value is refused here, not by exit 64. */
+const AGENT_MAX_SECONDS = 14_400;
+
+/** The agent launch for `run`, or undefined when the run is the plane user's. Throws rather than downgrade. */
+export function agentLaunch(run: RunSpec, launcher: AgentLauncher | undefined): AgentRun | undefined {
+  if (!run.runAs) return undefined;
+  if (!launcher) throw new NotSupportedError("an agent-user launch on an adapter with no agent launcher configured");
+  if (!AGENT_UNIT.test(run.runAs.unit)) throw new Error("agent unit id is not a safe unit name");
+  if (run.secretEnv && Object.keys(run.secretEnv).length > 0) throw new Error("an agent-user launch carries no secret environment");
+  if (run.profile && run.profile.secretRefs.length > 0) throw new Error("an agent-user launch carries no secret references");
+  const maxSeconds = Math.ceil(run.env.maxRuntimeMs / 1000);
+  if (!Number.isFinite(maxSeconds) || maxSeconds < 1 || maxSeconds > AGENT_MAX_SECONDS) {
+    throw new Error(`an agent-user launch needs a runtime bound of 1..${AGENT_MAX_SECONDS} s, got ${maxSeconds}`);
+  }
+  return { launcher, unit: run.runAs.unit, maxSeconds, cwd: run.workdir };
+}
+
+const agentSudoArgs = (l: AgentLauncher) => ["-n", "-u", l.user, "-g", l.group, "--", l.wrapper];
+/** sudo needs a PATH to find nothing of ours; everything else is dropped on purpose. */
+const agentSudoEnv = (): NodeJS.ProcessEnv => ({ PATH: "/usr/local/bin:/usr/bin:/bin", LANG: "C.UTF-8" });
+
+/** Ask the agent's user manager to stop the run's scope. Bounded; never throws (the scope may be gone). */
+export function stopAgentUnit(launcher: AgentLauncher, unit: string, timeoutMs = 10_000): Promise<void> {
+  return new Promise((done) => {
+    if (!AGENT_UNIT.test(unit)) return done();
+    let child: ChildProcess;
+    try {
+      child = spawn(launcher.sudo, [...agentSudoArgs(launcher), "stop", unit], { env: agentSudoEnv(), stdio: "ignore" });
+    } catch {
+      return done();
+    }
+    const timer = setTimeout(() => { child.kill("SIGKILL"); done(); }, timeoutMs);
+    timer.unref();
+    const end = () => { clearTimeout(timer); done(); };
+    child.on("error", end);
+    child.on("exit", end);
+  });
 }
 
 /** Options that change how a run is launched. Everything here defaults OFF. */
@@ -613,6 +687,11 @@ export interface ClaudeAdapterOptions {
    * files are read, never written.
    */
   profile?: ClaudeLaunchProfile;
+  /**
+   * P0-A2: how to launch a run as the agent Unix user. Used only for a run whose `RunSpec.runAs`
+   * is set; every other run launches exactly as before. Without it such a run is refused.
+   */
+  agentLauncher?: AgentLauncher;
 }
 
 export interface ClaudeLaunchProfile {

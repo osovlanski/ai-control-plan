@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdirSync, realpathSync } from "node:fs";
+import { chmodSync, lstatSync, mkdirSync, readdirSync, realpathSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
 
@@ -218,4 +218,24 @@ export async function runDiffSummary(
     deletions += Number(del) || 0;
   }
   return { diffStat, changedFiles, insertions, deletions };
+}
+
+/**
+ * P0-A2: open a freshly created worktree to its group, so the agent Unix user (a member) can
+ * edit it. Git writes the tree with this process's umask, which normally leaves the group
+ * read-only. Directories get rwx and setgid (new entries keep the group), files get rw.
+ * Symlinks are left alone. The parent must already carry the agent group (host setup).
+ */
+export function shareWorktreeWithGroup(worktreePath: string): void {
+  const walk = (path: string) => {
+    const st = lstatSync(path);
+    if (st.isSymbolicLink()) return;
+    if (st.isDirectory()) {
+      chmodSync(path, (st.mode & 0o7777) | 0o2070);
+      for (const name of readdirSync(path)) walk(join(path, name));
+    } else if (st.isFile()) {
+      chmodSync(path, (st.mode & 0o7777) | 0o060);
+    }
+  };
+  walk(worktreePath);
 }

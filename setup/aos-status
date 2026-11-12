@@ -1,0 +1,22 @@
+#!/bin/bash
+# Read-only health check of the agent-user setup. Run as root. Exit 1 if anything is missing.
+bad=0
+c(){ if eval "$2" >/dev/null 2>&1; then echo "ok      $1"; else echo "MISSING $1"; bad=1; fi; }
+c "user aos-agent uid 1002"      '[ "$(id -u aos-agent)" = 1002 ]'
+c "linger"                       'loginctl show-user aos-agent -p Linger | grep -q yes'
+c "home 0700"                    '[ "$(stat -c %a /home/aos-agent)" = 700 ]'
+c "plane user in group aos"      'id -nG ubuntu | tr " " "\n" | grep -qx aos'
+c "/var/lib/aos/profiles 2750"   '[ "$(stat -c %a /var/lib/aos/profiles)" = 2750 ]'
+c "/var/lib/aos/worktrees 2770"  '[ "$(stat -c %a /var/lib/aos/worktrees)" = 2770 ]'
+c "wrapper root-owned 0755"      '[ "$(stat -c %U:%a /usr/local/lib/aos/run-as-agent)" = root:755 ]'
+c "claude copy"                  '[ -x /usr/local/lib/aos/claude ]'
+c "claude login"                 '[ -f /home/aos-agent/.claude/.credentials.json ]'
+c "agent git safe.directory"     'runuser -u aos-agent -- env HOME=/home/aos-agent git config --global --get-all safe.directory | grep -qx "/var/lib/aos/worktrees/\*"'
+# The plane user must NOT trust the agent tree: a .git owned by aos-agent has to stay refused.
+c "plane git does not trust it"  '! { git config --system --get-all safe.directory; runuser -u ubuntu -- env HOME=/home/ubuntu git config --global --get-all safe.directory; } 2>/dev/null | grep -qE "^(\*|/var/lib/aos(/.*)?)$"'
+c "sudoers /etc/sudoers.d/aos"   'visudo -cf /etc/sudoers.d/aos'
+c "nft table aos_agent_net"      'nft list table inet aos_agent_net'
+c "nft unit enabled"             'systemctl is-enabled aos-agent-net.service'
+# Informational: the boundary only protects against aos-agent while this holds (README.md).
+if sudo -l -U ubuntu 2>/dev/null | grep -q 'NOPASSWD: ALL'; then echo "note    plane user still has blanket NOPASSWD sudo"; fi
+exit $bad

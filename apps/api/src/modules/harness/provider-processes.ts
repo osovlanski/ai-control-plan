@@ -30,6 +30,9 @@ import type { ProviderProcess } from "@agent-plane/core";
 export const INCARNATION_ENV = "AGENT_PLANE_INCARNATION";
 /** Under the workspace dir: one file per API pid, one provider group leader pid per line. */
 export const PROVIDER_GROUPS_DIR = "provider-groups";
+/** P0-A2. Under the workspace dir: one file per API pid, one agent-user unit name per line. */
+export const AGENT_UNITS_DIR = "agent-units";
+const AGENT_UNIT = /^[A-Za-z0-9_-]{1,64}$/;
 /** SIGTERM → SIGKILL grace. The Claude CLI flushes its transcript on SIGTERM well inside this. */
 export const DEFAULT_TERMINATE_GRACE_MS = 5_000;
 
@@ -129,6 +132,13 @@ export class ProviderProcessTracker {
       const dir = join(this.workspaceDir, PROVIDER_GROUPS_DIR);
       mkdirSync(dir, { recursive: true, mode: 0o700 });
       appendFileSync(join(dir, String(process.pid)), `${proc.pid}\n`);
+      // An agent-user provider is not ours to signal after a crash: its unit name is what a
+      // later boot can stop (`reapStrayAgentUnits`).
+      if (proc.agentUnit && AGENT_UNIT.test(proc.agentUnit)) {
+        const units = join(this.workspaceDir, AGENT_UNITS_DIR);
+        mkdirSync(units, { recursive: true, mode: 0o700 });
+        appendFileSync(join(units, String(process.pid)), `${proc.agentUnit}\n`);
+      }
     } catch (err) {
       // The run goes on; only a crash-time reap of this provider is lost.
       this.log?.("provider group not recorded", { sessionId, providerPid: proc.pid, error: String(err) });
@@ -146,7 +156,10 @@ export class ProviderProcessTracker {
     const proc = this.bySession.get(sessionId);
     if (!proc) return Promise.resolve("untracked");
     this.bySession.delete(sessionId);
-    const done = terminateProcessTree(proc.pid, this.graceMs)
+    // An agent-user provider sits behind sudo, which this user may not signal: its scope is
+    // stopped by name first, and the signals below then only find what is already gone.
+    const done = (proc.stop ? proc.stop().catch(() => undefined) : Promise.resolve())
+      .then(() => terminateProcessTree(proc.pid, this.graceMs))
       .then((outcome) => {
         this.log?.("provider process terminated", { sessionId, providerPid: proc.pid, reason, outcome });
         return outcome;
@@ -255,4 +268,34 @@ export async function reapStrayProviders(
   for (const owner of dead.keys()) rmSync(join(groupsDir, String(owner)), { force: true });
   if (strays.length) opts.log?.("reaped stray provider processes from a dead incarnation", { workspaceDir, pids: strays, outcome });
   return strays;
+}
+
+/**
+ * P0-A2: stop the agent-user units a dead incarnation of this workspace left running. Their
+ * processes belong to another Unix user and carry none of this process's environment, so the
+ * tag-and-group reap above cannot see or signal them; the unit name recorded at spawn is the
+ * handle. `stop` is the adapter's wrapper call and is a no-op for a unit that already ended.
+ * Each unit is also bounded by its own `RuntimeMaxSec`, so a missed stop is late, not unbounded.
+ */
+export async function reapStrayAgentUnits(
+  workspaceDir: string,
+  stop: (unit: string) => Promise<void>,
+  opts: { log?: ProcessLog; procRoot?: string } = {},
+): Promise<string[]> {
+  const procRoot = opts.procRoot ?? "/proc";
+  const dir = join(workspaceDir, AGENT_UNITS_DIR);
+  if (!existsSync(dir)) return [];
+  const stopped: string[] = [];
+  for (const file of readdirSync(dir)) {
+    const owner = Number(file);
+    if (!/^\d+$/.test(file) || owner === process.pid || ownerAlive(owner, procRoot)) continue;
+    const units = readFileSync(join(dir, file), "utf8").split("\n").filter((u) => AGENT_UNIT.test(u));
+    for (const unit of new Set(units)) {
+      await stop(unit).catch(() => undefined);
+      stopped.push(unit);
+    }
+    rmSync(join(dir, file), { force: true });
+  }
+  if (stopped.length) opts.log?.("stopped agent-user units from a dead incarnation", { workspaceDir, units: stopped });
+  return stopped;
 }

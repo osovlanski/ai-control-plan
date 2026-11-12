@@ -150,6 +150,12 @@ export interface FakeOptions {
    */
   harness?: FakeHarness;
   /**
+   * TEST-ONLY (P0-A2). Declare `harness.agentUser`, so a drive can take an agent task through
+   * the plane without a provider. Honest for the fake: it spawns no process and runs no
+   * repository code, so nothing of the task runs as the plane user. Default off.
+   */
+  agentUser?: boolean;
+  /**
    * Model selectors this fake assistant advertises. Default `[{ id: "fake-1" }]`
    * — unchanged for every existing caller. A demo/test that needs two distinct
    * candidate identities (K13) sets this to two ids; each becomes its own
@@ -208,7 +214,8 @@ export class FakeAdapter implements AgentAdapter {
       // numbers the legacy path reads straight off the raw event payload.
       // M3: a fake standing in for Claude Code or Codex runs that harness's real provisioning plan
       // (files, digest, verify, dispose); only the launch is fake. Cursor and Bedrock have none.
-      harness: { usageAccounting: "cumulative", toolGating: "none", approvalRelay: true, processIsolation: "none", provisioning: FAKE_PROVISIONING[this.harness] },
+      harness: { usageAccounting: "cumulative", toolGating: "none", approvalRelay: true, processIsolation: "none", provisioning: FAKE_PROVISIONING[this.harness],
+        ...(this.options.agentUser === true ? { agentUser: true } : {}) },
       // K9: `observeContext` returns whatever `[FAKE:CONTEXT:…]` scripted. No
       // compaction control is exposed (that is K10) — `compact: "none"`.
       context: {

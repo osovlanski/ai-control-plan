@@ -1,0 +1,14 @@
+# /etc/sudoers.d/90-cloud-init-users  (0440 root:root) — REPLACES the cloud-init file of that name.
+# NOT installed by aos-setup. Applying it is itay's decision and needs his explicit OK:
+# see setup/README.md, "Narrowing the plane user's sudo".
+#
+# Today cloud-init gives the plane user `ubuntu ALL=(ALL) NOPASSWD:ALL`, so anything running as
+# ubuntu (the plane, an agent session on this box) is root, and the aos-agent boundary only
+# protects against aos-agent. After this file:
+#   - root still exists for a human: `sudo` asks for ubuntu's password, which only itay knows
+#     and which no process on the box holds;
+#   - without a password, ubuntu can run only the three root-owned recovery tools below.
+# The three paths are root-owned copies under /usr/local/lib/aos. They take no arguments that
+# name a file to run, and aos-setup installs from its own root-owned directory only.
+ubuntu ALL=(ALL) ALL
+ubuntu ALL=(root) NOPASSWD: /usr/local/lib/aos/aos-setup "", /usr/local/lib/aos/aos-setup --no-net, /usr/local/lib/aos/aos-status "", /usr/local/lib/aos/rollback.sh ""

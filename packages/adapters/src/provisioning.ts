@@ -11,7 +11,7 @@
  * - The profile digest carries no absolute path and no time, so one revision gives one digest.
  */
 import { createHash, randomUUID } from "node:crypto";
-import { lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type {
@@ -27,7 +27,7 @@ import type {
   ProvisioningVerification,
   VerifiedProfile,
 } from "@agent-plane/core";
-import { jcs, mcpLaunchProblem, mcpServerName, ProvisioningError } from "@agent-plane/core";
+import { jcs, mcpLaunchProblem, mcpServerName, ProvisioningError, redactSecrets } from "@agent-plane/core";
 
 export const PROFILE_MARKER = ".agent-plane-profile.json";
 export const PLUGIN_NAME = "agent-plane-profile";
@@ -155,6 +155,35 @@ export function computeProfileDigest(plan: Pick<ProvisioningPlan, "harness" | "f
   }, "integer"));
 }
 
+/**
+ * Values that are secrets by shape, wherever they appear. Deliberately narrower than the event
+ * redaction rules: a skill may say "the token goes in the header" without being refused.
+ */
+const SECRET_SHAPED: ReadonlyArray<{ name: string; pattern: RegExp }> = [
+  { name: "API key", pattern: /\bsk-[A-Za-z0-9_-]{20,}\b/ },
+  { name: "GitHub token", pattern: /\b(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,})\b/ },
+  { name: "JWT", pattern: /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/ },
+  { name: "bearer token", pattern: /\bBearer\s+[A-Za-z0-9._~+/-]{24,}=*/ },
+  { name: "private key", pattern: /-----BEGIN [A-Z ]*PRIVATE KEY-----/ },
+];
+
+/**
+ * P0-A2: a group-readable profile is read by the agent user, so it may carry no secret: no secret
+ * reference (the value would have to cross to the agent's environment), no value this process
+ * registered as a secret, and nothing secret-shaped in any file.
+ */
+function assertNoSecrets(p: ProvisioningPlan): void {
+  if (p.access !== "group") return;
+  if (p.secretRefs.length > 0) {
+    throw new ProvisioningError("secret_in_profile", `an agent-readable profile may not name secret references (${p.secretRefs.join(", ")})`);
+  }
+  for (const f of p.files) {
+    if (redactSecrets(f.content) !== f.content) throw new ProvisioningError("secret_in_profile", `profile file ${f.relPath} holds a registered secret value`);
+    const hit = SECRET_SHAPED.find((s) => s.pattern.test(f.content));
+    if (hit) throw new ProvisioningError("secret_in_profile", `profile file ${f.relPath} holds a secret-shaped value (${hit.name})`);
+  }
+}
+
 function plan(input: ProvisioningInput, secretRefs: string[], rest: Omit<ProvisioningPlan, "schemaVersion" | "compositionRevisionId" | "sessionId" | "root" | "secretRefs" | "profileDigest">): ProvisioningPlan {
   const base = {
     schemaVersion: 1 as const,
@@ -165,7 +194,9 @@ function plan(input: ProvisioningInput, secretRefs: string[], rest: Omit<Provisi
     files: [...rest.files].sort(byPath),
     secretRefs,
   };
-  return { ...base, profileDigest: computeProfileDigest(base) };
+  const built: ProvisioningPlan = { ...base, ...(input.access === "group" ? { access: "group" as const } : {}), profileDigest: computeProfileDigest(base) };
+  assertNoSecrets(built);
+  return built;
 }
 
 /**
@@ -293,23 +324,55 @@ export function materializeProfile(p: ProvisioningPlan, harness: ProvisionedHarn
   if (p.harness !== harness) throw new ProvisioningError("harness_mismatch", `plan is for ${p.harness}, not ${harness}`);
   assertProfileRoot(p.root);
   if (computeProfileDigest(p) !== p.profileDigest) throw new ProvisioningError("digest_mismatch", "plan does not match its profile digest");
+  assertNoSecrets(p);
+  const group = p.access === "group";
+  const dirMode = group ? 0o750 : 0o700;
+  const fileMode = group ? 0o640 : 0o600;
   const profile: ProvisionedProfile = { plan: p, marker: PROFILE_MARKER };
   const existing = lstatOrUndefined(p.root);
   if (existing) {
     if (!existing.isSymbolicLink() && existing.isDirectory() && sameMarker(readMarker(p.root), markerFor(p))) return profile;
     throw new ProvisioningError("unowned_path", "profile root already exists and is not this profile");
   }
-  mkdirSync(dirname(p.root), { recursive: true, mode: 0o700 });
+  // A group profile's parent is host setup (setgid, group = the agent's): creating it here would
+  // give it this process's own group, and the agent could not read below it.
+  if (group) {
+    const parent = lstatOrUndefined(dirname(p.root));
+    if (!parent || !parent.isDirectory() || parent.isSymbolicLink()) throw new ProvisioningError("invalid_root", "the agent profile root does not exist; run the host setup first");
+    if ((parent.mode & 0o2000) === 0 || (parent.mode & 0o027) !== 0o000 || (parent.mode & 0o050) !== 0o050) {
+      throw new ProvisioningError("invalid_root", "the agent profile root must be setgid, group-readable, not group-writable and closed to others (2750)");
+    }
+  } else {
+    mkdirSync(dirname(p.root), { recursive: true, mode: 0o700 });
+  }
   const staging = `${p.root}.staging-${randomUUID()}`;
+  // Modes are set explicitly: `mkdir`/`open` modes are cut by the umask, and 0640 must hold under 077.
+  const makeDir = (dir: string) => {
+    if (lstatOrUndefined(dir)) return;
+    if (dir !== staging) makeDir(dirname(dir));
+    mkdirSync(dir, { mode: dirMode });
+    chmodSync(dir, group ? dirMode | 0o2000 : dirMode);
+  };
+  const writeFile = (target: string, content: string) => {
+    writeFileSync(target, content, { encoding: "utf8", mode: fileMode, flag: "wx" });
+    chmodSync(target, fileMode);
+  };
   try {
-    mkdirSync(staging, { mode: 0o700 });
+    makeDir(staging);
     for (const f of p.files) {
       const target = join(staging, f.relPath);
       if (!inside(target, staging)) throw new ProvisioningError("invalid_bundle", `profile file ${f.relPath} escapes the root`);
-      mkdirSync(dirname(target), { recursive: true, mode: 0o700 });
-      writeFileSync(target, f.content, { encoding: "utf8", mode: 0o600, flag: "wx" });
+      makeDir(dirname(target));
+      writeFile(target, f.content);
     }
-    writeFileSync(join(staging, PROFILE_MARKER), `${JSON.stringify(markerFor(p))}\n`, { mode: 0o600, flag: "wx" });
+    writeFile(join(staging, PROFILE_MARKER), `${JSON.stringify(markerFor(p))}\n`);
+    if (group) {
+      // Every entry must carry the agent group. It does when the root is setgid and this user is
+      // a member of that group (a non-member's chmod drops setgid, and the next level loses it).
+      const gid = lstatSync(dirname(p.root)).gid;
+      const stray = [staging, ...walk(staging).map((e) => join(staging, e.relPath))].find((path) => lstatSync(path).gid !== gid);
+      if (stray) throw new ProvisioningError("invalid_root", "the profile did not inherit the agent group from its root; the plane user must be a member of that group");
+    }
     renameSync(staging, p.root);
   } catch (err) {
     rmSync(staging, { recursive: true, force: true });

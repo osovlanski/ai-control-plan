@@ -51,6 +51,12 @@ export interface ProvisioningInput {
   sessionId: string;
   /** One entry per `spec.assets.mcp_servers` ref. Absent means none were resolved. */
   mcpServers?: ProvisioningMcpServer[];
+  /**
+   * P0-A2: `"group"` writes the profile for another Unix user to read: dirs 0750, files 0640,
+   * group inherited from the (setgid) parent. Such a profile may name no secret reference and
+   * hold no secret-shaped value. Absent = `"owner"` (0700/0600), as before.
+   */
+  access?: "owner" | "group";
 }
 
 /** A file the profile owns, relative to the profile root. */
@@ -101,6 +107,8 @@ export interface ProvisioningPlan {
   excluded: string[];
   /** Secret reference NAMES the launch resolves in memory. Never values. */
   secretRefs: string[];
+  /** P0-A2: see `ProvisioningInput.access`. Not part of the digest: it changes modes, not content. */
+  access?: "owner" | "group";
   /** sha256 over JCS of harness, files (relPath + digest) and the launch shape with content digests. No path, no time. */
   profileDigest: string;
 }
@@ -161,7 +169,9 @@ export type ProvisioningRefusal =
   | "invalid_bundle"
   | "invalid_root"
   | "unowned_path"
-  | "digest_mismatch";
+  | "digest_mismatch"
+  /** P0-A2: an agent-readable profile named a secret reference or held a secret-shaped value. */
+  | "secret_in_profile";
 
 export class ProvisioningError extends Error {
   constructor(readonly reason: ProvisioningRefusal, message: string) {

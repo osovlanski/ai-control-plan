@@ -8,6 +8,7 @@
     "start": "tsx src/index.ts",
     "open": "tsx src/bin/open-web.ts",
     "rotate": "tsx src/bin/rotate-credential.ts",
+    "rotate-operate": "tsx src/bin/rotate-operate-secret.ts",
     "model:shadow-report": "tsx src/bin/model-shadow-report.ts",
     "asset:shadow-report": "tsx src/bin/asset-shadow-report.ts",
     "decision:injection-frequency": "tsx src/bin/decision-injection-frequency.ts",

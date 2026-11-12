@@ -13,6 +13,12 @@ export interface VerificationProviderContext {
   authority?: WorkspaceAuthority;
   worktreePath?: string;
   signal?: AbortSignal;
+  /**
+   * P0-A2 (auto-copilot plan §C.0): `"refused"` for a request with `policy.runAs: "agent"`. A
+   * command from the repository would run as the plane user here, so no provider may execute
+   * one; the isolated acceptance runner is the only executor for such a task.
+   */
+  repositoryCommands?: "refused";
   remainingMs(): number;
 }
 
@@ -116,6 +122,10 @@ export class CommandVerifier implements VerificationProvider {
       (spec.provider === undefined || spec.provider === "native" || spec.provider === "command");
   }
   async run(spec: VerificationSpec, context: VerificationProviderContext): Promise<VerificationProviderOutcome> {
+    // Before anything else: nothing below may be reached for an agent task (G21).
+    if (context.repositoryCommands === "refused") {
+      return outcome("skipped", "skipped (repository commands never run as the plane user for an agent task; acceptance runs them isolated)");
+    }
     if (!context.authority || !context.worktreePath) return outcome("skipped", "skipped (no workspace authority)");
     if (!spec.command) return outcome("skipped", "skipped (no command)");
     try {

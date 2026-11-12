@@ -10,9 +10,10 @@ import {
   type CursorOptions,
   type FakeOptions,
   type OpenRouterOptions,
+  type AgentLauncher,
   type ClaudeLaunchProfile,
 } from "@agent-plane/adapters";
-import type { ResolvedConfig } from "../config.js";
+import { agentLauncher, type ResolvedConfig } from "../config.js";
 import type { Db } from "../db/index.js";
 import { probeCapability, type CapabilityProbe } from "./capability-probe.js";
 
@@ -50,7 +51,8 @@ export class Registry {
         id,
         createAdapter(id as AssistantId, cfg.provider, cfg.options ?? {}, this.config.sessionInput.enabled,
           // server configs are checked by the CLI at launch; config only checks their shape
-          this.config.execution.providerProfile as ClaudeLaunchProfile | undefined),
+          this.config.execution.providerProfile as ClaudeLaunchProfile | undefined,
+          this.config.execution.agentUser ? agentLauncher(this.config.execution.agentUser) : undefined),
       );
       upsert.run(id, cfg.provider, cfg.enabled === false ? 0 : 1);
     }
@@ -192,10 +194,11 @@ function createAdapter(
   options: Record<string, unknown> = {},
   sessionInputEnabled = false,
   profile?: ClaudeLaunchProfile,
+  launcher?: AgentLauncher,
 ): AgentAdapter {
   switch (provider) {
     case "anthropic":
-      return new ClaudeAdapter(id, undefined, { liveInput: sessionInputEnabled, ...(profile ? { profile } : {}) });
+      return new ClaudeAdapter(id, undefined, { liveInput: sessionInputEnabled, ...(profile ? { profile } : {}), ...(launcher ? { agentLauncher: launcher } : {}) });
     case "openai":
       return new CodexAdapter(id, { appServerInput: sessionInputEnabled && options.appServerInput === true });
     case "openrouter":

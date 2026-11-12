@@ -1,7 +1,7 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { ensureCredential } from "./auth/credential-file.js";
 import { homedir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { parse, stringify } from "yaml";
 import type { McpToolAccess, McpToolPolicy } from "@agent-plane/core";
 
@@ -248,7 +248,49 @@ export interface WorkspaceConfig {
      * config, as before.
      */
     providerProfile?: { plugins?: string[]; mcpServers?: Record<string, Record<string, unknown>> };
+    /**
+     * P0-A2 (auto-copilot plan §C.0): the host is set up to run providers as a
+     * separate Unix user (`setup/aos-setup`). A task created with `runAs: "agent"`
+     * then launches through the wrapper, gets its profile under `profilesRoot`
+     * and its worktree under `worktreesRoot`. Every key has the setup's default,
+     * so `agentUser: {}` is enough. Unset = no task may ask for it.
+     */
+    agentUser?: Partial<AgentUserConfig>;
   };
+}
+
+export interface AgentUserConfig {
+  user: string;
+  group: string;
+  sudo: string;
+  /** The single command the sudoers rule allows. */
+  wrapper: string;
+  /** Root-owned provider CLI the agent user can execute. */
+  executable: string;
+  /** Plane-owned, setgid, agent-readable (2750). */
+  profilesRoot: string;
+  /** Plane-owned, setgid, agent-writable (2770). */
+  worktreesRoot: string;
+}
+
+export const AGENT_USER_DEFAULTS: AgentUserConfig = {
+  user: "aos-agent",
+  group: "aos",
+  sudo: "/usr/bin/sudo",
+  wrapper: "/usr/local/lib/aos/run-as-agent",
+  executable: "/usr/local/lib/aos/claude",
+  profilesRoot: "/var/lib/aos/profiles",
+  worktreesRoot: "/var/lib/aos/worktrees",
+};
+
+/** The adapter-facing half of the block: how to reach the wrapper. */
+export function agentLauncher(a: AgentUserConfig): { sudo: string; user: string; group: string; wrapper: string; executable: string } {
+  return { sudo: a.sudo, user: a.user, group: a.group, wrapper: a.wrapper, executable: a.executable };
+}
+
+/** Where a task's worktree is created: the agent tree for an agent task, the workspace's own otherwise. */
+export function worktreesRoot(config: Pick<ResolvedConfig, "dir" | "execution">, runAs?: string | null): string {
+  return runAs === "agent" && config.execution.agentUser ? config.execution.agentUser.worktreesRoot : join(config.dir, "worktrees");
 }
 
 /** The resolved execution block — always canonical `harnessModes`, never the deprecated key. */
@@ -256,6 +298,8 @@ export interface ResolvedExecutionConfig {
   harnessModes: { single: boolean };
   maxConcurrentProviderStarts?: number;
   providerProfile?: { plugins: string[]; mcpServers: Record<string, Record<string, unknown>> };
+  /** P0-A2: present only when the host runs providers as a separate Unix user. */
+  agentUser?: AgentUserConfig;
 }
 
 /** The resolved model block — always present, always fail-closed by default. */
@@ -550,10 +594,34 @@ function resolveExecution(
     providerProfile = { plugins, mcpServers: servers };
   }
 
+  const rawAgent = fileExecution?.agentUser;
+  let agentUser: AgentUserConfig | undefined;
+  if (rawAgent !== undefined) {
+    if (typeof rawAgent !== "object" || rawAgent === null || Array.isArray(rawAgent)) {
+      throw new Error(`${configPath}: execution.agentUser must be a mapping`);
+    }
+    const unknown = Object.keys(rawAgent).filter((k) => !(k in AGENT_USER_DEFAULTS));
+    if (unknown.length > 0) throw new Error(`${configPath}: execution.agentUser has unknown key(s): ${unknown.join(", ")}`);
+    agentUser = { ...AGENT_USER_DEFAULTS, ...rawAgent };
+    for (const key of ["user", "group"] as const) {
+      if (typeof agentUser[key] !== "string" || !/^[a-z_][a-z0-9_-]{0,31}$/.test(agentUser[key])) {
+        throw new Error(`${configPath}: execution.agentUser.${key} must be a Unix account name`);
+      }
+    }
+    for (const key of ["sudo", "wrapper", "executable", "profilesRoot", "worktreesRoot"] as const) {
+      const value = agentUser[key];
+      if (typeof value !== "string" || !isAbsolute(value) || resolve(value) !== value) {
+        throw new Error(`${configPath}: execution.agentUser.${key} must be an absolute, normalized path`);
+      }
+    }
+    if (!single) throw new Error(`${configPath}: execution.agentUser needs execution.harnessModes.single: only the Harness path launches as the agent user`);
+  }
+
   return {
     harnessModes: { single },
     ...(cap !== undefined ? { maxConcurrentProviderStarts: cap } : {}),
     ...(providerProfile ? { providerProfile } : {}),
+    ...(agentUser ? { agentUser } : {}),
   };
 }
 

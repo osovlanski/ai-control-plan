@@ -1,0 +1,5 @@
+# /etc/sudoers.d/aos  (0440 root:root). P0-A2, docs/agentic-os-auto-copilot-plan.md §C.0.
+# The plane user may run exactly one wrapper, as aos-agent only. env_reset drops the plane's
+# environment, so no plane secret can reach a provider through it.
+Defaults:ubuntu env_reset
+ubuntu ALL=(aos-agent:aos) NOPASSWD: /usr/local/lib/aos/run-as-agent

@@ -81,6 +81,8 @@ export class WorkspaceAuthority {
       repoAllowlist: string[];
       /** Canonical parent dir every session worktree must resolve under. */
       worktreeRoot: string;
+      /** P0-A2: the agent tree, where an agent task's worktree lives. A second accepted parent. */
+      agentWorktreeRoot?: string;
       /** Extra env var names allowed through to verification commands (blocklist still applies). */
       envAllowlist?: string[];
     },
@@ -96,8 +98,7 @@ export class WorkspaceAuthority {
       throw new WorkspaceError("repo-allowlist", `${repoPath} is not in the instance repo allowlist`);
     }
     const worktreePath = this.canonical(input.worktreePath, "worktree-realpath");
-    const root = this.canonical(this.opts.worktreeRoot, "worktree-root-realpath");
-    if (!contains(root, worktreePath) && !contains(repoPath, worktreePath) && worktreePath !== repoPath) {
+    if (!this.underWorktreeRoot(worktreePath, false) && !contains(repoPath, worktreePath) && worktreePath !== repoPath) {
       throw new WorkspaceError(
         "worktree-containment",
         `${worktreePath} resolves outside both the worktree root and the repo`,
@@ -169,7 +170,7 @@ export class WorkspaceAuthority {
     maxOutputBytes?: number;
   }): Promise<CommandResult> {
     const worktree = this.canonical(spec.worktreePath, "command-worktree-realpath");
-    if (!contains(this.canonical(this.opts.worktreeRoot, "worktree-root-realpath"), worktree) && worktree !== this.canonical(this.opts.worktreeRoot, "worktree-root-realpath")) {
+    if (!this.underWorktreeRoot(worktree, true)) {
       throw new WorkspaceError("command-worktree", `${worktree} is not under the worktree root`);
     }
     const cwd = spec.cwd ? this.canonical(spec.cwd, "command-cwd-realpath") : worktree;
@@ -329,6 +330,17 @@ export class WorkspaceAuthority {
     return env;
   }
 
+  /** `path` (canonical) is below one of the worktree roots, or is one when `orRoot`. */
+  private underWorktreeRoot(path: string, orRoot: boolean): boolean {
+    const agent = this.opts.agentWorktreeRoot;
+    // The agent tree exists only on a set-up host; a missing one accepts nothing. With it
+    // configured, the workspace's own root may not exist yet (no ordinary task has run), and
+    // then accepts nothing either; without it a missing root is the error it always was.
+    const roots = agent && !existsSync(this.opts.worktreeRoot) ? [] : [this.canonical(this.opts.worktreeRoot, "worktree-root-realpath")];
+    if (agent && existsSync(agent)) roots.push(this.canonical(agent, "worktree-root-realpath"));
+    return roots.some((root) => contains(root, path) || (orRoot && path === root));
+  }
+
   private allowed(repoPath: string): boolean {
     return this.opts.repoAllowlist.some((entry) => {
       let allowed = entry;
@@ -343,8 +355,7 @@ export class WorkspaceAuthority {
 
   private discoveryPath(worktreePath: string, relative: string): string {
     const worktree = this.canonical(worktreePath, "discovery-worktree-realpath");
-    const root = this.canonical(this.opts.worktreeRoot, "worktree-root-realpath");
-    if (!contains(root, worktree) && worktree !== root) {
+    if (!this.underWorktreeRoot(worktree, true)) {
       throw new WorkspaceError("discovery-worktree", `${worktree} is not under the worktree root`);
     }
     if (isAbsolute(relative)) throw new WorkspaceError("discovery-absolute", `${relative} must be relative`);

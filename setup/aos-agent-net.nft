@@ -1,0 +1,23 @@
+# /usr/local/lib/aos/aos-agent-net.nft. P0-A2, docs/agentic-os-auto-copilot-plan.md §C.0.
+# Own table only; never touches iptables-nft's "ip filter" table or tailscale's tables.
+# uid aos-agent (1002): drop loopback (except the resolved stub), tailnet, private ranges and
+# metadata. Allow HTTPS to the rest. The loopback allowlist is empty for the first loop, so the
+# plane API, Cockpit HTTP/WebSocket/PTY and every other local service are unreachable.
+# Idempotent reload: declare, delete, redefine (one atomic transaction).
+table inet aos_agent_net
+delete table inet aos_agent_net
+table inet aos_agent_net {
+  chain out {
+    type filter hook output priority -1; policy accept;
+    meta skuid != 1002 return
+    ct state established,related accept
+    ip daddr 127.0.0.53 udp dport 53 accept
+    ip daddr 127.0.0.53 tcp dport 53 accept
+    oifname "lo" counter drop
+    oifname "tailscale0" counter drop
+    ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 100.64.0.0/10 } counter drop
+    ip6 daddr { fc00::/7, fe80::/10, ::1 } counter drop
+    tcp dport 443 accept
+    counter drop
+  }
+}

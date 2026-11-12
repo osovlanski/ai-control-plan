@@ -155,6 +155,17 @@ export interface RunnerDeps {
   /** Spawn → first-event timing and silence reports, per session. */
   log?: (message: string, fields: Record<string, unknown>) => void;
   /**
+   * P0-A2 (auto-copilot plan §C.0): the host can run providers as the agent Unix user. Absent ⇒
+   * a request with `policy.runAs: "agent"` is rejected at Prepare.
+   */
+  agentUser?: { /** Plane-owned, setgid, agent-readable; one directory per session. */ profilesRoot: string };
+  /**
+   * P0-A2 backstop: what the TASK says, whoever built the request. A request for an agent task
+   * that does not carry `policy.runAs` is rejected, so no request builder can launch such a task
+   * as the plane user by leaving the flag out.
+   */
+  taskRunAs?: (taskId: string) => "agent" | undefined;
+  /**
    * M3 provisioning (plan §3.4). For a request bound to a composition revision, the runner asks
    * the adapter to prepare, provision and verify a per-run profile under `root/<sessionId>` before
    * `start`, launches with it, and disposes it when the session ends. Absent ⇒ no lifecycle runs.
@@ -1117,6 +1128,15 @@ class RunContext {
     if ((this.request.context.secretRefs?.length ?? 0) > 0 && !this.d.secretResolver) {
       return "request names secretRefs but no secret resolver is configured to resolve them at launch";
     }
+    if (this.d.taskRunAs?.(this.request.taskId) === "agent" && p.runAs !== "agent") {
+      return "the task runs as the agent user but this request does not carry policy.runAs agent";
+    }
+    if (p.runAs === "agent") {
+      if (!this.d.agentUser) return "policy.runAs agent requires execution.agentUser, which this workspace does not configure";
+      if (h?.agentUser !== true) return "policy.runAs agent requires an adapter that can launch as the agent user";
+      if (!this.request.context.worktree) return "policy.runAs agent requires a request worktree: the agent user cannot reach the workspace directory";
+      if ((this.request.context.secretRefs?.length ?? 0) > 0) return "policy.runAs agent carries no secrets: the request names secretRefs";
+    }
     return undefined;
   }
 
@@ -1131,6 +1151,8 @@ class RunContext {
           : undefined,
       runControl: { executionRequestId: this.request.executionRequestId },
       ...(this.verifiedProfile ? { profile: this.verifiedProfile } : {}),
+      // The scope is named after the session, so a stop and a crash reap can address it.
+      ...(p.runAs === "agent" ? { runAs: { kind: "agent" as const, unit: this.sessionId } } : {}),
     };
   }
 
@@ -1162,7 +1184,11 @@ class RunContext {
 
     let plan;
     try {
-      plan = await adapter.prepare({ spec, bundle, root: join(deps.root, this.sessionId), sessionId: this.sessionId, ...(mcpServers ? { mcpServers } : {}) });
+      // P0-A2: an agent run's profile lives where the agent user can read it and cannot write it.
+      const agent = this.request.policy.runAs === "agent";
+      if (agent && !this.d.agentUser) return unenforceable("policy.runAs agent has no agent profile root");
+      const root = agent ? this.d.agentUser!.profilesRoot : deps.root;
+      plan = await adapter.prepare({ spec, bundle, root: join(root, this.sessionId), sessionId: this.sessionId, ...(mcpServers ? { mcpServers } : {}), ...(agent ? { access: "group" as const } : {}) });
     } catch (err) {
       if (err instanceof ProvisioningError && (err.reason === "unsupported_asset" || err.reason === "unsupported_transport")) return ambient(err.message);
       return unenforceable(`provisioning refused: ${redactMessage(err)}`);
@@ -1661,6 +1687,7 @@ class RunContext {
       authority: this.d.authority,
       worktreePath: this.request.context.worktree?.worktreePath,
       signal,
+      ...(this.request.policy.runAs === "agent" ? { repositoryCommands: "refused" as const } : {}),
       remainingMs: () =>
         Math.max(0, this.snapshot.startedAtMs + this.request.policy.timeout.hardMs - this.runner.clock()),
     });

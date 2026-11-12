@@ -258,3 +258,78 @@ describe("launch with a verified profile", () => {
     expect(events.find((e) => e.summary.startsWith("Fake launched with profile"))?.summary).toBe(`Fake launched with profile ${profile.profileDigest} (full): 3/3 files present`);
   });
 });
+
+/**
+ * P0-A2 (docs/agentic-os-auto-copilot-plan.md §C.0): a profile the agent Unix user reads. The
+ * plane owns it, the group may read it, nobody else may, and it holds no secret.
+ */
+describe("agent-readable profile (access: group)", () => {
+  const agentRoot = (mode = 0o2750) => {
+    const root = join(profilesDir(), "agent-profiles");
+    mkdirSync(root);
+    chmodSync(root, mode);
+    return root;
+  };
+  const groupInput = (root: string, files?: Array<[string, string]>): ProvisioningInput => {
+    const b = files ? bundle("claude-code", files) : claudeBundle();
+    return { spec: spec("claude-code", b), bundle: b, root: join(root, "es_1"), sessionId: "es_1", access: "group" };
+  };
+  const modeOf = (path: string) => lstatSync(path).mode & 0o7777;
+
+  it("writes dirs 2750 and files 0640 whatever the umask, and verifies and disposes as usual", async () => {
+    const root = agentRoot();
+    const previous = process.umask(0o077);
+    try {
+      const adapter = claude();
+      const plan = await adapter.prepare(groupInput(root));
+      expect(plan.access).toBe("group");
+      const profile = await adapter.provision(plan);
+      expect(modeOf(plan.root)).toBe(0o2750);
+      expect(modeOf(join(plan.root, PROFILE_MARKER))).toBe(0o640);
+      for (const f of plan.files) expect(modeOf(join(plan.root, f.relPath)), f.relPath).toBe(0o640);
+      expect(modeOf(join(plan.root, "plugin"))).toBe(0o2750);
+      expect(lstatSync(plan.root).gid).toBe(lstatSync(root).gid);
+      expect((await adapter.verify(profile)).ok).toBe(true);
+      expect(await adapter.dispose(profile)).toEqual({ removed: true });
+    } finally {
+      process.umask(previous);
+    }
+  });
+
+  it("keeps the same digest as the owner-only profile: access changes modes, not content", async () => {
+    const owner = await claude().prepare(input("claude-code"));
+    const group = await claude().prepare(groupInput(agentRoot()));
+    expect(owner.access).toBeUndefined();
+    expect({ ...group.files }).toEqual({ ...owner.files });
+  });
+
+  it("refuses a root that host setup did not make: missing, not setgid, group-writable or open to others", async () => {
+    const plan = await claude().prepare({ ...groupInput(join(profilesDir(), "absent")) });
+    expect(await refusal(claude().provision(plan))).toBe("invalid_root");
+    for (const mode of [0o750, 0o2770, 0o2755]) {
+      const p = await claude().prepare(groupInput(agentRoot(mode)));
+      expect(await refusal(claude().provision(p)), mode.toString(8)).toBe("invalid_root");
+      expect(existsSync(p.root)).toBe(false);
+    }
+  });
+
+  it("refuses a secret-shaped value in any file, and lets prose about secrets through", async () => {
+    const root = agentRoot();
+    const leaked = `# Notes\n\nexport GH=${"ghp_"}${"A1b2C3d4E5".repeat(4)}\n`;
+    expect(await refusal(claude().prepare(groupInput(root, [["CLAUDE.md", leaked]])))).toBe("secret_in_profile");
+    const jwtish = `token: eyJ${"a".repeat(12)}.${"b".repeat(12)}.${"c".repeat(12)}\n`;
+    expect(await refusal(claude().prepare(groupInput(root, [["CLAUDE.md", jwtish]])))).toBe("secret_in_profile");
+    const prose = "# Auth\n\nPut the token in the `Authorization: Bearer <token>` header. Never commit a password or API key.\n";
+    await expect(claude().prepare(groupInput(root, [["CLAUDE.md", prose]]))).resolves.toMatchObject({ access: "group" });
+    // The same content is fine in an owner-only profile, as before.
+    const b = bundle("claude-code", [["CLAUDE.md", leaked]]);
+    await expect(claude().prepare({ spec: spec("claude-code", b), bundle: b, root: join(profilesDir(), "run_1"), sessionId: "run_1" })).resolves.toBeDefined();
+  });
+
+  it("refuses a value this process registered as a secret", async () => {
+    const { registerSecret } = await import("@agent-plane/core");
+    const value = "FAKE-registered-secret-not-real-0123456789";
+    registerSecret(value);
+    expect(await refusal(claude().prepare(groupInput(agentRoot(), [["CLAUDE.md", `x ${value} y\n`]])))).toBe("secret_in_profile");
+  });
+});
