@@ -4,6 +4,7 @@ import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  AUTOPILOT_OPERATE_CAPABILITY,
   COMMAND_CAPABILITIES,
   INGEST_CAPABILITIES,
   CONTROL_PLANE_API_VERSION,
@@ -162,6 +163,8 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   const contextRead = { config: { auth: { require: "context.read" } } } as const;
   const registryRead = { config: { auth: { require: "registry.read" } } } as const;
   const write = { config: { auth: { require: "commands.write" } } } as const;
+  // P0-A2: only the operator secret carries this (auth/operate-secret.ts); no stored credential or browser session can.
+  const operate = { config: { auth: { require: AUTOPILOT_OPERATE_CAPABILITY } } } as const;
   const usageWrite = { config: { auth: { require: "usage.write" } } } as const;
   const telemetryRead = { config: { auth: { require: "telemetry.read" } } } as const;
   const memoryRead = { config: { auth: { require: "memory.read" } } } as const;
@@ -438,12 +441,26 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     return { promptRates: toolGatePromptRates(db, { limit }) };
   });
 
+  // ---- Autopilot (P0-A2: the authority boundary only) ----
+  //
+  // docs/agentic-os-auto-copilot-plan.md §C.0: starting, releasing and resolving need
+  // `autopilot.operate`; stopping stays on `commands.write`, so stopping is always allowed and
+  // starting is not. The autopilot itself lands in later slices: these routes exist now so the
+  // boundary is fixed and tested (G0) before any behaviour sits behind it. An authorised call
+  // gets an honest 501 and changes nothing.
+  const autopilotPending = (_req: FastifyRequest, reply: FastifyReply) =>
+    reply.status(501).send({ error: "autopilot_not_implemented", detail: "the autopilot lands after P0-A2; this route only fixes who may call it" });
+  app.post("/api/autopilot/start", operate, autopilotPending);
+  app.post("/api/autopilot/release", operate, autopilotPending);
+  app.post("/api/autopilot/resolve", operate, autopilotPending);
+  app.post("/api/autopilot/stop", write, autopilotPending);
+
   // ---- Tasks ----
 
   app.post<{
-    Body: { goal?: string; constraints?: string[]; repoPath?: string; profile?: RoutingProfile; wait?: WaitInput; overrides?: TaskIntent["overrides"]; mode?: string };
+    Body: { goal?: string; constraints?: string[]; repoPath?: string; profile?: RoutingProfile; wait?: WaitInput; overrides?: TaskIntent["overrides"]; mode?: string; runAs?: string };
   }>("/api/tasks", write, async (req, reply) => {
-    const { goal, constraints, repoPath, profile, wait, overrides, mode } = req.body ?? {};
+    const { goal, constraints, repoPath, profile, wait, overrides, mode, runAs } = req.body ?? {};
     if (typeof goal !== "string" || !goal.trim()) return reply.status(400).send({ error: "goal is required" });
     if (repoPath !== undefined && typeof repoPath !== "string") return reply.status(400).send({ error: "repoPath must be a string" });
     if (repoPath && !repoAllowed(repoPath)) {
@@ -459,8 +476,16 @@ export function buildServer(deps: ServerDeps): BuiltServer {
       if (constraints && (!Array.isArray(constraints) || constraints.some(c => typeof c !== 'string'))) throw new Error('constraints must be strings');
       if (profile && !['auto','preserve-quota','fastest','best-quality','lowest-tokens'].includes(profile)) throw new Error('Invalid routing profile');
       if (wait) scheduler.validate(wait);
+      // P0-A2: an agent task is refused here, not at launch, when the host cannot keep its code
+      // away from the plane user. It needs a repository: the agent cannot reach the workspace dir.
+      if (runAs !== undefined) {
+        if (runAs !== 'agent') throw new Error('runAs accepts only "agent"');
+        if (!config.execution.agentUser) throw new Error('runAs "agent" needs execution.agentUser, which this workspace does not configure');
+        if (!repoPath) throw new Error('runAs "agent" needs a repository');
+        if (mode && mode !== 'single') throw new Error('runAs "agent" requires single mode');
+      }
       const envelope = db.transaction(() => {
-        const task = tasks.create(redactValue({ goal: goal.trim(), constraints, repoPath, profile, overrides }));
+        const task = tasks.create(redactValue({ goal: goal.trim(), constraints, repoPath, profile, overrides, ...(runAs === 'agent' ? { runAs: 'agent' as const } : {}) }));
         if (wait) scheduler.attach(task.taskId, wait);
         return tasks.envelope(task.taskId);
       })();

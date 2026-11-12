@@ -86,6 +86,17 @@ export interface ExecutionPolicy {
    * before RUNNING. The achieved tier is always reported on the result.
    */
   isolation: { required: IsolationTier };
+  /**
+   * P0-A2 (auto-copilot plan §C.0). `"agent"`: nothing that came from the
+   * repository or the provider may run as the plane user for this request.
+   * The provider launches as the agent Unix user through the wrapper, the
+   * per-run profile is written to the agent-readable profile root with no
+   * secret values, and the native `CommandVerifier` never runs (the isolated
+   * acceptance runner is the only executor of repository commands). Prepare
+   * rejects (`policy_unenforceable`) when the host or the adapter cannot do
+   * this. Absent = today's behaviour.
+   */
+  runAs?: "agent";
 }
 
 export type IsolationTier = "full" | "partial" | "ambient";

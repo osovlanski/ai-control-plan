@@ -68,6 +68,14 @@ export interface ProviderProcess {
   /** ISO time the adapter spawned it. */
   spawnedAt: string;
   alive(): boolean;
+  /**
+   * Set when the process runs as another Unix user (`RunSpec.runAs`): the plane
+   * user may not signal it, so the kernel stops it through this first. Resolves
+   * once the stop was asked for; never throws.
+   */
+  stop?(): Promise<void>;
+  /** The transient unit the process runs in, when `stop` is set: recorded so a restart can stop a stray one. */
+  agentUnit?: string;
 }
 
 export interface RunSpec {
@@ -104,6 +112,14 @@ export interface RunSpec {
    * harness refuses to start rather than launch against it (risk 9).
    */
   profile?: VerifiedProfile;
+  /**
+   * P0-A2 (auto-copilot plan §C.0): launch the provider as the agent Unix user
+   * through the plane's single sudoers wrapper, in a transient systemd scope
+   * named after `unit` and bounded by `env.maxRuntimeMs`. Set by the Harness
+   * from `ExecutionPolicy.runAs`, never by a caller. An adapter that cannot
+   * launch this way refuses to start rather than run as the plane user.
+   */
+  runAs?: { kind: "agent"; unit: string };
 }
 
 export type PermissionPolicy =

@@ -82,6 +82,12 @@ export interface CapabilityManifest {
      */
     approvalIdempotentRedelivery?: boolean;
     processIsolation: "os-sandbox" | "provider-sandbox" | "none";
+    /**
+     * P0-A2: the adapter can launch its provider as the agent Unix user through
+     * the plane's wrapper (`RunSpec.runAs`). Absent or false: a request with
+     * `policy.runAs: "agent"` is rejected at Prepare.
+     */
+    agentUser?: boolean;
     provisioningContractVersion?: string;
     /**
      * M3: what the adapter's provisioning lifecycle achieves (risk 1). Absent ⇒ `none`: the

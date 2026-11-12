@@ -1,0 +1,61 @@
+#!/bin/bash
+# Idempotent host setup for the agent user. Run as root: sudo ./aos-setup [--no-net]
+# docs/agentic-os-auto-copilot-plan.md §C.0, P0-A2. Creates only what is missing; re-running on
+# a healthy host changes nothing.
+#   --no-net   skip sudoers + nftables (the step that is tried under a timed rollback first)
+# It never touches the plane user's own sudo rights: see README.md for that separate step.
+set -euo pipefail
+[ "$(id -u)" = 0 ] || { echo "aos-setup: run as root" >&2; exit 1; }
+case "${1:-}" in ""|--no-net) ;; *) echo "usage: aos-setup [--no-net]" >&2; exit 64;; esac
+SRC="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+L=/usr/local/lib/aos
+PLANE_USER=ubuntu
+say(){ echo "aos-setup: $*"; }
+# Installed copies are root-owned, so a run from $L installs only what root put there.
+inst(){ [ "$(readlink -f "$SRC/$1")" = "$(readlink -f "$3")" ] || install -o root -g root -m "$2" "$SRC/$1" "$3"; }
+
+getent group aos >/dev/null || { groupadd aos; say "group aos created"; }
+id aos-agent >/dev/null 2>&1 || { useradd -u 1002 -g aos -m -d /home/aos-agent -s /usr/sbin/nologin aos-agent; say "user aos-agent created"; }
+[ "$(id -u aos-agent)" = 1002 ] || { echo "aos-agent uid is not 1002; the nft rule would not match" >&2; exit 1; }
+chmod 0700 /home/aos-agent
+loginctl enable-linger aos-agent
+# The plane user reads and commits what the agent writes in a worktree, and its profile files
+# must keep the aos group: both need membership. It takes effect at the plane's next login.
+id -nG "$PLANE_USER" | tr ' ' '\n' | grep -qx aos || { usermod -aG aos "$PLANE_USER"; say "$PLANE_USER added to group aos (restart the plane to pick it up)"; }
+install -d -o "$PLANE_USER" -g aos -m 0750 /var/lib/aos
+install -d -o "$PLANE_USER" -g aos -m 2750 /var/lib/aos/profiles   # agent reads, cannot write
+install -d -o "$PLANE_USER" -g aos -m 2770 /var/lib/aos/worktrees  # agent writes
+install -d -o root -g root -m 0755 "$L"
+inst run-as-agent 0755 "$L/run-as-agent"
+inst aos-setup 0755 "$L/aos-setup"
+inst aos-status 0755 "$L/aos-status"
+inst rollback.sh 0755 "$L/rollback.sh"
+inst sudoers.d/aos 0644 "$L/aos-sudoers"
+inst aos-agent-net.nft 0644 "$L/aos-agent-net.nft"
+inst aos-agent-net.service 0644 "$L/aos-agent-net.service"
+# The agent runs git inside worktrees the plane user owns, so it trusts that tree. This goes in
+# aos-agent's OWN config, never the system's: the plane user must keep refusing a .git that
+# aos-agent owns (git's ownership check is what stops a planted .git directory, with hooks,
+# from running as the plane user at checkpoint time).
+agit(){ runuser -u aos-agent -- env HOME=/home/aos-agent git config --global "$@"; }
+agit --get-all safe.directory 2>/dev/null | grep -qx '/var/lib/aos/worktrees/\*' || agit --add safe.directory '/var/lib/aos/worktrees/*'
+if [ ! -x "$L/claude" ]; then
+  bin="$(readlink -f "/home/$PLANE_USER/.local/bin/claude")"; v="$(basename "$bin")"
+  [[ "$v" =~ ^[A-Za-z0-9._-]{1,64}$ ]] || { echo "aos-setup: unexpected claude binary name" >&2; exit 1; }
+  # Read as the plane user, never as root: the path is the plane user's to point anywhere.
+  tmp="$(mktemp "$L/.claude.XXXXXX")"
+  runuser -u "$PLANE_USER" -- cat -- "$bin" > "$tmp"
+  chown root:root "$tmp"; chmod 0755 "$tmp"; mv -f "$tmp" "$L/claude-$v"
+  ln -sfn "claude-$v" "$L/claude"; say "claude $v copied"
+fi
+[ "${1:-}" = --no-net ] && { say "done (sudoers + nft skipped)"; exit 0; }
+visudo -cf "$L/aos-sudoers" >/dev/null
+install -o root -g root -m 0440 "$L/aos-sudoers" /etc/sudoers.d/aos
+visudo -c >/dev/null
+nft -c -f "$L/aos-agent-net.nft"
+install -o root -g root -m 0644 "$L/aos-agent-net.service" /etc/systemd/system/aos-agent-net.service
+systemctl daemon-reload
+systemctl enable --quiet aos-agent-net.service
+systemctl restart aos-agent-net.service
+say "done"
+[ -f /home/aos-agent/.claude/.credentials.json ] || say "NOTE: aos-agent has no Claude login (itay: cd /var/lib/aos/worktrees, then sudo -u aos-agent -H env XDG_RUNTIME_DIR=/run/user/1002 $L/claude, /login)"

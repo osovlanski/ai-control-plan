@@ -1,7 +1,7 @@
 import { closeSync, fsyncSync, lstatSync, openSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { randomBytes } from "node:crypto";
-import { COMMAND_CAPABILITIES, INGEST_CAPABILITIES, OBSERVABILITY_CAPABILITIES, registerSecret } from "@agent-plane/core";
+import { AUTOPILOT_OPERATE_CAPABILITY, COMMAND_CAPABILITIES, INGEST_CAPABILITIES, OBSERVABILITY_CAPABILITIES, registerSecret } from "@agent-plane/core";
 
 export interface CredentialSecret { kid: string; secret: string; capabilities: string[]; createdAt: string; notAfter: string | null }
 export interface CredentialFile { version: 1; secrets: CredentialSecret[] }
@@ -16,7 +16,10 @@ export function readCredential(path: string): CredentialFile {
   validateCredentialFile(path);
   const value = JSON.parse(readFileSync(path, "utf8")) as CredentialFile;
   if (value.version !== 1 || !Array.isArray(value.secrets) || value.secrets.length === 0) throw new Error(`Invalid credential file ${path}`);
-  for (const item of value.secrets) { if (!item.kid || !item.secret || !Array.isArray(item.capabilities)) throw new Error(`Invalid credential file ${path}`); registerSecret(item.secret); }
+  for (const item of value.secrets) { if (!item.kid || !item.secret || !Array.isArray(item.capabilities)) throw new Error(`Invalid credential file ${path}`);
+    // P0-A2: the operator capability lives only behind the operator secret, whose hash alone is on this machine.
+    if (item.capabilities.includes(AUTOPILOT_OPERATE_CAPABILITY)) throw new Error(`Invalid credential file ${path}: ${AUTOPILOT_OPERATE_CAPABILITY} may not be granted by a stored credential`);
+    registerSecret(item.secret); }
   return value;
 }
 export function ensureCredential(dir: string): CredentialFile {
@@ -38,6 +41,7 @@ export function atomicWriteCredential(path: string, value: CredentialFile): void
   writeFileSync(tmp, JSON.stringify(value,null,2)+"\n", { mode: 0o600 }); const fd=openSync(tmp,"r"); fsyncSync(fd); closeSync(fd); renameSync(tmp,path); const dfd=openSync(dirname(path),"r"); fsyncSync(dfd); closeSync(dfd);
 }
 export function rotateCredential(path: string, graceSeconds: number, capabilities?: string[], now = new Date()): CredentialSecret {
+  if (capabilities?.includes(AUTOPILOT_OPERATE_CAPABILITY)) throw new Error(`${AUTOPILOT_OPERATE_CAPABILITY} may not be granted by a stored credential; use rotate-operate`);
   return withCredentialLock(path, () => { const file=readCredential(path); const active=file.secrets.filter(s=>isActive(s,now)); const cap=capabilities ?? active.at(-1)?.capabilities ?? [...OBSERVABILITY_CAPABILITIES,...COMMAND_CAPABILITIES,...INGEST_CAPABILITIES]; const until=new Date(now.getTime()+graceSeconds*1000).toISOString(); for (const s of active) s.notAfter=until; const next={...fresh(now),capabilities:cap}; file.secrets.push(next); atomicWriteCredential(path,file); registerSecret(next.secret); return next; });
 }
 

@@ -1,6 +1,7 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import type { FastifyInstance, FastifyRequest } from "fastify";
-import { CONTROL_PLANE_API_VERSION, redactSecrets, registerSecret } from "@agent-plane/core";
+import { AUTOPILOT_OPERATE_CAPABILITY, CONTROL_PLANE_API_VERSION, redactSecrets, registerSecret } from "@agent-plane/core";
+import { matchOperateSecret, operateSecretPath } from "./operate-secret.js";
 import type { ResolvedConfig } from "../config.js";
 import type { Db } from "../db/index.js";
 import type { CredentialStore } from "./credential-file.js";
@@ -17,7 +18,7 @@ export function registerAuth(app:FastifyInstance, deps:{config:ResolvedConfig;cr
   app.addHook("onRoute", route=>{ const path=String(route.url); if(path.startsWith("/api/") && route.config?.auth===undefined) throw new Error(`Route ${String(route.method)} ${path} must declare config.auth`); if(route.config?.auth===null && !(path==="/api/auth/bootstrap"&&String(route.method)==="POST")) throw new Error(`Only POST /api/auth/bootstrap may use config.auth=null`); });
   app.addHook("onRequest",async(req,reply)=>{
     const path=req.url.split("?")[0]!; if(!path.startsWith("/api/")) return; const rule=req.routeOptions.config?.auth; if(rule===null) return;
-    const cred=await authenticate(req,credentials,sessions,now);
+    const cred=await authenticate(req,credentials,sessions,now,operateSecretPath(config.dir));
     if(!cred){ reply.header("X-Control-Plane-Api-Version",CONTROL_PLANE_API_VERSION).header("WWW-Authenticate","Bearer"); return reply.code(401).send({error:"unauthenticated"}); }
     if(rule===undefined) return;
     if(!cred.capabilities.includes(rule.require)) return reply.code(403).send({error:`${rule.require} required`});
@@ -35,8 +36,12 @@ export function registerAuth(app:FastifyInstance, deps:{config:ResolvedConfig;cr
   });
   const sweep=setInterval(()=>db.prepare("DELETE FROM bootstrap_jti WHERE expires_at <= ?").run(Math.floor(now().getTime()/1000)),60_000); sweep.unref(); app.addHook("onClose",()=>clearInterval(sweep));
 }
-async function authenticate(req:FastifyRequest,store:CredentialStore,sessions:SessionMap,now:()=>Date):Promise<AuthenticatedCredential|null>{
-  const auth=req.headers.authorization; if(auth?.startsWith("Bearer ")){const raw=auth.slice(7); let match=findSecret(raw,store); if(!match){await store.reloadOnMiss();match=findSecret(raw,store);} return match?{kind:"bearer",capabilities:match.capabilities,kid:match.kid}:null;}
+async function authenticate(req:FastifyRequest,store:CredentialStore,sessions:SessionMap,now:()=>Date,operatePath:string):Promise<AuthenticatedCredential|null>{
+  const auth=req.headers.authorization; if(auth?.startsWith("Bearer ")){const raw=auth.slice(7); let match=findSecret(raw,store);
+    // P0-A2: the operator secret is matched by hash and carries exactly one capability. It is
+    // checked before the reload, so presenting it never costs the credential file a re-read.
+    if(!match){const kid=matchOperateSecret(operatePath,raw); if(kid){registerSecret(raw); return {kind:"bearer",capabilities:[AUTOPILOT_OPERATE_CAPABILITY],kid};}}
+    if(!match){await store.reloadOnMiss();match=findSecret(raw,store);} return match?{kind:"bearer",capabilities:match.capabilities,kid:match.kid}:null;}
   const cookie=req.headers.cookie; if(!cookie)return null; const vals=cookie.split(";").map(x=>x.trim()).filter(x=>x.startsWith("__Host-acp_session=")); if(vals.length!==1)return null; const sid=vals[0]!.slice("__Host-acp_session=".length);const s=sessions.get(sid);if(!s||s.expiresAt<=now().getTime())return null;await store.reloadOnMiss();const key=store.byKid(s.kid);return key?{kind:"cookie",capabilities:s.capabilities,kid:s.kid}:null;
 }
 function findSecret(raw:string,store:CredentialStore){const b=Buffer.from(raw);return store.active().find(s=>{const x=Buffer.from(s.secret);return x.length===b.length&&timingSafeEqual(x,b)});}

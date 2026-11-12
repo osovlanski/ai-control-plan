@@ -107,6 +107,12 @@ describe("prepare: MCP servers by reference", () => {
     expect(plan.secretRefs).toEqual([]);
   });
 
+  it("P0-A2: an agent-readable profile may not name a secret reference; one with none is fine", async () => {
+    expect(await refusal(claude().prepare({ ...input("claude-code"), access: "group" }))).toMatch(/^secret_in_profile: .*EXAMPLE_TOKEN_REF/);
+    const noSecret = { ...input("claude-code", [{ ref: ref("mcp:example-mcp", launch({ env: {} })), launch: launch({ env: {} }) }]), access: "group" as const };
+    await expect(claude().prepare(noSecret)).resolves.toMatchObject({ access: "group", secretRefs: [] });
+  });
+
   it("refuses what it cannot launch safely, naming references and never a value", async () => {
     const i = input("claude-code");
     const remote = launch({ transport: "remote", command: undefined, url: "https://mcp.example.invalid/" });

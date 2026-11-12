@@ -40,7 +40,7 @@ import {
   redactText,
   type ModelPrecedenceSource,
 } from "@agent-plane/core";
-import type { ResolvedConfig } from "../config.js";
+import { worktreesRoot, type ResolvedConfig } from "../config.js";
 import type { Db } from "../db/index.js";
 import type { RepositoryIdentityRegistry } from "../repo/identity-registry.js";
 import {
@@ -48,6 +48,7 @@ import {
   createAssistantWorktree,
   createTaskBranch,
   createTaskWorktree,
+  shareWorktreeWithGroup,
   mergeWinner,
   type TaskWorktree,
   runDiffSummary,
@@ -607,6 +608,12 @@ export class Orchestrator {
     // transaction is the only grant — so anything arriving here unclaimed is a
     // defect that fails here instead of running outside the pool's capacity.
     this.scheduler?.assertLaunchClaim(taskId, options.dispatchId);
+    // P0-A2: only the Harness path can launch as the agent user. Any other route would run the
+    // provider as the plane user, so it is refused here, before a worktree or a run exists.
+    const runAs = this.tasks.get(taskId)?.run_as === "agent" ? "agent" as const : undefined;
+    if (runAs && (options.parallel || !this.harnessRouting(taskId, options))) {
+      throw new Error(`Task ${taskId} runs as the agent user and can only start on the Harness single path`);
+    }
     if (options.dispatchId) {
       const saved = this.db.prepare('SELECT request_json FROM execution_requests WHERE id = ? AND superseded = 0').get(options.dispatchId) as { request_json: string | null } | undefined;
       if (saved?.request_json) {
@@ -637,10 +644,11 @@ export class Orchestrator {
       const worktree = await this.parallelContinuationWorktree(taskId, envelope.repository.path) ?? await createTaskWorktree(
         envelope.repository.path,
         envelope.taskId,
-        join(this.config.dir, "worktrees"),
+        worktreesRoot(this.config, row.run_as),
         ...(options.composition?.baseCommit !== undefined ? [{ baseCommit: options.composition.baseCommit }] : []),
       );
       workdir = worktree.path;
+      if (runAs) shareWorktreeWithGroup(worktree.path); // the agent user edits it as a group member
       this.tasks.setWorktree(taskId, worktree.path, worktree.branch, worktree.baseRef);
       row = this.tasks.get(taskId)!;
       envelope = this.tasks.envelope(taskId);
@@ -692,7 +700,7 @@ export class Orchestrator {
       const request = buildExecutionRequest({ taskId, dispatchId: options.dispatchId, assistantId, attempt, prompt, workdir, model: launchModel?.id,
         worktree: envelope.repository ? { repoPath: envelope.repository.path, branch: taskRow.branch ?? envelope.repository.branch, worktreePath: workdir, baseRef: taskRow.base_ref ?? 'HEAD' } : undefined,
         scratchPath, target: executionTarget, approvalMode: policy?.approvalMode ?? this.config.policy.approvalMode, maxRuntimeMs: policy?.maxRuntimeMs ?? this.maxRuntimeMs,
-        routingDecisionRef: options.routingDecisionRef!, verificationPlan: project?.plan,
+        routingDecisionRef: options.routingDecisionRef!, verificationPlan: project?.plan, ...(runAs ? { runAs } : {}),
         ...(composed && policy ? { compositionRevisionId: composed.compositionRevisionId, budget: policy.budget } : {}) });
       this.db.transaction(() => {
         const d = this.db.prepare('SELECT phase, origin FROM dispatches WHERE dispatch_id = ?').get(options.dispatchId) as { phase: string; origin: string };
@@ -772,6 +780,7 @@ export class Orchestrator {
           routingDecisionRef,
           verification: projectVerification.plan?.checks ?? [],
           verificationPlan: projectVerification.plan,
+          ...(runAs ? { runAs } : {}),
           ...(composed && policy ? { compositionRevisionId: composed.compositionRevisionId, budget: policy.budget } : {}),
         },
         (result, sid) => this.settleFromResult(taskId, assistantId, sid, result),

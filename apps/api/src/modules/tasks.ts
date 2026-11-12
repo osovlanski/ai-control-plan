@@ -11,6 +11,8 @@ export interface CreateTaskInput {
   overrides?: TaskIntent["overrides"];
   /** Declared hard requirements — a minimum context window excludes candidates (K13). */
   requirements?: TaskIntent["requirements"];
+  /** P0-A2: `"agent"` = this task's provider and repository code run as the agent Unix user only. */
+  runAs?: "agent";
 }
 
 export interface TaskRow {
@@ -31,6 +33,8 @@ export interface TaskRow {
   /** K20: the label routing reads, stored once at intake. NULL on every pre-031 row. */
   task_kind: string | null;
   classifier_version: number | null;
+  /** P0-A2: 'agent' or NULL (the plane user). Set at creation, never changed. */
+  run_as: "agent" | null;
   created_at: string;
   updated_at: string;
 }
@@ -64,8 +68,8 @@ export class TaskStore {
     const intent = { goal: input.goal, constraints: input.constraints ?? [], repository: envelope.repository, profile: input.profile ?? "auto", overrides: input.overrides, requirements: input.requirements } satisfies TaskIntent;
     this.db
       .prepare(
-        `INSERT INTO tasks (id, goal, state, profile, repo_path, branch, envelope, intent_json, task_kind, classifier_version, created_at, updated_at)
-         VALUES (?, ?, 'CREATED', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO tasks (id, goal, state, profile, repo_path, branch, envelope, intent_json, task_kind, classifier_version, run_as, created_at, updated_at)
+         VALUES (?, ?, 'CREATED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         taskId,
@@ -78,6 +82,7 @@ export class TaskStore {
         // K20: v1, the label routing and K13 read. Written once; never rewritten.
         classifyTaskV1(input.goal),
         CLASSIFIER_VERSION,
+        input.runAs ?? null,
         now,
         now,
       );

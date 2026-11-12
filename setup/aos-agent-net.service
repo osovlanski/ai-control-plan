@@ -1,0 +1,13 @@
+[Unit]
+Description=Egress rules for aos-agent (uid 1002), Agentic OS P0-A2
+After=network-pre.target
+Before=network.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /usr/local/lib/aos/aos-agent-net.nft
+ExecStop=/usr/sbin/nft delete table inet aos_agent_net
+
+[Install]
+WantedBy=multi-user.target

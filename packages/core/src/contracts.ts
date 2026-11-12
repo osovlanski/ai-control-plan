@@ -72,4 +72,10 @@ export const COMMAND_CAPABILITIES = ["commands.write"] as const;
 // observability + command capabilities) never carries it.
 export const INGEST_CAPABILITIES = ["usage.write"] as const;
 
+// P0-A2 (auto-copilot plan §C.0): starting, releasing and resolving the autopilot
+// needs this capability. It is never in the credential file and never in a
+// browser session: only the operator secret, whose hash alone is on the box,
+// carries it. Stopping stays on `commands.write`.
+export const AUTOPILOT_OPERATE_CAPABILITY = "autopilot.operate" as const;
+
 export type ObservabilityCapability = (typeof OBSERVABILITY_CAPABILITIES)[number];

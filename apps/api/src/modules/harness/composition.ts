@@ -23,7 +23,9 @@ import { HarnessBridge } from "./control-plane-bridge.js";
 import { deriveEnvelopeUpdate } from "./envelope-derivation.js";
 import { EventRecorder } from "./event-recorder.js";
 import { snapshotQuota } from "./quota-snapshot.js";
-import { ProviderProcessTracker, markIncarnation, reapStrayProviders } from "./provider-processes.js";
+import { ProviderProcessTracker, markIncarnation, reapStrayAgentUnits, reapStrayProviders } from "./provider-processes.js";
+import { stopAgentUnit } from "@agent-plane/adapters";
+import { agentLauncher } from "../../config.js";
 import { HarnessRecovery } from "./recovery.js";
 import { SessionRunner, type RunnerDeps } from "./session-runner.js";
 import { SessionStore } from "./session-store.js";
@@ -115,15 +117,23 @@ export function buildHarnessComposition(deps: HarnessCompositionDeps): HarnessCo
     processes,
     reapStrays: () => {
       bootSweepPending = true; // only reconcileOnBoot reaps, and it sweeps profiles last
-      return reapStrayProviders(config.dir, { log: deps.onInfo });
+      // P0-A2: agent-user units first. They are not this user's to signal, so they are stopped
+      // by name through the wrapper; the process reap below then finds their sudo parents gone.
+      const agent = config.execution.agentUser;
+      const units = agent
+        ? reapStrayAgentUnits(config.dir, (unit) => stopAgentUnit(agentLauncher(agent), unit), { log: deps.onInfo })
+        : Promise.resolve([]);
+      return units.then(() => reapStrayProviders(config.dir, { log: deps.onInfo }));
     },
     sweepProfiles: () => {
       // On boot no runner is alive (§9), so a lease a dead incarnation left on a terminal session
       // holds nothing; the boot sweep decides on session state alone, as before.
       const boot = bootSweepPending;
       bootSweepPending = false;
+      // P0-A2: the agent-readable root is swept by the same rules; it exists only on a set-up host.
+      for (const root of [profilesRoot, ...(config.execution.agentUser ? [config.execution.agentUser.profilesRoot] : [])]) {
       const swept = sweepProfiles({
-        root: profilesRoot,
+        root,
         sessionState: (sid) => sessionStore.get(sid)?.state,
         // A terminal state lands before the runner terminates its provider and disposes the
         // profile; its lease is released last. Until then the profile may still be in use.
@@ -134,7 +144,8 @@ export function buildHarnessComposition(deps: HarnessCompositionDeps): HarnessCo
         },
         record: (sid, events) => recorder.appendSettled(sid, events),
       });
-      if (swept.removed.length || swept.unowned.length) deps.onInfo?.("profile sweep", { removed: swept.removed.length, retained: swept.retained.length, unowned: swept.unowned });
+      if (swept.removed.length || swept.unowned.length) deps.onInfo?.("profile sweep", { root, removed: swept.removed.length, retained: swept.retained.length, unowned: swept.unowned });
+      }
     },
   });
 
@@ -205,6 +216,7 @@ export function buildHarnessComposition(deps: HarnessCompositionDeps): HarnessCo
   const authority = new WorkspaceAuthority({
     repoAllowlist: config.repoAllowlist,
     worktreeRoot: join(config.dir, "worktrees"),
+    ...(config.execution.agentUser ? { agentWorktreeRoot: config.execution.agentUser.worktreesRoot } : {}),
   });
   const projectVerification = (worktreePath: string): ReturnType<typeof planProjectVerification> => {
     try {
@@ -305,6 +317,8 @@ export function buildHarnessComposition(deps: HarnessCompositionDeps): HarnessCo
     toolGate,
     processes,
     log: deps.onInfo,
+    ...(config.execution.agentUser ? { agentUser: { profilesRoot: config.execution.agentUser.profilesRoot } } : {}),
+    taskRunAs: (taskId) => (tasks.get(taskId)?.run_as === "agent" ? "agent" : undefined),
     provisioning: {
       root: profilesRoot,
       load: (compositionRevisionId) => {

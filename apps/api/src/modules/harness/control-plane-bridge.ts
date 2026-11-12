@@ -56,6 +56,8 @@ export interface BridgeStartInput {
   compositionRevisionId?: string;
   /** M2: token/cost caps from the revision. Absent ⇒ today's `{ enforcement: "advisory" }`, no caps. */
   budget?: BudgetPolicy;
+  /** P0-A2: the task's `run_as`. Becomes `policy.runAs`; absent for every other task. */
+  runAs?: "agent";
 }
 
 const APPROVAL_STRICTNESS: Readonly<Record<ApprovalMode, number>> = { "auto-approve": 0, "prompt-on-escalation": 1, "read-only": 2 };
@@ -130,6 +132,7 @@ export function buildExecutionRequest(input: BridgeStartInput): ExecutionRequest
       tools: { mode: "audit" },
       checkpoint: { onSoftLimit: true },
       isolation: { required: "ambient" },
+      ...(input.runAs ? { runAs: input.runAs } : {}),
     },
     context: {
       ...(input.target ? { target: input.target } : {}),
