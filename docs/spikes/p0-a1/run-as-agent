@@ -1,0 +1,27 @@
+#!/bin/bash
+# Runs as aos-agent (via sudo). Usage:
+#   run-as-agent run <task-session-id> <max-seconds> <cwd> -- <cmd> [args...]
+#   run-as-agent stop <task-session-id>
+# Caller input is validated here; sudo's env_reset drops the caller's environment.
+set -euo pipefail
+umask 027
+export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+export HOME="$(getent passwd "$(id -u)" | cut -d: -f6)"
+export PATH=/usr/local/bin:/usr/bin:/bin
+mode="${1:-}"; id="${2:-}"
+[[ "$id" =~ ^[A-Za-z0-9_-]{1,64}$ ]] || { echo "bad id" >&2; exit 64; }
+unit="aos-run-$id"
+case "$mode" in
+  stop) exec systemctl --user stop "$unit.scope" ;;
+  run)
+    secs="${3:-}"; cwd="${4:-}"; [ "${5:-}" = "--" ] || exit 64
+    [[ "$secs" =~ ^[0-9]{1,5}$ ]] && [ "$secs" -ge 1 ] && [ "$secs" -le 14400 ] || { echo "bad seconds" >&2; exit 64; }
+    case "$cwd" in /home/ubuntu/workspace/*|/var/lib/aos/*|/tmp/aos-spike/*) ;; *) echo "cwd outside allowed roots" >&2; exit 64;; esac
+    [ -d "$cwd" ] || exit 64
+    shift 5
+    [ "$#" -ge 1 ] || exit 64
+    exec systemd-run --user --scope --quiet --collect --unit="$unit" \
+      -p RuntimeMaxSec="$secs" -p TimeoutStopSec=5 -p MemoryMax=1500M -p TasksMax=256 \
+      --working-directory="$cwd" -- "$@" ;;
+  *) exit 64 ;;
+esac

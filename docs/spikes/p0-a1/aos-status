@@ -1,0 +1,16 @@
+#!/bin/bash
+# Read-only P0-A1 health check. Run as root. Exit 1 if anything is missing.
+bad=0
+c(){ if eval "$2" >/dev/null 2>&1; then echo "ok      $1"; else echo "MISSING $1"; bad=1; fi; }
+c "user aos-agent uid 1002"   '[ "$(id -u aos-agent)" = 1002 ]'
+c "linger"                    'loginctl show-user aos-agent -p Linger | grep -q yes'
+c "home 0700"                 '[ "$(stat -c %a /home/aos-agent)" = 700 ]'
+c "/var/lib/aos/profiles 750" '[ "$(stat -c %a /var/lib/aos/profiles)" = 750 ]'
+c "/var/lib/aos/worktrees 2770" '[ "$(stat -c %a /var/lib/aos/worktrees)" = 2770 ]'
+c "wrapper"                   '[ -x /usr/local/lib/aos/run-as-agent ]'
+c "claude copy"               '[ -x /usr/local/lib/aos/claude ]'
+c "claude login"              '[ -f /home/aos-agent/.claude/.credentials.json ]'
+c "sudoers /etc/sudoers.d/aos" 'visudo -cf /etc/sudoers.d/aos'
+c "nft table aos_agent_net"   'nft list table inet aos_agent_net'
+c "nft unit enabled"          'systemctl is-enabled aos-agent-net.service'
+exit $bad

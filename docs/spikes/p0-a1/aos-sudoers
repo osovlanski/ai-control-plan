@@ -1,0 +1,3 @@
+# /etc/sudoers.d/aos  (0440 root:root). Plane user may run exactly one wrapper, as aos-agent only.
+Defaults:ubuntu env_reset
+ubuntu ALL=(aos-agent:aos) NOPASSWD: /usr/local/lib/aos/run-as-agent
