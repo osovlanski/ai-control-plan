@@ -1,0 +1,402 @@
+# Agentic OS backlog: desired work for ai-control-plan and cockpit (auto copilot plan §C.3).
+#
+# Rules (enforced by `node scripts/backlog-check.mjs`; field reference in README.md):
+# - No status field. Status is derived from GitHub (os/<id> ref, its PR) and plane attempts.
+# - `id` is stable forever and becomes the GitHub ref os/<id>. Renaming an item is a new item.
+# - Only open work is listed. Shipped slices (P0-A2, P0-2, ...) are in docs/PROJECT_MEMORY.md.
+# - lane oci-loop: the OCI autopilot may pick it up. It needs acceptance commands, each with an
+#   explicit replaySafe, and the writable paths of the offline snapshot (§C.2.7).
+# - lane manual-cloud: a Claude Code or Codex cloud thread reserves os/<id> first (§C.4).
+# - lane owner: only itay can do it (a host step, a secret, a login or a decision).
+# - Acceptance commands come from this file at origin/main, never from the task worktree.
+#
+# Audited 2026-11-13 at ai-control-plan 08ba95b and cockpit 2c19d12 (no open PRs in either).
+version: 1
+items:
+  # ── Stage 3: the first autonomous loop ──────────────────────────────────────────────
+  - id: p0-1-oci-config
+    title: "OCI config: oci-heavy pool of 1, harnessModes.single, composer.requireRevision"
+    phase: "auto-copilot stage 3 (P0-1)"
+    repo: ai-control-plan
+    size: S
+    depends_on: []
+    files: ["docs/autopilot/p0-1-oci-config.md"]
+    lane: owner
+    profile: auto
+    night: false
+    source: "plan §F stage 3 P0-1"
+    notes: "Live config on the OCI box. Pass: GET /api/scheduler/status lists the pool; autopilot start refuses without either setting (G27). The doc path is where the record goes, not a code change."
+
+  - id: p0-3-host-gate
+    title: "Host gate (observation) and the close timer unit under aos-agent"
+    phase: "auto-copilot stage 3 (P0-3)"
+    repo: ai-control-plan
+    size: M
+    depends_on: []
+    files: ["apps/api/src/modules/host-admission.ts", "setup/aos-close.timer"]
+    lane: manual-cloud
+    profile: best-quality
+    night: false
+    source: "plan §F stage 3 P0-3; thread started 2026-11-13"
+    notes: "Acceptance G8, G20. G20 needs the OCI box."
+
+  - id: p0-4-acceptance-runner
+    title: "Acceptance runner: trusted commands, fresh read-only snapshot, offline, replay-safe rule"
+    phase: "auto-copilot stage 3 (P0-4)"
+    repo: ai-control-plan
+    size: M
+    depends_on: []
+    files: ["apps/api/src/modules/acceptance-run.ts"]
+    lane: manual-cloud
+    profile: best-quality
+    night: false
+    source: "plan §F stage 3 P0-4; PROJECT_MEMORY 2026-11-12 finding (uncommitted checkpoint)"
+    notes: "Reads items[].acceptance from this file. Must treat a checkpoint with committed:false as blocked (P0-A2 open finding). Acceptance G10, G25, G28."
+
+  - id: p0-5-publications
+    title: "Publications: fast-forward push with lease, draft PR with marker, publish_uncertain"
+    phase: "auto-copilot stage 3 (P0-5)"
+    repo: ai-control-plan
+    size: L
+    depends_on: []
+    files: ["apps/api/src/modules/publications.ts"]
+    lane: manual-cloud
+    profile: best-quality
+    night: false
+    source: "plan §F stage 3 P0-5; thread started 2026-11-13"
+    notes: "Acceptance G12, G13, G29 on fake GitHub. Replaces the 501 on POST /api/autopilot/resolve."
+
+  - id: p0-6-select-next
+    title: "selectNext() and create-ref reservation, lineage, attempt and task in one transaction"
+    phase: "auto-copilot stage 3 (P0-6)"
+    repo: ai-control-plan
+    size: M
+    depends_on: [p0-5-publications]
+    files:
+      - "apps/api/src/modules/autopilot.ts"
+      - "docs/progress/backlog.schema.json"
+      - "scripts/backlog-check.mjs"
+      - "docs/progress/manual-lane-reserve.md"
+    lane: manual-cloud
+    profile: best-quality
+    night: false
+    source: "plan §F stage 3 P0-6"
+    notes: "Reads this file at origin/main and computes the item revision digest (scripts/backlog-check.mjs --digests). Acceptance G11, G23."
+
+  - id: p0-8-k3-egress
+    title: "K3 quota probe egress: fixed Anthropic endpoint, redirect error, off for the autopilot lane"
+    phase: "auto-copilot stage 3 (P0-8)"
+    repo: ai-control-plan
+    size: S
+    depends_on: []
+    files: ["apps/api/src/modules/quota-probe.ts"]
+    lane: manual-cloud
+    profile: auto
+    night: false
+    source: "plan §F stage 3 P0-8; review-3 finding 14; thread started 2026-11-13"
+
+  - id: p0-10-morning-report
+    title: "Minimum morning report: outcomes, runtime, tokens, charges, stop reason, unresolved effects"
+    phase: "auto-copilot stage 3 (P0-10)"
+    repo: ai-control-plan
+    size: S
+    depends_on: [p0-6-select-next]
+    files: ["apps/api/src/modules/autopilot.ts", "scripts/morning-report.mjs"]
+    lane: manual-cloud
+    profile: auto
+    night: false
+    source: "plan §F stage 3 P0-10"
+
+  - id: g15-first-loop-live
+    title: "G15: one real item end to end on OCI to a draft PR with no human step"
+    phase: "auto-copilot stage 3 exit"
+    repo: ai-control-plan
+    size: M
+    depends_on: [p0-1-oci-config, p0-3-host-gate, p0-4-acceptance-runner, p0-6-select-next, p0-10-morning-report, p0-a2-host-drive]
+    files: ["docs/autopilot/g15-first-loop.md"]
+    lane: owner
+    profile: auto
+    night: false
+    source: "plan §F stage 3 exit (G15, then G3, G12, G29)"
+    notes: "Needs itay to start the autopilot with autopilot.operate. The first item it runs should be one of the oci-loop items below."
+
+  # ── Owner steps and decisions carried from P0-A ─────────────────────────────────────
+  - id: p0-a2-host-drive
+    title: "Run G0, G21 and G26 on OCI after re-running aos-setup and setting the operator secret"
+    phase: "auto-copilot stage 2 exit"
+    repo: ai-control-plan
+    size: S
+    depends_on: []
+    files: ["docs/autopilot/p0-a2-host-drive.md"]
+    lane: owner
+    profile: auto
+    night: false
+    source: "PROJECT_MEMORY 2026-11-12 (P0-A2, OCI drive pending)"
+    notes: "Steps in docs/autopilot/p0-a2-host-drive.md. G26's composed-profile part needs Cockpit running."
+
+  - id: aos-operator-sudoers
+    title: "Decide whether to install setup/sudoers.d/aos-operator (narrow the plane user's sudo)"
+    phase: "auto-copilot stage 2 follow-up"
+    repo: ai-control-plan
+    size: S
+    depends_on: []
+    files: ["setup/sudoers.d/aos-operator"]
+    lane: owner
+    profile: auto
+    night: false
+    source: "PROJECT_MEMORY 2026-11-12 open finding"
+    notes: "Host change; needs itay's explicit OK."
+
+  # ── Stage 4: reliability proof ──────────────────────────────────────────────────────
+  - id: p0-7-restore-reconcile
+    title: "Restore reconciliation, fail-closed boot, external heartbeat, off-host backup, runbook"
+    phase: "auto-copilot stage 4 (P0-7)"
+    repo: ai-control-plan
+    size: L
+    depends_on: [p0-6-select-next]
+    files: ["apps/api/src/modules/autopilot.ts", "docs/autopilot/runbook.md"]
+    lane: manual-cloud
+    profile: best-quality
+    night: false
+    source: "plan §F stage 4, §C.5; decisions D-11, D-14"
+    notes: "Acceptance G14, G17. D-11 (backup destination) is still open."
+
+  - id: p0-7-replacement-drill
+    title: "Replacement-host restore drill with token rotation (G18), then all of G0-G29"
+    phase: "auto-copilot stage 4 exit"
+    repo: ai-control-plan
+    size: M
+    depends_on: [p0-7-restore-reconcile, g15-first-loop-live]
+    files: ["docs/autopilot/runbook.md"]
+    lane: owner
+    profile: auto
+    night: false
+    source: "plan §F stage 4, §G"
+
+  # ── Stage 5: make it an Agentic OS ──────────────────────────────────────────────────
+  - id: p1-0-codex-fallback
+    title: "Codex joins as the quota fallback under aos-agent (own P0-A spike, ChatGPT sign-in)"
+    phase: "auto-copilot stage 5 (P1-0)"
+    repo: ai-control-plan
+    size: L
+    depends_on: [p0-7-replacement-drill]
+    files: ["packages/adapters/src/codex.ts"]
+    lane: owner
+    profile: best-quality
+    night: false
+    source: "plan §F stage 5; decisions D-2, D-13"
+    notes: "Starts with a re-read of OpenAI's Codex-with-ChatGPT terms; the spike runs on OCI."
+
+  - id: p1-3-aos-cli
+    title: "aos CLI: read-only first, then create, stream, approve and stop"
+    phase: "auto-copilot stage 5 (P1-3/4)"
+    repo: ai-control-plan
+    size: L
+    depends_on: [p0-7-replacement-drill]
+    files: ["apps/cli/**"]
+    lane: manual-cloud
+    profile: best-quality
+    night: false
+    source: "plan §F stage 5"
+
+  - id: p1-6-scorecard
+    title: "OS-vs-solo scorecard runs as autopilot items; Phase 8 close"
+    phase: "auto-copilot stage 5 (P1-6/7)"
+    repo: ai-control-plan
+    size: L
+    depends_on: [p0-7-replacement-drill]
+    files: ["eval/**"]
+    lane: manual-cloud
+    profile: best-quality
+    night: false
+    source: "plan §F stage 5; decision D-8"
+
+  - id: p1-1-aa-grounding
+    title: "AA map grounding for routing (mapped > 0)"
+    phase: "auto-copilot stage 5 (P1-1)"
+    repo: ai-control-plan
+    size: M
+    depends_on: []
+    files: ["apps/api/src/modules/artificial-analysis.ts"]
+    lane: manual-cloud
+    profile: auto
+    night: false
+    source: "plan §F stage 5; PROJECT_MEMORY 2026-11-07 K8 diagnostic"
+    notes: "The live refresh needs the AA key on OCI."
+
+  - id: p1-5-effort-cohorts
+    title: "Effort- and assistant-aware cohorts; effort chosen per task by profile"
+    phase: "auto-copilot stage 5 (P1-5)"
+    repo: ai-control-plan
+    size: M
+    depends_on: []
+    files: ["apps/api/src/modules/model-selection.ts"]
+    lane: manual-cloud
+    profile: best-quality
+    night: false
+    source: "plan §F stage 5"
+
+  - id: p1-8-jev-shadow
+    title: "Jev shadow site for cheap decisions (needs D-7 spend answer)"
+    phase: "auto-copilot stage 5 (P1-8)"
+    repo: ai-control-plan
+    size: M
+    depends_on: []
+    files: ["apps/api/src/modules/decision-typesafe.ts"]
+    lane: owner
+    profile: auto
+    night: false
+    source: "plan §F stage 5; decision D-7 open"
+
+  - id: p1-2-daily-report
+    title: "Full daily report with % of estimated scope from this backlog"
+    phase: "auto-copilot stage 5 (P1-2)"
+    repo: ai-control-plan
+    size: M
+    depends_on: [p0-10-morning-report]
+    files: ["scripts/morning-report.mjs"]
+    lane: manual-cloud
+    profile: auto
+    night: false
+    source: "plan §F stage 5, §C.3"
+
+  # ── Small, verified defects: first-loop candidates ──────────────────────────────────
+  - id: legacy-run-cli-version
+    title: "Legacy orchestrator path records runs.harness_cli_version"
+    phase: "K13 follow-up"
+    repo: ai-control-plan
+    size: S
+    depends_on: []
+    files: ["apps/api/src/modules/orchestrator.ts", "apps/api/test/**"]
+    lane: oci-loop
+    profile: auto
+    night: true
+    source: "K13 P2 finding (PR #162); verified 2026-11-13: only harness/session-store.ts writes the column"
+    notes: "model-selection.ts falls back to the run.started event for legacy runs; with this fix the fallback stops being load-bearing."
+    acceptance:
+      commands:
+        - { run: "pnpm install --offline --frozen-lockfile", replaySafe: true, timeoutSec: 600 }
+        - { run: "pnpm typecheck", replaySafe: true, timeoutSec: 900 }
+        - { run: "pnpm lint", replaySafe: true, timeoutSec: 900 }
+        - { run: "pnpm test", replaySafe: true, timeoutSec: 2700 }
+      writable: &plane-writable
+        - "node_modules"
+        - "apps/api/node_modules"
+        - "apps/web/node_modules"
+        - "packages/core/node_modules"
+        - "packages/adapters/node_modules"
+        - "eval/node_modules"
+      drive: "A legacy-path (harnessModes.single false) fake-provider run whose run.started carries a CLI version leaves runs.harness_cli_version set."
+
+  - id: refused-handoff-checkpoint
+    title: "A handoff refused by routing must not write a run-less 'handoff' checkpoint"
+    phase: "phase 7 resume follow-up (D3)"
+    repo: ai-control-plan
+    size: S
+    depends_on: []
+    files: ["apps/api/src/modules/orchestrator.ts", "apps/api/test/**"]
+    lane: oci-loop
+    profile: auto
+    night: true
+    source: "m3-resume drive 2026-10-30 defect D3 (restart route #119 left D3-D5 open)"
+    notes: "Re-check on main first; if it no longer reproduces, the PR is a regression test only."
+    acceptance:
+      commands:
+        - { run: "pnpm install --offline --frozen-lockfile", replaySafe: true, timeoutSec: 600 }
+        - { run: "pnpm typecheck", replaySafe: true, timeoutSec: 900 }
+        - { run: "pnpm lint", replaySafe: true, timeoutSec: 900 }
+        - { run: "pnpm test", replaySafe: true, timeoutSec: 2700 }
+      writable: *plane-writable
+      drive: "POST /handoff that routing refuses, then POST /wait on the same task: the wait is accepted."
+
+  - id: resume-offered-approval
+    title: "An approval answered on a resume_offered session is refused, not silently dropped"
+    phase: "phase 7 resume follow-up (D5)"
+    repo: ai-control-plan
+    size: S
+    depends_on: []
+    files: ["apps/api/src/modules/harness/session-runner.ts", "apps/api/test/**"]
+    lane: oci-loop
+    profile: auto
+    night: true
+    source: "m3-resume drive 2026-10-30 defect D5"
+    notes: "Re-check on main first, as for refused-handoff-checkpoint."
+    acceptance:
+      commands:
+        - { run: "pnpm install --offline --frozen-lockfile", replaySafe: true, timeoutSec: 600 }
+        - { run: "pnpm typecheck", replaySafe: true, timeoutSec: 900 }
+        - { run: "pnpm lint", replaySafe: true, timeoutSec: 900 }
+        - { run: "pnpm test", replaySafe: true, timeoutSec: 2700 }
+      writable: *plane-writable
+      drive: "POST /input with an approval on a resume_offered session returns 409 and the approval stays pending."
+
+  - id: handoff-disabled-reason
+    title: "A same-assistant handoff is refused with its real reason, not 'disabled in workspace config'"
+    phase: "phase 7 resume follow-up (D4)"
+    repo: ai-control-plan
+    size: S
+    depends_on: []
+    files: ["apps/api/src/modules/orchestrator.ts", "apps/api/src/modules/router.ts", "apps/api/test/**"]
+    lane: manual-cloud
+    profile: auto
+    night: false
+    source: "m3-resume drive 2026-10-30 defect D4; orchestrator.ts already rewrites the reason for the handoff source"
+    notes: "Needs a check of whether the existing rewrite (orchestrator.ts 'excluded as the handoff source') already covers D4 before any code; kept out of the night loop until then."
+
+  - id: memory-stale-boundary
+    title: "Cockpit memory Garden: stale means older than staleDays, as the memory v1 contract says"
+    phase: "O6 follow-up"
+    repo: cockpit
+    size: S
+    depends_on: []
+    files: ["memoryGarden.ts", "memoryGarden.test.ts"]
+    lane: oci-loop
+    profile: auto
+    night: true
+    source: "O6 S2 review finding (cockpit #49); verified 2026-11-13: memoryGarden.ts skips only ageDays < staleDays, so exactly staleDays is stale"
+    notes: "README says 'longer than staleDays' too. Contract-text alignment, no contract change."
+    acceptance:
+      commands:
+        - { run: "npm ci --offline --no-audit --no-fund", replaySafe: true, timeoutSec: 600 }
+        - { run: "npm test", replaySafe: false, timeoutSec: 1800 }
+        - { run: "npm run build", replaySafe: true, timeoutSec: 600 }
+      writable: &cockpit-writable
+        - "node_modules"
+        - ".generated"
+        - { file: "memory-garden-status.json" }
+        - { file: "retro-action-status.json" }
+      drive: "A memory file aged exactly staleDays is not reported stale; staleDays + 1 is."
+
+  - id: cockpit-tests-out-of-root
+    title: "Cockpit server tests write their status files to a temp dir, not the repo root"
+    phase: "hermetic tests follow-up"
+    repo: cockpit
+    size: S
+    depends_on: []
+    files: ["server.test.ts", "actionStatus.ts", "testHermeticEnv.ts"]
+    lane: oci-loop
+    profile: auto
+    night: true
+    source: "P0-9 drive 2026-11-13: npm test on a fresh checkout leaves memory-garden-status.json and retro-action-status.json in the repo root"
+    notes: "Once fixed, drop both files from the cockpit writable lists here."
+    acceptance:
+      commands:
+        - { run: "npm ci --offline --no-audit --no-fund", replaySafe: true, timeoutSec: 600 }
+        - { run: "npm test", replaySafe: false, timeoutSec: 1800 }
+        - { run: "npm run build", replaySafe: true, timeoutSec: 600 }
+      writable: *cockpit-writable
+      drive: "git status --ignored on a fresh checkout after npm test lists only node_modules and .generated."
+
+  # ── Cockpit ─────────────────────────────────────────────────────────────────────────
+  - id: cockpit-autopilot-view
+    title: "Cockpit shows the plane's autopilot state read-only (after the plane publishes it as a contract)"
+    phase: "auto-copilot stage 5"
+    repo: cockpit
+    size: M
+    depends_on: [p0-10-morning-report]
+    files: ["controlPlane.ts", "public/**"]
+    lane: manual-cloud
+    profile: auto
+    night: false
+    source: "plan §E.6 Cockpit as the first installed app; cockpit AGENTS.md contract rule"
+    notes: "Contract lands in ai-control-plan first, then Cockpit vendors it SHA-pinned."

@@ -1,0 +1,206 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/osovlanski/ai-control-plan/docs/progress/backlog.schema.json",
+  "title": "Agentic OS backlog v1",
+  "description": "Desired work for both repositories (auto copilot plan \u00a7C.3). There is no status field: status is derived from GitHub refs os/<id>, PRs and plane attempts. scripts/backlog-check.mjs enforces this schema plus the cross-item rules it cannot express (unique ids, depends_on targets, cycles, offline installs).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "items"
+  ],
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "items": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/item"
+      }
+    }
+  },
+  "$defs": {
+    "id": {
+      "description": "Stable forever. Used as the GitHub ref os/<id>, so lowercase letters, digits and single hyphens only.",
+      "type": "string",
+      "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+      "maxLength": 60
+    },
+    "relPath": {
+      "description": "Repository-relative path or glob. Not absolute, no '..' segment, not the repository root, not under .git.",
+      "type": "string",
+      "minLength": 1
+    },
+    "command": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run",
+        "replaySafe"
+      ],
+      "properties": {
+        "run": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Shell string run in the snapshot root, offline."
+        },
+        "replaySafe": {
+          "type": "boolean",
+          "description": "true only if re-running after a crash cannot repeat an effect outside the snapshot's writable paths. Required explicitly; the runner's default when absent would be false."
+        },
+        "timeoutSec": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5400
+        }
+      }
+    },
+    "acceptance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "commands",
+        "writable"
+      ],
+      "properties": {
+        "commands": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/command"
+          }
+        },
+        "writable": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/writable"
+          },
+          "uniqueItems": true
+        },
+        "drive": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Free text; not executed by the acceptance runner."
+        }
+      }
+    },
+    "item": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "title",
+        "phase",
+        "repo",
+        "size",
+        "depends_on",
+        "files",
+        "lane",
+        "profile",
+        "night"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "phase": {
+          "type": "string",
+          "minLength": 1
+        },
+        "repo": {
+          "enum": [
+            "ai-control-plan",
+            "cockpit"
+          ]
+        },
+        "size": {
+          "enum": [
+            "S",
+            "M",
+            "L"
+          ],
+          "description": "Estimated scope points: S=1, M=3, L=8."
+        },
+        "depends_on": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/id"
+          },
+          "uniqueItems": true
+        },
+        "files": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/relPath"
+          }
+        },
+        "lane": {
+          "enum": [
+            "oci-loop",
+            "manual-cloud",
+            "owner"
+          ]
+        },
+        "profile": {
+          "type": "string",
+          "minLength": 1
+        },
+        "night": {
+          "type": "boolean"
+        },
+        "source": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Where the audit found this item."
+        },
+        "notes": {
+          "type": "string",
+          "minLength": 1
+        },
+        "acceptance": {
+          "$ref": "#/$defs/acceptance"
+        }
+      },
+      "if": {
+        "properties": {
+          "lane": {
+            "const": "oci-loop"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "acceptance"
+        ]
+      }
+    },
+    "writable": {
+      "description": "A plain string is a directory the run may write (created if missing). {file: path} is a single file that may not exist yet; the runner lets the run create it while its parent stays read-only.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/relPath"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "file"
+          ],
+          "properties": {
+            "file": {
+              "$ref": "#/$defs/relPath"
+            }
+          }
+        }
+      ]
+    }
+  }
+}
