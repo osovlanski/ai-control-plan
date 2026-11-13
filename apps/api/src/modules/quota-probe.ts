@@ -9,6 +9,27 @@ import type { Registry } from './registry.js';
 /** One attempt per assistant per window; `status()` reports the age. */
 export const PROBE_INTERVAL_MS = 15 * 60_000;
 const PROBE_TIMEOUT_MS = 5_000;
+/**
+ * P0-8 (auto-copilot plan §B.5): the only destination K3 ever sends a bearer
+ * token to. It is a constant, not configuration: an assistant option naming any
+ * other endpoint is refused when the service is built, and the request refuses
+ * redirects, so the token cannot be steered to a foreign host by config or by
+ * the server's own response.
+ */
+export const ANTHROPIC_USAGE_ENDPOINT = 'https://api.anthropic.com/api/oauth/usage';
+
+/**
+ * Config problems K3 refuses at load. `usageEndpoint` is accepted only when it
+ * names the fixed endpoint exactly, so an old config that spelled out the
+ * default keeps loading.
+ */
+export function quotaProbeConfigProblems(assistants: ResolvedConfig['assistants']): string[] {
+  return Object.entries(assistants ?? {}).flatMap(([id, entry]) => {
+    const value = entry?.options?.usageEndpoint;
+    return value === undefined || value === ANTHROPIC_USAGE_ENDPOINT ? []
+      : [`assistants.${id}.options.usageEndpoint is refused: the quota probe only calls ${ANTHROPIC_USAGE_ENDPOINT}`];
+  });
+}
 
 export type ProbeStatus = 'ok' | 'unavailable' | 'unauthorized' | 'unsupported';
 export interface ProbeOutcome {
@@ -38,7 +59,11 @@ export async function probeQuota(provider: string, options: Record<string, unkno
 /** The OAuth token is read into a local: never returned, logged or persisted. */
 async function probeClaudeUsage(options: Record<string, unknown>): Promise<ProbeOutcome> {
   const path = typeof options.credentialsPath === 'string' ? options.credentialsPath : join(homedir(), '.claude', '.credentials.json');
-  const endpoint = typeof options.usageEndpoint === 'string' ? options.usageEndpoint : 'https://api.anthropic.com/api/oauth/usage';
+  // Second line of defence behind the load-time refusal: a foreign endpoint
+  // reaching here is refused before the credential file is even read.
+  if (options.usageEndpoint !== undefined && options.usageEndpoint !== ANTHROPIC_USAGE_ENDPOINT) {
+    return { status: 'unsupported', buckets: [], detail: 'usage endpoint override refused' };
+  }
   let token: string | undefined;
   try {
     token = (JSON.parse(readFileSync(path, 'utf8')) as { claudeAiOauth?: { accessToken?: string } })?.claudeAiOauth?.accessToken;
@@ -48,8 +73,10 @@ async function probeClaudeUsage(options: Record<string, unknown>): Promise<Probe
   if (!token) return { status: 'unauthorized', buckets: [], detail: 'no OAuth access token' };
   let response: Response;
   try {
-    response = await fetch(endpoint, {
+    response = await fetch(ANTHROPIC_USAGE_ENDPOINT, {
       headers: { authorization: `Bearer ${token}`, 'anthropic-beta': 'oauth-2025-04-20' },
+      // A redirect would resend the request elsewhere: fail it instead.
+      redirect: 'error',
       signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
     });
   } catch {
@@ -83,7 +110,10 @@ export class QuotaProbeService {
     private registry: Registry,
     private probe: QuotaProbeFn = probeQuota,
     private now: () => Date = () => new Date(),
-  ) {}
+  ) {
+    const problems = quotaProbeConfigProblems(config.assistants);
+    if (problems.length) throw new Error(`Invalid quota probe config:\n  - ${problems.join('\n  - ')}`);
+  }
 
   get enabled(): boolean { return this.config.scheduler?.quotaProbe === true; }
 

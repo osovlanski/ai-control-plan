@@ -802,6 +802,10 @@ export class Scheduler {
     if (!this.d.probes?.enabled) return;
     const c = this.condition(taskId);
     if (!c || c.state !== 'active' || c.generation !== generation || c.kind !== 'quota') return;
+    // P0-8 (plan §C.0): K3 stays off for the autopilot lane. Its tasks run as
+    // `aos-agent`, whose login the plane must not read, and the plane's own
+    // account is not theirs; they rely on K2's limit events instead.
+    if (this.d.tasks.get(taskId)?.run_as === 'agent') return;
     const attempts = await this.d.probes.refresh(c.assistants).catch(error => { this.d.onError?.(error); return []; });
     if (!attempts.length) return;
     const history = [...c.history, { at: this.iso(), actor: 'scheduler', outcome: 'probe',
