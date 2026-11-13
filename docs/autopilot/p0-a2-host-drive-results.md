@@ -1,6 +1,6 @@
 # P0-A2 host drive results (2026-11-12, OCI ai-workstation)
 
-Verdict for P0-A2: **BLOCKED**. G0 PASS, G21 PASS (step 4 deferred as the doc allows), G26 BLOCKED on its composed-profile part.
+Verdict for P0-A2: **FAIL** (was BLOCKED before the composed run). G0 PASS, G21 PASS (step 4 deferred as the doc allows), G26 FAIL: the composed run stops at the plugin-isolation check.
 
 Method: after `aos-setup` was re-run (itay approved), a scratch plane on :4199 (own `AGENT_PLANE_HOME`, own generated operator secret, `execution.agentUser: {}`, `runAs:"agent"` tasks on a clone under `/var/lib/aos/worktrees/drive-repo`) ran real Claude sessions as `aos-agent` through sudo and the wrapper. The live plane on :4176 was never touched. Scratch plane, clone and secrets were removed afterwards.
 
@@ -20,16 +20,16 @@ Method: after `aos-setup` was re-run (itay approved), a scratch plane on :4199 (
 4. Acceptance with no network belongs to the acceptance runner (§C.2.7): not runnable yet.
 Note: a repository with no `packageManager` declaration is blocked earlier, at verification planning (`no packageManager declaration or recognized lockfile`), before the agent-user policy is reached. Both end in WAITING_INPUT.
 
-## G26 — BLOCKED (composed profile not driven)
-Observed with a real session and the composer off:
-- Provider runs as `aos-agent` inside `aos-run-<session>.scope`; `RuntimeMaxUSec=30min`.
-- Cancel mid-stream: scope and child processes gone in 2 s, run `CANCELLED`.
-- `kill -9` of the plane with a live session, then restart: boot log "stopped agent-user units from a dead incarnation" names all four sessions; scope gone. The live session was offered resume (`canResume`), so its run row stays RUNNING and the task pauses `harness_error`, as for an ordinary task.
-Not driven: a selected skill and an MCP server loaded from `/var/lib/aos/profiles/<session>` (`provisioning.verified`, startup evidence, profile disposed). That needs `composer.enabled` plus Cockpit's bundle service and token. The only Cockpit on the box is itay's live one, and using its token for a scratch plane was not authorised. `/var/lib/aos/profiles` stayed empty during all runs.
+## G26 — FAIL (composed run stopped by the plugin-isolation check)
+Second Cockpit (own HOME, port 8799, own token, one skill and one stdlib stdio MCP server with no secret ref, tagged so the composer selects them) and a scratch plane with `composer.enabled`. The live Cockpit and its token were not used.
+- Composition selected `claude-skills:drive-skill` and `mcp:drive-mcp`, both allowlisted; started with the confirmed digest.
+- PASS: `provisioning.verified` (profile under `/var/lib/aos/profiles/<session>`, files `plugin/.claude-plugin/plugin.json` and `plugin/skills/drive-skill/SKILL.md`); `run.started` evidence `runtime_skills` ok (profile skill loaded) and `runtime_mcp` ok ("1 profile server(s) loaded, no others"); `provisioning.disposed` and the profile directory gone.
+- FAIL: `runtime_plugins`: "plugins outside the profile loaded: cc-plugin-agents-md, cc-plugin-plugin-authoring, cc-plugin-privacy, cc-plugin-telemetry". The session ended `FAILED`, `policy_unenforceable`, non-retryable, checkpoint committed. These are account-synced plugins that `aos-agent`'s Claude login pulls into `/home/aos-agent/.claude/plugins/synced/`. The check is working as designed; as installed, no composed agent run can pass it.
+- Not reachable because the run fails at startup: cancel and restart recovery of a composed run (those were observed earlier on non-composed runs: scope gone in 2 s after cancel; boot log "stopped agent-user units from a dead incarnation"; scope runs as `aos-agent` with `RuntimeMaxUSec=30min`).
 
 ## Findings
 - `setup/aos-setup` and `setup/aos-status` failed or false-reported when run from a directory `aos-agent` cannot stat (a checkout under `/home/ubuntu`): the `git config` step errored and the `safe.directory` check said MISSING while the entry existed. Fixed here with `cd /`. The installed copies in `/usr/local/lib/aos` are not updated; re-run `aos-setup --no-net` to refresh them.
 - Both scratch tasks end WAITING_INPUT because a required check is `skipped`. The autopilot must read that as "acceptance runner decides", not as a human wait.
 
 ## To close G26
-Either (a) approve a scratch plane using the live Cockpit's bundle token, or (b) start a second Cockpit with its own token on another port, then run steps 1, 2 (evidence) and 4 of `p0-a2-host-drive.md`.
+The agent login must stop loading account-synced plugins, or the check must treat them as out of scope. Options: a Claude login for `aos-agent` on an account with no synced plugins; or a launch setting that disables plugin sync for the agent (not yet found). Then rerun the composed run, cancel and restart-recovery steps.
