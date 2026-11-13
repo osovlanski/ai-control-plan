@@ -8,7 +8,9 @@ import { openDb, type Db } from '../src/db/index.js';
 import { buildServer, type BuiltServer } from '../src/server.js';
 import { Scheduler } from '../src/modules/scheduler.js';
 import { QuotaProjection, retryDelay } from '../src/modules/quota.js';
-import { PROBE_INTERVAL_MS, QuotaProbeService, probeQuota, type ProbeOutcome, type QuotaProbeFn } from '../src/modules/quota-probe.js';
+import { createServer, type Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { ANTHROPIC_USAGE_ENDPOINT, PROBE_INTERVAL_MS, QuotaProbeService, probeQuota, type ProbeOutcome, type QuotaProbeFn } from '../src/modules/quota-probe.js';
 
 const A = 'fake-a' as AssistantId, B = 'fake-b' as AssistantId;
 let built: BuiltServer;
@@ -224,13 +226,15 @@ describe('K3 Claude usage probe', () => {
     }), { status: 200 }));
     vi.stubGlobal('fetch', fetchMock);
 
-    const outcome = await probeQuota('anthropic', { credentialsPath: credentials(), usageEndpoint: 'https://usage.test/usage' });
+    const outcome = await probeQuota('anthropic', { credentialsPath: credentials() });
     expect(outcome).toEqual({ status: 'ok', buckets: [
       { bucket: 'five_hour', usedPercent: 61, resetsAt: '2026-09-06T17:00:00.000Z' },
       { bucket: 'seven_day', usedPercent: 12, resetsAt: '2026-09-12T00:00:00.000Z' },
       { bucket: 'seven_day_opus', usedPercent: 0, resetsAt: undefined },
     ] });
-    const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe('https://api.anthropic.com/api/oauth/usage');
+    expect(init.redirect).toBe('error');
     const headers = init.headers as Record<string, string>;
     expect(headers['anthropic-beta']).toBe('oauth-2025-04-20');
     expect(headers.authorization).toContain(CREDENTIAL);
@@ -239,7 +243,7 @@ describe('K3 Claude usage probe', () => {
 
   it('never persists, logs or echoes the credential through the service', async () => {
     await boot(true);
-    config.assistants[A] = { provider: 'anthropic', options: { credentialsPath: credentials(), usageEndpoint: 'https://usage.test/usage' } };
+    config.assistants[A] = { provider: 'anthropic', options: { credentialsPath: credentials() } };
     db.prepare('UPDATE assistants SET provider = ? WHERE id = ?').run('anthropic', A);
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ five_hour: { utilization: 55, resets_at: '2026-09-06T17:00:00Z' } }), { status: 200 })));
     const logged: string[] = [];
@@ -261,7 +265,7 @@ describe('K3 Claude usage probe', () => {
   ] as const)('classifies %s without leaking the response', async (_label, status, expected) => {
     await boot(true);
     vi.stubGlobal('fetch', vi.fn(async () => new Response(`server echoed ${CREDENTIAL}`, { status })));
-    const outcome = await probeQuota('anthropic', { credentialsPath: credentials(), usageEndpoint: 'https://usage.test/usage' });
+    const outcome = await probeQuota('anthropic', { credentialsPath: credentials() });
     expect(outcome).toMatchObject({ status: expected, buckets: [] });
     expect(JSON.stringify(outcome)).not.toContain(CREDENTIAL);
   });
@@ -270,7 +274,7 @@ describe('K3 Claude usage probe', () => {
     await boot(true);
     expect(await probeQuota('anthropic', { credentialsPath: join(home, 'absent.json') })).toMatchObject({ status: 'unauthorized' });
     vi.stubGlobal('fetch', vi.fn(async () => { throw new Error(`connect ECONNREFUSED carrying ${CREDENTIAL}`); }));
-    const outcome = await probeQuota('anthropic', { credentialsPath: credentials(), usageEndpoint: 'https://usage.test/usage' });
+    const outcome = await probeQuota('anthropic', { credentialsPath: credentials() });
     expect(outcome).toMatchObject({ status: 'unavailable', detail: 'usage endpoint unreachable' });
     expect(JSON.stringify(outcome)).not.toContain(CREDENTIAL);
   });
@@ -283,5 +287,89 @@ describe('K3 Claude usage probe', () => {
       expect(await probeQuota(provider, {})).toEqual({ status: 'unsupported', buckets: [], detail: `no verified idle quota endpoint for ${provider}` });
     }
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  describe('P0-8 egress', () => {
+    const FAKE = 'FAKE-k3-oauth-not-real';
+    function fakeCredentials(): string {
+      const path = join(home, 'fake-credentials.json');
+      writeFileSync(path, JSON.stringify({ claudeAiOauth: { accessToken: FAKE } }), { mode: 0o600 });
+      return path;
+    }
+    const servers: Server[] = [];
+    afterEach(() => { for (const s of servers.splice(0)) s.close(); });
+    async function listen(handler: Parameters<typeof createServer>[1]): Promise<string> {
+      const server = createServer(handler);
+      servers.push(server);
+      await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+      return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    }
+
+    it('refuses a foreign usage endpoint at load', async () => {
+      clock = new Date('2026-09-06T12:00:00.000Z');
+      home = mkdtempSync(join(tmpdir(), 'k3-'));
+      const cfg = loadConfig({ AGENT_PLANE_HOME: home });
+      cfg.assistants = { [A]: { provider: 'anthropic', options: { usageEndpoint: 'https://collector.example/usage' } } };
+      const foreignDb = openDb(cfg.dbPath);
+      try {
+        expect(() => buildServer({ config: cfg, db: foreignDb, now })).toThrow(/assistants\.fake-a\.options\.usageEndpoint is refused/);
+      } finally { foreignDb.close(); }
+    });
+
+    it('still loads a config that names the fixed endpoint', async () => {
+      await boot(true);
+      config.assistants[A] = { provider: 'anthropic', options: { usageEndpoint: ANTHROPIC_USAGE_ENDPOINT } };
+      expect(() => new QuotaProbeService(db, config, built.registry, probeQuota, now)).not.toThrow();
+    });
+
+    it('refuses an override passed straight to the probe without reading the credential or calling out', async () => {
+      await boot(true);
+      const fetchMock = vi.fn();
+      vi.stubGlobal('fetch', fetchMock);
+      const outcome = await probeQuota('anthropic', { credentialsPath: fakeCredentials(), usageEndpoint: 'https://collector.example/usage' });
+      expect(outcome).toEqual({ status: 'unsupported', buckets: [], detail: 'usage endpoint override refused' });
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('does not follow a redirect from the usage endpoint', async () => {
+      await boot(true);
+      const leaked: string[] = [];
+      const collector = await listen((req, res) => { leaked.push(String(req.headers.authorization)); res.end('{}'); });
+      const usage = await listen((_req, res) => { res.writeHead(302, { location: `${collector}/steal` }); res.end(); });
+      // Route the fixed URL to a local server that redirects, using the real
+      // fetch with the probe's own RequestInit.
+      const realFetch = globalThis.fetch;
+      const calls: string[] = [];
+      vi.stubGlobal('fetch', (url: string, init: RequestInit) => { calls.push(url); return realFetch(`${usage}/api/oauth/usage`, init); });
+
+      const outcome = await probeQuota('anthropic', { credentialsPath: fakeCredentials() });
+
+      expect(calls).toEqual([ANTHROPIC_USAGE_ENDPOINT]);
+      expect(outcome).toEqual({ status: 'unavailable', buckets: [], detail: 'usage endpoint unreachable' });
+      expect(leaked).toEqual([]);
+      expect(JSON.stringify(outcome)).not.toContain(FAKE);
+    });
+
+    it('stays off for an autopilot-lane task while still probing for an interactive one', async () => {
+      await boot(true);
+      const probe = vi.fn<QuotaProbeFn>(async () => ok(0));
+      const scheduler = new Scheduler({ db, config, tasks: built.tasks, orchestrator: built.orchestrator, bus: built.bus, now, probes: service(probe) });
+      const agentTask = built.tasks.create({ goal: 'autopilot task', runAs: 'agent' }).taskId;
+      scheduler.attach(agentTask, { kind: 'quota', notBefore: new Date(clock.getTime() - 1).toISOString(), assistants: [A] });
+      const parked = scheduler.condition(agentTask)!;
+
+      // The start itself is refused here (no Harness single path in this rig);
+      // what matters is that no probe ran first.
+      await scheduler.runNow(agentTask).catch(() => undefined);
+
+      expect(probe).not.toHaveBeenCalled();
+      const consumed = db.prepare('SELECT history FROM wait_conditions WHERE task_id = ? AND generation = ?').get(agentTask, parked.generation) as { history: string };
+      expect(JSON.parse(consumed.history)).not.toContainEqual(expect.objectContaining({ outcome: 'probe' }));
+
+      const own = built.tasks.create({ goal: 'interactive task' }).taskId;
+      scheduler.attach(own, { kind: 'quota', notBefore: new Date(clock.getTime() - 1).toISOString(), assistants: [A] });
+      await scheduler.runNow(own);
+      expect(probe).toHaveBeenCalledTimes(1);
+    });
   });
 });
