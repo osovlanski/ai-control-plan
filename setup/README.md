@@ -10,7 +10,7 @@ files, its API, Cockpit, or the network beyond HTTPS.
 
 | File | Installed as | What it is |
 |---|---|---|
-| `run-as-agent` | `/usr/local/lib/aos/run-as-agent` (root, 0755) | the one command the plane may run as `aos-agent`; starts a `systemd-run --user --scope` bounded by `RuntimeMaxSec`, or stops one |
+| `run-as-agent` | `/usr/local/lib/aos/run-as-agent` (root, 0755) | the one command the plane may run as `aos-agent`; starts a `systemd-run --user --scope` bounded by `RuntimeMaxSec` (`run`), the same with no network for acceptance (`accept`: `unshare --user --map-root-user --net`, its own loopback up), or stops one |
 | `sudoers.d/aos` | `/etc/sudoers.d/aos` (root, 0440) | `ubuntu ALL=(aos-agent:aos) NOPASSWD:` that wrapper only, `env_reset` |
 | `aos-agent-net.nft`, `aos-agent-net.service` | `/usr/local/lib/aos/`, `/etc/systemd/system/` | egress rules for uid 1002, loaded at boot |
 | `aos-setup` | `/usr/local/lib/aos/aos-setup` | idempotent install of everything above, plus user, group and directories |
