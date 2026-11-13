@@ -257,6 +257,54 @@ export interface WorkspaceConfig {
      */
     agentUser?: Partial<AgentUserConfig>;
   };
+  /** P0-2 (auto-copilot plan §C.2): the autopilot's bounds. Every key has a default. */
+  autopilot?: Partial<ResolvedAutopilotConfig>;
+}
+
+/** The resolved autopilot block: always present. It bounds the autopilot; it never starts it. */
+export interface ResolvedAutopilotConfig {
+  /** The K4b pool every autopilot task waits on. Must be declared in `scheduler.resources`. */
+  pool: string;
+  /** D-5: provider sessions and acceptance of one attempt, together. */
+  runtimeBudgetMs: number;
+  /** D-5. */
+  attemptsPerItem: number;
+  /** D-5: the default `maxItems` of a new window. */
+  itemsPerWindow: number;
+  /** §C.2.3: no launch with less than this left in the window. */
+  minSliceMs: number;
+  /** §C.2.3: a session's deadline is this far before the window closes. */
+  graceMs: number;
+  /** §C.2.3: the retry of a `host_busy` refusal. */
+  hostRetryMs: number;
+  /** D-13: how long a billing attestation stays current. */
+  attestationMaxAgeDays: number;
+}
+export const AUTOPILOT_DEFAULTS: ResolvedAutopilotConfig = {
+  pool: "oci-heavy", runtimeBudgetMs: 90 * 60_000, attemptsPerItem: 2, itemsPerWindow: 3,
+  minSliceMs: 10 * 60_000, graceMs: 2 * 60_000, hostRetryMs: 2 * 60_000, attestationMaxAgeDays: 30,
+};
+
+function resolveAutopilot(file: unknown, configPath: string): ResolvedAutopilotConfig {
+  if (file === undefined) return { ...AUTOPILOT_DEFAULTS };
+  if (!isRecord(file)) throw new Error(`${configPath}: autopilot must be a mapping`);
+  const unknown = Object.keys(file).filter((k) => !Object.prototype.hasOwnProperty.call(AUTOPILOT_DEFAULTS, k));
+  if (unknown.length > 0) throw new Error(`${configPath}: autopilot has unknown key(s): ${unknown.join(", ")}`);
+  const out = { ...AUTOPILOT_DEFAULTS };
+  if (file.pool !== undefined) {
+    if (typeof file.pool !== "string" || !file.pool) throw new Error(`${configPath}: autopilot.pool must be a resource pool name`);
+    out.pool = file.pool;
+  }
+  for (const key of ["runtimeBudgetMs", "attemptsPerItem", "itemsPerWindow", "minSliceMs", "graceMs", "hostRetryMs", "attestationMaxAgeDays"] as const) {
+    const value = file[key];
+    if (value === undefined) continue;
+    if (!isPositiveInteger(value)) throw new Error(`${configPath}: autopilot.${key} must be a positive integer`);
+    out[key] = value;
+  }
+  // The scope's RuntimeMaxSec is bounded by the wrapper at four hours; a longer budget could never launch.
+  if (out.runtimeBudgetMs > 4 * 3_600_000) throw new Error(`${configPath}: autopilot.runtimeBudgetMs must be at most four hours`);
+  if (out.graceMs >= out.minSliceMs) throw new Error(`${configPath}: autopilot.graceMs must be below autopilot.minSliceMs`);
+  return out;
 }
 
 export interface AgentUserConfig {
@@ -342,8 +390,10 @@ export interface ResolvedComposerConfig {
   };
 }
 
-export interface ResolvedConfig extends Omit<WorkspaceConfig, "execution" | "models" | "decisions" | "sessionInput" | "registry" | "composer"> {
+export interface ResolvedConfig extends Omit<WorkspaceConfig, "execution" | "models" | "decisions" | "sessionInput" | "registry" | "composer" | "autopilot"> {
   registry: ResolvedRegistryConfig;
+  /** Always present: the autopilot's bounds (it is started by an operator call, never by config). */
+  autopilot: ResolvedAutopilotConfig;
   /** Always present; `enabled` is false unless the workspace turns it on. */
   composer: ResolvedComposerConfig;
   execution: ResolvedExecutionConfig;
@@ -477,6 +527,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ResolvedConfig
   const sessionInput = resolveSessionInput(file.sessionInput, configPath);
   const registry = resolveRegistry(file.registry, configPath);
   const composer = resolveComposer(file.composer, configPath);
+  const autopilot = resolveAutopilot(file.autopilot, configPath);
 
   const config: WorkspaceConfig = {
     workspace: file.workspace ?? workspace,
@@ -502,7 +553,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ResolvedConfig
   }
   ensureCredential(dir);
 
-  return { ...config, execution, models, decisions, sessionInput, registry, composer, dir, dbPath: join(dir, "agent-plane.db"), warnings };
+  return { ...config, execution, models, decisions, sessionInput, registry, composer, autopilot, dir, dbPath: join(dir, "agent-plane.db"), warnings };
 }
 
 /**

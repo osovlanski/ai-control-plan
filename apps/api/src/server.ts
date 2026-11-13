@@ -35,6 +35,7 @@ import { routingHistory } from "./modules/router.js";
 import { TaskEventBus } from "./modules/sse.js";
 import { TaskStageReader } from "./modules/task-stage.js";
 import { Scheduler } from "./modules/scheduler.js";
+import { AutopilotService, AutopilotStartRefused, type AutopilotDeps } from "./modules/autopilot.js";
 import { QuotaProbeService, type QuotaProbeFn } from "./modules/quota-probe.js";
 import { ModelCatalogService, CATALOG_REVISION, type CatalogSource } from "./modules/model-catalog.js";
 import { RegistryFederation } from "./modules/registry-federation.js";
@@ -78,6 +79,8 @@ export interface ServerDeps {
   bus?: TaskEventBus;
   tasks?: TaskStore;
   now?: () => Date;
+  /** P0-2: the autopilot's host gate (§C.2.6). P0-3 supplies the real probes; tests inject one. */
+  autopilotHostGate?: AutopilotDeps["hostGate"];
   quotaProbes?: QuotaProbeService;
   /** Overrides the idle quota probe transport (K3) when `quotaProbes` is not supplied. Test/demo only. */
   quotaProbeFn?: QuotaProbeFn;
@@ -117,6 +120,7 @@ export interface BuiltServer {
   cooldowns: CooldownStore;
   telemetry: TelemetryService;
   scheduler: Scheduler;
+  autopilot: AutopilotService;
   quotaProbes: QuotaProbeService;
   modelCatalog: ModelCatalogService;
   registryFederation: RegistryFederation;
@@ -185,10 +189,15 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   // harnessRecovery is always built (the lease sweep below runs regardless of
   // whether a test injects its own orchestrator); harnessBridge/projectVerification
   // are only wired into the internal composition root.
+  // P0-2: the autopilot core. Built before the Harness so the runner's final launch check and
+  // approval rule are the service's own; it gets the scheduler below, once that exists.
+  const autopilot = new AutopilotService({ db, config, tasks, now, ...(deps.autopilotHostGate ? { hostGate: deps.autopilotHostGate } : {}) });
   const composed = buildHarnessComposition({
     db,
     config,
     tasks,
+    beforeProviderStart: (request, sessionId) => autopilot.beforeProviderStart(request, sessionId),
+    onApprovalRefused: (request, _sessionId, kind) => autopilot.approvalRefused(request.taskId, kind),
     bus,
     checkpoints,
     registry,
@@ -242,7 +251,9 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     !repoPath || config.repoAllowlist.some((allowed) => repoPath === allowed || repoPath.startsWith(`${allowed}/`));
 
   const probes = deps.quotaProbes ?? new QuotaProbeService(db, config, registry, deps.quotaProbeFn, now);
-  const scheduler = new Scheduler({ db, tasks, orchestrator, bus, config, probes, now, onError: error => app.log.error(error) });
+  const scheduler = new Scheduler({ db, tasks, orchestrator, bus, config, probes, now, autopilot, onError: error => app.log.error(error) });
+  autopilot.scheduler = scheduler;
+  orchestrator.autopilot = autopilot;
   const computeRoute = (taskId: string, userOverride?: AssistantId) => tasks.get(taskId)
     ? orchestrator.routeTask(taskId, 'intake', { override: userOverride }) : undefined;
 
@@ -441,19 +452,40 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     return { promptRates: toolGatePromptRates(db, { limit }) };
   });
 
-  // ---- Autopilot (P0-A2: the authority boundary only) ----
+  // ---- Autopilot (P0-A2: who may call; P0-2: the core) ----
   //
-  // docs/agentic-os-auto-copilot-plan.md §C.0: starting, releasing and resolving need
-  // `autopilot.operate`; stopping stays on `commands.write`, so stopping is always allowed and
-  // starting is not. The autopilot itself lands in later slices: these routes exist now so the
-  // boundary is fixed and tested (G0) before any behaviour sits behind it. An authorised call
-  // gets an honest 501 and changes nothing.
-  const autopilotPending = (_req: FastifyRequest, reply: FastifyReply) =>
-    reply.status(501).send({ error: "autopilot_not_implemented", detail: "the autopilot lands after P0-A2; this route only fixes who may call it" });
-  app.post("/api/autopilot/start", operate, autopilotPending);
-  app.post("/api/autopilot/release", operate, autopilotPending);
-  app.post("/api/autopilot/resolve", operate, autopilotPending);
-  app.post("/api/autopilot/stop", write, autopilotPending);
+  // docs/agentic-os-auto-copilot-plan.md §C.0: starting, releasing, resolving, and changing
+  // windows or the billing attestation need `autopilot.operate`; stopping stays on
+  // `commands.write`, so stopping is always allowed and starting is not. Reads are `tasks.read`.
+  // `resolve` belongs to publications (P0-5) and stays an honest 501 until they exist.
+  const operatorKid = (req: FastifyRequest): string => req.cred?.kid ?? "operator";
+  const autopilotError = (reply: FastifyReply, err: unknown) => {
+    if (err instanceof AutopilotStartRefused) return reply.status(409).send({ error: "autopilot_start_refused", setting: err.setting, detail: err.message });
+    return reply.status(400).send({ error: err instanceof Error ? err.message : String(err) });
+  };
+  app.get("/api/autopilot", read.tasks, () => ({ ...autopilot.status(), windows: autopilot.windows(), attempts: autopilot.attempts(20) }));
+  app.post("/api/autopilot/start", operate, (req, reply) => {
+    try { return autopilot.start(operatorKid(req)); } catch (err) { return autopilotError(reply, err); }
+  });
+  app.post("/api/autopilot/release", operate, (_req, reply) => {
+    try { return { released: autopilot.release(), autopilot: autopilot.status() }; } catch (err) { return reply.status(409).send({ error: err instanceof Error ? err.message : String(err) }); }
+  });
+  app.post("/api/autopilot/resolve", operate, (_req: FastifyRequest, reply: FastifyReply) =>
+    reply.status(501).send({ error: "autopilot_not_implemented", detail: "resolving a publication lands with publications (P0-5)" }));
+  app.post<{ Body: { opensAt?: unknown; closesAt?: unknown; maxItems?: unknown } }>("/api/autopilot/windows", operate, (req, reply) => {
+    try { return reply.status(201).send(autopilot.addWindow(req.body ?? {}, operatorKid(req))); } catch (err) { return autopilotError(reply, err); }
+  });
+  app.post<{ Body: { extraUsageOff?: unknown; autoReloadOff?: unknown } }>("/api/autopilot/attestations", operate, (req, reply) => {
+    try { return reply.status(201).send(autopilot.attest({ extraUsageOff: req.body?.extraUsageOff, autoReloadOff: req.body?.autoReloadOff }, operatorKid(req))); } catch (err) { return autopilotError(reply, err); }
+  });
+  app.post<{ Body: { mode?: unknown } }>("/api/autopilot/stop", write, async (req, reply) => {
+    const mode = req.body?.mode ?? "now";
+    if (mode !== "now" && mode !== "drain") return reply.status(400).send({ error: "mode must be now or drain" });
+    const stopped = autopilot.stop(mode, "operator");
+    // §C.2.9 `stop now` on a running attempt: cancel the session, which stops its scope.
+    if (stopped.cancelTaskId) await scheduler.cancel(stopped.cancelTaskId);
+    return autopilot.status();
+  });
 
   // ---- Tasks ----
 
@@ -1506,7 +1538,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     });
   }
 
-  return { app, registry, orchestrator, tasks, bus, checkpoints, cooldowns, telemetry, scheduler, quotaProbes: probes, modelCatalog, registryFederation, memoryFederation, sessionInputs, sessionInputRedelivery };
+  return { app, registry, orchestrator, tasks, bus, checkpoints, cooldowns, telemetry, scheduler, autopilot, quotaProbes: probes, modelCatalog, registryFederation, memoryFederation, sessionInputs, sessionInputRedelivery };
 }
 
 function sseHeaders(reply: FastifyReply): void {

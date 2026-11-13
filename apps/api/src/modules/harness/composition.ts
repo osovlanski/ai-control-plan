@@ -60,6 +60,9 @@ export interface HarnessCompositionDeps {
   registry: Registry;
   onError: (err: unknown) => void;
   onQuotaObserved?: () => void;
+  /** P0-2: the autopilot's final launch check and approval rule (see `RunnerDeps`). */
+  beforeProviderStart?: RunnerDeps["beforeProviderStart"];
+  onApprovalRefused?: RunnerDeps["onApprovalRefused"];
   /** Replaces `decisionProviders(config.decisions)`. Test/scratch only — production registers `decisionProviders()` (K19d: the model judge). */
   decisionProviders?: DecisionProvider[];
   /** Where an I-D8 activation refusal is said out loud. */
@@ -319,6 +322,8 @@ export function buildHarnessComposition(deps: HarnessCompositionDeps): HarnessCo
     log: deps.onInfo,
     ...(config.execution.agentUser ? { agentUser: { profilesRoot: config.execution.agentUser.profilesRoot } } : {}),
     taskRunAs: (taskId) => (tasks.get(taskId)?.run_as === "agent" ? "agent" : undefined),
+    ...(deps.beforeProviderStart ? { beforeProviderStart: deps.beforeProviderStart } : {}),
+    ...(deps.onApprovalRefused ? { onApprovalRefused: deps.onApprovalRefused } : {}),
     provisioning: {
       root: profilesRoot,
       load: (compositionRevisionId) => {

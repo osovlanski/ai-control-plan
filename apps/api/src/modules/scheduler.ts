@@ -7,6 +7,7 @@ import type { TaskStore } from './tasks.js';
 import type { Orchestrator, RecomposeOrigin } from './orchestrator.js';
 import type { QuotaProbeService } from './quota-probe.js';
 import { ScheduleService } from './schedules.js';
+import { AutopilotLaunchRefused, type AutopilotPark, type AutopilotRefusalReason } from './autopilot.js';
 import type { TaskEventBus } from './sse.js';
 
 const RECHECK_MS = 60_000;
@@ -30,6 +31,11 @@ export interface SchedulerDeps {
   db: Db; tasks: TaskStore; orchestrator: Orchestrator; bus: TaskEventBus; config: ResolvedConfig;
   /** Optional idle quota probes (K3). Absent or disabled: quota waits use run-stream evidence alone. */
   probes?: QuotaProbeService;
+  /**
+   * P0-2: the autopilot's side of a refused launch. Absent = no task is the autopilot's and a
+   * typed refusal can never be thrown. `refused` runs inside the park transaction.
+   */
+  autopilot?: { owns(taskId: string): boolean; refused(taskId: string, reason: AutopilotRefusalReason): AutopilotPark; heldReason(taskId: string): string | undefined };
   now?: () => Date;
   /** Deterministic fault injection at committed crash boundaries. */
   boundary?: (phase: 'reserved' | 'routed' | 'materialized' | 'start_attempted' | 'session_created', dispatch: Dispatch) => Promise<void>;
@@ -859,7 +865,13 @@ export class Scheduler {
     // M2 S6 (I-S1): a dispatch composes a new revision over the route it just made; a K11
     // continuation on the same assistant reuses its revision. No composer: nothing changes.
     const recomposed = await this.d.orchestrator.recompose(taskId, routed.explanation.chosen, recomposeOrigin(dispatch.origin, intent), routed.routingDecisionId, id);
-    if (recomposed?.kind === 'blocked') { this.block(dispatch, recomposed.reason, recomposed.pauseKind); return; }
+    if (recomposed?.kind === 'blocked') {
+      // §C.2.10: an autopilot run is never downgraded and never left to a generic pause. No
+      // revision (Cockpit's bundle service down, no budget) is the typed `composition_unavailable`.
+      if (this.d.autopilot?.owns(taskId)) this.autopilotPark(dispatch, 'composition_unavailable', recomposed.reason);
+      else this.block(dispatch, recomposed.reason, recomposed.pauseKind);
+      return;
+    }
     try {
       const { runId } = await this.d.orchestrator.startTask(taskId, routed.explanation.chosen, {
         continuation: dispatch.checkpoint_id ? { kind: 'checkpoint', checkpointId: dispatch.checkpoint_id } : { kind: 'fresh' }, dispatchId: id, routingDecisionRef: String(routed.routingDecisionId),
@@ -884,6 +896,13 @@ export class Scheduler {
       })();
       this.publish(taskId);
     } catch (error) {
+      // §C.2.3: a typed refusal is thrown by the early check, before `start_attempted`, so the
+      // dispatch is still `reserved` and no provider was called. It is parked by its reason, not
+      // left reserved for the sweep to retry and not counted as an automatic wake.
+      if (error instanceof AutopilotLaunchRefused && this.dispatch(id).phase === 'reserved') {
+        this.autopilotPark(dispatch, error.reason, error.detail);
+        return;
+      }
       if (this.dispatch(id).phase === 'start_attempted') {
         this.record(taskId, 'dispatch.ambiguous', dispatch.condition_generation, id, { reason: 'Start outcome unknown; recovery required' });
         this.publish(taskId);
@@ -939,6 +958,97 @@ export class Scheduler {
     // follows exactly the evidence the re-park itself acted on (no session row, or
     // an operator-confirmed non-start) — it never guesses that a provider is idle.
     this.releaseSoon(dispatch.task_id, `dispatch ${reason}`);
+  }
+
+  /**
+   * §C.2.3 typed park: a launch the autopilot refused BEFORE `start_attempted`. One transaction:
+   * the dispatch is `reparked` and its request superseded, the K4b claim is released while the
+   * task keeps its pool requirement, `autoWakes` is untouched, and exactly one wait (or a hold,
+   * or the end of the task) is written, chosen by the reason. The attempt moves in the same
+   * transaction (`autopilot.refused`).
+   */
+  private autopilotPark(dispatch: Dispatch, reason: AutopilotRefusalReason, detail: string): void {
+    const taskId = dispatch.task_id;
+    const released = this.d.db.transaction((): string | undefined => {
+      if (this.dispatch(dispatch.dispatch_id).phase !== 'reserved' || this.d.tasks.get(taskId)?.state !== 'ROUTING') return undefined;
+      const handoff = this.d.db.prepare("SELECT id, state FROM handoff_envelopes WHERE claimed_by_request_id = ?").get(dispatch.dispatch_id) as { id: string; state: string } | undefined;
+      if (handoff?.state === 'claimed') new HandoffService(this.d.db).release(handoff.id, dispatch.dispatch_id);
+      this.d.db.prepare('UPDATE execution_requests SET superseded = 1 WHERE id = ?').run(dispatch.dispatch_id);
+      this.phase(dispatch.dispatch_id, 'reparked', `autopilot: ${reason}`);
+      const resource = this.autopilotApply(taskId, reason, detail, 'ROUTING');
+      this.record(taskId, 'dispatch.reparked', dispatch.condition_generation, dispatch.dispatch_id, { reason: `autopilot: ${reason}`, detail, autoWakes: this.condition(taskId)?.autoWakes ?? 0 });
+      return resource;
+    })();
+    this.publish(taskId);
+    if (released) this.notifyResource(released);
+    this.arm();
+  }
+
+  /**
+   * The same park for a launch refused at the FINAL check (the runner, after provisioning, with
+   * no provider process created). The refused session has settled, the dispatch is `started` and
+   * the task is `RUNNING`; the wait and the attempt follow the same table.
+   */
+  autopilotParkSettled(taskId: string, reason: AutopilotRefusalReason, detail: string): void {
+    const released = this.d.db.transaction((): string | undefined => {
+      if (this.d.tasks.get(taskId)?.state !== 'RUNNING') return undefined;
+      return this.autopilotApply(taskId, reason, detail, 'RUNNING');
+    })();
+    this.publish(taskId);
+    if (released) this.notifyResource(released);
+    this.arm();
+  }
+
+  /** Inside a transaction: the attempt's move, the one wait, the task transition and the claim release. Returns the pool released. */
+  private autopilotApply(taskId: string, reason: AutopilotRefusalReason, detail: string, from: 'ROUTING' | 'RUNNING'): string | undefined {
+    const old = this.condition(taskId);
+    // A wait must be anchored to the settled predecessor's checkpoint (`TaskStore.transition`).
+    const park = this.d.autopilot!.refused(taskId, reason);
+    const history = [...(old?.history ?? []), { at: this.iso(), actor: 'autopilot', outcome: 'parked', reason }].slice(-10);
+    if (park.kind === 'time') {
+      // The same requirement, still owed: it keeps its seniority and re-acquires its own claim.
+      const next: WaitInput = old?.resource
+        ? { kind: 'resource', notBefore: park.notBefore, reason: `autopilot: ${reason}`, resource: old.resource, units: old.units ?? 1 }
+        : { kind: 'time', notBefore: park.notBefore, reason: `autopilot: ${reason}` };
+      this.insert(taskId, next, 'autopilot', old?.autoWakes ?? 0, history, this.anchor(taskId) ?? old?.checkpointId, [], old?.origin,
+        { resource: old?.resource, units: old?.units, continuation: from === 'ROUTING' ? old?.continuation : undefined });
+      this.d.tasks.transition(taskId, 'WAITING_RESOURCE');
+    } else if (park.kind === 'hold') {
+      this.d.tasks.transition(taskId, 'WAITING_INPUT', 'intervention_required');
+    } else {
+      this.d.tasks.transition(taskId, park.kind === 'cancel' ? 'CANCELLED' : 'FAILED');
+    }
+    this.record(taskId, 'autopilot.parked', old?.generation, undefined, { reason, detail, park: park.kind, ...(park.kind === 'time' ? { notBefore: park.notBefore } : {}) });
+    const held = this.claim(taskId);
+    if (!held) return undefined;
+    // The dispatch that owned the claim will not run a provider: the slot goes back in THIS
+    // transaction, so no sweep can observe a refused launch still holding capacity.
+    this.d.db.prepare('UPDATE resource_claims SET released_at = ?, release_reason = ? WHERE claim_id = ? AND released_at IS NULL')
+      .run(this.iso(), `autopilot: ${reason}`, held.claim_id);
+    this.record(taskId, 'resource.released', undefined, held.dispatch_id, { resource: held.resource, units: held.units, reason: `autopilot: ${reason}` });
+    return held.resource;
+  }
+
+  /**
+   * `autopilot.operate` release of a typed hold: the task re-enters its pool queue with the
+   * requirement and seniority it had. Nothing starts here; the grant and both launch checks decide.
+   */
+  autopilotRelease(taskId: string): WaitCondition {
+    this.d.db.transaction(() => {
+      const reason = this.d.autopilot?.heldReason(taskId);
+      if (!reason) throw new Error(`Task ${taskId} is not held by the autopilot`);
+      if (this.hasOwner(taskId)) throw new Error('Existing execution prevents a release');
+      const old = this.condition(taskId);
+      if (!old?.resource) throw new Error(`Task ${taskId} carries no pool requirement`);
+      this.d.db.prepare("UPDATE wait_conditions SET state = 'replaced' WHERE task_id = ? AND state = 'active'").run(taskId);
+      const history = [...old.history, { at: this.iso(), actor: 'operator', outcome: 'released', reason }].slice(-10);
+      this.insert(taskId, { kind: 'resource', notBefore: this.iso(), reason: `autopilot release after ${reason}`, resource: old.resource, units: old.units ?? 1 },
+        'operator', old.autoWakes, history, this.anchor(taskId) ?? old.checkpointId, [], old.origin, { resource: old.resource, units: old.units, continuation: old.continuation });
+      this.d.tasks.transition(taskId, 'WAITING_RESOURCE', undefined, 'resource-continuation');
+      this.record(taskId, 'wait.attached', this.condition(taskId)!.generation, undefined, { autopilot: 'release', after: reason });
+    })();
+    this.publish(taskId); this.arm();
+    return this.condition(taskId)!;
   }
 
   /**
