@@ -18,6 +18,8 @@ files, its API, Cockpit, or the network beyond HTTPS.
 | `rollback.sh` | `/usr/local/lib/aos/rollback.sh` | reverts sudoers + nft only |
 | `teardown.sh` | not installed | full removal, by hand only; deletes `aos-agent`'s Claude login |
 | `sudoers.d/aos-operator` | **not installed** | proposal that narrows the plane user's own sudo; see below |
+| `aos-close` | `/usr/local/lib/aos/aos-close` (root, 0755) | P0-3: at an autopilot window's close, stops every `aos-run-*.scope` and checks the slice is empty |
+| `aos-close.service`, `aos-close.timer` | `/etc/systemd/user/` (root, 0644), enabled `--global`, `ConditionUser=aos-agent` | P0-3: runs `aos-close` every minute in `aos-agent`'s own user manager; works with the plane dead |
 
 Layout it creates: `/var/lib/aos/profiles` (`ubuntu:aos`, 2750: the agent reads, cannot write) and
 `/var/lib/aos/worktrees` (`ubuntu:aos`, 2770: the agent writes). The plane user is added to group
@@ -61,6 +63,32 @@ execution:
 
 A new Claude CLI version is a root-side copy: remove `/usr/local/lib/aos/claude` and re-run
 `aos-setup --no-net`.
+
+## The host gate and the close timer (P0-3)
+
+Design: plan §C.2.5 and §C.2.6. Host drive: `docs/autopilot/p0-3-host-drive.md`.
+
+- **Host gate** (observation, `apps/api/src/modules/host-admission.ts`): every autopilot launch
+  check reads load per CPU, `MemAvailable`, free disk, and the cgroup tree of
+  `user.slice/user-1002.slice`. Anything populated there other than the user manager's own
+  `init.scope` (`systemd`, `(sd-pam)`) refuses the launch `host_busy`; so does anything
+  unreadable. It is **fail-closed**: without `scheduler.admission.<pool>` every autopilot launch
+  is refused. Floors (defaults shown):
+
+  ```yaml
+  scheduler:
+    resources: { oci-heavy: 1 }
+    admission:
+      oci-heavy: { maxLoadPerCpu: 1.5, minFreeMemMb: 1024, minFreeDiskMb: 5120 }  # diskPath: the agent worktrees root
+  ```
+
+- **Close schedule**: at boot and at every launch check the plane rewrites
+  `/var/lib/aos/schedule/windows` (dir `ubuntu:aos` 2750, file 0640) from its windows table. If
+  it cannot, the check refuses: nothing runs whose close the timer does not know.
+- **Close timer**: `aos-close.timer` fires every minute in `aos-agent`'s user manager. Within 15
+  minutes after a listed close it runs `systemctl --user stop 'aos-run-*.scope'` and fails the
+  unit (`systemctl --user -M aos-agent@ status aos-close.service`) if the slice is not empty
+  after 10 s. It also stops a manual agent task still running at that moment.
 
 ## The operator secret (itay only)
 

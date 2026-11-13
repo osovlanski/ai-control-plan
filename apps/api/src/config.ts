@@ -75,6 +75,11 @@ export interface WorkspaceConfig {
      * which is a larger slice than K4b.
      */
     resources?: Record<string, number>;
+    /**
+     * P0-3 (auto-copilot plan §C.2.6): the host gate's floors, per pool, under their own key so
+     * the numeric `resources` format stays as it is. Observation only; see `host-admission.ts`.
+     */
+    admission?: Record<string, AdmissionConfig>;
   };
   sync: {
     /** Local hour (0-23) for the daily capability sync. */
@@ -319,6 +324,47 @@ export interface AgentUserConfig {
   profilesRoot: string;
   /** Plane-owned, setgid, agent-writable (2770). */
   worktreesRoot: string;
+  /** P0-3: the close timer's schedule, written by the plane in a plane-owned 2750 directory. */
+  closeSchedule: string;
+}
+
+/** P0-3: one pool's host-gate floors (§C.2.6). */
+export interface AdmissionConfig {
+  /** 1-minute load average divided by the CPU count. */
+  maxLoadPerCpu: number;
+  /** `MemAvailable`, in MB. */
+  minFreeMemMb: number;
+  /** Free space for an unprivileged user on `diskPath`'s filesystem, in MB. */
+  minFreeDiskMb: number;
+  /** Defaults to the agent worktrees root, or the workspace directory without an agent user. */
+  diskPath: string;
+}
+export const ADMISSION_DEFAULTS: Omit<AdmissionConfig, "diskPath"> = { maxLoadPerCpu: 1.5, minFreeMemMb: 1024, minFreeDiskMb: 5120 };
+
+function resolveAdmission(raw: unknown, resources: Record<string, number>, defaultDisk: string, configPath: string): Record<string, AdmissionConfig> | undefined {
+  if (raw === undefined) return undefined;
+  if (!isRecord(raw)) throw new Error(`${configPath}: scheduler.admission must be a mapping of pool name to floors`);
+  const out = Object.create(null) as Record<string, AdmissionConfig>;
+  for (const pool of Object.getOwnPropertyNames(raw)) {
+    const entry = raw[pool];
+    if (!Object.prototype.hasOwnProperty.call(resources, pool)) throw new Error(`${configPath}: scheduler.admission.${pool} names a pool not declared in scheduler.resources`);
+    if (entry !== null && entry !== undefined && !isRecord(entry)) throw new Error(`${configPath}: scheduler.admission.${pool} must be a mapping`);
+    const e = (entry ?? {}) as Record<string, unknown>;
+    const unknown = Object.keys(e).filter((k) => !["maxLoadPerCpu", "minFreeMemMb", "minFreeDiskMb", "diskPath"].includes(k));
+    if (unknown.length > 0) throw new Error(`${configPath}: scheduler.admission.${pool} has unknown key(s): ${unknown.join(", ")}`);
+    const a: AdmissionConfig = { ...ADMISSION_DEFAULTS, diskPath: defaultDisk };
+    for (const key of ["maxLoadPerCpu", "minFreeMemMb", "minFreeDiskMb"] as const) {
+      if (e[key] === undefined) continue;
+      if (typeof e[key] !== "number" || !Number.isFinite(e[key]) || (e[key] as number) <= 0) throw new Error(`${configPath}: scheduler.admission.${pool}.${key} must be a positive number`);
+      a[key] = e[key] as number;
+    }
+    if (e.diskPath !== undefined) {
+      if (typeof e.diskPath !== "string" || !isAbsolute(e.diskPath) || resolve(e.diskPath) !== e.diskPath) throw new Error(`${configPath}: scheduler.admission.${pool}.diskPath must be an absolute, normalized path`);
+      a.diskPath = e.diskPath;
+    }
+    out[pool] = a;
+  }
+  return out;
 }
 
 export const AGENT_USER_DEFAULTS: AgentUserConfig = {
@@ -329,6 +375,7 @@ export const AGENT_USER_DEFAULTS: AgentUserConfig = {
   executable: "/usr/local/lib/aos/claude",
   profilesRoot: "/var/lib/aos/profiles",
   worktreesRoot: "/var/lib/aos/worktrees",
+  closeSchedule: "/var/lib/aos/schedule/windows",
 };
 
 /** The adapter-facing half of the block: how to reach the wrapper. */
@@ -528,6 +575,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ResolvedConfig
   const registry = resolveRegistry(file.registry, configPath);
   const composer = resolveComposer(file.composer, configPath);
   const autopilot = resolveAutopilot(file.autopilot, configPath);
+  const resources = pools(file.scheduler?.resources);
+  const admission = resolveAdmission(file.scheduler?.admission, resources, execution.agentUser?.worktreesRoot ?? dir, configPath);
 
   const config: WorkspaceConfig = {
     workspace: file.workspace ?? workspace,
@@ -537,7 +586,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ResolvedConfig
     policy: { ...defaults.policy, ...file.policy },
     failover: { ...defaults.failover, ...file.failover },
     sync: { ...defaults.sync, ...file.sync },
-    scheduler: { enabled: file.scheduler?.enabled ?? true, maxAutoWakes: file.scheduler?.maxAutoWakes ?? 3, quotaProbe: file.scheduler?.quotaProbe ?? false, resources: pools(file.scheduler?.resources) },
+    scheduler: { enabled: file.scheduler?.enabled ?? true, maxAutoWakes: file.scheduler?.maxAutoWakes ?? 3, quotaProbe: file.scheduler?.quotaProbe ?? false, resources, ...(admission ? { admission } : {}) },
     execution,
   };
 
@@ -659,7 +708,7 @@ function resolveExecution(
         throw new Error(`${configPath}: execution.agentUser.${key} must be a Unix account name`);
       }
     }
-    for (const key of ["sudo", "wrapper", "executable", "profilesRoot", "worktreesRoot"] as const) {
+    for (const key of ["sudo", "wrapper", "executable", "profilesRoot", "worktreesRoot", "closeSchedule"] as const) {
       const value = agentUser[key];
       if (typeof value !== "string" || !isAbsolute(value) || resolve(value) !== value) {
         throw new Error(`${configPath}: execution.agentUser.${key} must be an absolute, normalized path`);
