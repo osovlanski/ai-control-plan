@@ -37,6 +37,7 @@ import { TaskStageReader } from "./modules/task-stage.js";
 import { Scheduler } from "./modules/scheduler.js";
 import { AutopilotService, AutopilotStartRefused, type AutopilotDeps } from "./modules/autopilot.js";
 import { PublicationRefused, PublicationService, type PublicationGit, type PublicationGitHub } from "./modules/publications.js";
+import { hostGateFromConfig, syncCloseSchedule } from "./modules/host-admission.js";
 import { QuotaProbeService, type QuotaProbeFn } from "./modules/quota-probe.js";
 import { ModelCatalogService, CATALOG_REVISION, type CatalogSource } from "./modules/model-catalog.js";
 import { RegistryFederation } from "./modules/registry-federation.js";
@@ -198,13 +199,21 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   // are only wired into the internal composition root.
   // P0-2: the autopilot core. Built before the Harness so the runner's final launch check and
   // approval rule are the service's own; it gets the scheduler below, once that exists.
-  const autopilot = new AutopilotService({ db, config, tasks, now, ...(deps.autopilotHostGate ? { hostGate: deps.autopilotHostGate } : {}) });
+  // P0-3: the real host gate (§C.2.6) unless a test injects one. It is fail-closed: without
+  // `scheduler.admission.<pool>` every autopilot launch is refused `host_busy`.
+  const autopilot: AutopilotService = new AutopilotService({ db, config, tasks, now, hostGate: deps.autopilotHostGate ?? hostGateFromConfig(config, { windows: () => autopilot.windows(), openWindow: () => autopilot.openWindow(), now }) });
   const publications = new PublicationService({
     db, autopilot, now,
     ...(deps.autopilotGitHub ? { github: deps.autopilotGitHub } : {}),
     ...(deps.autopilotGit ? { git: deps.autopilotGit } : {}),
     ...(deps.publicationSleep ? { sleep: deps.publicationSleep } : {}),
   });
+  // P0-3: the close timer's schedule, from the windows this database holds (the gate rewrites it at every launch check).
+  const syncSchedule = () => {
+    try { const why = syncCloseSchedule(config, autopilot.windows(), now()); if (why && config.execution.agentUser) app.log.warn(`close schedule not written: ${why}`); }
+    catch (err) { app.log.error({ err }, "close schedule not written"); }
+  };
+  syncSchedule();
   const composed = buildHarnessComposition({
     db,
     config,

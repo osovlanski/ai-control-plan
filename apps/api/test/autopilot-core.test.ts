@@ -51,7 +51,8 @@ async function boot(setup: Setup = {}): Promise<Rig> {
       if (setup.approvalMode) config.policy.approvalMode = setup.approvalMode;
       Object.assign(config.autopilot, setup.autopilot ?? {});
     },
-    ...(setup.hostGate ? { autopilotHostGate: setup.hostGate } : {}),
+    // The real gate (P0-3) observes this host and is fail-closed without `scheduler.admission`; these tests drive the core, so it is open unless a test closes it.
+    autopilotHostGate: setup.hostGate ?? (() => ({ ok: true })),
   });
   return rig;
 }

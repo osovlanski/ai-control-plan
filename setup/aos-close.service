@@ -1,0 +1,8 @@
+[Unit]
+Description=aos: stop agent scopes when an autopilot window closes (P0-3)
+# Installed in /etc/systemd/user, so every user manager sees it; it runs for aos-agent only.
+ConditionUser=aos-agent
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/aos/aos-close

@@ -26,6 +26,7 @@ id -nG "$PLANE_USER" | tr ' ' '\n' | grep -qx aos || { usermod -aG aos "$PLANE_U
 install -d -o "$PLANE_USER" -g aos -m 0750 /var/lib/aos
 install -d -o "$PLANE_USER" -g aos -m 2750 /var/lib/aos/profiles   # agent reads, cannot write
 install -d -o "$PLANE_USER" -g aos -m 2770 /var/lib/aos/worktrees  # agent writes
+install -d -o "$PLANE_USER" -g aos -m 2750 /var/lib/aos/schedule   # P0-3: plane writes the close schedule, agent reads
 install -d -o root -g root -m 0755 "$L"
 inst run-as-agent 0755 "$L/run-as-agent"
 inst aos-setup 0755 "$L/aos-setup"
@@ -34,6 +35,9 @@ inst rollback.sh 0755 "$L/rollback.sh"
 inst sudoers.d/aos 0644 "$L/aos-sudoers"
 inst aos-agent-net.nft 0644 "$L/aos-agent-net.nft"
 inst aos-agent-net.service 0644 "$L/aos-agent-net.service"
+inst aos-close 0755 "$L/aos-close"
+inst aos-close.service 0644 "$L/aos-close.service"
+inst aos-close.timer 0644 "$L/aos-close.timer"
 # The agent runs git inside worktrees the plane user owns, so it trusts that tree. This goes in
 # aos-agent's OWN config, never the system's: the plane user must keep refusing a .git that
 # aos-agent owns (git's ownership check is what stops a planted .git directory, with hooks,
@@ -49,6 +53,14 @@ if [ ! -x "$L/claude" ]; then
   chown root:root "$tmp"; chmod 0755 "$tmp"; mv -f "$tmp" "$L/claude-$v"
   ln -sfn "claude-$v" "$L/claude"; say "claude $v copied"
 fi
+# P0-3: the close timer (§C.2.5) in aos-agent's own user manager. Root-owned unit files in
+# /etc/systemd/user, enabled globally; ConditionUser keeps every other user's manager out of it.
+for u in aos-close.service aos-close.timer; do
+  cmp -s "$L/$u" "/etc/systemd/user/$u" || install -o root -g root -m 0644 "$L/$u" "/etc/systemd/user/$u"
+done
+systemctl --global enable --quiet aos-close.timer
+agentctl(){ systemctl --user -M aos-agent@ "$@"; }
+agentctl daemon-reload && agentctl start aos-close.timer || say "WARN: could not start aos-close.timer in aos-agent's manager (is linger on? try again after: loginctl enable-linger aos-agent)"
 [ "${1:-}" = --no-net ] && { say "done (sudoers + nft skipped)"; exit 0; }
 visudo -cf "$L/aos-sudoers" >/dev/null
 install -o root -g root -m 0440 "$L/aos-sudoers" /etc/sudoers.d/aos

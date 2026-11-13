@@ -1,0 +1,13 @@
+[Unit]
+Description=aos: check every minute whether an autopilot window has closed (P0-3)
+ConditionUser=aos-agent
+
+[Timer]
+# Every minute on the minute; the script decides from the plane's schedule whether a close is due.
+# A per-window OnCalendar would need the plane to edit units; a fixed timer that reads a file
+# keeps working with the plane dead and needs no unit change when a window is added.
+OnCalendar=*-*-* *:*:00
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target
