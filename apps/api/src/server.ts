@@ -36,6 +36,7 @@ import { TaskEventBus } from "./modules/sse.js";
 import { TaskStageReader } from "./modules/task-stage.js";
 import { Scheduler } from "./modules/scheduler.js";
 import { AutopilotService, AutopilotStartRefused, type AutopilotDeps } from "./modules/autopilot.js";
+import { PublicationRefused, PublicationService, type PublicationGit, type PublicationGitHub } from "./modules/publications.js";
 import { hostGateFromConfig, syncCloseSchedule } from "./modules/host-admission.js";
 import { QuotaProbeService, type QuotaProbeFn } from "./modules/quota-probe.js";
 import { ModelCatalogService, CATALOG_REVISION, type CatalogSource } from "./modules/model-catalog.js";
@@ -82,6 +83,11 @@ export interface ServerDeps {
   now?: () => Date;
   /** P0-2: the autopilot's host gate (§C.2.6). P0-3 supplies the real probes; tests inject one. */
   autopilotHostGate?: AutopilotDeps["hostGate"];
+  /** P0-5: GitHub and git for publications (§C.2.4). Without GitHub, nothing is published or swept. */
+  autopilotGitHub?: PublicationGitHub;
+  autopilotGit?: PublicationGit;
+  /** P0-5: injectable backoff sleep for publication reads (tests). */
+  publicationSleep?: (ms: number) => Promise<void>;
   quotaProbes?: QuotaProbeService;
   /** Overrides the idle quota probe transport (K3) when `quotaProbes` is not supplied. Test/demo only. */
   quotaProbeFn?: QuotaProbeFn;
@@ -122,6 +128,7 @@ export interface BuiltServer {
   telemetry: TelemetryService;
   scheduler: Scheduler;
   autopilot: AutopilotService;
+  publications: PublicationService;
   quotaProbes: QuotaProbeService;
   modelCatalog: ModelCatalogService;
   registryFederation: RegistryFederation;
@@ -195,6 +202,12 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   // P0-3: the real host gate (§C.2.6) unless a test injects one. It is fail-closed: without
   // `scheduler.admission.<pool>` every autopilot launch is refused `host_busy`.
   const autopilot: AutopilotService = new AutopilotService({ db, config, tasks, now, hostGate: deps.autopilotHostGate ?? hostGateFromConfig(config, { windows: () => autopilot.windows(), openWindow: () => autopilot.openWindow(), now }) });
+  const publications = new PublicationService({
+    db, autopilot, now,
+    ...(deps.autopilotGitHub ? { github: deps.autopilotGitHub } : {}),
+    ...(deps.autopilotGit ? { git: deps.autopilotGit } : {}),
+    ...(deps.publicationSleep ? { sleep: deps.publicationSleep } : {}),
+  });
   // P0-3: the close timer's schedule, from the windows this database holds (the gate rewrites it at every launch check).
   const syncSchedule = () => {
     try { const why = syncCloseSchedule(config, autopilot.windows(), now()); if (why && config.execution.agentUser) app.log.warn(`close schedule not written: ${why}`); }
@@ -466,7 +479,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   // docs/agentic-os-auto-copilot-plan.md §C.0: starting, releasing, resolving, and changing
   // windows or the billing attestation need `autopilot.operate`; stopping stays on
   // `commands.write`, so stopping is always allowed and starting is not. Reads are `tasks.read`.
-  // `resolve` belongs to publications (P0-5) and stays an honest 501 until they exist.
+  // P0-5: `resolve` is per publication, `/api/autopilot/publications/:id/resolve` (§C.2.4).
   const operatorKid = (req: FastifyRequest): string => req.cred?.kid ?? "operator";
   const autopilotError = (reply: FastifyReply, err: unknown) => {
     if (err instanceof AutopilotStartRefused) return reply.status(409).send({ error: "autopilot_start_refused", setting: err.setting, detail: err.message });
@@ -479,8 +492,13 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   app.post("/api/autopilot/release", operate, (_req, reply) => {
     try { return { released: autopilot.release(), autopilot: autopilot.status() }; } catch (err) { return reply.status(409).send({ error: err instanceof Error ? err.message : String(err) }); }
   });
-  app.post("/api/autopilot/resolve", operate, (_req: FastifyRequest, reply: FastifyReply) =>
-    reply.status(501).send({ error: "autopilot_not_implemented", detail: "resolving a publication lands with publications (P0-5)" }));
+  app.get("/api/autopilot/publications", read.tasks, () => ({ publications: publications.list(50) }));
+  app.post<{ Params: { id: string }; Body: { action?: unknown } }>("/api/autopilot/publications/:id/resolve", operate, async (req, reply) => {
+    try { return await publications.resolve(req.params.id, req.body?.action, operatorKid(req)); } catch (err) {
+      if (err instanceof PublicationRefused) return reply.status(409).send({ error: err.message });
+      throw err;
+    }
+  });
   app.post<{ Body: { opensAt?: unknown; closesAt?: unknown; maxItems?: unknown } }>("/api/autopilot/windows", operate, (req, reply) => {
     try { return reply.status(201).send(autopilot.addWindow(req.body ?? {}, operatorKid(req))); } catch (err) { return autopilotError(reply, err); }
   });
@@ -1321,7 +1339,13 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     void harnessRecovery.sweepExpiredLeases().catch((err) => app.log.error(err, "lease sweep failed"));
   }, 60_000);
   leaseSweep.unref();
-  app.addHook("onClose", async () => { clearInterval(leaseSweep); scheduler.stop(); });
+  // P0-5: publications reconcile on the same cadence (uncertain creates, interrupted publishes,
+  // late duplicates). A no-op while no GitHub client is configured.
+  const publicationSweep = setInterval(() => {
+    void publications.sweep().catch((err) => app.log.error(err, "publication sweep failed"));
+  }, 60_000);
+  publicationSweep.unref();
+  app.addHook("onClose", async () => { clearInterval(leaseSweep); clearInterval(publicationSweep); scheduler.stop(); });
   // ---- Durable session-addressed conversational input (default OFF) ----
   //
   // The whole capability is behind `sessionInput.enabled`. While it is false
@@ -1547,7 +1571,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     });
   }
 
-  return { app, registry, orchestrator, tasks, bus, checkpoints, cooldowns, telemetry, scheduler, autopilot, quotaProbes: probes, modelCatalog, registryFederation, memoryFederation, sessionInputs, sessionInputRedelivery };
+  return { app, registry, orchestrator, tasks, bus, checkpoints, cooldowns, telemetry, scheduler, autopilot, publications, quotaProbes: probes, modelCatalog, registryFederation, memoryFederation, sessionInputs, sessionInputRedelivery };
 }
 
 function sseHeaders(reply: FastifyReply): void {
