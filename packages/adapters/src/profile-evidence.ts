@@ -9,6 +9,8 @@ export interface ClaudeInitInventory {
   mcpServers: ReadonlyArray<{ name: string; status: string }>;
 }
 
+/** What Claude Code reports as `path` for a plugin compiled into the CLI. */
+const BUILTIN_PLUGIN_PATH = "builtin";
 const PROFILE_SKILL = /^plugin\/skills\/([^/]+)\/SKILL\.md$/;
 /** Statuses that mean the server is not serving the run. `pending` is still connecting at init. */
 const MCP_DOWN = new Set(["failed", "needs-auth", "disabled"]);
@@ -35,7 +37,9 @@ export function claudeInitEvidence(profile: VerifiedProfile, init: ClaudeInitInv
 
   const ours = (p: { name: string; path: string }) =>
     launch.pluginDir !== undefined && p.name === PLUGIN_NAME && resolve(p.path) === resolve(launch.pluginDir);
-  const foreignPlugins = init.plugins.filter((p) => !ours(p)).map((p) => p.name).sort();
+  // `cc-plugin-*` built-ins ship inside the CLI binary (init reports `path: "builtin"`), cannot be
+  // switched off at launch and cannot be changed by a repository or an agent: not foreign.
+  const foreignPlugins = init.plugins.filter((p) => !ours(p) && p.path !== BUILTIN_PLUGIN_PATH).map((p) => p.name).sort();
   const pluginMissing = launch.pluginDir !== undefined && !init.plugins.some(ours);
   checks.push({
     name: "runtime_plugins",

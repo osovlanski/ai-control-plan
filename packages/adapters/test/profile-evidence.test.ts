@@ -104,6 +104,16 @@ describe("claudeInitEvidence", () => {
     ]);
   });
 
+  it("plugins built into the CLI (init path \"builtin\", as Claude Code 2.1.322 reports them) are not foreign", async () => {
+    const profile = await profileFor("claude-code");
+    const builtins = ["agents-md", "telemetry", "privacy", "plugin-authoring"].map((n) => ({ name: `cc-plugin-${n}`, path: "builtin" }));
+    const e = claudeInitEvidence(profile, { ...faithful(profile), plugins: [...builtins, ...faithful(profile).plugins] });
+    expect(failing(e)).toEqual([]);
+    // a plugin that merely claims the name from a directory is still foreign
+    const spoof = claudeInitEvidence(profile, { ...faithful(profile), plugins: [...faithful(profile).plugins, { name: "cc-plugin-privacy", path: "/home/u/p" }] });
+    expect(failing(spoof)).toEqual(["runtime_plugins: plugins outside the profile loaded: cc-plugin-privacy"]);
+  });
+
   it("the profile plugin loaded from another directory is not the profile's", async () => {
     const profile = await profileFor("claude-code");
     const e = claudeInitEvidence(profile, { ...faithful(profile), plugins: [{ name: "agent-plane-profile", path: "/elsewhere/plugin" }] });
