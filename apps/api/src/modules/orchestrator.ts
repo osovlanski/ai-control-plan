@@ -58,6 +58,7 @@ import { renderTaskPrompt } from "../render/prompt.js";
 import { ensureScratch, removeScratch, sweepScratch } from "../repo/scratch.js";
 import type { CheckpointReason, CheckpointService } from "./checkpoint.js";
 import type { HarnessBridge } from "./harness/control-plane-bridge.js";
+import type { AutopilotRefusalReason, AutopilotService } from "./autopilot.js";
 import { deriveEnvelopeUpdate } from "./harness/envelope-derivation.js";
 import { quotaOf, snapshotQuota } from "./harness/quota-snapshot.js";
 import { effectiveStateSql, effectiveUsageJoin, effectiveUsageSql } from "./harness/state-vocab.js";
@@ -225,6 +226,8 @@ export class Orchestrator {
    */
   private active = new Map<string, ActiveRun>();
   scheduler?: Scheduler;
+  /** P0-2: set by the composition root. Absent = no task is the autopilot's. */
+  autopilot?: AutopilotService;
   /** M2 S6: recomposition at dispatch and failover, and budget settlement. Absent with the composer off. */
   dispatchComposer?: DispatchComposer;
   /** M6 S1: projects a settled revision-bound session into `asset_usage`. Never throws. */
@@ -572,6 +575,8 @@ export class Orchestrator {
     // M6: a session settled before a crash (or before M6) with no projection yet.
     this.assetTelemetry?.backfill();
     this.memoryProposals?.backfill();
+    // P0-2: runtime rows and `running` attempts left by a crash, now that every session is settled.
+    this.autopilot?.reconcileOnBoot();
     return reconciled;
   }
 
@@ -608,6 +613,17 @@ export class Orchestrator {
     // transaction is the only grant — so anything arriving here unclaimed is a
     // defect that fails here instead of running outside the pool's capacity.
     this.scheduler?.assertLaunchClaim(taskId, options.dispatchId);
+    // P0-2 (§C.2.3): the EARLY autopilot launch check, so a doomed start does no work. It throws
+    // the typed `AutopilotLaunchRefused`, which the scheduler parks by its reason. The same check
+    // runs again, last, in the session runner (`beforeProviderStart`). Undefined for every task
+    // that is not the autopilot's.
+    const savedRequest = options.dispatchId
+      ? (this.db.prepare('SELECT request_json FROM execution_requests WHERE id = ? AND superseded = 0').get(options.dispatchId) as { request_json: string | null } | undefined)?.request_json
+      : undefined;
+    const autopilotLaunch = this.autopilot?.launchCheck(taskId, options.dispatchId, "early", {
+      composed: savedRequest ? !!(JSON.parse(savedRequest) as ExecutionRequest).compositionRevisionId : options.composition !== undefined,
+    });
+    if (this.autopilot?.owns(taskId) && options.parallel) throw new Error(`Task ${taskId} is an autopilot task and never runs in parallel`);
     // P0-A2: only the Harness path can launch as the agent user. Any other route would run the
     // provider as the plane user, so it is refused here, before a worktree or a run exists.
     const runAs = this.tasks.get(taskId)?.run_as === "agent" ? "agent" as const : undefined;
@@ -699,7 +715,10 @@ export class Orchestrator {
       const launchModel = this.requestedModel(taskId, assistantId, options.routingDecisionRef, composed?.compositionRevisionId);
       const request = buildExecutionRequest({ taskId, dispatchId: options.dispatchId, assistantId, attempt, prompt, workdir, model: launchModel?.id,
         worktree: envelope.repository ? { repoPath: envelope.repository.path, branch: taskRow.branch ?? envelope.repository.branch, worktreePath: workdir, baseRef: taskRow.base_ref ?? 'HEAD' } : undefined,
-        scratchPath, target: executionTarget, approvalMode: policy?.approvalMode ?? this.config.policy.approvalMode, maxRuntimeMs: policy?.maxRuntimeMs ?? this.maxRuntimeMs,
+        scratchPath, target: executionTarget, approvalMode: policy?.approvalMode ?? this.config.policy.approvalMode,
+        // P0-2: an autopilot request is never materialised with more runtime than its attempt and
+        // window had left at the early check. The final check recomputes the deadline it runs under.
+        maxRuntimeMs: Math.min(policy?.maxRuntimeMs ?? this.maxRuntimeMs, autopilotLaunch?.remainingMs ?? Number.POSITIVE_INFINITY),
         routingDecisionRef: options.routingDecisionRef!, verificationPlan: project?.plan, ...(runAs ? { runAs } : {}),
         ...(composed && policy ? { compositionRevisionId: composed.compositionRevisionId, budget: policy.budget } : {}) });
       this.db.transaction(() => {
@@ -1287,6 +1306,21 @@ export class Orchestrator {
     sessionId: string,
     result: ExecutionResult | null,
   ): Promise<void> {
+    try {
+      await this.settleSession(taskId, assistantId, sessionId, result);
+    } finally {
+      // P0-2 (§C.2.1): whatever settled the task, the session's runtime row is written and a
+      // `running` attempt follows its task. A no-op for every task that is not the autopilot's.
+      try { this.autopilot?.afterSettle(taskId); } catch (err) { this.notice(taskId, "warn", `autopilot settlement failed: ${message(err)}`); }
+    }
+  }
+
+  private async settleSession(
+    taskId: string,
+    assistantId: string,
+    sessionId: string,
+    result: ExecutionResult | null,
+  ): Promise<void> {
     // M2 S6: whatever settles the task, the run's usage is settled against its revision's caps.
     if (result) this.sessionSettled(sessionId);
     if (this.harnessBridge!.consumePlaneOwnsTerminal(sessionId)) return; // cancel / manual handoff owns it
@@ -1308,6 +1342,15 @@ export class Orchestrator {
     if (result === null) {
       tx("WAITING_INPUT", `execution harness error on session ${sessionId} — recovery required`, "harness_error");
       return;
+    }
+
+    if (this.autopilot && this.scheduler) {
+      // P0-2 (§C.2.3): the runner refused this session at the final check. No provider process
+      // existed; the task parks by the refusal's reason exactly as an early refusal does.
+      const refusal = this.autopilot.takeFinalRefusal(sessionId);
+      if (refusal) { this.autopilotPark(taskId, refusal, "refused at the final launch check"); return; }
+      // §C.2.5: the window closed on a running session. The attempt is suspended, not failed.
+      if (this.autopilot.cutByWindow(taskId, sessionId, result)) { this.autopilotPark(taskId, "window_closed", "session cut at the window deadline"); return; }
     }
 
     const detailReason = (result.yield?.detail as { reason?: string } | undefined)?.reason;
@@ -1373,6 +1416,17 @@ export class Orchestrator {
         return;
       }
     }
+  }
+
+  /** A settled session's typed park. If the wait cannot be written, the task holds for an operator rather than staying RUNNING with nothing behind it. */
+  private autopilotPark(taskId: string, reason: AutopilotRefusalReason, detail: string): void {
+    try {
+      this.scheduler!.autopilotParkSettled(taskId, reason, detail);
+    } catch (err) {
+      this.notice(taskId, "warn", `autopilot park (${reason}) failed: ${message(err)}`);
+      if (this.tasks.get(taskId)?.state === "RUNNING") this.tasks.transition(taskId, "WAITING_INPUT", "harness_error");
+    }
+    this.publishState(taskId, this.tasks.envelope(taskId));
   }
 
   private canSettle(taskId: string): boolean {
@@ -1965,6 +2019,8 @@ export class Orchestrator {
     mode: "compare" | "race",
   ): Promise<{ runs: Array<{ runId: string; assistantId: string }> }> {
     if (assistantIds.length < 2) throw new Error("Parallel execution needs at least two assistants");
+    // P0-2 (§C.2.3): compare and race, legacy or composed, refuse autopilot tasks outright.
+    if (this.autopilot?.owns(taskId)) throw new Error(`Task ${taskId} is an autopilot task and never runs in parallel`);
     if (this.isActive(taskId)) throw new Error(`Task ${taskId} already has an active run`);
     const row = this.tasks.get(taskId);
     if (!row) throw new Error(`Unknown task ${taskId}`);

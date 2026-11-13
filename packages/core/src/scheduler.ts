@@ -225,7 +225,9 @@ export interface SchedulerEvent {
     | 'dispatch.started' | 'dispatch.ambiguous' | 'dispatch.reparked' | 'dispatch.aborted' | 'wait.cancelled'
     | 'dependency.failed'
     /** K4b: the durable audit trail of who holds a slot and why another task waited. */
-    | 'resource.claimed' | 'resource.released' | 'resource.unsatisfiable';
+    | 'resource.claimed' | 'resource.released' | 'resource.unsatisfiable'
+    /** P0-2: a launch the autopilot refused, with its reason and the wait that was written. */
+    | 'autopilot.parked';
   at: string;
   payload: Record<string, unknown>;
 }

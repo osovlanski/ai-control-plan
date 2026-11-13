@@ -105,6 +105,8 @@ export interface RigOptions {
   assetShadowScorer?: ServerDeps["assetShadowScorer"];
   /** O6 S3: replaces the memory shadow rule (a throwing one must not fail a compose). */
   memoryShadowScorer?: ServerDeps["memoryShadowScorer"];
+  /** P0-2: the autopilot's host gate (§C.2.6). */
+  autopilotHostGate?: ServerDeps["autopilotHostGate"];
 }
 
 const GIT_ENV = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.invalid", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.invalid" };
@@ -145,6 +147,7 @@ export async function bootRig(options: RigOptions = {}): Promise<Rig> {
     config, db, composerHostname: "fake-host-s6.example", ...(options.now ? { now: options.now } : {}),
     ...(options.assetShadowScorer ? { assetShadowScorer: options.assetShadowScorer } : {}),
     ...(options.memoryShadowScorer ? { memoryShadowScorer: options.memoryShadowScorer } : {}),
+    ...(options.autopilotHostGate ? { autopilotHostGate: options.autopilotHostGate } : {}),
   });
   built.registry.init();
   await built.registry.syncAll();

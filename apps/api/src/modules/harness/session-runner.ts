@@ -116,6 +116,21 @@ export interface RunnerDeps {
   /** Resolves the request's secret REFERENCES at the launch boundary (§3). */
   secretResolver?: SecretResolver;
   /**
+   * P0-2 (auto-copilot plan §C.2.3): the FINAL launch check. Called after provisioning and after
+   * the start queue was acquired, immediately before `adapter.start` / `adapter.resume`: the last
+   * point before a provider process exists. `refuse` ends the session with no provider started
+   * (the profile is disposed by the usual path). `remainingMs` replaces the request's runtime
+   * bound for this launch, for the Harness deadline and for the agent scope's `RuntimeMaxSec`.
+   * It is a duration, not an instant, so it is applied on the runner's own clock.
+   * Undefined = not a gated request. A hook that throws fails the session before any provider.
+   */
+  beforeProviderStart?: (request: ExecutionRequest, sessionId: string) => { remainingMs: number } | { refuse: string; detail: string } | undefined;
+  /**
+   * P0-2 (§C.2.8): an approval was denied by a person or expired. True = this is an unattended
+   * run, so the session is cancelled instead of handing the denial to the provider to continue.
+   */
+  onApprovalRefused?: (request: ExecutionRequest, sessionId: string, kind: "denied" | "expired") => boolean;
+  /**
    * Per-session provider-process containment probe (§3) — the "equivalent
    * adapter probe" §3 allows in place of a provisioning `verify()` call. Given
    * the exact launch config (spec + provider ref), returns true when the
@@ -432,6 +447,14 @@ class RunContext {
         payload: { note: "provider_start_queue", waitMs, cap: this.runner.starts.cap },
       }]);
       this.launchAtMs = this.runner.clock(); // silence is measured from the spawn, not the queue
+    }
+    const refusal = this.finalLaunchCheck();
+    if (refusal) {
+      // Nothing was spawned. The session ends CANCELLED by the plane; the caller parks the task.
+      clearInterval(heartbeat);
+      this.releaseStartSlot();
+      if (refusal.failure) return this.finalizeFailure("FAILED", refusal.failure, "STARTING");
+      return this.finalize("STARTING", "CANCELLED", { cancellation: { requestedBy: "plane", at: this.iso() }, checkpoint: await this.attemptCheckpoint("cancel") });
     }
     try {
       handle = await this.startProvider(adapter);
@@ -1256,6 +1279,47 @@ class RunContext {
     }
   }
 
+  /**
+   * P0-2 (§C.2.3): the final launch check. Undefined = start the provider. A refusal is recorded
+   * as a session event and returned; an admitted launch has its deadline recomputed here, so a
+   * replayed request never runs under the timeout it was stored with.
+   */
+  private finalLaunchCheck(): { failure?: ExecutionFailure } | undefined {
+    const hook = this.d.beforeProviderStart;
+    if (!hook) return undefined;
+    let verdict: ReturnType<NonNullable<RunnerDeps["beforeProviderStart"]>>;
+    try {
+      verdict = hook(this.request, this.sessionId);
+    } catch (err) {
+      return { failure: { kind: "internal", retryable: false, message: `final launch check failed: ${redactMessage(err)}` } };
+    }
+    if (!verdict) return undefined;
+    if ("refuse" in verdict) {
+      this.recordEvents([{
+        runId: this.sessionId as never, ts: this.iso(), type: "phase",
+        summary: `launch refused at the final check: ${verdict.refuse}`,
+        payload: { note: "launch_refused", reason: verdict.refuse, detail: verdict.detail },
+      }]);
+      return {};
+    }
+    // `hardMs` counts from the session's start, which provisioning and the start queue already used part of.
+    const elapsedMs = Math.max(0, this.runner.clock() - this.snapshot.startedAtMs);
+    // Tighten only: the request's own bound (workspace and revision policy) still holds.
+    const remainingMs = Math.max(1000, Math.min(Math.floor(verdict.remainingMs), this.request.policy.timeout.hardMs - elapsedMs, this.request.runSpec.env.maxRuntimeMs));
+    this.request = {
+      ...this.request,
+      policy: { ...this.request.policy, timeout: { ...this.request.policy.timeout, hardMs: elapsedMs + remainingMs } },
+      runSpec: { ...this.request.runSpec, env: { ...this.request.runSpec.env, maxRuntimeMs: remainingMs } },
+    };
+    this.snapshot.policy = this.request.policy;
+    this.recordEvents([{
+      runId: this.sessionId as never, ts: this.iso(), type: "phase",
+      summary: `launch admitted at the final check; deadline in ${remainingMs} ms`,
+      payload: { note: "launch_admitted", remainingMs, admittedMs: Math.floor(verdict.remainingMs) },
+    }]);
+    return undefined;
+  }
+
   private async startProvider(adapter: AgentAdapter): Promise<RunHandle> {
     const spec = this.effectiveRunSpec();
     this.effectiveSpec = spec as RunSpec; // secretEnv is deleted in the finally below
@@ -1523,6 +1587,7 @@ class RunContext {
       if (row && (row.state === "answered" || row.state === "delivering" || row.state === "delivery_unknown")) break;
       if ((row && row.state === "expired") || this.runner.clock() > deadline) {
         if (!row || row.state === "pending") this.d.approvals.expire(this.sessionId, providerRequestId);
+        this.d.onApprovalRefused?.(this.request, this.sessionId, "expired");
         this.cancelBy = "plane"; // policy-set expiry cancels the session cleanly (§4)
         return "cancelled";
       }
@@ -1531,6 +1596,12 @@ class RunContext {
     }
 
     const answered = this.d.approvals.get(this.sessionId, providerRequestId)!;
+    if (answered.decision === "denied" && this.d.onApprovalRefused?.(this.request, this.sessionId, "denied")) {
+      // §C.2.8: an unattended run does not continue past a denial. The denial is never handed to
+      // the provider to work around; the session is cancelled and its scope stopped.
+      this.cancelBy = "plane";
+      return "cancelled";
+    }
     this.d.approvals.markDelivering(this.sessionId, providerRequestId);
     if (typeof adapter.send === "function") {
       try {
