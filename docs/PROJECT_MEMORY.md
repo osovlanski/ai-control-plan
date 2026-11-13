@@ -868,3 +868,11 @@ Migration 041 adds `runs.harness_cli_version` (TEXT NULL, forward only, no backf
 - **Decision (plan reading):** `budget_exhausted` ends the attempt (`failed`) and its task, because a budget never refills and a final attempt's task may not launch. `window_closed` with no later window on record holds in `WAITING_INPUT`; adding a window and releasing continues it. `stopped`, `billing_expired` and `composition_unavailable` hold the same way, and `release` is the only way on.
 - **Decision:** attempts are created only by `reserve` + `admit` in-process until P0-6 (`selectNext` + GitHub reservation) adds the caller. `settled` is non-final, so after one attempt the loop holds until P0-4/P0-5 exist.
 
+
+## 2026-11-13 — Autopilot P0-3: host gate and close timer (SHIPPED in code; G8/G20 host drive BLOCKED on the reference host)
+
+- **Contract:** config `scheduler.admission.<pool>: { maxLoadPerCpu 1.5, minFreeMemMb 1024, minFreeDiskMb 5120, diskPath }` (pool must be declared in `scheduler.resources`); `execution.agentUser.closeSchedule` (default `/var/lib/aos/schedule/windows`). Host files `setup/aos-close{,.service,.timer}`; `aos-setup` creates `/var/lib/aos/schedule` (2750) and enables the timer `--global` with `ConditionUser=aos-agent`.
+- **Behaviour:** the launch check's host gate (`modules/host-admission.ts`) is fail-closed: no `scheduler.admission` for the autopilot pool refuses every launch `host_busy`. It walks `user-<uid>.slice` by recursive `populated`; only `user@<uid>.service/init.scope` holding `systemd`/`(sd-pam)` (at most two processes) is allowed. Each check rewrites the close schedule from the windows table and refuses if the file does not list the open window's close.
+- **Decision:** the close timer fires every minute and reads the plane's schedule file, instead of one `OnCalendar` per window: no unit edits per window, and it works with the plane dead. It acts only within 15 minutes after a close, so a manual agent task in the day is not stopped (one running at the close is).
+- **Finding (open):** `aos-agent` owns its user manager, so a process running as it can stop or mask `aos-close.timer` and `set-property` its scope's `RuntimeMaxSec`. Both bounds hold against a dead plane, not a hostile agent. A root-side backstop is a design change for the owner.
+- Host drive steps: `docs/autopilot/p0-3-host-drive.md`.

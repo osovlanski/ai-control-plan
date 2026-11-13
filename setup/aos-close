@@ -1,0 +1,48 @@
+#!/bin/bash
+# /usr/local/lib/aos/aos-close (root:root 0755). Run by aos-close.service in aos-agent's own user
+# manager, every minute (aos-close.timer). docs/agentic-os-auto-copilot-plan.md §C.2.5, P0-3.
+#
+# When an autopilot window has just closed, stop every agent scope (`aos-run-*.scope`) and check
+# that the slice is empty. It reads only the schedule the plane writes
+# (/var/lib/aos/schedule/windows, `<opens-epoch> <closes-epoch>` per line), so it works with the
+# plane dead. `RuntimeMaxSec` on each scope is the first bound; this is the second.
+#
+# "Just closed" = now is in [close, close + CATCHUP). After that the close is history: a scope
+# started in the day (a manual agent task) is not this timer's business.
+#
+# Overrides for an off-host drive only: AOS_CLOSE_SCHEDULE, AOS_CLOSE_NOW, AOS_CGROUP_ROOT.
+set -uo pipefail
+SCHEDULE="${AOS_CLOSE_SCHEDULE:-/var/lib/aos/schedule/windows}"
+CGROOT="${AOS_CGROUP_ROOT:-/sys/fs/cgroup}"
+CATCHUP=900
+now="${AOS_CLOSE_NOW:-$(date +%s)}"
+log(){ echo "aos-close: $*"; }
+
+[ -r "$SCHEDULE" ] || { log "schedule $SCHEDULE unreadable"; exit 1; }
+due=""
+while read -r opens closes rest; do
+  [[ "$opens" =~ ^[0-9]{1,12}$ && "$closes" =~ ^[0-9]{1,12}$ && -z "$rest" ]] || continue
+  if [ "$now" -ge "$closes" ] && [ "$now" -lt $((closes + CATCHUP)) ]; then due="$closes"; fi
+done < "$SCHEDULE"
+[ -n "$due" ] || exit 0
+
+log "window closed at $(date -u -d "@$due" +%FT%TZ); stopping aos-run-*.scope"
+systemctl --user stop 'aos-run-*.scope' || log "systemctl stop returned $?"
+
+# The slice must be empty apart from the user manager (init.scope) and this unit itself
+# (app.slice/aos-close.service on current systemd, directly under user@ on older ones).
+uid="$(id -u)"
+slice="$CGROOT/user.slice/user-$uid.slice"
+left=""
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  left=""
+  while IFS= read -r -d '' procs; do
+    dir="${procs%/cgroup.procs}"
+    case "$dir" in */user@"$uid".service/init.scope|*/aos-close.service) continue;; esac
+    [ -s "$procs" ] && left="$left ${dir#"$slice"/}"
+  done < <(find "$slice" -name cgroup.procs -print0 2>/dev/null)
+  [ -z "$left" ] && break
+  sleep 1
+done
+if [ -n "$left" ]; then log "slice NOT empty after stop:$left"; exit 1; fi
+log "slice empty"

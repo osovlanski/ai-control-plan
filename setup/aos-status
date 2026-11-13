@@ -16,6 +16,10 @@ c "agent git safe.directory"     'runuser -u aos-agent -- env HOME=/home/aos-age
 # The plane user must NOT trust the agent tree: a .git owned by aos-agent has to stay refused.
 c "plane git does not trust it"  '! { git config --system --get-all safe.directory; runuser -u ubuntu -- env HOME=/home/ubuntu git config --global --get-all safe.directory; } 2>/dev/null | grep -qE "^(\*|/var/lib/aos(/.*)?)$"'
 c "sudoers /etc/sudoers.d/aos"   'visudo -cf /etc/sudoers.d/aos'
+c "/var/lib/aos/schedule 2750"   '[ "$(stat -c %a /var/lib/aos/schedule)" = 2750 ]'
+c "close script root-owned"      '[ "$(stat -c %U:%a /usr/local/lib/aos/aos-close)" = root:755 ]'
+c "close timer active (aos-agent)" 'systemctl --user -M aos-agent@ is-active aos-close.timer'
+c "close schedule written"       '[ -s /var/lib/aos/schedule/windows ]'
 c "nft table aos_agent_net"      'nft list table inet aos_agent_net'
 c "nft unit enabled"             'systemctl is-enabled aos-agent-net.service'
 # Informational: the boundary only protects against aos-agent while this holds (README.md).
