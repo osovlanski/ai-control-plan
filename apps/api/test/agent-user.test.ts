@@ -112,7 +112,7 @@ async function runToEnd(taskId: string): Promise<Settled> {
 describe("autopilot.operate (G0)", () => {
   it("refuses start, release and resolve to the ordinary credential and leaves stop open to it", async () => {
     await boot();
-    for (const route of ["start", "release", "resolve", "windows", "attestations"]) {
+    for (const route of ["start", "release", "publications/pub_any/resolve", "windows", "attestations"]) {
       const res = await post(`/api/autopilot/${route}`, ordinary());
       expect(res.statusCode, route).toBe(403);
       expect(res.json()).toEqual({ error: "autopilot.operate required" });
@@ -130,14 +130,14 @@ describe("autopilot.operate (G0)", () => {
     expect((await post("/api/autopilot/start", bearer(secret))).statusCode).toBe(401); // no hash stored yet
     writeOperateSecretHash(operateSecretPath(config.dir), hash);
     // Past the authority boundary each route answers for itself (P0-2): this instance has no
-    // `composer.requireRevision`, nothing is held, and publications do not exist yet.
+    // `composer.requireRevision`, nothing is held, and there is no such publication.
     const started = await post("/api/autopilot/start", bearer(secret));
     expect(started.statusCode).toBe(409);
     expect(started.json()).toMatchObject({ error: "autopilot_start_refused", setting: "composer.requireRevision" });
     expect((await post("/api/autopilot/release", bearer(secret))).statusCode).toBe(409);
-    const resolved = await post("/api/autopilot/resolve", bearer(secret));
-    expect(resolved.statusCode).toBe(501);
-    expect(resolved.json().error).toBe("autopilot_not_implemented");
+    const resolved = await post("/api/autopilot/publications/pub_missing/resolve", bearer(secret), { action: "retry" });
+    expect(resolved.statusCode).toBe(409);
+    expect(resolved.json().error).toBe("publication pub_missing does not exist");
     expect((await built!.app.inject({ method: "GET", url: "/api/tasks", headers: bearer(secret) })).statusCode).toBe(403);
     expect((await post("/api/tasks", bearer(secret), { goal: "x" })).statusCode).toBe(403);
     expect((await post("/api/autopilot/stop", bearer(secret))).statusCode).toBe(403);
