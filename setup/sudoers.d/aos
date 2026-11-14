@@ -3,3 +3,6 @@
 # environment, so no plane secret can reach a provider through it.
 Defaults:ubuntu env_reset
 ubuntu ALL=(aos-agent:aos) NOPASSWD: /usr/local/lib/aos/run-as-agent
+# P0-4: acceptance only. Root makes the network namespace, then the wrapper drops to aos-agent:aos
+# before the command starts (an unprivileged userns is refused by Ubuntu's AppArmor default).
+ubuntu ALL=(root) NOPASSWD: /usr/local/lib/aos/accept-as-agent

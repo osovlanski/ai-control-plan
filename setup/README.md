@@ -11,7 +11,8 @@ files, its API, Cockpit, or the network beyond HTTPS.
 | File | Installed as | What it is |
 |---|---|---|
 | `run-as-agent` | `/usr/local/lib/aos/run-as-agent` (root, 0755) | the one command the plane may run as `aos-agent`; starts a `systemd-run --user --scope` bounded by `RuntimeMaxSec`, or stops one |
-| `sudoers.d/aos` | `/etc/sudoers.d/aos` (root, 0440) | `ubuntu ALL=(aos-agent:aos) NOPASSWD:` that wrapper only, `env_reset` |
+| `accept-as-agent` | `/usr/local/lib/aos/accept-as-agent` (root, 0755) | P0-4 acceptance: run as root, makes a network namespace with only `lo` up (`unshare --net`), then drops to `aos-agent:aos` (`setpriv`, no capabilities, `no_new_privs`) in a system scope `aos-accept-<id>` bounded by `RuntimeMaxSec`; or stops one. Root does the namespace because `kernel.apparmor_restrict_unprivileged_userns=1` refuses an unprivileged one |
+| `sudoers.d/aos` | `/etc/sudoers.d/aos` (root, 0440) | `ubuntu ALL=(aos-agent:aos) NOPASSWD:` `run-as-agent` only, plus `ubuntu ALL=(root) NOPASSWD:` `accept-as-agent` only, `env_reset` |
 | `aos-agent-net.nft`, `aos-agent-net.service` | `/usr/local/lib/aos/`, `/etc/systemd/system/` | egress rules for uid 1002, loaded at boot |
 | `aos-setup` | `/usr/local/lib/aos/aos-setup` | idempotent install of everything above, plus user, group and directories |
 | `aos-status` | `/usr/local/lib/aos/aos-status` | read-only check, exit 1 on any gap |

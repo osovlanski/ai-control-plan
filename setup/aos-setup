@@ -29,6 +29,7 @@ install -d -o "$PLANE_USER" -g aos -m 2770 /var/lib/aos/worktrees  # agent write
 install -d -o "$PLANE_USER" -g aos -m 2750 /var/lib/aos/schedule   # P0-3: plane writes the close schedule, agent reads
 install -d -o root -g root -m 0755 "$L"
 inst run-as-agent 0755 "$L/run-as-agent"
+inst accept-as-agent 0755 "$L/accept-as-agent"
 inst aos-setup 0755 "$L/aos-setup"
 inst aos-status 0755 "$L/aos-status"
 inst rollback.sh 0755 "$L/rollback.sh"
