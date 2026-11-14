@@ -12,6 +12,7 @@
  * (P0-3) are later slices: attempts here are made with `reserve` + `admit` directly, and the
  * host gate is an injected function.
  */
+import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -67,7 +68,7 @@ function open(minutes = 8 * 60, maxItems = 3) {
 }
 let item = 0;
 function admit(goal = "Ship the feature") {
-  const reserved = ap().reserve({ itemId: `item-${++item}`, reservationId: `res-${item}`, reservationSha: "0".repeat(40) });
+  const reserved = ap().reserve({ itemId: `item-${++item}`, reservationId: `res-${item}`, reservationSha: execFileSync("git", ["-C", rig!.repo, "rev-parse", "HEAD"], { encoding: "utf8" }).trim() });
   const attempt = ap().admit(reserved.id, { goal, repoPath: rig!.repo });
   return { attemptId: attempt.id, taskId: attempt.taskId! };
 }

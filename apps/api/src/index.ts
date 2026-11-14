@@ -6,7 +6,7 @@ import { scheduleDailyJobs } from "./modules/jobs.js";
 
 const config = loadConfig();
 const db = openDb(config.dbPath);
-const { app, registry, orchestrator, scheduler, modelCatalog, registryFederation, memoryFederation } = buildServer({ config, db });
+const { app, registry, orchestrator, scheduler, modelCatalog, registryFederation, memoryFederation, acceptance, dispatcher } = buildServer({ config, db });
 
 registry.init();
 const reconciled = await orchestrator.reconcileOnBoot();
@@ -15,8 +15,12 @@ await registry.syncChangedAll();
 await registryFederation.sync();
 // O6 S3: Cockpit's memory bundle snapshot, same rules (feeds the memory shadow only).
 await memoryFederation.sync();
+// P0-4/P0-6: an acceptance run a crash interrupted is `crashed` (replay or blocked) before anything dispatches.
+await acceptance?.reconcileOnBoot();
 await scheduler.reconcileOnBoot();
 scheduler.startTimer();
+// P0-6: the in-plane dispatcher. It selects only while the autopilot is running, which a boot never makes it.
+dispatcher.startTimer();
 // The daily job syncs the memory snapshot right after the registry's; a memory failure never fails the registry sync.
 const federations = {
   sync: async () => {

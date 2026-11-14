@@ -26,7 +26,8 @@
  */
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { closeSync, constants, fstatSync, openSync, readFileSync } from "node:fs";
+import { registerSecret } from "@agent-plane/core";
 import type { Db } from "../db/index.js";
 import type { AutopilotService } from "./autopilot.js";
 
@@ -101,8 +102,31 @@ export function gitCli(timeoutMs = 120_000): PublicationGit {
   };
 }
 
+/**
+ * P0-6: the plane user's GitHub token, read per request: one fd for the check and the read,
+ * `O_NOFOLLOW`, a regular file owned by this uid with no group or other bits. Any problem is an
+ * `auth` error, which stops the autopilot (`github-auth`). The value is registered for redaction.
+ */
+export function readGitHubTokenFile(path: string): string {
+  let fd: number;
+  try { fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); } catch (err) {
+    throw new GitHubError("auth", undefined, `GitHub token file unreadable (${(err as NodeJS.ErrnoException).code ?? "error"})`);
+  }
+  let token: string;
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile() || st.uid !== process.getuid?.() || (st.mode & 0o077) !== 0) throw new GitHubError("auth", undefined, "GitHub token file must be a regular file of this user with mode 0600 or tighter");
+    token = readFileSync(fd, "utf8").trim();
+  } finally {
+    closeSync(fd);
+  }
+  if (!token) throw new GitHubError("auth", undefined, "GitHub token file is empty");
+  registerSecret(token);
+  return token;
+}
+
 /** Minimal GitHub REST client. The token is read per request from its file, so a rotation needs no restart. */
-export class GitHubRestClient implements PublicationGitHub {
+export class GitHubRestClient implements PublicationGitHub, ReservationGitHub {
   private readonly fetchImpl: typeof fetch;
   constructor(private readonly opts: { apiBase?: string; tokenFile?: string; token?: () => string; timeoutMs?: number; fetch?: typeof fetch }) {
     this.fetchImpl = opts.fetch ?? fetch;
@@ -164,6 +188,50 @@ export class GitHubRestClient implements PublicationGitHub {
     if (status !== 201) throw new GitHubError("rejected", status, `POST pulls: HTTP ${status}: ${JSON.stringify(json).slice(0, 300)}`);
     try { return toPull(json); } catch { throw new GitHubError("unknown", status, "POST pulls: unreadable PR in the answer"); }
   }
+
+  /* P0-6 (§C.2.2): the reservation calls. */
+
+  async getCommit(repo: string, sha: string): Promise<GitCommit | null> {
+    if (!/^[0-9a-f]{40}$/.test(sha)) throw new GitHubError("rejected", undefined, "GET commit: not a full SHA");
+    const { status, json } = await this.call("GET", `/repos/${repo}/git/commits/${sha}`);
+    if (status === 404) return null;
+    if (status !== 200) throw new GitHubError("rejected", status, `GET commit ${sha}: HTTP ${status}`);
+    const c = json as { sha?: unknown; message?: unknown; parents?: Array<{ sha?: unknown }> };
+    if (typeof c?.sha !== "string" || typeof c.message !== "string" || !Array.isArray(c.parents)) throw new GitHubError("unknown", status, `GET commit ${sha}: unreadable answer`);
+    return { sha: c.sha, message: c.message, parents: c.parents.map((p) => String(p.sha)) };
+  }
+  async createCommit(repo: string, input: ReservationCommitInput): Promise<string> {
+    const { status, json } = await this.call("POST", `/repos/${repo}/git/commits`, {
+      message: input.message, tree: input.tree, parents: [input.parent],
+      author: { name: input.name, email: input.email, date: input.date },
+      committer: { name: input.name, email: input.email, date: input.date },
+    });
+    if (status !== 201) throw new GitHubError("rejected", status, `POST git/commits: HTTP ${status}: ${JSON.stringify(json).slice(0, 300)}`);
+    const sha = (json as { sha?: unknown })?.sha;
+    if (typeof sha !== "string") throw new GitHubError("unknown", status, "POST git/commits: no sha in the answer");
+    return sha;
+  }
+  async createRef(repo: string, branch: string, sha: string): Promise<"created" | "exists"> {
+    const { status, json } = await this.call("POST", `/repos/${repo}/git/refs`, { ref: `refs/heads/${branch}`, sha });
+    if (status === 201) return "created";
+    // "Reference already exists" is the only 422 that means a ref is there; anything else is a refusal.
+    if (status === 422 && /already exists/i.test(JSON.stringify(json))) return "exists";
+    throw new GitHubError("rejected", status, `POST git/refs: HTTP ${status}: ${JSON.stringify(json).slice(0, 300)}`);
+  }
+}
+
+/** A git commit as GitHub's git-data API returns it. */
+export interface GitCommit { sha: string; message: string; parents: string[] }
+/** The reservation commit's content (§C.2.2 step 1): fixed from the intent, so every retry is identical. */
+export interface ReservationCommitInput { tree: string; parent: string; message: string; name: string; email: string; date: string }
+
+/** P0-6: GitHub's side of a reservation. `createRef` answers `exists` for GitHub's 422 "already exists". */
+export interface ReservationGitHub {
+  getBranchSha(repo: string, branch: string): Promise<string | null>;
+  listPullsForHead(repo: string, branch: string): Promise<PullRequest[]>;
+  getCommit(repo: string, sha: string): Promise<GitCommit | null>;
+  createCommit(repo: string, input: ReservationCommitInput): Promise<string>;
+  createRef(repo: string, branch: string, sha: string): Promise<"created" | "exists">;
 }
 
 function toPull(raw: unknown): PullRequest {

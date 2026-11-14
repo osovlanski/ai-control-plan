@@ -284,23 +284,42 @@ export interface ResolvedAutopilotConfig {
   hostRetryMs: number;
   /** D-13: how long a billing attestation stays current. */
   attestationMaxAgeDays: number;
+  /** P0-6: how often the in-plane dispatcher (`selectNext`, acceptance, publication) ticks. */
+  dispatchIntervalMs: number;
+  /**
+   * P0-6: the backlog's `repo` names the dispatcher can work on. `github` is `owner/name`,
+   * `path` the plane user's clone (in the repo allowlist, remote `origin`), `base` the branch
+   * reservations and PRs start from. An item whose repo is not listed is never selected.
+   */
+  repos: Record<string, AutopilotRepoConfig>;
+  /** P0-6: which entry of `repos` holds `docs/progress/backlog.yaml` (read at `origin/main`). */
+  backlogRepo: string;
+  /**
+   * P0-6: the plane user's GitHub token for reservations and publications. The file must be a
+   * regular file owned by the plane user with no group or other bits, and is read per request.
+   * Absent = no dispatcher and no publication sweep.
+   */
+  github?: { tokenFile: string; apiBase?: string };
 }
-export const AUTOPILOT_DEFAULTS: ResolvedAutopilotConfig = {
+export interface AutopilotRepoConfig { github: string; path: string; base: string }
+export const AUTOPILOT_DEFAULTS: Omit<ResolvedAutopilotConfig, "repos"> & { repos: Readonly<Record<string, AutopilotRepoConfig>> } = {
   pool: "oci-heavy", runtimeBudgetMs: 90 * 60_000, attemptsPerItem: 2, itemsPerWindow: 3,
   minSliceMs: 10 * 60_000, graceMs: 2 * 60_000, hostRetryMs: 2 * 60_000, attestationMaxAgeDays: 30,
+  dispatchIntervalMs: 60_000, repos: {}, backlogRepo: "ai-control-plan",
 };
+const AUTOPILOT_KEYS = [...Object.keys(AUTOPILOT_DEFAULTS), "github"];
 
 function resolveAutopilot(file: unknown, configPath: string): ResolvedAutopilotConfig {
-  if (file === undefined) return { ...AUTOPILOT_DEFAULTS };
+  if (file === undefined) return { ...AUTOPILOT_DEFAULTS, repos: {} };
   if (!isRecord(file)) throw new Error(`${configPath}: autopilot must be a mapping`);
-  const unknown = Object.keys(file).filter((k) => !Object.prototype.hasOwnProperty.call(AUTOPILOT_DEFAULTS, k));
+  const unknown = Object.keys(file).filter((k) => !AUTOPILOT_KEYS.includes(k));
   if (unknown.length > 0) throw new Error(`${configPath}: autopilot has unknown key(s): ${unknown.join(", ")}`);
-  const out = { ...AUTOPILOT_DEFAULTS };
+  const out: ResolvedAutopilotConfig = { ...AUTOPILOT_DEFAULTS, repos: {} };
   if (file.pool !== undefined) {
     if (typeof file.pool !== "string" || !file.pool) throw new Error(`${configPath}: autopilot.pool must be a resource pool name`);
     out.pool = file.pool;
   }
-  for (const key of ["runtimeBudgetMs", "attemptsPerItem", "itemsPerWindow", "minSliceMs", "graceMs", "hostRetryMs", "attestationMaxAgeDays"] as const) {
+  for (const key of ["runtimeBudgetMs", "attemptsPerItem", "itemsPerWindow", "minSliceMs", "graceMs", "hostRetryMs", "attestationMaxAgeDays", "dispatchIntervalMs"] as const) {
     const value = file[key];
     if (value === undefined) continue;
     if (!isPositiveInteger(value)) throw new Error(`${configPath}: autopilot.${key} must be a positive integer`);
@@ -309,6 +328,34 @@ function resolveAutopilot(file: unknown, configPath: string): ResolvedAutopilotC
   // The scope's RuntimeMaxSec is bounded by the wrapper at four hours; a longer budget could never launch.
   if (out.runtimeBudgetMs > 4 * 3_600_000) throw new Error(`${configPath}: autopilot.runtimeBudgetMs must be at most four hours`);
   if (out.graceMs >= out.minSliceMs) throw new Error(`${configPath}: autopilot.graceMs must be below autopilot.minSliceMs`);
+  if (out.dispatchIntervalMs < 5_000) throw new Error(`${configPath}: autopilot.dispatchIntervalMs must be at least 5000`);
+  if (file.repos !== undefined) {
+    if (!isRecord(file.repos)) throw new Error(`${configPath}: autopilot.repos must be a mapping of backlog repo name to { github, path, base }`);
+    for (const name of Object.getOwnPropertyNames(file.repos)) {
+      const r = file.repos[name];
+      if (!isRecord(r)) throw new Error(`${configPath}: autopilot.repos.${name} must be a mapping`);
+      const extra = Object.keys(r).filter((k) => !["github", "path", "base"].includes(k));
+      if (extra.length > 0) throw new Error(`${configPath}: autopilot.repos.${name} has unknown key(s): ${extra.join(", ")}`);
+      if (typeof r.github !== "string" || !/^[\w.-]+\/[\w.-]+$/.test(r.github)) throw new Error(`${configPath}: autopilot.repos.${name}.github must be owner/name`);
+      if (typeof r.path !== "string" || !isAbsolute(r.path) || resolve(r.path) !== r.path) throw new Error(`${configPath}: autopilot.repos.${name}.path must be an absolute, normalized path`);
+      const base = r.base ?? "main";
+      if (typeof base !== "string" || !/^[\w./-]+$/.test(base) || base.includes("..")) throw new Error(`${configPath}: autopilot.repos.${name}.base must be a branch name`);
+      out.repos[name] = { github: r.github, path: r.path, base };
+    }
+  }
+  if (file.backlogRepo !== undefined) {
+    if (typeof file.backlogRepo !== "string" || !file.backlogRepo) throw new Error(`${configPath}: autopilot.backlogRepo must be a repo name`);
+    out.backlogRepo = file.backlogRepo;
+  }
+  if (file.github !== undefined) {
+    const g = file.github;
+    if (!isRecord(g)) throw new Error(`${configPath}: autopilot.github must be a mapping`);
+    const extra = Object.keys(g).filter((k) => !["tokenFile", "apiBase"].includes(k));
+    if (extra.length > 0) throw new Error(`${configPath}: autopilot.github has unknown key(s): ${extra.join(", ")}`);
+    if (typeof g.tokenFile !== "string" || !isAbsolute(g.tokenFile)) throw new Error(`${configPath}: autopilot.github.tokenFile must be an absolute path`);
+    if (g.apiBase !== undefined && (typeof g.apiBase !== "string" || !/^https:\/\/[^/\s]+(\/[^\s]*)?$/.test(g.apiBase))) throw new Error(`${configPath}: autopilot.github.apiBase must be an https URL`);
+    out.github = { tokenFile: g.tokenFile, ...(g.apiBase !== undefined ? { apiBase: g.apiBase as string } : {}) };
+  }
   return out;
 }
 

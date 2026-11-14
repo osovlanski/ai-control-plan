@@ -6,9 +6,10 @@
  * check (`launchCheck`) that the orchestrator calls early and the session runner calls last,
  * immediately before a provider process exists (§C.2.3).
  *
- * What does not: picking work and reserving it (`selectNext`, P0-6), acceptance (P0-4),
- * publication (P0-5) and the host gate's own probes (P0-3, injected here as `hostGate`). Until
- * P0-6 lands, an attempt is created only through `reserve` + `admit`, which have no HTTP route.
+ * What does not: picking work and reserving it on GitHub (`selectNext`, P0-6, in
+ * `autopilot-dispatcher.ts`, which calls `reserve`, `reservationOwned`/`reservationFailed`,
+ * `external` and `admit` here), acceptance (P0-4), publication (P0-5) and the host gate's own
+ * probes (P0-3, injected here as `hostGate`).
  *
  * Every write is a SQLite transaction on the plane's own database. Nothing here calls a provider,
  * GitHub or the network.
@@ -49,6 +50,9 @@ export interface AutopilotAttempt {
   id: string; itemId: string; attemptNo: number; reservationId: string; reservationSha?: string; taskId?: string;
   state: AttemptState; reason?: string; runtimeBudgetMs: number; runtimeUsedMs: number;
   deadlineAt?: string; deadlineBound?: "budget" | "window"; createdAt: string; updatedAt: string; finalAt?: string;
+  /** P0-6: the reservation's provenance (absent on attempts made in-process before P0-6). */
+  repo?: string; baseSha?: string; reservationDate?: string; itemRevision?: string; backlogSha?: string;
+  reservationOutcome?: "created" | "owned" | "reused";
 }
 export interface AutopilotWindow { id: string; opensAt: string; closesAt: string; maxItems: number; charged: number }
 
@@ -83,6 +87,8 @@ interface AttemptRow {
   id: string; item_id: string; attempt_no: number; reservation_id: string; reservation_sha: string | null; task_id: string | null;
   state: AttemptState; reason: string | null; runtime_budget_ms: number; deadline_at: string | null; deadline_bound: "budget" | "window" | null;
   created_at: string; updated_at: string; final_at: string | null;
+  repo: string | null; base_sha: string | null; reservation_date: string | null; item_revision: string | null; backlog_sha: string | null;
+  reservation_outcome: "created" | "owned" | "reused" | null;
 }
 interface WindowRow { id: string; opens_at: string; closes_at: string; max_items: number }
 
@@ -96,6 +102,8 @@ export class AutopilotService {
   private readonly db: Db;
   private readonly now: () => Date;
   scheduler?: AutopilotSchedulerPort;
+  /** P0-6: called after an attempt reaches `settled`, so the dispatcher starts acceptance without waiting for its timer. */
+  onSettled?: () => void;
   /** A final-check refusal, held until the refused session settles and the orchestrator parks its task. */
   private readonly finalRefusals = new Map<string, AutopilotRefusalReason>();
 
@@ -239,6 +247,9 @@ export class AutopilotService {
       state: r.state, ...(r.reason ? { reason: r.reason } : {}), runtimeBudgetMs: r.runtime_budget_ms, runtimeUsedMs: this.usedMs(r.id),
       ...(r.deadline_at ? { deadlineAt: r.deadline_at } : {}), ...(r.deadline_bound ? { deadlineBound: r.deadline_bound } : {}),
       createdAt: r.created_at, updatedAt: r.updated_at, ...(r.final_at ? { finalAt: r.final_at } : {}),
+      ...(r.repo ? { repo: r.repo } : {}), ...(r.base_sha ? { baseSha: r.base_sha } : {}), ...(r.reservation_date ? { reservationDate: r.reservation_date } : {}),
+      ...(r.item_revision ? { itemRevision: r.item_revision } : {}), ...(r.backlog_sha ? { backlogSha: r.backlog_sha } : {}),
+      ...(r.reservation_outcome ? { reservationOutcome: r.reservation_outcome } : {}),
     };
   }
   private row(id: string): AttemptRow | undefined {
@@ -284,7 +295,11 @@ export class AutopilotService {
    * the ref and calls `admit` or `external`. Refuses while any attempt is non-final (invariant 1,
    * also a unique index) and past the per-item attempt limit.
    */
-  reserve(input: { itemId: string; reservationId: string; reservationSha?: string }): AutopilotAttempt {
+  reserve(input: {
+    itemId: string; reservationId: string; reservationSha?: string;
+    /** P0-6: the intent's provenance, persisted before any GitHub request. */
+    repo?: string; baseSha?: string; reservationDate?: string; itemRevision?: string; backlogSha?: string;
+  }): AutopilotAttempt {
     if (!input.itemId || !input.reservationId) throw new Error("an attempt needs an item id and a reservation id");
     return this.db.transaction(() => {
       const open = this.currentRow();
@@ -293,10 +308,55 @@ export class AutopilotService {
       if (last >= this.cfg.attemptsPerItem) throw new Error(`item ${input.itemId} has used its ${this.cfg.attemptsPerItem} attempt(s)`);
       const id = `apa_${randomUUID()}`;
       const at = this.iso();
-      this.db.prepare(`INSERT INTO autopilot_attempts(id, item_id, attempt_no, reservation_id, reservation_sha, state, runtime_budget_ms, created_at, updated_at)
-        VALUES(?,?,?,?,?,'reserving',?,?,?)`).run(id, input.itemId, last + 1, input.reservationId, input.reservationSha ?? null, this.cfg.runtimeBudgetMs, at, at);
+      this.db.prepare(`INSERT INTO autopilot_attempts(id, item_id, attempt_no, reservation_id, reservation_sha, state, runtime_budget_ms, created_at, updated_at,
+        repo, base_sha, reservation_date, item_revision, backlog_sha)
+        VALUES(?,?,?,?,?,'reserving',?,?,?,?,?,?,?,?)`).run(id, input.itemId, last + 1, input.reservationId, input.reservationSha ?? null, this.cfg.runtimeBudgetMs, at, at,
+        input.repo ?? null, input.baseSha ?? null, input.reservationDate ?? null, input.itemRevision ?? null, input.backlogSha ?? null);
       return this.toAttempt(this.row(id)!);
     })();
+  }
+
+  /**
+   * P0-6 (§C.2.2): the ref is ours. Still `reserving`: `admit` moves it on with the task. `sha` is
+   * the reservation commit the branch starts from (GitHub's answer to the commit create, or an
+   * earlier attempt's commit when a retry reuses its ref), which the task is based on and the
+   * publication leases against.
+   */
+  reservationOwned(attemptId: string, sha: string, outcome: "created" | "owned" | "reused"): AutopilotAttempt {
+    if (!/^[0-9a-f]{40}$/.test(sha)) throw new Error("a reservation SHA is a full commit SHA");
+    return this.db.transaction(() => {
+      const row = this.row(attemptId);
+      if (row?.state !== "reserving") throw new Error(`attempt ${attemptId} is ${row?.state ?? "unknown"}, not reserving`);
+      this.db.prepare("UPDATE autopilot_attempts SET reservation_sha = ?, reservation_outcome = ?, updated_at = ? WHERE id = ?").run(sha, outcome, this.iso(), attemptId);
+      return this.toAttempt(this.row(attemptId)!);
+    })();
+  }
+
+  /** P0-6: a reservation that cannot go on (a ref of ours that carries work, an inconsistent answer). `reserving` → `failed`. */
+  reservationFailed(attemptId: string, reason: string): AutopilotAttempt {
+    return this.db.transaction(() => {
+      const row = this.row(attemptId);
+      if (row?.state !== "reserving") throw new Error(`attempt ${attemptId} is ${row?.state ?? "unknown"}, not reserving`);
+      this.finalize(row, "failed", reason);
+      return this.toAttempt(this.row(attemptId)!);
+    })();
+  }
+
+  /** P0-6: every attempt of an item, newest first. */
+  attemptsOfItem(itemId: string): AutopilotAttempt[] {
+    return (this.db.prepare("SELECT * FROM autopilot_attempts WHERE item_id = ? ORDER BY attempt_no DESC").all(itemId) as AttemptRow[]).map((r) => this.toAttempt(r));
+  }
+  /** P0-6: the attempt that made a reservation, by the id its reservation commit carries. */
+  attemptOfReservation(reservationId: string): AutopilotAttempt | undefined {
+    const r = this.db.prepare("SELECT * FROM autopilot_attempts WHERE reservation_id = ?").get(reservationId) as AttemptRow | undefined;
+    return r ? this.toAttempt(r) : undefined;
+  }
+  /**
+   * P0-6 (§C.2.2 lineage): the commit an autopilot task's worktree is created at. The
+   * orchestrator uses it instead of the composer's base, so a stale local HEAD never matters.
+   */
+  baseCommitOf(taskId: string): string | undefined {
+    return this.rowOfTask(taskId)?.reservation_sha ?? undefined;
   }
 
   /** `reserving` → `external`: the ref belongs to another lane. Never re-run. */
@@ -579,18 +639,25 @@ export class AutopilotService {
    * An attempt a park, a stop or an approval refusal already moved is left alone.
    */
   afterSettle(taskId: string): void {
+    let settled = false;
     this.db.transaction(() => {
       const attempt = this.rowOfTask(taskId);
       if (!attempt) return;
       this.syncRuntime(attempt.id);
       if (attempt.state !== "running" || this.liveSession(attempt.id)) return;
       const state = this.d.tasks.get(taskId)?.state as TaskState | undefined;
-      if (state === "COMPLETED") this.setState(attempt.id, "settled");
+      if (state === "COMPLETED") { this.setState(attempt.id, "settled"); settled = true; }
       else if (state === "FAILED") this.finalize(attempt, "failed", "task failed");
       else if (state === "CANCELLED") this.finalize(attempt, "cancelled", "task cancelled");
       // More work is needed (a quota re-park, a context continuation, a failover) or a person is.
       else if (state && !isTerminal(state)) this.setState(attempt.id, "admitted", attempt.reason);
     })();
+    if (settled) try { this.onSettled?.(); } catch { /* a trigger; the dispatcher's timer covers a lost one */ }
+  }
+
+  /** P0-6: the attempt's task state, for the dispatcher (a `suspended` attempt with a completed task goes to acceptance). */
+  taskState(taskId: string): TaskState | undefined {
+    return this.d.tasks.get(taskId)?.state as TaskState | undefined;
   }
 
   /**

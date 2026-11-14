@@ -657,11 +657,16 @@ export class Orchestrator {
     const scratchPath = !envelope.repository && !options.worktree && !row.worktree_path ? ensureScratch(this.config.dir, taskId) : undefined;
     let workdir = options.worktree?.worktreePath ?? row.worktree_path ?? scratchPath ?? this.config.dir;
     if (envelope.repository && !options.worktree && !row.worktree_path) {
+      // P0-6 (§C.2.2 lineage): an autopilot task starts at its reservation commit, never at the
+      // composer's base or the clone's HEAD, so the publication is a fast-forward of `os/<item>`.
+      const autopilotBase = this.autopilot?.baseCommitOf(taskId);
+      if (this.autopilot?.owns(taskId) && !autopilotBase) throw new Error(`Task ${taskId} is an autopilot task with no reservation commit`);
+      const baseCommit = autopilotBase ?? options.composition?.baseCommit;
       const worktree = await this.parallelContinuationWorktree(taskId, envelope.repository.path) ?? await createTaskWorktree(
         envelope.repository.path,
         envelope.taskId,
         worktreesRoot(this.config, row.run_as),
-        ...(options.composition?.baseCommit !== undefined ? [{ baseCommit: options.composition.baseCommit }] : []),
+        ...(baseCommit !== undefined ? [{ baseCommit }] : []),
       );
       workdir = worktree.path;
       if (runAs) shareWorktreeWithGroup(worktree.path); // the agent user edits it as a group member
