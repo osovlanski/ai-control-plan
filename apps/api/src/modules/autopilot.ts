@@ -655,6 +655,25 @@ export class AutopilotService {
     if (settled) try { this.onSettled?.(); } catch { /* a trigger; the dispatcher's timer covers a lost one */ }
   }
 
+  /**
+   * P0-6: a task that ends before any session starts (a launch refusal, a stale capability record,
+   * a worktree or adapter failure) never reaches `afterSettle`, so its `admitted` attempt would
+   * wait for ever and hold the one attempt slot. The dispatcher calls this for an `admitted`
+   * attempt: a FAILED or CANCELLED task with no live session ends it (§C.2.1: `failed` or
+   * `cancelled`), and the per-item retry rule applies as for any other failure.
+   */
+  taskEndedBeforeStart(attemptId: string): AutopilotAttempt | undefined {
+    return this.db.transaction(() => {
+      const attempt = this.row(attemptId);
+      if (!attempt || attempt.state !== "admitted" || !attempt.task_id || this.liveSession(attempt.id)) return undefined;
+      const state = this.d.tasks.get(attempt.task_id)?.state as TaskState | undefined;
+      if (state === "FAILED") this.finalize(attempt, "failed", "task failed before a session started");
+      else if (state === "CANCELLED") this.finalize(attempt, "cancelled", "task cancelled before a session started");
+      else return undefined;
+      return this.attempt(attemptId);
+    })();
+  }
+
   /** P0-6: the attempt's task state, for the dispatcher (a `suspended` attempt with a completed task goes to acceptance). */
   taskState(taskId: string): TaskState | undefined {
     return this.d.tasks.get(taskId)?.state as TaskState | undefined;

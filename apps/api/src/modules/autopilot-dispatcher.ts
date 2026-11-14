@@ -343,6 +343,15 @@ export class AutopilotDispatcher {
         this.runInBackground(a.id, `publish:${a.id}`, () => this.d.publications.publish(pub.id));
         return drove("publication resumed");
       }
+      case "admitted": {
+        // The task ended before any session started: nothing else will move this attempt.
+        const ended = this.d.autopilot.taskEndedBeforeStart(a.id);
+        if (ended) {
+          this.log("warn", `attempt ${a.id} ${ended.state}: ${ended.reason}`);
+          return drove(`${ended.state}: ${ended.reason}`);
+        }
+        return drove(`${a.state}: moved by the scheduler, the sweep or itay`);
+      }
       default:
         return drove(`${a.state}: moved by the scheduler, the sweep or itay`);
     }

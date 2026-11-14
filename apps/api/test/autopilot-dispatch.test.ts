@@ -459,6 +459,25 @@ describe("retries", () => {
     expect(gh.refCreates.map((c) => c.answer)).toEqual(["201", "422"]);
   });
 
+  it("a task that fails before any session started ends its attempt instead of holding the slot (first live run)", async () => {
+    // Live, the launch was refused ("requires an adapter that can launch as the agent user"): the
+    // task went FAILED with no session, so nothing settled and the attempt stayed `admitted`.
+    await boot([{ id: "item-a" }]);
+    open();
+    await dispatcher().tick();
+    const a = ap().currentAttempt()!;
+    expect(a).toMatchObject({ state: "admitted", attemptNo: 1 });
+    expect(await dispatcher().tick()).toMatchObject({ action: "drove", state: "admitted" }); // a healthy wait is left alone
+    // The end state a refused launch leaves (the scheduler owns the transition, so set it directly).
+    rig!.db.prepare("UPDATE tasks SET state = 'FAILED' WHERE id = ?").run(a.taskId);
+    const out = await dispatcher().tick();
+    expect(out).toMatchObject({ action: "drove", attemptId: a.id, state: "failed", detail: expect.stringContaining("failed before a session started") });
+    expect(ap().attempt(a.id)).toMatchObject({ state: "failed", reason: "task failed before a session started" });
+    // The retry rule applies as for any failure: attempt 2 reuses the untouched reservation.
+    await dispatcher().tick();
+    expect(ap().currentAttempt()).toMatchObject({ attemptNo: 2, state: "admitted", reservationOutcome: "reused", reservationSha: a.reservationSha });
+  });
+
   it("a failed attempt's ref that carries pushed work is left for itay, and attempts run out", async () => {
     await boot([{ id: "item-a" }]);
     await failFirstAttempt(() => { gh.pushWork("item-a"); });
