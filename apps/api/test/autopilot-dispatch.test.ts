@@ -181,6 +181,7 @@ async function boot(items: Item[]): Promise<Rig> {
       chmodSync(join(tree, "profiles"), 0o2750);
       config.execution.agentUser = { ...AGENT_USER_DEFAULTS, profilesRoot: join(tree, "profiles"), worktreesRoot: join(tree, "worktrees") };
       config.scheduler = { ...config.scheduler!, resources: { "oci-heavy": 1 } };
+      config.policy.approvalMode = "prompt-on-escalation"; // the workspace prompts; an unattended autopilot session must not
       config.autopilot.repos = { "ai-control-plan": { github: REPO, path: repo, base: "main" } };
       // origin: a bare repository holding main with the backlog on it.
       const bare = join(root, "origin.git");
@@ -437,6 +438,43 @@ describe("lineage and recovery (G23, G24)", () => {
   });
 });
 
+describe("approvals of an unattended session", () => {
+  const approvalOf = (taskId: string) => {
+    const rows = rig!.db.prepare("SELECT request_json FROM execution_requests WHERE task_id = ? AND superseded = 0").all(taskId) as Array<{ request_json: string }>;
+    expect(rows.length).toBeGreaterThan(0);
+    return rows.map((r) => (JSON.parse(r.request_json) as { policy: { approval: { mode: string } } }).policy.approval.mode);
+  };
+
+  it("an autopilot launch as the agent user is approval-free, though the workspace prompts (first live run: the approval expired and blocked the attempt)", async () => {
+    await boot([{ id: "item-a" }]);
+    expect(rig!.config.policy.approvalMode).toBe("prompt-on-escalation");
+    open();
+    await dispatcher().tick();
+    const a = ap().currentAttempt()!;
+    expect(rig!.built.tasks.get(a.taskId!)!.run_as).toBe("agent");
+    await runTask(a.taskId!);
+    expect(approvalOf(a.taskId!)).toEqual(["auto-approve"]);
+    ap().stop("now", "test"); // nothing may start behind the teardown
+    await dispatcher().tick();
+    await dispatcher().idle();
+  });
+
+  it("autopilot.approvalMode: prompt-on-escalation keeps the workspace prompt", async () => {
+    await boot([{ id: "item-a" }]);
+    rig!.config.autopilot.approvalMode = "prompt-on-escalation";
+    open();
+    await dispatcher().tick();
+    const a = ap().currentAttempt()!;
+    const done = reaches(rig!.built, a.taskId!, ["COMPLETED", "FAILED", "CANCELLED", "WAITING_INPUT"]);
+    await rig!.built.scheduler.tick();
+    await done;
+    expect(approvalOf(a.taskId!)).toEqual(["prompt-on-escalation"]);
+    ap().stop("now", "test");
+    await dispatcher().tick();
+    await dispatcher().idle();
+  });
+});
+
 describe("retries", () => {
   /** Attempt 1 runs, acceptance fails (no item-a.txt), `duringAcceptance` runs, and the loop then moves on by itself. */
   async function failFirstAttempt(duringAcceptance?: () => void): Promise<string> {
@@ -519,6 +557,9 @@ describe("config and the GitHub token file", () => {
     expect(() => load(`  github: { tokenFile: rel }`)).toThrow(/absolute/);
     expect(() => load(`  github: { tokenFile: /t, apiBase: "http://evil" }`)).toThrow(/https/);
     expect(() => load(`  dispatchIntervalMs: 10`)).toThrow(/at least 5000/);
+    expect(load(`  attemptsPerItem: 3`).autopilot.approvalMode).toBe("auto-approve");
+    expect(load(`  approvalMode: prompt-on-escalation`).autopilot.approvalMode).toBe("prompt-on-escalation");
+    expect(() => load(`  approvalMode: read-only`)).toThrow(/auto-approve or prompt-on-escalation/);
   });
 
   it("reads the token only from a private regular file of this user, as an auth error otherwise", async () => {

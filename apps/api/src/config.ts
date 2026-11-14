@@ -295,6 +295,13 @@ export interface ResolvedAutopilotConfig {
   /** P0-6: which entry of `repos` holds `docs/progress/backlog.yaml` (read at `origin/main`). */
   backlogRepo: string;
   /**
+   * The approval mode of an autopilot session that runs as the agent user. Nobody is there to answer
+   * an approval, which expires after 30 minutes and blocks the attempt (§C.2.8), so the default is
+   * `auto-approve`: the aos-agent sandbox (no network, worktree-only writes) is the boundary, not the
+   * prompt. It never loosens `policy.approvalMode: read-only`, and it applies to no other task.
+   */
+  approvalMode: "auto-approve" | "prompt-on-escalation";
+  /**
    * P0-6: the plane user's GitHub token for reservations and publications. The file must be a
    * regular file owned by the plane user with no group or other bits, and is read per request.
    * Absent = no dispatcher and no publication sweep.
@@ -305,7 +312,7 @@ export interface AutopilotRepoConfig { github: string; path: string; base: strin
 export const AUTOPILOT_DEFAULTS: Omit<ResolvedAutopilotConfig, "repos"> & { repos: Readonly<Record<string, AutopilotRepoConfig>> } = {
   pool: "oci-heavy", runtimeBudgetMs: 90 * 60_000, attemptsPerItem: 2, itemsPerWindow: 3,
   minSliceMs: 10 * 60_000, graceMs: 2 * 60_000, hostRetryMs: 2 * 60_000, attestationMaxAgeDays: 30,
-  dispatchIntervalMs: 60_000, repos: {}, backlogRepo: "ai-control-plan",
+  dispatchIntervalMs: 60_000, repos: {}, backlogRepo: "ai-control-plan", approvalMode: "auto-approve",
 };
 const AUTOPILOT_KEYS = [...Object.keys(AUTOPILOT_DEFAULTS), "github"];
 
@@ -328,6 +335,10 @@ function resolveAutopilot(file: unknown, configPath: string): ResolvedAutopilotC
   // The scope's RuntimeMaxSec is bounded by the wrapper at four hours; a longer budget could never launch.
   if (out.runtimeBudgetMs > 4 * 3_600_000) throw new Error(`${configPath}: autopilot.runtimeBudgetMs must be at most four hours`);
   if (out.graceMs >= out.minSliceMs) throw new Error(`${configPath}: autopilot.graceMs must be below autopilot.minSliceMs`);
+  if (file.approvalMode !== undefined) {
+    if (file.approvalMode !== "auto-approve" && file.approvalMode !== "prompt-on-escalation") throw new Error(`${configPath}: autopilot.approvalMode must be auto-approve or prompt-on-escalation`);
+    out.approvalMode = file.approvalMode;
+  }
   if (out.dispatchIntervalMs < 5_000) throw new Error(`${configPath}: autopilot.dispatchIntervalMs must be at least 5000`);
   if (file.repos !== undefined) {
     if (!isRecord(file.repos)) throw new Error(`${configPath}: autopilot.repos must be a mapping of backlog repo name to { github, path, base }`);

@@ -30,7 +30,7 @@ import {
   type ComposerConfig, type ComposerInputs, type ComposerOptIn, type ComposerOutcome, type ComposerOverrides, type ConfirmInput, type RegistryView,
   type RoutingExplanation, type TaskIntent, type TaskKind,
 } from "@agent-plane/core";
-import type { ResolvedConfig } from "../../config.js";
+import type { ApprovalMode, ResolvedConfig } from "../../config.js";
 import type { Db } from "../../db/index.js";
 import type { CompositionDecision } from "../../composition-contract.js";
 import type { ShadowAttempt } from "../asset-shadow.js";
@@ -66,6 +66,12 @@ export interface ComposerServiceDeps extends RouteDeps {
   assetShadow?: { record(attempt: ShadowAttempt): void };
   /** O6 S3: logs a memory shadow verdict per pinned bundle of an attempt that reached stage 4. Never feeds back. */
   memoryShadow?: { record(attempt: MemoryShadowAttempt): void };
+  /**
+   * An autopilot task that runs as the agent user starts from `autopilot.approvalMode` instead of the
+   * workspace approval mode: nobody answers its approvals, which expire and block the attempt (§C.2.8).
+   * Absent = the workspace mode for every task.
+   */
+  autopilotOwns?: (taskId: string) => boolean;
 }
 
 export interface PreviewResponse {
@@ -545,7 +551,7 @@ export class ComposerService implements DispatchComposer {
       optIns: this.optIns(taskId),
       environment: this.environment(registry),
       config,
-      workspacePolicy: { policyId: WORKSPACE_POLICY_ID, approvalMode: this.config.policy.approvalMode, toolAllowlist: [] },
+      workspacePolicy: { policyId: WORKSPACE_POLICY_ID, approvalMode: this.workspaceApprovalMode(taskId, row.run_as), toolAllowlist: [] },
       // What the task's runs have settled so far (S6): a failover revision gets only the remainder.
       consumed: this.accounting.consumption(taskId),
       ...(budgetShare !== undefined ? { budgetShare: { candidates: budgetShare } } : {}),
@@ -553,6 +559,13 @@ export class ComposerService implements DispatchComposer {
       confirm,
       forbiddenHostnames: this.forbiddenHostnames(),
     };
+  }
+
+  /** The approval mode a task's composition starts from; `read-only` is never loosened. */
+  private workspaceApprovalMode(taskId: string, runAs: string | null | undefined): ApprovalMode {
+    const workspace = this.config.policy.approvalMode;
+    if (workspace === "read-only") return workspace;
+    return runAs === "agent" && this.deps.autopilotOwns?.(taskId) ? this.config.autopilot.approvalMode : workspace;
   }
 
   /** The machine's hostname and the Cockpit base URL host. */

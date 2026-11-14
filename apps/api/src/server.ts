@@ -746,6 +746,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
       assetShadow,
       memoryShadow,
       db, config, tasks, registry, cooldowns, now, ...(modelCatalog ? { catalog: modelCatalog } : {}),
+      autopilotOwns: (taskId) => autopilot.owns(taskId),
       federation: registryFederation,
       bundled: new BundledComposition(db, new CockpitBundleClient(config.registry.cockpit.baseUrl, config.registry.cockpit.tokenPath), {
         enabled: config.registry.cockpit.enabled, logger: app.log,
