@@ -158,6 +158,20 @@ export function hostGateFromConfig(config: ResolvedConfig, plane?: PlaneWindows,
   };
 }
 
+/**
+ * P0-6: acceptance's "the run's scope is empty" (§C.2.7 step 2) on the real slice. Only the
+ * census, not the floors: acceptance follows a settled session of the same attempt. Absent agent
+ * user = not idle; an unreadable slice throws, which the runner reads as not idle.
+ */
+export function agentIdleFromConfig(config: ResolvedConfig, probes: HostProbes = REAL_PROBES): () => HostGateResult {
+  return () => {
+    const agent = config.execution.agentUser;
+    if (!agent) return { ok: false, detail: "execution.agentUser is not configured" };
+    const busy = agentSliceCensus(probes, uidOf(readFileSync(probes.passwdPath, "utf8"), agent.user));
+    return busy.length === 0 ? { ok: true } : { ok: false, detail: `agent slice is not empty: ${busy.slice(0, 3).join("; ")}` };
+  };
+}
+
 /* ------------------------------------------------------- close schedule -- */
 
 /**

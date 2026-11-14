@@ -8,6 +8,7 @@
  * below the floor; then the same four through the real scheduler and launch check. The real
  * kernel tree and the close timer (G20) run on the OCI box: `docs/autopilot/p0-3-host-drive.md`.
  */
+import { execFileSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -225,7 +226,7 @@ function openAndAdmit() {
   ap().addWindow({ opensAt: at(instant - MIN), closesAt: at(instant + 8 * 60 * MIN), maxItems: 3 }, "op_test");
   ap().attest({ extraUsageOff: true, autoReloadOff: true }, "op_test");
   ap().start("op_test");
-  const reserved = ap().reserve({ itemId: "item-1", reservationId: "res-1", reservationSha: "0".repeat(40) });
+  const reserved = ap().reserve({ itemId: "item-1", reservationId: "res-1", reservationSha: execFileSync("git", ["-C", rig!.repo, "rev-parse", "HEAD"], { encoding: "utf8" }).trim() });
   return ap().admit(reserved.id, { goal: "Ship the feature", repoPath: rig!.repo }).taskId!;
 }
 async function sweep(taskId: string, states: readonly string[]) {

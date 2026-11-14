@@ -107,6 +107,8 @@ export interface RigOptions {
   memoryShadowScorer?: ServerDeps["memoryShadowScorer"];
   /** P0-2: the autopilot's host gate (§C.2.6). */
   autopilotHostGate?: ServerDeps["autopilotHostGate"];
+  /** P0-6: any other server dependency (fake GitHub, acceptance executor, ...). */
+  serverDeps?: Partial<ServerDeps>;
 }
 
 const GIT_ENV = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.invalid", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.invalid" };
@@ -148,6 +150,7 @@ export async function bootRig(options: RigOptions = {}): Promise<Rig> {
     ...(options.assetShadowScorer ? { assetShadowScorer: options.assetShadowScorer } : {}),
     ...(options.memoryShadowScorer ? { memoryShadowScorer: options.memoryShadowScorer } : {}),
     ...(options.autopilotHostGate ? { autopilotHostGate: options.autopilotHostGate } : {}),
+    ...(options.serverDeps ?? {}),
   });
   built.registry.init();
   await built.registry.syncAll();

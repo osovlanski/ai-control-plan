@@ -36,8 +36,10 @@ import { TaskEventBus } from "./modules/sse.js";
 import { TaskStageReader } from "./modules/task-stage.js";
 import { Scheduler } from "./modules/scheduler.js";
 import { AutopilotService, AutopilotStartRefused, type AutopilotDeps } from "./modules/autopilot.js";
-import { PublicationRefused, PublicationService, type PublicationGit, type PublicationGitHub } from "./modules/publications.js";
-import { hostGateFromConfig, syncCloseSchedule } from "./modules/host-admission.js";
+import { GitHubRestClient, PublicationRefused, PublicationService, readGitHubTokenFile, type PublicationGit, type PublicationGitHub, type ReservationGitHub } from "./modules/publications.js";
+import { agentIdleFromConfig, hostGateFromConfig, syncCloseSchedule } from "./modules/host-admission.js";
+import { AcceptanceRunner, agentAcceptanceExecutor, type AcceptanceExecutor } from "./modules/acceptance-run.js";
+import { AutopilotDispatcher, type DispatchGit } from "./modules/autopilot-dispatcher.js";
 import { QuotaProbeService, type QuotaProbeFn } from "./modules/quota-probe.js";
 import { ModelCatalogService, CATALOG_REVISION, type CatalogSource } from "./modules/model-catalog.js";
 import { RegistryFederation } from "./modules/registry-federation.js";
@@ -88,6 +90,19 @@ export interface ServerDeps {
   autopilotGit?: PublicationGit;
   /** P0-5: injectable backoff sleep for publication reads (tests). */
   publicationSleep?: (ms: number) => Promise<void>;
+  /**
+   * P0-6: GitHub for reservations. Defaults to `autopilotGitHub` when that also implements the
+   * reservation calls, else to a REST client on `autopilot.github.tokenFile`.
+   */
+  autopilotReservationGitHub?: ReservationGitHub;
+  /** P0-6: the dispatcher's local git (fetch, rev-parse, show, commit-tree). */
+  autopilotDispatchGit?: DispatchGit;
+  /** P0-6: the acceptance executor. Defaults to `setup/accept-as-agent` when an agent user is configured. TEST-ONLY when not offline. */
+  acceptanceExecutor?: AcceptanceExecutor;
+  /** P0-6: where acceptance snapshots go. Defaults to `<agent worktreesRoot>/acceptance`. */
+  acceptanceSnapshotsRoot?: string;
+  /** P0-6: the acceptance "scope is empty" probe. Defaults to the agent slice census. */
+  acceptanceAgentIdle?: () => { ok: true } | { ok: false; detail: string };
   quotaProbes?: QuotaProbeService;
   /** Overrides the idle quota probe transport (K3) when `quotaProbes` is not supplied. Test/demo only. */
   quotaProbeFn?: QuotaProbeFn;
@@ -129,6 +144,9 @@ export interface BuiltServer {
   scheduler: Scheduler;
   autopilot: AutopilotService;
   publications: PublicationService;
+  /** P0-6: absent when the instance has no acceptance executor (no agent user). */
+  acceptance?: AcceptanceRunner;
+  dispatcher: AutopilotDispatcher;
   quotaProbes: QuotaProbeService;
   modelCatalog: ModelCatalogService;
   registryFederation: RegistryFederation;
@@ -202,9 +220,17 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   // P0-3: the real host gate (§C.2.6) unless a test injects one. It is fail-closed: without
   // `scheduler.admission.<pool>` every autopilot launch is refused `host_busy`.
   const autopilot: AutopilotService = new AutopilotService({ db, config, tasks, now, hostGate: deps.autopilotHostGate ?? hostGateFromConfig(config, { windows: () => autopilot.windows(), openWindow: () => autopilot.openWindow(), now }) });
+  // P0-6: the production GitHub client, on the plane user's token file (read per request).
+  const restGitHub = config.autopilot.github
+    ? new GitHubRestClient({ token: () => readGitHubTokenFile(config.autopilot.github!.tokenFile), ...(config.autopilot.github.apiBase ? { apiBase: config.autopilot.github.apiBase } : {}) })
+    : undefined;
+  const publicationGitHub = deps.autopilotGitHub ?? restGitHub;
+  const reservationGitHub = deps.autopilotReservationGitHub
+    ?? (deps.autopilotGitHub && "createRef" in deps.autopilotGitHub ? deps.autopilotGitHub as unknown as ReservationGitHub : undefined)
+    ?? (deps.autopilotGitHub ? undefined : restGitHub);
   const publications = new PublicationService({
     db, autopilot, now,
-    ...(deps.autopilotGitHub ? { github: deps.autopilotGitHub } : {}),
+    ...(publicationGitHub ? { github: publicationGitHub } : {}),
     ...(deps.autopilotGit ? { git: deps.autopilotGit } : {}),
     ...(deps.publicationSleep ? { sleep: deps.publicationSleep } : {}),
   });
@@ -214,6 +240,27 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     catch (err) { app.log.error({ err }, "close schedule not written"); }
   };
   syncSchedule();
+  // P0-6: acceptance (P0-4) on the agent wrapper, only where an agent user exists (or a test injects an executor).
+  const agentUser = config.execution.agentUser;
+  const backlogRepo = config.autopilot.repos[config.autopilot.backlogRepo];
+  const acceptanceExecutor = deps.acceptanceExecutor ?? (agentUser ? agentAcceptanceExecutor(agentUser) : undefined);
+  const acceptance = acceptanceExecutor && backlogRepo && (deps.acceptanceSnapshotsRoot || agentUser)
+    ? new AcceptanceRunner({
+      db, now, executor: acceptanceExecutor, bounds: config.autopilot,
+      backlog: { repoPath: backlogRepo.path },
+      snapshotsRoot: deps.acceptanceSnapshotsRoot ?? join(agentUser!.worktreesRoot, "acceptance"),
+      agentIdle: deps.acceptanceAgentIdle ?? agentIdleFromConfig(config),
+      ...(acceptanceExecutor.offline ? {} : { allowOnlineExecutor: true }),
+    })
+    : undefined;
+  const dispatcher = new AutopilotDispatcher({
+    config, autopilot, publications, now,
+    ...(acceptance ? { acceptance } : {}),
+    ...(reservationGitHub ? { github: reservationGitHub } : {}),
+    ...(deps.autopilotDispatchGit ? { git: deps.autopilotDispatchGit } : {}),
+    log: (level, msg) => app.log[level](msg),
+  });
+  autopilot.onSettled = () => dispatcher.kick();
   const composed = buildHarnessComposition({
     db,
     config,
@@ -485,22 +532,25 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     if (err instanceof AutopilotStartRefused) return reply.status(409).send({ error: "autopilot_start_refused", setting: err.setting, detail: err.message });
     return reply.status(400).send({ error: err instanceof Error ? err.message : String(err) });
   };
-  app.get("/api/autopilot", read.tasks, () => ({ ...autopilot.status(), windows: autopilot.windows(), attempts: autopilot.attempts(20) }));
+  app.get("/api/autopilot", read.tasks, () => ({ ...autopilot.status(), windows: autopilot.windows(), attempts: autopilot.attempts(20), dispatcher: dispatcher.status() }));
   app.post("/api/autopilot/start", operate, (req, reply) => {
-    try { return autopilot.start(operatorKid(req)); } catch (err) { return autopilotError(reply, err); }
+    try { const started = autopilot.start(operatorKid(req)); dispatcher.kick(); return started; } catch (err) { return autopilotError(reply, err); }
   });
   app.post("/api/autopilot/release", operate, (_req, reply) => {
-    try { return { released: autopilot.release(), autopilot: autopilot.status() }; } catch (err) { return reply.status(409).send({ error: err instanceof Error ? err.message : String(err) }); }
+    try { const released = autopilot.release(); dispatcher.kick(); return { released, autopilot: autopilot.status() }; } catch (err) { return reply.status(409).send({ error: err instanceof Error ? err.message : String(err) }); }
   });
+  // P0-6: one dispatcher tick now, the same the timer runs (selectNext, acceptance, publication).
+  app.post("/api/autopilot/dispatch", operate, async () => ({ tick: await dispatcher.tick(), dispatcher: dispatcher.status(), autopilot: autopilot.status() }));
+  app.get<{ Params: { id: string } }>("/api/autopilot/attempts/:id/acceptance", read.tasks, (req) => ({ runs: acceptance?.runs(req.params.id) ?? [] }));
   app.get("/api/autopilot/publications", read.tasks, () => ({ publications: publications.list(50) }));
   app.post<{ Params: { id: string }; Body: { action?: unknown } }>("/api/autopilot/publications/:id/resolve", operate, async (req, reply) => {
-    try { return await publications.resolve(req.params.id, req.body?.action, operatorKid(req)); } catch (err) {
+    try { const resolved = await publications.resolve(req.params.id, req.body?.action, operatorKid(req)); dispatcher.kick(); return resolved; } catch (err) {
       if (err instanceof PublicationRefused) return reply.status(409).send({ error: err.message });
       throw err;
     }
   });
   app.post<{ Body: { opensAt?: unknown; closesAt?: unknown; maxItems?: unknown } }>("/api/autopilot/windows", operate, (req, reply) => {
-    try { return reply.status(201).send(autopilot.addWindow(req.body ?? {}, operatorKid(req))); } catch (err) { return autopilotError(reply, err); }
+    try { const window = autopilot.addWindow(req.body ?? {}, operatorKid(req)); dispatcher.kick(); return reply.status(201).send(window); } catch (err) { return autopilotError(reply, err); }
   });
   app.post<{ Body: { extraUsageOff?: unknown; autoReloadOff?: unknown } }>("/api/autopilot/attestations", operate, (req, reply) => {
     try { return reply.status(201).send(autopilot.attest({ extraUsageOff: req.body?.extraUsageOff, autoReloadOff: req.body?.autoReloadOff }, operatorKid(req))); } catch (err) { return autopilotError(reply, err); }
@@ -509,6 +559,8 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     const mode = req.body?.mode ?? "now";
     if (mode !== "now" && mode !== "drain") return reply.status(400).send({ error: "mode must be now or drain" });
     const stopped = autopilot.stop(mode, "operator");
+    // §C.2.9 `stop now` in `accepting`: stop the acceptance scope now (its poll would within a second).
+    if (mode === "now") acceptance?.stopNow();
     // §C.2.9 `stop now` on a running attempt: cancel the session, which stops its scope.
     if (stopped.cancelTaskId) await scheduler.cancel(stopped.cancelTaskId);
     return autopilot.status();
@@ -1345,7 +1397,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     void publications.sweep().catch((err) => app.log.error(err, "publication sweep failed"));
   }, 60_000);
   publicationSweep.unref();
-  app.addHook("onClose", async () => { clearInterval(leaseSweep); clearInterval(publicationSweep); scheduler.stop(); });
+  app.addHook("onClose", async () => { clearInterval(leaseSweep); clearInterval(publicationSweep); dispatcher.stop(); scheduler.stop(); });
   // ---- Durable session-addressed conversational input (default OFF) ----
   //
   // The whole capability is behind `sessionInput.enabled`. While it is false
@@ -1571,7 +1623,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     });
   }
 
-  return { app, registry, orchestrator, tasks, bus, checkpoints, cooldowns, telemetry, scheduler, autopilot, publications, quotaProbes: probes, modelCatalog, registryFederation, memoryFederation, sessionInputs, sessionInputRedelivery };
+  return { app, registry, orchestrator, tasks, bus, checkpoints, cooldowns, telemetry, scheduler, autopilot, publications, ...(acceptance ? { acceptance } : {}), dispatcher, quotaProbes: probes, modelCatalog, registryFederation, memoryFederation, sessionInputs, sessionInputRedelivery };
 }
 
 function sseHeaders(reply: FastifyReply): void {
