@@ -129,7 +129,13 @@ export class Registry {
     const probe = await this.capabilityProbe(provider, this.config.assistants[id]?.options ?? {});
     const previous = this.db.prepare("SELECT fingerprint,details FROM capability_probes WHERE assistant_id=?").get(id) as { fingerprint: string; details: string } | undefined;
     const previousDetails = previous ? JSON.parse(previous.details) as Record<string, unknown> : undefined;
-    const changed = !previous || previous.fingerprint !== probe.fingerprint || !this.manifest(id);
+    // The probe sees the CLI, not this workspace's launch settings. An adapter's declared
+    // capabilities depend on them too (`execution.agentUser` makes the Claude adapter declare
+    // `harness.agentUser`), so a change there re-describes it. A row from before this field
+    // reads as "not configured", so an unchanged workspace is not re-described.
+    const agentConfigured = this.config.execution.agentUser !== undefined;
+    const changed = !previous || previous.fingerprint !== probe.fingerprint || !this.manifest(id)
+      || (previousDetails?.agentLauncher === true) !== agentConfigured;
     let manifest = this.manifest(id);
     if (changed) {
       // describe() IS the runtime probe and outranks anything scraped from local
@@ -154,7 +160,7 @@ export class Registry {
     }
     this.db.prepare(`INSERT INTO capability_probes (assistant_id,fingerprint,details,observed_at) VALUES (?,?,?,?)
       ON CONFLICT(assistant_id) DO UPDATE SET fingerprint=excluded.fingerprint,details=excluded.details,observed_at=excluded.observed_at`)
-      .run(id, probe.fingerprint, JSON.stringify(probe), now);
+      .run(id, probe.fingerprint, JSON.stringify({ ...probe, agentLauncher: agentConfigured }), now);
     const insert = this.db.prepare("INSERT INTO quota_snapshots (assistant_id,window,used_percent,resets_at,source,observed_at) VALUES (?,?,?,?,?,?)");
     for (const limit of manifest?.core.limits ?? []) insert.run(id, limit.window, limit.usedPercent, limit.resetsAt ?? null, limit.source, limit.observedAt);
     return { changed, manifest };
