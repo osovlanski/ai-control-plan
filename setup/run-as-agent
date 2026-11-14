@@ -3,13 +3,7 @@
 # aos-agent (sudoers.d/aos). docs/agentic-os-auto-copilot-plan.md §C.0, P0-A2.
 #
 #   run-as-agent run <id> <max-seconds> <cwd> -- <cmd> [args...]
-#   run-as-agent accept <id> <max-seconds> <cwd> -- <cmd> [args...]
 #   run-as-agent stop <id>
-#
-# `accept` (P0-4, §C.2.7) is `run` with no network: <cmd> starts in a new user and network
-# namespace with only its own loopback up (tests that serve on 127.0.0.1 keep working; nothing
-# routes out, and the host's loopback services are not in that namespace). Only aos-agent's own
-# uid is mapped (to 0 inside), so plane-owned files of the read-only snapshot stay read-only.
 #
 # `run` starts <cmd> in a transient scope `aos-run-<id>` of aos-agent's user manager, killed
 # after <max-seconds> whatever the plane does. `stop` stops that scope. Every argument is
@@ -31,7 +25,7 @@ case "$mode" in
     [ "$#" -eq 2 ] || exit 64
     # A unit that already ended is not an error for the caller.
     systemctl --user stop "$unit.scope" 2>/dev/null || true ;;
-  run|accept)
+  run)
     secs="${3:-}"; cwd="${4:-}"; [ "${5:-}" = "--" ] || exit 64
     [[ "$secs" =~ ^[0-9]{1,5}$ ]] && [ "$secs" -ge 1 ] && [ "$secs" -le 14400 ] || { echo "run-as-agent: bad seconds" >&2; exit 64; }
     # Resolve first: a pattern match on the raw string would accept /var/lib/aos/worktrees/../..
@@ -40,9 +34,6 @@ case "$mode" in
     [ -d "$real" ] || exit 64
     shift 5
     [ "$#" -ge 1 ] || exit 64
-    if [ "$mode" = accept ]; then
-      set -- /usr/bin/unshare --user --map-root-user --net -- /bin/sh -c '/usr/sbin/ip link set lo up || exit 70; exec "$@"' aos-accept "$@"
-    fi
     exec systemd-run --user --scope --quiet --collect --unit="$unit" \
       -p RuntimeMaxSec="$secs" -p TimeoutStopSec=5 -p MemoryMax=1500M -p TasksMax=256 \
       --working-directory="$real" -- "$@" ;;

@@ -305,26 +305,36 @@ describe("G25 stop and the window during acceptance", () => {
 });
 
 describe("agent executor", () => {
-  it("calls the wrapper's accept mode with a bounded scope and a shell command", async () => {
+  it("calls the root accept wrapper (its own sudoers line) with a bounded scope and a shell command", async () => {
     const root = mkdtempSync(join(tmpdir(), "acc-sudo-"));
     const fakeSudo = join(root, "sudo");
     writeFileSync(fakeSudo, `#!/bin/sh\nfor a in "$@"; do printf '%s\\n' "$a"; done\n`);
     chmodSync(fakeSudo, 0o755);
-    const exec = agentAcceptanceExecutor({ sudo: fakeSudo, user: "aos-agent", group: "aos", wrapper: "/usr/local/lib/aos/run-as-agent" });
+    const exec = agentAcceptanceExecutor({ sudo: fakeSudo, wrapper: "/usr/local/lib/aos/run-as-agent" });
     expect(exec.offline).toBe(true);
     const res = await exec.exec({ unit: "acc-abc-1", cwd: "/var/lib/aos/worktrees/acceptance/acr_1", command: "pnpm test", timeoutMs: 90_500 }, new AbortController().signal);
     expect(res.output.trim().split("\n")).toEqual([
-      "-n", "-u", "aos-agent", "-g", "aos", "--", "/usr/local/lib/aos/run-as-agent",
-      "accept", "acc-abc-1", "91", "/var/lib/aos/worktrees/acceptance/acr_1", "--", "/bin/sh", "-c", "pnpm test",
+      "-n", "--", "/usr/local/lib/aos/accept-as-agent",
+      "run", "acc-abc-1", "91", "/var/lib/aos/worktrees/acceptance/acr_1", "--", "/bin/sh", "-c", "pnpm test",
     ]);
     await expect(exec.exec({ unit: "bad unit", cwd: "/", command: "x", timeoutMs: 1000 }, new AbortController().signal)).rejects.toThrow(/safe unit/);
     rmSync(root, { recursive: true, force: true });
   });
 
-  it("the wrapper source has the accept mode with no network", () => {
-    const src = readFileSync(join(__dirname, "../../../setup/run-as-agent"), "utf8");
-    expect(src).toContain("run|accept)");
-    expect(src).toContain("set -- /usr/bin/unshare --user --map-root-user --net -- /bin/sh -c '/usr/sbin/ip link set lo up || exit 70; exec \"$@\"' aos-accept \"$@\"");
+  it("the accept wrapper makes the namespace as root, then drops to aos-agent before the command", () => {
+    const src = readFileSync(join(__dirname, "../../../setup/accept-as-agent"), "utf8");
+    expect(src).toContain('[ "$(id -u)" = 0 ] ||');
+    const chain = src.slice(src.indexOf("exec systemd-run --scope"));
+    const order = ["-p RuntimeMaxSec=\"$secs\"", "/usr/bin/unshare --net --", "/usr/sbin/ip link set lo up || exit 70",
+      "/usr/bin/setpriv --reuid=\"$AGENT\" --regid=\"$GROUP\" --init-groups --no-new-privs --inh-caps=-all --bounding-set=-all", "/usr/bin/env -i"];
+    const at = order.map((s) => chain.indexOf(s));
+    expect(at.every((i) => i > 0)).toBe(true);
+    expect([...at].sort((a, b) => a - b)).toEqual(at);
+    expect(src).not.toContain("--user");
+    const sudoers = readFileSync(join(__dirname, "../../../setup/sudoers.d/aos"), "utf8");
+    expect(sudoers).toContain("ubuntu ALL=(root) NOPASSWD: /usr/local/lib/aos/accept-as-agent\n");
+    // The agent wrapper itself is unchanged: no accept mode there.
+    expect(readFileSync(join(__dirname, "../../../setup/run-as-agent"), "utf8")).not.toContain("accept");
   });
 });
 

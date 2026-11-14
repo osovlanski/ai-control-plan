@@ -11,10 +11,10 @@
  *    reservation commit must be an ancestor of that SHA (§C.2.2).
  * 3. **A fresh snapshot per run.** `git worktree add --detach <sha>` into a new directory for
  *    every `run_no`, never reused. Tracked files are made read-only (0440, 0550 when executable;
- *    directories 0550); only the item's declared `writable` paths are 2770.
+ *    directories 2550); only the item's declared `writable` paths are 2770.
  * 4. **Offline.** Commands run through an `AcceptanceExecutor` that must declare itself offline.
- *    The production one is the agent wrapper's `accept` mode: `aos-agent`, its own systemd scope
- *    with `RuntimeMaxSec`, and a new network namespace (no interfaces but a down loopback).
+ *    The production one is `setup/accept-as-agent`: root makes a network namespace with only
+ *    `lo` up, then drops to `aos-agent:aos`, in its own systemd scope with `RuntimeMaxSec`.
  * 5. **Capped.** Each command runs under `min(its timeoutSec, the run's deadline)`, where the
  *    deadline is `min(now + budget − used, closes_at − graceMs)` (§C.2.3); acceptance time is
  *    charged to the attempt's runtime budget like a provider session.
@@ -33,7 +33,7 @@
 import { spawn, execFile, type ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, rmSync, symlinkSync } from "node:fs";
-import { isAbsolute, join, normalize, sep } from "node:path";
+import { dirname, isAbsolute, join, normalize, sep } from "node:path";
 import { promisify } from "node:util";
 import { parse as parseYaml } from "yaml";
 import type { AgentUserConfig, ResolvedAutopilotConfig } from "../config.js";
@@ -242,12 +242,14 @@ const OUTPUT_TAIL = 8 * 1024;
 const UNIT = /^[A-Za-z0-9_-]{1,64}$/;
 
 /**
- * The production executor: `sudo -n -u aos-agent run-as-agent accept <unit> <secs> <cwd> -- /bin/sh -c <cmd>`.
- * The wrapper's `accept` mode is `run` plus `unshare --user --net`, so the scope has no network;
- * `RuntimeMaxSec=<secs>` kills it at the deadline even if the plane is dead.
+ * The production executor: `sudo -n -- accept-as-agent run <unit> <secs> <cwd> -- /bin/sh -c <cmd>`.
+ * That root-owned wrapper (setup/accept-as-agent, its own sudoers line) makes a network namespace
+ * with only `lo` up as root, then drops to aos-agent:aos before the command starts, so the
+ * command has no network and no more rights than in `run`. `RuntimeMaxSec=<secs>` on its scope
+ * kills it at the deadline even if the plane is dead.
  */
-export function agentAcceptanceExecutor(agent: Pick<AgentUserConfig, "sudo" | "user" | "group" | "wrapper">): AcceptanceExecutor {
-  const base = ["-n", "-u", agent.user, "-g", agent.group, "--", agent.wrapper];
+export function agentAcceptanceExecutor(agent: Pick<AgentUserConfig, "sudo" | "wrapper"> & { acceptWrapper?: string }): AcceptanceExecutor {
+  const base = ["-n", "--", agent.acceptWrapper ?? join(dirname(agent.wrapper), "accept-as-agent")];
   const env = { PATH: "/usr/local/bin:/usr/bin:/bin", LANG: "C.UTF-8" };
   const stop = (unit: string): Promise<void> => new Promise((done) => {
     if (!UNIT.test(unit)) return done();
@@ -265,7 +267,7 @@ export function agentAcceptanceExecutor(agent: Pick<AgentUserConfig, "sudo" | "u
       if (!UNIT.test(req.unit)) return reject(new Error("acceptance unit id is not a safe unit name"));
       const secs = Math.ceil(req.timeoutMs / 1000);
       if (secs < 1 || secs > MAX_COMMAND_SECONDS) return reject(new Error(`acceptance runtime bound must be 1..${MAX_COMMAND_SECONDS} s, got ${secs}`));
-      const child = spawn(agent.sudo, [...base, "accept", req.unit, String(secs), req.cwd, "--", "/bin/sh", "-c", req.command], { env, stdio: ["ignore", "pipe", "pipe"] });
+      const child = spawn(agent.sudo, [...base, "run", req.unit, String(secs), req.cwd, "--", "/bin/sh", "-c", req.command], { env, stdio: ["ignore", "pipe", "pipe"] });
       let tail = "";
       const take = (b: Buffer) => { tail = (tail + b.toString("utf8")).slice(-OUTPUT_TAIL); };
       child.stdout?.on("data", take);
