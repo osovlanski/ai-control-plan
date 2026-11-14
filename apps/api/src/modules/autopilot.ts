@@ -330,6 +330,31 @@ export class AutopilotService {
     return this.attempt(attemptId)!;
   }
 
+  /**
+   * P0-5 (§C.2.1 publication rows, §C.2.4): the publisher moves the attempt through the states it
+   * owns. Called inside the publisher's own transaction, so the attempt and the publication move
+   * together. Anything outside these edges is a bug and throws.
+   */
+  publicationMoved(attemptId: string, to: "publishing" | "publish_uncertain" | "published" | "closed" | "conflict" | "failed" | "cancelled", reason?: string): void {
+    const row = this.row(attemptId);
+    if (!row) throw new Error(`attempt ${attemptId} does not exist`);
+    if (row.state === to) return;
+    const allowed: Record<string, readonly string[]> = {
+      accepted: ["publishing"],
+      publishing: ["publish_uncertain", "published", "closed", "conflict", "failed", "cancelled"],
+      // `publishing` is the operator's `retry`; `cancelled` is `abandon`.
+      publish_uncertain: ["publishing", "published", "closed", "conflict", "failed", "cancelled"],
+    };
+    if (!allowed[row.state]?.includes(to)) throw new Error(`attempt ${attemptId} is ${row.state}; a publication cannot move it to ${to}`);
+    if (isFinal(to)) this.finalize(row, to as (typeof FINAL_ATTEMPT_STATES)[number], reason ?? to);
+    else this.setState(attemptId, to, reason ?? null);
+  }
+
+  /** Autopilot run state, for the publisher's re-check before each mutation (§C.2.4). */
+  runState(): "stopped" | "draining" | "running" {
+    return (this.db.prepare("SELECT status FROM autopilot_state WHERE id = 1").get() as { status: "stopped" | "draining" | "running" }).status;
+  }
+
   /* ------------------------------------------------------------ runtime -- */
 
   private usedMs(attemptId: string): number {
