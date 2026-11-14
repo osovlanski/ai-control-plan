@@ -49,7 +49,8 @@ async function boot(setup: Setup = {}): Promise<Rig> {
       chmodSync(join(tree, "profiles"), 0o2750); // what `setup/aos-setup` leaves: setgid, group-readable, closed to others
       config.execution.agentUser = { ...AGENT_USER_DEFAULTS, profilesRoot: join(tree, "profiles"), worktreesRoot: join(tree, "worktrees") };
       config.scheduler = { ...config.scheduler!, resources: { "oci-heavy": 1 } };
-      if (setup.approvalMode) config.policy.approvalMode = setup.approvalMode;
+      // These tests drive the approval path itself, so the autopilot session prompts too (the default for it is auto-approve).
+      if (setup.approvalMode) { config.policy.approvalMode = setup.approvalMode; config.autopilot.approvalMode = setup.approvalMode; }
       Object.assign(config.autopilot, setup.autopilot ?? {});
     },
     // The real gate (P0-3) observes this host and is fail-closed without `scheduler.admission`; these tests drive the core, so it is open unless a test closes it.

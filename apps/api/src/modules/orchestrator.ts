@@ -40,7 +40,7 @@ import {
   redactText,
   type ModelPrecedenceSource,
 } from "@agent-plane/core";
-import { worktreesRoot, type ResolvedConfig } from "../config.js";
+import { worktreesRoot, type ApprovalMode, type ResolvedConfig } from "../config.js";
 import type { Db } from "../db/index.js";
 import type { RepositoryIdentityRegistry } from "../repo/identity-registry.js";
 import {
@@ -714,13 +714,13 @@ export class Orchestrator {
       // identity exists, and the request takes its policy from it, exactly as an operator start does.
       const composed = this.bindComposition(options.composition, executionTarget, taskRow.branch);
       const policy = composed
-        ? composedExecutionPolicy(composed.policy, { approvalMode: this.config.policy.approvalMode, maxRuntimeMs: this.maxRuntimeMs },
+        ? composedExecutionPolicy(composed.policy, { approvalMode: this.approvalBaseline(taskId), maxRuntimeMs: this.maxRuntimeMs },
           this.registry.manifest(assistantId)?.harness)
         : undefined;
       const launchModel = this.requestedModel(taskId, assistantId, options.routingDecisionRef, composed?.compositionRevisionId);
       const request = buildExecutionRequest({ taskId, dispatchId: options.dispatchId, assistantId, attempt, prompt, workdir, model: launchModel?.id,
         worktree: envelope.repository ? { repoPath: envelope.repository.path, branch: taskRow.branch ?? envelope.repository.branch, worktreePath: workdir, baseRef: taskRow.base_ref ?? 'HEAD' } : undefined,
-        scratchPath, target: executionTarget, approvalMode: policy?.approvalMode ?? this.config.policy.approvalMode,
+        scratchPath, target: executionTarget, approvalMode: policy?.approvalMode ?? this.approvalBaseline(taskId),
         // P0-2: an autopilot request is never materialised with more runtime than its attempt and
         // window had left at the early check. The final check recomputes the deadline it runs under.
         maxRuntimeMs: Math.min(policy?.maxRuntimeMs ?? this.maxRuntimeMs, autopilotLaunch?.remainingMs ?? Number.POSITIVE_INFINITY),
@@ -775,7 +775,7 @@ export class Orchestrator {
       // request's approval mode, runtime and caps come from its policy (tighten only).
       const composed = this.bindComposition(options.composition, executionTarget, taskRow.branch);
       const policy = composed
-        ? composedExecutionPolicy(composed.policy, { approvalMode: this.config.policy.approvalMode, maxRuntimeMs: this.maxRuntimeMs },
+        ? composedExecutionPolicy(composed.policy, { approvalMode: this.approvalBaseline(taskId), maxRuntimeMs: this.maxRuntimeMs },
           this.registry.manifest(assistantId)?.harness)
         : undefined;
       const launchModel = this.requestedModel(taskId, assistantId, routingDecisionRef, composed?.compositionRevisionId);
@@ -799,7 +799,7 @@ export class Orchestrator {
             : undefined,
           scratchPath,
           target: executionTarget,
-          approvalMode: policy?.approvalMode ?? this.config.policy.approvalMode,
+          approvalMode: policy?.approvalMode ?? this.approvalBaseline(taskId),
           maxRuntimeMs: policy?.maxRuntimeMs ?? this.maxRuntimeMs,
           routingDecisionRef,
           verification: projectVerification.plan?.checks ?? [],
@@ -1877,6 +1877,17 @@ export class Orchestrator {
    * Approvals carry a request id that is unique across a task's runs, so a
    * parallel comparison can have several assistants waiting at once.
    */
+  /**
+   * The workspace approval mode a launch starts from. An autopilot task that runs as the agent user has
+   * nobody to answer a prompt, so it takes `autopilot.approvalMode` (default auto-approve; the aos-agent
+   * sandbox is the boundary). `read-only` is never loosened, and no other task is affected.
+   */
+  private approvalBaseline(taskId: string): ApprovalMode {
+    const workspace = this.config.policy.approvalMode;
+    if (workspace === "read-only") return workspace;
+    return this.tasks.get(taskId)?.run_as === "agent" && this.autopilot?.owns(taskId) ? this.config.autopilot.approvalMode : workspace;
+  }
+
   async respondApproval(taskId: string, requestId: string, approved: boolean): Promise<void> {
     this.assertNoMixedOwnership(taskId);
     if (this.harnessOwns(taskId)) {
