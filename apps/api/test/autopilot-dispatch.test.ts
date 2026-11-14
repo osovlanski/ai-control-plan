@@ -29,6 +29,8 @@ const GIT_ENV = {
   ...process.env, GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "commit.gpgsign", GIT_CONFIG_VALUE_0: "false",
   GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.invalid", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.invalid",
 };
+// The plane's own `git commit` (the checkpoint) reads the process environment; a CI runner has no identity.
+Object.assign(process.env, GIT_ENV);
 const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", env: GIT_ENV }).trim();
 const gitIn = (cwd: string, input: string, env: Record<string, string>, ...args: string[]) =>
   execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", input, env: { ...GIT_ENV, ...env } }).trim();
