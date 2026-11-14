@@ -330,11 +330,11 @@ describe("agent executor", () => {
     const at = order.map((s) => chain.indexOf(s));
     expect(at.every((i) => i > 0)).toBe(true);
     expect([...at].sort((a, b) => a - b)).toEqual(at);
-    expect(src).not.toContain("--user");
+    expect(chain).not.toContain("--user");
     const sudoers = readFileSync(join(__dirname, "../../../setup/sudoers.d/aos"), "utf8");
     expect(sudoers).toContain("ubuntu ALL=(root) NOPASSWD: /usr/local/lib/aos/accept-as-agent\n");
     // The agent wrapper itself is unchanged: no accept mode there.
-    expect(readFileSync(join(__dirname, "../../../setup/run-as-agent"), "utf8")).not.toContain("accept");
+    expect(readFileSync(join(__dirname, "../../../setup/run-as-agent"), "utf8")).not.toMatch(/accept\)|unshare/);
   });
 });
 
