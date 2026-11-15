@@ -13,14 +13,16 @@
  *   - stop reason: the autopilot's state now and why it is not running;
  *   - unresolved remote effects: publications waiting on itay, unsettled or unknown publication
  *     mutations nobody resolved, and acceptance runs that recorded effects the plane cannot know;
- *   - heartbeat gaps: the external heartbeat (D-14) is P0-7 and nothing records a ping yet, so the
- *     report says the figure is not tracked rather than reporting zero gaps;
+ *   - heartbeat gaps: from the D-14 ping ledger (P0-7a, `autopilot-heartbeat.ts`); with no
+ *     `autopilot.heartbeat` configured the report says the figure is not tracked rather than
+ *     reporting zero gaps;
  *   - attestation age: the newest billing attestation, its age and whether it is current.
  *
  * Nothing here writes. Token figures are provisional: usage records may still arrive.
  */
 import type { BudgetCaps, TaskConsumption } from "@agent-plane/core";
 import type { Db } from "../db/index.js";
+import { heartbeatSummary, type HeartbeatConfig, type HeartbeatSummary } from "./autopilot-heartbeat.js";
 
 /** What the report needs from the composer's accounting; absent when the composer is off. */
 export interface ReportAccounting {
@@ -34,6 +36,8 @@ export interface MorningReportDeps {
   accounting?: ReportAccounting;
   /** `composer.policy.budget.maxTokens`: the cap when a task has no revision on record. */
   defaultMaxTokens?: number;
+  /** `autopilot.heartbeat`: absent = the heartbeat is not tracked. */
+  heartbeat?: HeartbeatConfig;
 }
 
 export interface MorningReportAttempt {
@@ -72,7 +76,7 @@ export interface MorningReport {
   tokens: { used: number; overshoot: number; attemptsOverCap: number; available: boolean };
   autopilot: { status: string; stopReason: string | null; updatedAt: string };
   unresolvedEffects: UnresolvedEffect[];
-  heartbeat: { tracked: false; gaps: null; detail: string };
+  heartbeat: HeartbeatSummary;
   attestation: { attestedAt: string; expiresAt: string; ageHours: number; current: boolean; extraUsageOff: boolean; autoReloadOff: boolean } | null;
 }
 
@@ -186,7 +190,7 @@ export function morningReport(d: MorningReportDeps, opts: { windowId?: string } 
     },
     autopilot: { status: state.status, stopReason: state.stop_reason, updatedAt: state.updated_at },
     unresolvedEffects,
-    heartbeat: { tracked: false, gaps: null, detail: "the external heartbeat (D-14) lands with P0-7; no ping is recorded yet" },
+    heartbeat: heartbeatSummary(db, d.heartbeat, w ? { opensAt: w.opens_at, closesAt: w.closes_at } : null, now),
     attestation: att ? {
       attestedAt: att.attested_at, expiresAt: att.expires_at,
       ageHours: Math.round(((now.getTime() - Date.parse(att.attested_at)) / 3_600_000) * 10) / 10,
@@ -217,7 +221,12 @@ export function renderMorningReport(r: MorningReport): string {
     : "Tokens: not available (composer off)");
   out.push(r.unresolvedEffects.length ? `Unresolved remote effects: ${r.unresolvedEffects.length}` : "Unresolved remote effects: none");
   for (const e of r.unresolvedEffects) out.push(`  ${e.kind} · attempt ${e.attemptId}${e.publicationId ? ` · publication ${e.publicationId}` : ""} · ${e.detail}`);
-  out.push(`Heartbeat gaps: not tracked (${r.heartbeat.detail})`);
+  const hb = r.heartbeat;
+  if (!hb.tracked || hb.gaps === null) out.push(`Heartbeat gaps: not tracked (${hb.detail})`);
+  else {
+    out.push(`Heartbeat: ${hb.pings} ping(s), ${hb.failed} failed; gaps ${hb.gaps.length ? hb.gaps.length : "none"} (${hb.detail})`);
+    for (const g of hb.gaps) out.push(`  ${g.kind} ${g.from} → ${g.to} (${mins(g.ms)})`);
+  }
   out.push(r.attestation
     ? `Billing attestation: ${r.attestation.ageHours}h old, expires ${r.attestation.expiresAt}, ${r.attestation.current ? "current" : "NOT current"}`
     : "Billing attestation: none on record");

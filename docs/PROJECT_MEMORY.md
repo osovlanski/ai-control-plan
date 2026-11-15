@@ -900,4 +900,12 @@ Migration 041 adds `runs.harness_cli_version` (TEXT NULL, forward only, no backf
 - `GET /api/autopilot/report[?windowId=&format=text]` (`tasks.read`, read-only) and `node scripts/morning-report.mjs` over it. Default window: the latest one that has opened. Module `modules/autopilot-report.ts`.
 - Tokens are the composer's task settlement (same as `/composition/budget`) against the task's composed `max_tokens`; overshoot is reported, never enforced (§D.3). Without the composer the report says tokens are unavailable.
 - Unresolved remote effects are listed from every window, not only the reported one, so an old uncertain create cannot drop out of view.
-- **Heartbeat gaps are reported as not tracked**: nothing records the D-14 ping until P0-7. Do not read the absence of gaps as zero gaps.
+- Heartbeat gaps come from the P0-7a ledger (below); without `autopilot.heartbeat` the report says they are not tracked.
+
+## 2026-11-15 — Autopilot P0-7a: external heartbeat, D-14 (SHIPPED on merge)
+
+- `autopilot.heartbeat: { urlFile, intervalMs }` (default 10 min, min 1 min). While the autopilot is not `stopped` (running or draining), `modules/autopilot-heartbeat.ts` sends a bare GET with `redirect: "error"` to the URL in `urlFile`, read per ping under the GitHub-token-file rule (regular file of the plane user, mode 0600 or tighter) and registered for redaction. `POST /start` pings at once; `POST /stop` writes the `paused` row at once.
+- **Decision:** draining also pings, because a phase is still running and a dead box then is still worth an email. This reads "while running" in §C.5 as "while not stopped".
+- Ledger `autopilot_heartbeats` (migration 048) stores time, `ping`/`paused`, ok, HTTP status and an error class, never the URL. A `paused` row is written once when the autopilot is found stopped after a ping, so stopped time is not a gap.
+- Report gaps: `silence` = over 2× interval with no row after a live ping (a dead plane or box; a boot leaves the autopilot stopped, so the next tick writes `paused` and closes the silence); `failed` = a run of failed pings up to the next ok one. Silence before the window's first ping is not counted.
+- **Open (box, itay):** create the dead-man's-switch check (D-14: Healthchecks.io-style, 10-min period, email to itay), put its URL in a 0600 file of the plane user and set `autopilot.heartbeat.urlFile`. The rest of P0-7 (off-host backup D-11, fail-closed restore and reconciliation, replacement-host drill, runbook) is still to build.
