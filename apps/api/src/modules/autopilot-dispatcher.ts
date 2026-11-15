@@ -200,6 +200,9 @@ export interface DispatcherDeps {
   log?: (level: "info" | "warn" | "error", msg: string) => void;
 }
 
+/** A failed attempt, or a blocked one the operator released, may be retried. */
+const retryable = (a: { state: string; requeuedAt?: string }): boolean => a.state === "failed" || (a.state === "blocked" && !!a.requeuedAt);
+
 export class AutopilotDispatcher {
   private readonly now: () => Date;
   private readonly git: DispatchGit;
@@ -480,7 +483,7 @@ export class AutopilotDispatcher {
       return { kind: "external", detail: `${branch} was reserved by lane ${root.lane} (reservation ${root.reservationId})` };
     }
     // An earlier attempt of ours. Its ref is reused only while it holds nothing but that reservation.
-    if (earlier.state === "failed" && head === root.sha) return { kind: "owned", sha: root.sha, how: "reused" };
+    if (retryable(earlier) && head === root.sha) return { kind: "owned", sha: root.sha, how: "reused" };
     return { kind: "failed", detail: `${branch} belongs to attempt ${earlier.attemptNo} (${earlier.state}) and is at ${head}, not its reservation ${root.sha}; itay decides` };
   }
 
@@ -582,7 +585,7 @@ export class AutopilotDispatcher {
     const last = this.d.autopilot.attemptsOfItem(item.id)[0];
 
     // The latest attempt row first (§C.3).
-    if (last && last.state !== "failed") return v(last.state === "published" ? "in review" : "blocked", `attempt ${last.attemptNo} is ${last.state}${last.reason ? ` (${last.reason})` : ""}`);
+    if (last && !retryable(last)) return v(last.state === "published" ? "in review" : "blocked", `attempt ${last.attemptNo} is ${last.state}${last.reason ? ` (${last.reason})` : ""}`);
     if (last && last.attemptNo >= this.cfg.attemptsPerItem) return v("blocked", `attempts exhausted (${last.attemptNo} of ${this.cfg.attemptsPerItem})`);
 
     const prs = await github.listPullsForHead(repo.github, branch);

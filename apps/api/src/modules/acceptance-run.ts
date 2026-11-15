@@ -154,6 +154,10 @@ async function trackedPaths(snapshot: string): Promise<string[]> {
 
 /** Tracked tree read-only; the declared writable paths (created if absent) group-writable, setgid. */
 function lockDown(snapshot: string, writable: readonly string[], writableFiles: readonly string[] = []): void {
+  // The snapshot is the agent's committed tree: a tracked symlink on a declared path would make
+  // chmod/mkdir below act on whatever it points at, as the plane's user. Refuse, never follow.
+  assertNoSymlinkOnPath(snapshot, writable);
+  assertNoSymlinkOnPath(snapshot, writableFiles.map((f) => f.split("/").slice(0, -1).join("/")).filter(Boolean));
   const walk = (dir: string): void => {
     for (const name of readdirSync(dir)) {
       const p = join(dir, name);
@@ -171,7 +175,7 @@ function lockDown(snapshot: string, writable: readonly string[], writableFiles: 
     const parts = w.split("/");
     for (let i = 1; i <= parts.length; i++) {
       const p = join(snapshot, ...parts.slice(0, i));
-      if (!existsSync(p)) {
+      if (!lexists(p)) {
         withOwnerWrite(join(snapshot, ...parts.slice(0, i - 1)), () => mkdirSync(p));
         chmodSync(p, i === parts.length ? 0o2770 : 0o2550);
       }
@@ -195,11 +199,29 @@ function lockDown(snapshot: string, writable: readonly string[], writableFiles: 
     const parts = f.split("/");
     for (let i = 1; i < parts.length; i++) {
       const dir = join(snapshot, ...parts.slice(0, i));
-      if (!existsSync(dir)) { withOwnerWrite(join(snapshot, ...parts.slice(0, i - 1)), () => mkdirSync(dir)); chmodSync(dir, 0o2550); }
+      if (!lexists(dir)) { withOwnerWrite(join(snapshot, ...parts.slice(0, i - 1)), () => mkdirSync(dir)); chmodSync(dir, 0o2550); }
     }
     const target = join(WRITABLE_FILES_DIR, f.replaceAll("/", "__"));
     const up = "../".repeat(parts.length - 1);
     withOwnerWrite(join(snapshot, ...parts.slice(0, -1)), () => symlinkSync(up + target, p));
+  }
+}
+
+function lexists(p: string): boolean {
+  try { lstatSync(p); return true; } catch { return false; }
+}
+
+/** Every existing component of each relative path must be a real directory (or the leaf, a real file or dir), never a symlink. */
+function assertNoSymlinkOnPath(root: string, relPaths: readonly string[]): void {
+  for (const rel of relPaths) {
+    const parts = rel.split("/").filter(Boolean);
+    for (let i = 1; i <= parts.length; i++) {
+      const p = join(root, ...parts.slice(0, i));
+      let st;
+      try { st = lstatSync(p); } catch { break; } // absent from here on: the plane creates it
+      if (st.isSymbolicLink()) throw new Error(`declared writable path ${rel} crosses a symlink at ${parts.slice(0, i).join("/")}`);
+      if (i < parts.length && !st.isDirectory()) throw new Error(`declared writable path ${rel} crosses a non-directory at ${parts.slice(0, i).join("/")}`);
+    }
   }
 }
 
@@ -466,7 +488,7 @@ export class AcceptanceRunner {
     } else if (!task.worktree_path || !task.repo_path) {
       problem = "the task has no worktree to checkpoint";
     } else {
-      try { sha = (await commitCheckpoint(task.worktree_path, `aos checkpoint: item ${attempt.item_id}`)) ?? undefined; } catch (err) { problem = `checkpoint commit failed: ${err instanceof Error ? err.message : String(err)}`; }
+      try { sha = (await commitCheckpoint(task.worktree_path, `aos checkpoint: item ${attempt.item_id}`, { confined: task.repo_path })) ?? undefined; } catch (err) { problem = `checkpoint commit failed: ${err instanceof Error ? err.message : String(err)}`; }
       if (!problem && !sha) problem = "checkpoint commit produced no SHA";
     }
     if (!problem && !attempt.reservation_sha) problem = "the attempt has no reservation SHA; lineage cannot be checked";

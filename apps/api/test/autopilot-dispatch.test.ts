@@ -516,6 +516,25 @@ describe("retries", () => {
     expect(ap().currentAttempt()).toMatchObject({ attemptNo: 2, state: "admitted", reservationOutcome: "reused", reservationSha: a.reservationSha });
   });
 
+  it("a blocked attempt is not retried until the operator requeues it, and the retry still counts", async () => {
+    await boot([{ id: "item-a" }]);
+    open();
+    await dispatcher().tick();
+    const a = ap().currentAttempt()!;
+    expect(ap().approvalRefused(a.taskId!, "expired")).toBe(true);
+    expect(ap().attempt(a.id)).toMatchObject({ state: "blocked", reason: "approval expired" });
+    expect(await dispatcher().tick()).toEqual({ action: "idle", reason: "no item is queued or retryable" });
+    expect(() => ap().requeue("apa_missing", "op")).toThrow(/unknown attempt/);
+    expect(ap().requeue(a.id, "op_test")).toMatchObject({ state: "blocked", requeuedBy: "op_test" }); // still final
+    expect(() => ap().requeue(a.id, "op_test")).toThrow(/already requeued/);
+    await dispatcher().tick();
+    expect(ap().currentAttempt()).toMatchObject({ attemptNo: 2, state: "admitted", reservationOutcome: "reused", reservationSha: a.reservationSha });
+    expect(() => ap().requeue(ap().currentAttempt()!.id, "op_test")).toThrow(/only a blocked attempt/);
+    ap().stop("now", "test");
+    await dispatcher().tick();
+    await dispatcher().idle();
+  });
+
   it("a failed attempt's ref that carries pushed work is left for itay, and attempts run out", async () => {
     await boot([{ id: "item-a" }]);
     await failFirstAttempt(() => { gh.pushWork("item-a"); });

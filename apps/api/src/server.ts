@@ -541,6 +541,10 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   });
   // P0-6: one dispatcher tick now, the same the timer runs (selectNext, acceptance, publication).
   app.post("/api/autopilot/dispatch", operate, async () => ({ tick: await dispatcher.tick(), dispatcher: dispatcher.status(), autopilot: autopilot.status() }));
+  // A blocked attempt is final and never retried; the operator may turn it into a failed one (counts toward attemptsPerItem).
+  app.post<{ Params: { id: string } }>("/api/autopilot/attempts/:id/requeue", operate, (req, reply) => {
+    try { const attempt = autopilot.requeue(req.params.id, operatorKid(req)); dispatcher.kick(); return { attempt }; } catch (err) { return reply.status(409).send({ error: err instanceof Error ? err.message : String(err) }); }
+  });
   app.get<{ Params: { id: string } }>("/api/autopilot/attempts/:id/acceptance", read.tasks, (req) => ({ runs: acceptance?.runs(req.params.id) ?? [] }));
   app.get("/api/autopilot/publications", read.tasks, () => ({ publications: publications.list(50) }));
   app.post<{ Params: { id: string }; Body: { action?: unknown } }>("/api/autopilot/publications/:id/resolve", operate, async (req, reply) => {

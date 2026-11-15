@@ -53,6 +53,8 @@ export interface AutopilotAttempt {
   /** P0-6: the reservation's provenance (absent on attempts made in-process before P0-6). */
   repo?: string; baseSha?: string; reservationDate?: string; itemRevision?: string; backlogSha?: string;
   reservationOutcome?: "created" | "owned" | "reused";
+  /** An operator released this `blocked` attempt for a retry. */
+  requeuedAt?: string; requeuedBy?: string;
 }
 export interface AutopilotWindow { id: string; opensAt: string; closesAt: string; maxItems: number; charged: number }
 
@@ -89,6 +91,7 @@ interface AttemptRow {
   created_at: string; updated_at: string; final_at: string | null;
   repo: string | null; base_sha: string | null; reservation_date: string | null; item_revision: string | null; backlog_sha: string | null;
   reservation_outcome: "created" | "owned" | "reused" | null;
+  requeued_at: string | null; requeued_by: string | null;
 }
 interface WindowRow { id: string; opens_at: string; closes_at: string; max_items: number }
 
@@ -250,6 +253,7 @@ export class AutopilotService {
       ...(r.repo ? { repo: r.repo } : {}), ...(r.base_sha ? { baseSha: r.base_sha } : {}), ...(r.reservation_date ? { reservationDate: r.reservation_date } : {}),
       ...(r.item_revision ? { itemRevision: r.item_revision } : {}), ...(r.backlog_sha ? { backlogSha: r.backlog_sha } : {}),
       ...(r.reservation_outcome ? { reservationOutcome: r.reservation_outcome } : {}),
+      ...(r.requeued_at ? { requeuedAt: r.requeued_at } : {}), ...(r.requeued_by ? { requeuedBy: r.requeued_by } : {}),
     };
   }
   private row(id: string): AttemptRow | undefined {
@@ -677,6 +681,22 @@ export class AutopilotService {
   /** P0-6: the attempt's task state, for the dispatcher (a `suspended` attempt with a completed task goes to acceptance). */
   taskState(taskId: string): TaskState | undefined {
     return this.d.tasks.get(taskId)?.state as TaskState | undefined;
+  }
+
+  /**
+   * Operator requeue of a `blocked` attempt (first live run: an expired approval ended an attempt
+   * `blocked`, which nothing retries). The attempt stays final and `blocked`; it is marked requeued,
+   * which makes it retryable like `failed`, and it still counts toward `attemptsPerItem`.
+   */
+  requeue(attemptId: string, by: string): AutopilotAttempt {
+    return this.db.transaction(() => {
+      const attempt = this.row(attemptId);
+      if (!attempt) throw new Error(`unknown attempt ${attemptId}`);
+      if (attempt.state !== "blocked") throw new Error(`attempt ${attemptId} is ${attempt.state}; only a blocked attempt can be requeued`);
+      if (attempt.requeued_at) throw new Error(`attempt ${attemptId} was already requeued`);
+      this.db.prepare("UPDATE autopilot_attempts SET requeued_at = ?, requeued_by = ? WHERE id = ?").run(this.iso(), by, attemptId);
+      return this.toAttempt(this.row(attemptId)!);
+    })();
   }
 
   /**
