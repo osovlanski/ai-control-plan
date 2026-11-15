@@ -307,6 +307,12 @@ export interface ResolvedAutopilotConfig {
    * Absent = no dispatcher and no publication sweep.
    */
   github?: { tokenFile: string; apiBase?: string };
+  /**
+   * P0-7a (D-14): the external dead-man's-switch ping. `urlFile` holds the check URL (a secret of
+   * the plane user: regular file, mode 0600 or tighter, read per ping). `intervalMs` defaults to 10
+   * minutes. Absent = no ping, and the morning report says the heartbeat is not tracked.
+   */
+  heartbeat?: { urlFile: string; intervalMs: number };
 }
 export interface AutopilotRepoConfig { github: string; path: string; base: string }
 export const AUTOPILOT_DEFAULTS: Omit<ResolvedAutopilotConfig, "repos"> & { repos: Readonly<Record<string, AutopilotRepoConfig>> } = {
@@ -314,7 +320,7 @@ export const AUTOPILOT_DEFAULTS: Omit<ResolvedAutopilotConfig, "repos"> & { repo
   minSliceMs: 10 * 60_000, graceMs: 2 * 60_000, hostRetryMs: 2 * 60_000, attestationMaxAgeDays: 30,
   dispatchIntervalMs: 60_000, repos: {}, backlogRepo: "ai-control-plan", approvalMode: "auto-approve",
 };
-const AUTOPILOT_KEYS = [...Object.keys(AUTOPILOT_DEFAULTS), "github"];
+const AUTOPILOT_KEYS = [...Object.keys(AUTOPILOT_DEFAULTS), "github", "heartbeat"];
 
 function resolveAutopilot(file: unknown, configPath: string): ResolvedAutopilotConfig {
   if (file === undefined) return { ...AUTOPILOT_DEFAULTS, repos: {} };
@@ -366,6 +372,16 @@ function resolveAutopilot(file: unknown, configPath: string): ResolvedAutopilotC
     if (typeof g.tokenFile !== "string" || !isAbsolute(g.tokenFile)) throw new Error(`${configPath}: autopilot.github.tokenFile must be an absolute path`);
     if (g.apiBase !== undefined && (typeof g.apiBase !== "string" || !/^https:\/\/[^/\s]+(\/[^\s]*)?$/.test(g.apiBase))) throw new Error(`${configPath}: autopilot.github.apiBase must be an https URL`);
     out.github = { tokenFile: g.tokenFile, ...(g.apiBase !== undefined ? { apiBase: g.apiBase as string } : {}) };
+  }
+  if (file.heartbeat !== undefined) {
+    const h = file.heartbeat;
+    if (!isRecord(h)) throw new Error(`${configPath}: autopilot.heartbeat must be a mapping`);
+    const extra = Object.keys(h).filter((k) => !["urlFile", "intervalMs"].includes(k));
+    if (extra.length > 0) throw new Error(`${configPath}: autopilot.heartbeat has unknown key(s): ${extra.join(", ")}`);
+    if (typeof h.urlFile !== "string" || !isAbsolute(h.urlFile)) throw new Error(`${configPath}: autopilot.heartbeat.urlFile must be an absolute path`);
+    const intervalMs = h.intervalMs ?? 10 * 60_000;
+    if (!isPositiveInteger(intervalMs) || intervalMs < 60_000) throw new Error(`${configPath}: autopilot.heartbeat.intervalMs must be an integer of at least 60000`);
+    out.heartbeat = { urlFile: h.urlFile, intervalMs };
   }
   return out;
 }

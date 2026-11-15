@@ -45,6 +45,7 @@ import { ModelCatalogService, CATALOG_REVISION, type CatalogSource } from "./mod
 import { RegistryFederation } from "./modules/registry-federation.js";
 import { BundledComposition, CockpitBundleClient } from "./modules/bundle-request.js";
 import { morningReport, renderMorningReport, UnknownWindow } from "./modules/autopilot-report.js";
+import { AutopilotHeartbeat, type HeartbeatFetch } from "./modules/autopilot-heartbeat.js";
 import { ComposerService, parseOverrides, type StartAttempt, type StartBinding } from "./modules/composer/service.js";
 import { createArtificialAnalysisSource } from "./modules/artificial-analysis.js";
 import { QuotaProjection } from "./modules/quota.js";
@@ -98,6 +99,8 @@ export interface ServerDeps {
   autopilotReservationGitHub?: ReservationGitHub;
   /** P0-6: the dispatcher's local git (fetch, rev-parse, show, commit-tree). */
   autopilotDispatchGit?: DispatchGit;
+  /** P0-7a: the heartbeat's HTTP call (tests). Defaults to global fetch with `redirect: "error"`. */
+  autopilotHeartbeatFetch?: HeartbeatFetch;
   /** P0-6: the acceptance executor. Defaults to `setup/accept-as-agent` when an agent user is configured. TEST-ONLY when not offline. */
   acceptanceExecutor?: AcceptanceExecutor;
   /** P0-6: where acceptance snapshots go. Defaults to `<agent worktreesRoot>/acceptance`. */
@@ -148,6 +151,8 @@ export interface BuiltServer {
   /** P0-6: absent when the instance has no acceptance executor (no agent user). */
   acceptance?: AcceptanceRunner;
   dispatcher: AutopilotDispatcher;
+  /** P0-7a: absent when `autopilot.heartbeat` is not configured. */
+  heartbeat?: AutopilotHeartbeat;
   quotaProbes: QuotaProbeService;
   modelCatalog: ModelCatalogService;
   registryFederation: RegistryFederation;
@@ -262,6 +267,10 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     log: (level, msg) => app.log[level](msg),
   });
   autopilot.onSettled = () => dispatcher.kick();
+  // P0-7a (D-14): the external heartbeat. Absent config = no ping and no ledger rows.
+  const heartbeat = config.autopilot.heartbeat
+    ? new AutopilotHeartbeat({ db, now, config: config.autopilot.heartbeat, ...(deps.autopilotHeartbeatFetch ? { fetch: deps.autopilotHeartbeatFetch } : {}) })
+    : undefined;
   const composed = buildHarnessComposition({
     db,
     config,
@@ -535,7 +544,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   };
   app.get("/api/autopilot", read.tasks, () => ({ ...autopilot.status(), windows: autopilot.windows(), attempts: autopilot.attempts(20), dispatcher: dispatcher.status() }));
   app.post("/api/autopilot/start", operate, (req, reply) => {
-    try { const started = autopilot.start(operatorKid(req)); dispatcher.kick(); return started; } catch (err) { return autopilotError(reply, err); }
+    try { const started = autopilot.start(operatorKid(req)); dispatcher.kick(); void heartbeat?.tick(); return started; } catch (err) { return autopilotError(reply, err); }
   });
   app.post("/api/autopilot/release", operate, (_req, reply) => {
     try { const released = autopilot.release(); dispatcher.kick(); return { released, autopilot: autopilot.status() }; } catch (err) { return reply.status(409).send({ error: err instanceof Error ? err.message : String(err) }); }
@@ -564,6 +573,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     const mode = req.body?.mode ?? "now";
     if (mode !== "now" && mode !== "drain") return reply.status(400).send({ error: "mode must be now or drain" });
     const stopped = autopilot.stop(mode, "operator");
+    void heartbeat?.tick(); // a `paused` row now, so silence while stopped is never read as a gap
     // §C.2.9 `stop now` in `accepting`: stop the acceptance scope now (its poll would within a second).
     if (mode === "now") acceptance?.stopNow();
     // §C.2.9 `stop now` on a running attempt: cancel the session, which stops its scope.
@@ -765,7 +775,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   app.get<{ Querystring: { windowId?: string; format?: string } }>("/api/autopilot/report", read.tasks, (req, reply) => {
     try {
       const report = morningReport({
-        db, now, ...(composer ? { accounting: composer.accounting } : {}),
+        db, now, ...(config.autopilot.heartbeat ? { heartbeat: config.autopilot.heartbeat } : {}), ...(composer ? { accounting: composer.accounting } : {}),
         ...(config.composer.policy.budget.maxTokens !== undefined ? { defaultMaxTokens: config.composer.policy.budget.maxTokens } : {}),
       }, req.query.windowId ? { windowId: req.query.windowId } : {});
       return req.query.format === "text" ? reply.type("text/plain; charset=utf-8").send(renderMorningReport(report)) : report;
@@ -1416,7 +1426,8 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     void publications.sweep().catch((err) => app.log.error(err, "publication sweep failed"));
   }, 60_000);
   publicationSweep.unref();
-  app.addHook("onClose", async () => { clearInterval(leaseSweep); clearInterval(publicationSweep); dispatcher.stop(); scheduler.stop(); });
+  heartbeat?.start();
+  app.addHook("onClose", async () => { clearInterval(leaseSweep); clearInterval(publicationSweep); heartbeat?.stop(); dispatcher.stop(); scheduler.stop(); });
   // ---- Durable session-addressed conversational input (default OFF) ----
   //
   // The whole capability is behind `sessionInput.enabled`. While it is false
@@ -1642,7 +1653,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     });
   }
 
-  return { app, registry, orchestrator, tasks, bus, checkpoints, cooldowns, telemetry, scheduler, autopilot, publications, ...(acceptance ? { acceptance } : {}), dispatcher, quotaProbes: probes, modelCatalog, registryFederation, memoryFederation, sessionInputs, sessionInputRedelivery };
+  return { app, registry, orchestrator, tasks, bus, checkpoints, cooldowns, telemetry, scheduler, autopilot, publications, ...(acceptance ? { acceptance } : {}), dispatcher, ...(heartbeat ? { heartbeat } : {}), quotaProbes: probes, modelCatalog, registryFederation, memoryFederation, sessionInputs, sessionInputRedelivery };
 }
 
 function sseHeaders(reply: FastifyReply): void {
