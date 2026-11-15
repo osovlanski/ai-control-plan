@@ -44,6 +44,7 @@ import { QuotaProbeService, type QuotaProbeFn } from "./modules/quota-probe.js";
 import { ModelCatalogService, CATALOG_REVISION, type CatalogSource } from "./modules/model-catalog.js";
 import { RegistryFederation } from "./modules/registry-federation.js";
 import { BundledComposition, CockpitBundleClient } from "./modules/bundle-request.js";
+import { morningReport, renderMorningReport, UnknownWindow } from "./modules/autopilot-report.js";
 import { ComposerService, parseOverrides, type StartAttempt, type StartBinding } from "./modules/composer/service.js";
 import { createArtificialAnalysisSource } from "./modules/artificial-analysis.js";
 import { QuotaProjection } from "./modules/quota.js";
@@ -760,6 +761,19 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     : undefined;
   // M2 S6: wakes, run-now, failover and handoffs recompose at dispatch; settles record overruns.
   if (composer) orchestrator.dispatchComposer = composer;
+  // P0-10: the minimum morning report over one window (default: the latest that has opened). Read-only.
+  app.get<{ Querystring: { windowId?: string; format?: string } }>("/api/autopilot/report", read.tasks, (req, reply) => {
+    try {
+      const report = morningReport({
+        db, now, ...(composer ? { accounting: composer.accounting } : {}),
+        ...(config.composer.policy.budget.maxTokens !== undefined ? { defaultMaxTokens: config.composer.policy.budget.maxTokens } : {}),
+      }, req.query.windowId ? { windowId: req.query.windowId } : {});
+      return req.query.format === "text" ? reply.type("text/plain; charset=utf-8").send(renderMorningReport(report)) : report;
+    } catch (err) {
+      if (err instanceof UnknownWindow) return reply.status(404).send({ error: "not found", windowId: err.windowId });
+      throw err;
+    }
+  });
   // M6 S1: settles project composed sessions into asset_usage; reconcileOnBoot backfills the rest.
   orchestrator.assetTelemetry = new AssetTelemetry(db, app.log);
   // O6 S5: settles extract memory proposals from composed sessions; reconcileOnBoot backfills.
