@@ -9,7 +9,7 @@
  * effect listed; a command that modifies the snapshot and restores it → blocked).
  */
 import { execFileSync, spawn } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -197,6 +197,42 @@ describe("G10 acceptance outcomes", () => {
     });
     const out = await runner(w).accept(w.attemptId);
     expect(out.started && out.run.state).toBe("failed");
+  });
+
+  it("a tracked symlink on a declared writable path is refused, never followed", async () => {
+    const outside = mkdtempSync(join(tmpdir(), "acc-outside-"));
+    chmodSync(outside, 0o755);
+    try {
+      const w = setup(cmds(["true", true]), {
+        worktreeChange: (wt) => { writeFileSync(join(wt, "src.txt"), "feature\n"); symlinkSync(outside, join(wt, "dist")); },
+      });
+      const out = await runner(w).accept(w.attemptId);
+      expect(out.started && out.run.state).toBe("blocked");
+      expect(attemptState(w).state).toBe("blocked");
+      expect(lstatSync(outside).mode & 0o7777).toBe(0o755);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("a symlinked ancestor of a writable file is refused", async () => {
+    const outside = mkdtempSync(join(tmpdir(), "acc-outside-"));
+    chmodSync(outside, 0o755);
+    try {
+      const w = setup(cmds(["true", true]), {
+        worktreeChange: (wt) => {
+          writeFileSync(join(wt, "src.txt"), "feature\n");
+          rmSync(join(wt, "docs"), { recursive: true, force: true });
+          symlinkSync(outside, join(wt, "docs"));
+        },
+      });
+      const out = await runner(w).accept(w.attemptId);
+      expect(out.started && out.run.state).toBe("blocked");
+      expect(lstatSync(outside).mode & 0o7777).toBe(0o755);
+      expect(existsSync(join(outside, "progress"))).toBe(false);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
   });
 
   it("a failed lineage check is blocked", async () => {

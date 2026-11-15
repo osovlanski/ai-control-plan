@@ -1,6 +1,6 @@
 import { SessionStore } from './harness/session-store.js';
 import { HandoffService } from './harness/handoff.js';
-import { buildExecutionRequest, composedExecutionPolicy } from './harness/control-plane-bridge.js';
+import { buildExecutionRequest, composedExecutionPolicy, stricterApproval } from './harness/control-plane-bridge.js';
 import type { ModelCatalogService } from './model-catalog.js';
 import type { ExecutionRequest, VerificationCheckResult } from '@agent-plane/core';
 import { QuotaProjection, controllingRetry } from './quota.js';
@@ -636,6 +636,10 @@ export class Orchestrator {
         const request = JSON.parse(saved.request_json) as ExecutionRequest;
         if (request.context.scratchPath) ensureScratch(this.config.dir, taskId);
         request.runSpec.prompt = this.dispatchPrompt(request, options);
+        // A saved request must not outlive a tightened policy: the replay never runs looser than today's baseline.
+        const mode = this.tightenedApproval(request.policy.approval.mode, taskId);
+        request.policy.approval.mode = mode;
+        request.runSpec.permissionPolicy = { ...request.runSpec.permissionPolicy, mode };
         new SessionStore(this.db).recordRequest(request); // fingerprint witnesses semantic replay
         const replayed = await this.executeDispatch(request, options);
         this.recordModelSource(taskId, replayed.runId, this.committedModelSource(request));
@@ -1882,6 +1886,10 @@ export class Orchestrator {
    * nobody to answer a prompt, so it takes `autopilot.approvalMode` (default auto-approve; the aos-agent
    * sandbox is the boundary). `read-only` is never loosened, and no other task is affected.
    */
+  private tightenedApproval(saved: ApprovalMode, taskId: string): ApprovalMode {
+    return stricterApproval(saved, this.approvalBaseline(taskId));
+  }
+
   private approvalBaseline(taskId: string): ApprovalMode {
     const workspace = this.config.policy.approvalMode;
     if (workspace === "read-only") return workspace;

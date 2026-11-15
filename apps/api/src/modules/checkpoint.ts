@@ -70,9 +70,11 @@ export class CheckpointService {
     // envelope: parallel sessions may have accumulated sibling paths there.
     let changedFiles: string[] = [];
 
+    // An agent-user worktree is written by an untrusted process: git runs against the plane-owned git dir.
+    const confine = row.run_as === "agent" && row.repo_path ? { confined: row.repo_path } : undefined;
     if (worktreePath && baseRef) {
       try {
-        gitRef = await commitCheckpoint(worktreePath, `checkpoint(${taskId}): ${reason}`);
+        gitRef = await commitCheckpoint(worktreePath, `checkpoint(${taskId}): ${reason}`, confine);
       } catch {
         // A commit failure must not lose the checkpoint — the envelope snapshot
         // is the part handoff cannot do without.
@@ -83,10 +85,10 @@ export class CheckpointService {
       // unavailable even though the checkpoint commit itself succeeded.
       if (gitRef) {
         try {
-          diffStat = await worktreeDiffStat(worktreePath, baseRef);
+          diffStat = await worktreeDiffStat(worktreePath, baseRef, confine);
           // Reconcile the envelope's file list with what git actually shows —
           // the agent may have touched files it never announced in an event.
-          const changed = await worktreeChangedFiles(worktreePath, baseRef);
+          const changed = await worktreeChangedFiles(worktreePath, baseRef, confine);
           changedFiles = changed;
           if (changed.length > 0) {
             envelope.artifacts.changedFiles = Array.from(
