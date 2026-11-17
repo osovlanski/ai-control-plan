@@ -155,6 +155,23 @@ describe("G10 acceptance outcomes", () => {
     expect(attemptState(w)).toEqual({ state: "failed", reason: "acceptance failed: command 2 exited 3: exit 3" });
   });
 
+  it("the plane prefetches dependencies into the snapshot before the commands run; a failed prefetch blocks the run (G15: pnpm install --offline had no store)", async () => {
+    const w = setup(cmds(["./check.sh", true]));
+    const seen: string[] = [];
+    const ok = await runner(w, localExecutor(), { prefetch: async (snap) => { seen.push(snap); expect(existsSync(join(snap, "check.sh"))).toBe(true); } }).accept(w.attemptId);
+    if (!ok.started) throw new Error(ok.reason);
+    expect(ok.run.state).toBe("passed");
+    expect(seen).toEqual([ok.run.snapshotPath]);
+
+    const w2 = setup(cmds(["./check.sh", true]));
+    const ex = localExecutor();
+    const bad = await runner(w2, ex, { prefetch: async () => { throw new Error("pnpm fetch exited 1: ERR_PNPM_FETCH_404"); } }).accept(w2.attemptId);
+    if (!bad.started) throw new Error(bad.reason);
+    expect(bad.run.state).toBe("blocked");
+    expect(bad.run.reason).toMatch(/acceptance could not run: pnpm fetch exited 1/);
+    expect(ex.seen).toEqual([]); // no command ran
+  });
+
   it("PASS binds the checkpoint SHA; the snapshot is fresh, read-only and removed; the writer's worktree is not consulted", async () => {
     const w = setup(cmds(
       ["./check.sh", true],
@@ -381,3 +398,23 @@ async function waitFor(cond: () => boolean, ms = 5_000): Promise<void> {
     await new Promise((res) => setTimeout(res, 20));
   }
 }
+
+describe("host setup for the acceptance toolchain", () => {
+  const root = join(__dirname, "..", "..", "..");
+  const read = (f: string) => readFileSync(join(root, f), "utf8");
+
+  it("aos-setup installs the pnpm the repo pins, so pnpm never tries to switch versions offline", () => {
+    const pinned = (JSON.parse(read("package.json")) as { packageManager: string }).packageManager;
+    const version = /^PNPM_VERSION=(\S+)$/m.exec(read("setup/aos-setup"))?.[1];
+    expect(`pnpm@${version}`).toBe(pinned);
+  });
+
+  it("the wrapper gives the agent the root-owned toolchain and the plane's store, and imports by copy", () => {
+    const wrapper = read("setup/accept-as-agent");
+    expect(wrapper).toContain("PATH=/opt/aos-tools/bin:");
+    expect(wrapper).toContain('npm_config_store_dir="$STORE"');
+    expect(wrapper).toContain("npm_config_package_import_method=copy");
+    expect(wrapper).toContain("npm_config_manage_package_manager_versions=false");
+    expect(read("setup/aos-setup")).toContain("/var/lib/aos/pnpm-store");
+  });
+});

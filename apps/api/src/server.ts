@@ -38,7 +38,7 @@ import { Scheduler } from "./modules/scheduler.js";
 import { AutopilotService, AutopilotStartRefused, type AutopilotDeps } from "./modules/autopilot.js";
 import { GitHubRestClient, PublicationRefused, PublicationService, readGitHubTokenFile, type PublicationGit, type PublicationGitHub, type ReservationGitHub } from "./modules/publications.js";
 import { agentIdleFromConfig, hostGateFromConfig, syncCloseSchedule } from "./modules/host-admission.js";
-import { AcceptanceRunner, agentAcceptanceExecutor, type AcceptanceExecutor } from "./modules/acceptance-run.js";
+import { AcceptanceRunner, agentAcceptanceExecutor, pnpmStorePrefetch, type AcceptanceExecutor } from "./modules/acceptance-run.js";
 import { AutopilotDispatcher, type DispatchGit } from "./modules/autopilot-dispatcher.js";
 import { QuotaProbeService, type QuotaProbeFn } from "./modules/quota-probe.js";
 import { ModelCatalogService, CATALOG_REVISION, type CatalogSource } from "./modules/model-catalog.js";
@@ -256,6 +256,8 @@ export function buildServer(deps: ServerDeps): BuiltServer {
       backlog: { repoPath: backlogRepo.path },
       snapshotsRoot: deps.acceptanceSnapshotsRoot ?? join(agentUser!.worktreesRoot, "acceptance"),
       agentIdle: deps.acceptanceAgentIdle ?? agentIdleFromConfig(config),
+      // The wrapper points pnpm at this store (setup/accept-as-agent); the plane fills it before each run.
+      ...(!deps.acceptanceExecutor && agentUser ? { prefetch: pnpmStorePrefetch(join(dirname(agentUser.worktreesRoot), "pnpm-store")) } : {}),
       ...(acceptanceExecutor.offline ? {} : { allowOnlineExecutor: true }),
     })
     : undefined;
