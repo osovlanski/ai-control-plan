@@ -516,6 +516,7 @@ export class AutopilotDispatcher {
     const w = status.window;
     if (!w) return idle("no window is open");
     if (Date.parse(w.closesAt) - this.now().getTime() < this.cfg.minSliceMs) return idle("the window closes within minSliceMs");
+    if (w.exhaustedByRestore) return idle(`window ${w.id} is exhausted by restore ${w.exhaustedByRestore}; the next window admits work`);
     if (w.charged >= w.maxItems) return idle(`window count: ${w.charged} of ${w.maxItems} items already charged`);
     if (!status.billingAttestation?.current) return idle("no current billing attestation");
     if (status.settings.length > 0) return idle(`${status.settings[0]!.setting} ${status.settings[0]!.detail}`);
@@ -593,6 +594,9 @@ export class AutopilotDispatcher {
     if (state === "merged") return v("done", `PR #${prs.find((p) => p.merged)!.number} merged`);
     if (state === "open") return v("in review", `PR #${prs.find((p) => p.state === "open")!.number} is open`);
     if (state === "closed") return v("blocked", "a closed, unmerged PR exists; needs itay");
+    // P0-7b (§C.5): a reservation the restore reconciliation could not tie to an attempt is never re-run.
+    const external = this.d.autopilot.externalReservationOf(item.id);
+    if (external) return v("blocked", `external reservation ${external} of ${branch} recorded by a restore reconciliation; never re-run, itay decides`);
 
     for (const dep of item.depends_on) {
       const depItem = items.find((i) => i.id === dep)!;

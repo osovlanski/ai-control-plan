@@ -1,7 +1,7 @@
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import fastifyStatic from "@fastify/static";
 import { existsSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   AUTOPILOT_OPERATE_CAPABILITY,
@@ -36,7 +36,7 @@ import { TaskEventBus } from "./modules/sse.js";
 import { TaskStageReader } from "./modules/task-stage.js";
 import { Scheduler } from "./modules/scheduler.js";
 import { AutopilotService, AutopilotStartRefused, type AutopilotDeps } from "./modules/autopilot.js";
-import { GitHubRestClient, PublicationRefused, PublicationService, readGitHubTokenFile, type PublicationGit, type PublicationGitHub, type ReservationGitHub } from "./modules/publications.js";
+import { GitHubRestClient, PublicationRefused, PublicationService, readGitHubTokenFile, type PublicationGit, type PublicationGitHub, type ReconcileGitHub, type ReservationGitHub } from "./modules/publications.js";
 import { agentIdleFromConfig, hostGateFromConfig, syncCloseSchedule } from "./modules/host-admission.js";
 import { AcceptanceRunner, agentAcceptanceExecutor, pnpmStorePrefetch, type AcceptanceExecutor } from "./modules/acceptance-run.js";
 import { AutopilotDispatcher, type DispatchGit } from "./modules/autopilot-dispatcher.js";
@@ -46,6 +46,7 @@ import { RegistryFederation } from "./modules/registry-federation.js";
 import { BundledComposition, CockpitBundleClient } from "./modules/bundle-request.js";
 import { morningReport, renderMorningReport, UnknownWindow } from "./modules/autopilot-report.js";
 import { AutopilotHeartbeat, type HeartbeatFetch } from "./modules/autopilot-heartbeat.js";
+import { AutopilotRestore, detectRestore, RestoreRefused } from "./modules/autopilot-restore.js";
 import { ComposerService, parseOverrides, type StartAttempt, type StartBinding } from "./modules/composer/service.js";
 import { createArtificialAnalysisSource } from "./modules/artificial-analysis.js";
 import { QuotaProjection } from "./modules/quota.js";
@@ -101,6 +102,10 @@ export interface ServerDeps {
   autopilotDispatchGit?: DispatchGit;
   /** P0-7a: the heartbeat's HTTP call (tests). Defaults to global fetch with `redirect: "error"`. */
   autopilotHeartbeatFetch?: HeartbeatFetch;
+  /** P0-7b: GitHub reads for the restore reconciliation. Defaults like `autopilotReservationGitHub`. */
+  autopilotReconcileGitHub?: ReconcileGitHub;
+  /** P0-7b: the agent slice census the restore report shows. Defaults to the real slice when an agent user is configured. */
+  autopilotRestoreAgentSlice?: () => { ok: true } | { ok: false; detail: string };
   /** P0-6: the acceptance executor. Defaults to `setup/accept-as-agent` when an agent user is configured. TEST-ONLY when not offline. */
   acceptanceExecutor?: AcceptanceExecutor;
   /** P0-6: where acceptance snapshots go. Defaults to `<agent worktreesRoot>/acceptance`. */
@@ -153,6 +158,8 @@ export interface BuiltServer {
   dispatcher: AutopilotDispatcher;
   /** P0-7a: absent when `autopilot.heartbeat` is not configured. */
   heartbeat?: AutopilotHeartbeat;
+  /** P0-7b: restore detection, reconciliation and the start gate (§C.5). */
+  restore: AutopilotRestore;
   quotaProbes: QuotaProbeService;
   modelCatalog: ModelCatalogService;
   registryFederation: RegistryFederation;
@@ -226,6 +233,10 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   // P0-3: the real host gate (§C.2.6) unless a test injects one. It is fail-closed: without
   // `scheduler.admission.<pool>` every autopilot launch is refused `host_busy`.
   const autopilot: AutopilotService = new AutopilotService({ db, config, tasks, now, hostGate: deps.autopilotHostGate ?? hostGateFromConfig(config, { windows: () => autopilot.windows(), openWindow: () => autopilot.openWindow(), now }) });
+  // P0-7b (§C.5): a restored database is detected here, before any boot reconciliation, timer or
+  // route: one transaction records it and stops the autopilot, so nothing can start from it.
+  const restored = detectRestore(db, config.dir, now, (msg) => app.log.warn(msg));
+  if (restored) app.log.warn(`autopilot: restored database detected (restore ${restored.restoreId}${restored.recorded ? "" : ", seen before"}); the autopilot is stopped until its reconciliation report is read back`);
   // P0-6: the production GitHub client, on the plane user's token file (read per request).
   const restGitHub = config.autopilot.github
     ? new GitHubRestClient({ token: () => readGitHubTokenFile(config.autopilot.github!.tokenFile), ...(config.autopilot.github.apiBase ? { apiBase: config.autopilot.github.apiBase } : {}) })
@@ -269,6 +280,24 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     log: (level, msg) => app.log[level](msg),
   });
   autopilot.onSettled = () => dispatcher.kick();
+  // P0-7b: the reconciliation and the start gate. Worktree roots are every place a task, a
+  // candidate or an acceptance snapshot is created.
+  const reconcileGitHub = deps.autopilotReconcileGitHub
+    ?? (deps.autopilotGitHub && "listBranches" in deps.autopilotGitHub ? deps.autopilotGitHub as unknown as ReconcileGitHub : undefined)
+    ?? (deps.autopilotGitHub ? undefined : restGitHub);
+  const snapshotsRoot = deps.acceptanceSnapshotsRoot ?? (agentUser ? join(agentUser.worktreesRoot, "acceptance") : undefined);
+  const restore = new AutopilotRestore({
+    db, config, autopilot, now,
+    ...(reconcileGitHub ? { github: reconcileGitHub } : {}),
+    worktreeRoots: [
+      { root: join(config.dir, "worktrees") },
+      ...(agentUser ? [{ root: agentUser.worktreesRoot, skip: snapshotsRoot && dirname(snapshotsRoot) === agentUser.worktreesRoot ? [basename(snapshotsRoot)] : [] }] : []),
+      ...(snapshotsRoot ? [{ root: snapshotsRoot }] : []),
+    ],
+    ...(deps.autopilotRestoreAgentSlice ? { agentSlice: deps.autopilotRestoreAgentSlice } : agentUser ? { agentSlice: agentIdleFromConfig(config) } : {}),
+    log: (level, msg) => app.log[level](msg),
+  });
+  autopilot.startGate = restore;
   // P0-7a (D-14): the external heartbeat. Absent config = no ping and no ledger rows.
   const heartbeat = config.autopilot.heartbeat
     ? new AutopilotHeartbeat({ db, now, config: config.autopilot.heartbeat, ...(deps.autopilotHeartbeatFetch ? { fetch: deps.autopilotHeartbeatFetch } : {}) })
@@ -544,7 +573,22 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     if (err instanceof AutopilotStartRefused) return reply.status(409).send({ error: "autopilot_start_refused", setting: err.setting, detail: err.message });
     return reply.status(400).send({ error: err instanceof Error ? err.message : String(err) });
   };
-  app.get("/api/autopilot", read.tasks, () => ({ ...autopilot.status(), windows: autopilot.windows(), attempts: autopilot.attempts(20), dispatcher: dispatcher.status() }));
+  app.get("/api/autopilot", read.tasks, () => ({ ...autopilot.status(), windows: autopilot.windows(), attempts: autopilot.attempts(20), dispatcher: dispatcher.status(), restore: restore.status() }));
+  // P0-7b (§C.5): restore state (a summary, never the report), the reconciliation, and the
+  // operator's read-back of the report, which a start after a restore requires.
+  app.get("/api/autopilot/restore", read.tasks, () => restore.status());
+  app.post("/api/autopilot/restore/reconcile", operate, async (_req, reply) => {
+    try { return await restore.reconcile(); } catch (err) {
+      if (err instanceof RestoreRefused) return reply.status(409).send({ error: err.message });
+      return reply.status(502).send({ error: `reconciliation failed: ${err instanceof Error ? err.message : String(err)}`, restore: restore.status() });
+    }
+  });
+  app.get("/api/autopilot/restore/report", operate, (req, reply) => {
+    try { return restore.readReport(operatorKid(req)); } catch (err) {
+      if (err instanceof RestoreRefused) return reply.status(404).send({ error: err.message });
+      throw err;
+    }
+  });
   app.post("/api/autopilot/start", operate, (req, reply) => {
     try { const started = autopilot.start(operatorKid(req)); dispatcher.kick(); void heartbeat?.tick(); return started; } catch (err) { return autopilotError(reply, err); }
   });
@@ -1655,7 +1699,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     });
   }
 
-  return { app, registry, orchestrator, tasks, bus, checkpoints, cooldowns, telemetry, scheduler, autopilot, publications, ...(acceptance ? { acceptance } : {}), dispatcher, ...(heartbeat ? { heartbeat } : {}), quotaProbes: probes, modelCatalog, registryFederation, memoryFederation, sessionInputs, sessionInputRedelivery };
+  return { app, registry, orchestrator, tasks, bus, checkpoints, cooldowns, telemetry, scheduler, autopilot, publications, ...(acceptance ? { acceptance } : {}), dispatcher, ...(heartbeat ? { heartbeat } : {}), restore, quotaProbes: probes, modelCatalog, registryFederation, memoryFederation, sessionInputs, sessionInputRedelivery };
 }
 
 function sseHeaders(reply: FastifyReply): void {

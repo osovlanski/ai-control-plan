@@ -313,6 +313,12 @@ export interface ResolvedAutopilotConfig {
    * minutes. Absent = no ping, and the morning report says the heartbeat is not tracked.
    */
   heartbeat?: { urlFile: string; intervalMs: number };
+  /**
+   * P0-7b (§C.5, D-11): the database backup script's settings (`pnpm --filter @agent-plane/api
+   * backup`). `localDir` defaults to `<workspace>/backups`, `keepDays` to 7. `destination` is
+   * where each copy also goes: only `dir:/absolute/path` is built; the off-host bucket is not.
+   */
+  backup?: { localDir?: string; keepDays: number; destination?: string };
 }
 export interface AutopilotRepoConfig { github: string; path: string; base: string }
 export const AUTOPILOT_DEFAULTS: Omit<ResolvedAutopilotConfig, "repos"> & { repos: Readonly<Record<string, AutopilotRepoConfig>> } = {
@@ -320,7 +326,7 @@ export const AUTOPILOT_DEFAULTS: Omit<ResolvedAutopilotConfig, "repos"> & { repo
   minSliceMs: 10 * 60_000, graceMs: 2 * 60_000, hostRetryMs: 2 * 60_000, attestationMaxAgeDays: 30,
   dispatchIntervalMs: 60_000, repos: {}, backlogRepo: "ai-control-plan", approvalMode: "auto-approve",
 };
-const AUTOPILOT_KEYS = [...Object.keys(AUTOPILOT_DEFAULTS), "github", "heartbeat"];
+const AUTOPILOT_KEYS = [...Object.keys(AUTOPILOT_DEFAULTS), "github", "heartbeat", "backup"];
 
 function resolveAutopilot(file: unknown, configPath: string): ResolvedAutopilotConfig {
   if (file === undefined) return { ...AUTOPILOT_DEFAULTS, repos: {} };
@@ -382,6 +388,17 @@ function resolveAutopilot(file: unknown, configPath: string): ResolvedAutopilotC
     const intervalMs = h.intervalMs ?? 10 * 60_000;
     if (!isPositiveInteger(intervalMs) || intervalMs < 60_000) throw new Error(`${configPath}: autopilot.heartbeat.intervalMs must be an integer of at least 60000`);
     out.heartbeat = { urlFile: h.urlFile, intervalMs };
+  }
+  if (file.backup !== undefined) {
+    const b = file.backup;
+    if (!isRecord(b)) throw new Error(`${configPath}: autopilot.backup must be a mapping`);
+    const extra = Object.keys(b).filter((k) => !["localDir", "keepDays", "destination"].includes(k));
+    if (extra.length > 0) throw new Error(`${configPath}: autopilot.backup has unknown key(s): ${extra.join(", ")}`);
+    if (b.localDir !== undefined && (typeof b.localDir !== "string" || !isAbsolute(b.localDir) || resolve(b.localDir) !== b.localDir)) throw new Error(`${configPath}: autopilot.backup.localDir must be an absolute, normalized path`);
+    const keepDays = b.keepDays ?? 7;
+    if (!isPositiveInteger(keepDays)) throw new Error(`${configPath}: autopilot.backup.keepDays must be a positive integer`);
+    if (b.destination !== undefined && (typeof b.destination !== "string" || !/^dir:\/\S*$/.test(b.destination))) throw new Error(`${configPath}: autopilot.backup.destination must be dir:/absolute/path (the off-host bucket is not built)`);
+    out.backup = { keepDays, ...(b.localDir !== undefined ? { localDir: b.localDir as string } : {}), ...(b.destination !== undefined ? { destination: b.destination as string } : {}) };
   }
   return out;
 }
