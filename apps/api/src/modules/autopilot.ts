@@ -684,15 +684,16 @@ export class AutopilotService {
   }
 
   /**
-   * Operator requeue of a `blocked` attempt (first live run: an expired approval ended an attempt
-   * `blocked`, which nothing retries). The attempt stays final and `blocked`; it is marked requeued,
-   * which makes it retryable like `failed`, and it still counts toward `attemptsPerItem`.
+   * Operator requeue of a `blocked` or `cancelled` attempt (first live run: an expired approval ended an
+   * attempt `blocked`, which nothing retries; an operator cancels a parked task to free the slot). The
+   * attempt stays final; it is marked requeued, which makes it retryable like `failed`, and it still
+   * counts toward `attemptsPerItem`.
    */
   requeue(attemptId: string, by: string): AutopilotAttempt {
     return this.db.transaction(() => {
       const attempt = this.row(attemptId);
       if (!attempt) throw new Error(`unknown attempt ${attemptId}`);
-      if (attempt.state !== "blocked") throw new Error(`attempt ${attemptId} is ${attempt.state}; only a blocked attempt can be requeued`);
+      if (attempt.state !== "blocked" && attempt.state !== "cancelled") throw new Error(`attempt ${attemptId} is ${attempt.state}; only a blocked or cancelled attempt can be requeued`);
       if (attempt.requeued_at) throw new Error(`attempt ${attemptId} was already requeued`);
       this.db.prepare("UPDATE autopilot_attempts SET requeued_at = ?, requeued_by = ? WHERE id = ?").run(this.iso(), by, attemptId);
       return this.toAttempt(this.row(attemptId)!);

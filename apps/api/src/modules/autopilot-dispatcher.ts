@@ -200,8 +200,8 @@ export interface DispatcherDeps {
   log?: (level: "info" | "warn" | "error", msg: string) => void;
 }
 
-/** A failed attempt, or a blocked one the operator released, may be retried. */
-const retryable = (a: { state: string; requeuedAt?: string }): boolean => a.state === "failed" || (a.state === "blocked" && !!a.requeuedAt);
+/** A failed attempt, or a blocked or cancelled one the operator released, may be retried. */
+const retryable = (a: { state: string; requeuedAt?: string }): boolean => a.state === "failed" || ((a.state === "blocked" || a.state === "cancelled") && !!a.requeuedAt);
 
 export class AutopilotDispatcher {
   private readonly now: () => Date;
