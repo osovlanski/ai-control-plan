@@ -197,4 +197,14 @@ describe("VerificationCoordinator", () => {
     expect(prepared.checks).toHaveLength(3);
     expect(prepared.outcomes).toBeUndefined();
   });
+
+  it("an agent-user task discovers no project checks: the acceptance runner is the only executor", async () => {
+    writeFileSync(join(worktree, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+    const base = request("erq_agent", "AG-agent");
+    const req: ExecutionRequest = { ...base, policy: { ...base.policy, runAs: "agent" } };
+    const sid = createSession(req);
+    const prepared = await coordinator(["src/widget.ts"], undefined, async () => false).prepare(sid, req);
+    expect(prepared.outcomes ?? []).toEqual([]);
+    expect(prepared.checks.some((c) => c.checkId.startsWith("project:"))).toBe(false);
+  });
 });
