@@ -123,6 +123,35 @@ function isoInstant(value: unknown, name: string): string {
   return new Date(value).toISOString();
 }
 
+/** P0-7c: an external record (§C.5) as the API shows it. */
+export interface AutopilotExternal {
+  id: number;
+  kind: "reservation" | "publication";
+  repo: string;
+  head: string;
+  itemId: string | null;
+  sha: string | null;
+  reservationId: string | null;
+  prNumber: number | null;
+  marker: string | null;
+  detail: string;
+  restoreId: string | null;
+  recordedAt: string;
+  resolution: { action: "dismissed"; at: string; by: string; note: string | null } | null;
+}
+interface ExternalRow {
+  id: number; kind: "reservation" | "publication"; repo: string; head: string; item_id: string | null; sha: string | null;
+  reservation_id: string | null; pr_number: number | null; marker: string | null; detail: string; restore_id: string | null; recorded_at: string;
+  resolved_at: string | null; resolved_by: string | null; resolution: "dismissed" | null; resolution_note: string | null;
+}
+const toExternal = (r: ExternalRow): AutopilotExternal => ({
+  id: r.id, kind: r.kind, repo: r.repo, head: r.head, itemId: r.item_id, sha: r.sha, reservationId: r.reservation_id, prNumber: r.pr_number,
+  marker: r.marker, detail: r.detail, restoreId: r.restore_id, recordedAt: r.recorded_at,
+  resolution: r.resolved_at ? { action: r.resolution ?? "dismissed", at: r.resolved_at, by: r.resolved_by ?? "operator", note: r.resolution_note } : null,
+});
+export class ExternalNotFound extends Error {}
+export class ExternalInvalid extends Error {}
+
 export class AutopilotService {
   private readonly db: Db;
   private readonly now: () => Date;
@@ -303,10 +332,35 @@ export class AutopilotService {
   attempts(limit = 50): AutopilotAttempt[] {
     return (this.db.prepare("SELECT * FROM autopilot_attempts ORDER BY created_at DESC, rowid DESC LIMIT ?").all(limit) as AttemptRow[]).map((r) => this.toAttempt(r));
   }
-  /** P0-7b: the reservation id of an external reservation the restore reconciliation recorded for this item, if any. */
+  /** P0-7b: the reservation id of an unresolved external reservation the restore reconciliation recorded for this item, if any. */
   externalReservationOf(itemId: string): string | undefined {
-    const r = this.db.prepare("SELECT reservation_id, sha FROM autopilot_externals WHERE kind = 'reservation' AND item_id = ? ORDER BY id LIMIT 1").get(itemId) as { reservation_id: string | null; sha: string | null } | undefined;
+    const r = this.db.prepare("SELECT reservation_id, sha FROM autopilot_externals WHERE kind = 'reservation' AND item_id = ? AND resolved_at IS NULL ORDER BY id LIMIT 1").get(itemId) as { reservation_id: string | null; sha: string | null } | undefined;
     return r ? (r.reservation_id ?? `(no reservation commit, ${r.sha?.slice(0, 12) ?? "?"})`) : undefined;
+  }
+  /** P0-7c: the external records, unresolved first then newest; resolved ones only when asked. */
+  externals(opts: { includeResolved?: boolean } = {}): AutopilotExternal[] {
+    const rows = this.db.prepare(`SELECT * FROM autopilot_externals ${opts.includeResolved ? "" : "WHERE resolved_at IS NULL"}
+      ORDER BY (resolved_at IS NULL) DESC, id DESC LIMIT 200`).all() as ExternalRow[];
+    return rows.map(toExternal);
+  }
+  /**
+   * P0-7c (§C.5): itay's decision on an external record. `dismiss` is the only action: the record
+   * stays as history and its item is no longer blocked by it. This does not touch GitHub. The
+   * dispatcher still reads the item's `os/<id>` ref before selecting it: while the ref exists the
+   * item is reported held (`running`, a manual lane) or `blocked`, never selected, so only a deleted
+   * or merged ref makes it eligible again.
+   */
+  resolveExternal(id: number, action: unknown, note: unknown, by: string): AutopilotExternal {
+    if (action !== "dismiss") throw new ExternalInvalid("action must be dismiss");
+    if (note !== undefined && (typeof note !== "string" || note.length > 500)) throw new ExternalInvalid("note must be a string of at most 500 characters");
+    return this.db.transaction(() => {
+      const row = this.db.prepare("SELECT * FROM autopilot_externals WHERE id = ?").get(id) as ExternalRow | undefined;
+      if (!row) throw new ExternalNotFound(`unknown external record ${id}`);
+      if (row.resolved_at) throw new Error(`external record ${id} was already ${row.resolution} by ${row.resolved_by} at ${row.resolved_at}`);
+      this.db.prepare("UPDATE autopilot_externals SET resolved_at = ?, resolved_by = ?, resolution = 'dismissed', resolution_note = ? WHERE id = ?")
+        .run(this.iso(), by, (note as string | undefined)?.trim() || null, id);
+      return toExternal(this.db.prepare("SELECT * FROM autopilot_externals WHERE id = ?").get(id) as ExternalRow);
+    })();
   }
   /** Whether this task belongs to an autopilot attempt, in any state. */
   owns(taskId: string): boolean { return !!this.rowOfTask(taskId); }

@@ -90,7 +90,7 @@ describe("backup script module (D-11 local half)", () => {
     writeFileSync(join(local, "notes.txt"), "keep me");
 
     const taken = await takeBackup({ dbPath: rig.config.dbPath, localDir: local, keepDays: 7, destination: directoryDestination(offsite), now });
-    expect(taken.manifest).toMatchObject({ name: "agent-plane-20300101T230000Z.db", integrity: "ok", lastMigration: "049_autopilot_restores.sql" });
+    expect(taken.manifest).toMatchObject({ name: "agent-plane-20300101T230000Z.db", integrity: "ok", lastMigration: "050_autopilot_external_resolutions.sql" });
     expect(taken.pruned).toEqual(["agent-plane-20291201T000000Z.db"]);
     expect(readdirSync(local).sort()).toEqual(["agent-plane-20300101T230000Z.db", "agent-plane-20300101T230000Z.json", "notes.txt"]);
     expect(readdirSync(offsite).sort()).toEqual(["agent-plane-20300101T230000Z.db", "agent-plane-20300101T230000Z.json"]);
@@ -420,5 +420,65 @@ describe("restore plumbing", () => {
     await expect(client.listBranches(REPO, "os")).rejects.toThrow(/must end with/);
     const endless = new GitHubRestClient({ apiBase: "http://127.0.0.1:1", token: () => "FAKE-token-not-real", fetch: (async () => Response.json(page(100, pr))) as typeof fetch });
     await expect(endless.listPulls(REPO)).rejects.toMatchObject({ kind: "unknown", message: expect.stringContaining("more than 3000") });
+  });
+});
+
+/* ------------------------------------------- P0-7c external records -- */
+
+describe("itay dismisses an external record (P0-7c)", () => {
+  it("lists externals, dismisses one through autopilot.operate, keeps it on a re-run, and reopens it on a new restore", async () => {
+    const gh = new FakeGitHub();
+    await bootAutopilot(gh, { ok: true });
+    const r = rig!;
+    const ap = r.built.autopilot;
+    const base = gh.commit("base");
+    gh.branches.set("os/theta", gh.commit(reservationMessage("theta", "oci-loop", "res-theta-lost"), base));
+    gh.pr(104, "os/theta", "pub-theta-lost");
+    writeFileSync(join(r.config.dir, RESTORE_MARKER_FILE), JSON.stringify({ restoredAt: at(T0) }));
+    detectRestore(r.db, r.config.dir, now);
+    await r.built.restore.reconcile();
+    expect(ap.externalReservationOf("theta")).toBe("res-theta-lost");
+
+    const op = generateOperateSecret();
+    writeOperateSecretHash(operateSecretPath(r.config.dir), op.hash);
+    const call = async (method: "GET" | "POST", url: string, secret?: string, payload?: unknown) => {
+      const res = await r.built.app.inject({ method, url, headers: { authorization: secret ? `Bearer ${secret}` : r.auth().authorization }, ...(payload ? { payload: payload as Record<string, unknown> } : {}) });
+      return { status: res.statusCode, body: res.json() as Record<string, unknown> };
+    };
+
+    const listed = (await call("GET", "/api/autopilot/externals")).body.externals as Array<{ id: number; kind: string; head: string; resolution: unknown }>;
+    expect(listed.map((x) => [x.kind, x.head, x.resolution])).toEqual([["publication", "os/theta", null], ["reservation", "os/theta", null]]);
+    const reservation = listed.find((x) => x.kind === "reservation")!;
+    const report = async () => ((await call("GET", "/api/autopilot/report")).body.unresolvedEffects as Array<{ kind: string; externalId?: number }>).filter((e) => e.kind === "external_record").map((e) => e.externalId).sort();
+    expect(await report()).toEqual(listed.map((x) => x.id).sort());
+
+    // Who may, and what is refused.
+    expect((await call("POST", `/api/autopilot/externals/${reservation.id}/resolve`, undefined, { action: "dismiss" })).status).toBe(403);
+    expect(await call("POST", `/api/autopilot/externals/${reservation.id}/resolve`, op.secret, { action: "adopt" })).toEqual({ status: 400, body: { error: "action must be dismiss" } });
+    expect((await call("POST", `/api/autopilot/externals/${reservation.id}/resolve`, op.secret, { action: "dismiss", note: "x".repeat(501) })).status).toBe(400);
+    expect((await call("POST", "/api/autopilot/externals/999/resolve", op.secret, { action: "dismiss" })).status).toBe(404);
+    expect((await call("POST", "/api/autopilot/externals/abc/resolve", op.secret, { action: "dismiss" })).status).toBe(400);
+
+    instant += MIN;
+    const dismissed = await call("POST", `/api/autopilot/externals/${reservation.id}/resolve`, op.secret, { action: "dismiss", note: " my manual lane; ref deleted " });
+    expect(dismissed.status).toBe(200);
+    expect(dismissed.body.external).toMatchObject({ id: reservation.id, resolution: { action: "dismissed", at: at(instant), by: expect.any(String), note: "my manual lane; ref deleted" } });
+    expect((await call("POST", `/api/autopilot/externals/${reservation.id}/resolve`, op.secret, { action: "dismiss" })).status).toBe(409);
+    expect(ap.externalReservationOf("theta")).toBeUndefined();
+    expect(((await call("GET", "/api/autopilot/externals")).body.externals as unknown[]).length).toBe(1);
+    expect(((await call("GET", "/api/autopilot/externals?all=1")).body.externals as unknown[]).length).toBe(2);
+    expect(await report()).toEqual([listed.find((x) => x.kind === "publication")!.id]);
+
+    // A re-run of the same restore's reconciliation keeps the decision.
+    await r.built.restore.reconcile();
+    expect(ap.externalReservationOf("theta")).toBeUndefined();
+
+    // A new restore that finds the same ref again reopens it.
+    instant += MIN;
+    writeFileSync(join(r.config.dir, RESTORE_MARKER_FILE), JSON.stringify({ restoredAt: at(instant) }));
+    expect(detectRestore(r.db, r.config.dir, now)?.recorded).toBe(true);
+    await r.built.restore.reconcile();
+    expect(ap.externalReservationOf("theta")).toBe("res-theta-lost");
+    expect(r.db.prepare("SELECT COUNT(*) AS n FROM autopilot_externals").get()).toEqual({ n: 2 });
   });
 });

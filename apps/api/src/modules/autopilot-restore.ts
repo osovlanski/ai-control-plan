@@ -347,9 +347,26 @@ export class AutopilotRestore implements AutopilotStartGate {
     return { ...base, outcome: "external" };
   }
 
+  /**
+   * Records an external once per identity. A row itay dismissed (P0-7c) is reopened only by a
+   * different restore: a re-run of the same reconciliation keeps his decision, a new restore is a
+   * new decision point.
+   */
   private recordExternal(e: { kind: "reservation" | "publication"; repo: string; head: string; itemId: string | null; sha: string | null; reservationId: string | null; prNumber: number | null; marker: string | null; detail: string; restoreId: string }): void {
-    this.db.prepare(`INSERT OR IGNORE INTO autopilot_externals(kind, repo, head, item_id, sha, reservation_id, pr_number, marker, detail, restore_id, recorded_at)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run(e.kind, e.repo, e.head, e.itemId, e.sha, e.reservationId, e.prNumber, e.marker, e.detail, e.restoreId, this.now().toISOString());
+    const at = this.now().toISOString();
+    const known = this.db.prepare(`SELECT id, restore_id, resolved_at FROM autopilot_externals
+      WHERE kind = ? AND repo = ? AND head = ? AND COALESCE(reservation_id, '') = ? AND COALESCE(pr_number, 0) = ?`)
+      .get(e.kind, e.repo, e.head, e.reservationId ?? "", e.prNumber ?? 0) as { id: number; restore_id: string | null; resolved_at: string | null } | undefined;
+    if (!known) {
+      this.db.prepare(`INSERT INTO autopilot_externals(kind, repo, head, item_id, sha, reservation_id, pr_number, marker, detail, restore_id, recorded_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run(e.kind, e.repo, e.head, e.itemId, e.sha, e.reservationId, e.prNumber, e.marker, e.detail, e.restoreId, at);
+      return;
+    }
+    if (known.resolved_at && known.restore_id !== e.restoreId) {
+      this.db.prepare(`UPDATE autopilot_externals SET item_id = ?, sha = ?, marker = ?, detail = ?, restore_id = ?, recorded_at = ?,
+        resolved_at = NULL, resolved_by = NULL, resolution = NULL, resolution_note = NULL WHERE id = ?`)
+        .run(e.itemId, e.sha, e.marker, e.detail, e.restoreId, at, known.id);
+    }
   }
 
   private publicationsSection(pullsByRepo: Map<string, PullRequest[]>): RestoreReport["publications"] {
