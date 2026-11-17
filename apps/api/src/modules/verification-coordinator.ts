@@ -129,7 +129,8 @@ export class VerificationCoordinator implements VerificationCoordinatorPort {
       throwIfAborted(signal);
       const changedFiles = checkpoint.changedFiles;
       const worktreePath = request.context.worktree?.worktreePath;
-      const discovery = worktreePath
+      // An agent-user task's repository commands run only in the isolated acceptance runner.
+      const discovery = worktreePath && request.policy.runAs !== "agent"
         ? discoverProjectVerificationCapabilities(snapshotProjectVerification(this.authority, worktreePath))
         : { capabilities: [], warnings: [] };
       throwIfAborted(signal);
