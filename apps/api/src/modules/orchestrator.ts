@@ -1366,7 +1366,11 @@ export class Orchestrator {
 
     switch (result.outcome) {
       case "completed": {
-        if (result.verification && !result.verification.passed) {
+        if (result.verification && !result.verification.passed && row.run_as === "agent") {
+          // An unattended agent-user task has nobody to answer a `verification_failed` pause: the attempt
+          // would hold the one slot for ever. It fails, and the per-item retry rule applies.
+          tx("FAILED", verificationNotice(result.verification.checks));
+        } else if (result.verification && !result.verification.passed) {
           tx("WAITING_INPUT", verificationNotice(result.verification.checks), "verification_failed");
         } else {
           tx("COMPLETED");

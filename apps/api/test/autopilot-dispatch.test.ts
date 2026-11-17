@@ -529,7 +529,24 @@ describe("retries", () => {
     expect(() => ap().requeue(a.id, "op_test")).toThrow(/already requeued/);
     await dispatcher().tick();
     expect(ap().currentAttempt()).toMatchObject({ attemptNo: 2, state: "admitted", reservationOutcome: "reused", reservationSha: a.reservationSha });
-    expect(() => ap().requeue(ap().currentAttempt()!.id, "op_test")).toThrow(/only a blocked attempt/);
+    expect(() => ap().requeue(ap().currentAttempt()!.id, "op_test")).toThrow(/only a blocked or cancelled attempt/);
+    ap().stop("now", "test");
+    await dispatcher().tick();
+    await dispatcher().idle();
+  });
+
+  it("a cancelled attempt (an operator freed a parked task) is retried only after a requeue", async () => {
+    await boot([{ id: "item-a" }]);
+    open();
+    await dispatcher().tick();
+    const a = ap().currentAttempt()!;
+    rig!.db.prepare("UPDATE tasks SET state = 'CANCELLED' WHERE id = ?").run(a.taskId);
+    await dispatcher().tick();
+    expect(ap().attempt(a.id)).toMatchObject({ state: "cancelled" });
+    expect(await dispatcher().tick()).toEqual({ action: "idle", reason: "no item is queued or retryable" });
+    ap().requeue(a.id, "op_test");
+    await dispatcher().tick();
+    expect(ap().currentAttempt()).toMatchObject({ attemptNo: 2, state: "admitted", reservationOutcome: "reused" });
     ap().stop("now", "test");
     await dispatcher().tick();
     await dispatcher().idle();
