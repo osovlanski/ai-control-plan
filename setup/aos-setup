@@ -11,6 +11,8 @@ SRC="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 cd /  # a cwd the agent user cannot stat (a home-dir checkout) makes the agent-side git calls fail
 L=/usr/local/lib/aos
 PLANE_USER=ubuntu
+# Must equal "packageManager" in the repo package.json (a test pins it): pnpm self-switches otherwise, and offline that fails.
+PNPM_VERSION=10.33.0
 say(){ echo "aos-setup: $*"; }
 # Installed copies are root-owned, so a run from $L installs only what root put there.
 inst(){ [ "$(readlink -f "$SRC/$1")" = "$(readlink -f "$3")" ] || install -o root -g root -m "$2" "$SRC/$1" "$3"; }
@@ -26,6 +28,7 @@ id -nG "$PLANE_USER" | tr ' ' '\n' | grep -qx aos || { usermod -aG aos "$PLANE_U
 install -d -o "$PLANE_USER" -g aos -m 0750 /var/lib/aos
 install -d -o "$PLANE_USER" -g aos -m 2750 /var/lib/aos/profiles   # agent reads, cannot write
 install -d -o "$PLANE_USER" -g aos -m 2770 /var/lib/aos/worktrees  # agent writes
+install -d -o "$PLANE_USER" -g aos -m 2755 /var/lib/aos/pnpm-store   # plane fills it, agent reads (v10/projects is the one dir it writes)
 install -d -o "$PLANE_USER" -g aos -m 2750 /var/lib/aos/schedule   # P0-3: plane writes the close schedule, agent reads
 install -d -o root -g root -m 0755 "$L"
 inst run-as-agent 0755 "$L/run-as-agent"
@@ -53,6 +56,17 @@ if [ ! -x "$L/claude" ]; then
   runuser -u "$PLANE_USER" -- cat -- "$bin" > "$tmp"
   chown root:root "$tmp"; chmod 0755 "$tmp"; mv -f "$tmp" "$L/claude-$v"
   ln -sfn "claude-$v" "$L/claude"; say "claude $v copied"
+fi
+# Acceptance (§C.2.7) runs `pnpm` as aos-agent, which cannot see the plane user's home. node and
+# pnpm go in /opt/aos-tools, root-owned. Copied from the plane user's node, so versions match.
+if [ ! -x /opt/aos-tools/bin/pnpm ] || [ ! -x /opt/aos-tools/bin/node ]; then
+  nodebin="$(readlink -f "/home/$PLANE_USER/.local/bin/node")"; npm="/home/$PLANE_USER/.local/bin/npm"
+  [ -x "$nodebin" ] && [ -x "$npm" ] || { echo "aos-setup: need node and npm at /home/$PLANE_USER/.local/bin to install /opt/aos-tools" >&2; exit 1; }
+  install -d -o root -g root -m 0755 /opt/aos-tools /opt/aos-tools/bin
+  install -o root -g root -m 0755 "$nodebin" /opt/aos-tools/bin/node
+  env HOME=/root PATH="/opt/aos-tools/bin:/usr/bin:/bin" "$nodebin" "$(readlink -f "$npm")" install -g --prefix /opt/aos-tools "pnpm@$PNPM_VERSION" --no-audit --no-fund --loglevel=error
+  chown -R root:root /opt/aos-tools; chmod -R a+rX,go-w /opt/aos-tools
+  say "node + pnpm $PNPM_VERSION installed in /opt/aos-tools"
 fi
 # P0-3: the close timer (§C.2.5) in aos-agent's own user manager. Root-owned unit files in
 # /etc/systemd/user, enabled globally; ConditionUser keeps every other user's manager out of it.

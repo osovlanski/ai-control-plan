@@ -317,6 +317,36 @@ export function agentAcceptanceExecutor(agent: Pick<AgentUserConfig, "sudo" | "w
   };
 }
 
+/**
+ * The production prefetch: `pnpm fetch` of the snapshot's lockfile into `storeDir`, as the plane user.
+ * The store is then readable by the agent group and read-only to it, except `v10/projects`, where pnpm
+ * registers each project it installs (it fails with EACCES if it cannot; measured). Acceptance imports by
+ * copy, so no store file is ever hard-linked into a tree the agent can write.
+ */
+export function pnpmStorePrefetch(storeDir: string, timeoutMs = 15 * 60_000): (snapshot: string) => Promise<void> {
+  return (snapshot) => new Promise((resolve, reject) => {
+    const projects = join(storeDir, "v10", "projects");
+    try { mkdirSync(projects, { recursive: true }); chmodSync(projects, 0o2770); } catch (err) { return reject(new Error(`pnpm store ${storeDir} is not usable: ${err instanceof Error ? err.message : String(err)}`)); }
+    const child = spawn("pnpm", ["fetch", "--store-dir", storeDir], {
+      cwd: snapshot, stdio: ["ignore", "ignore", "pipe"],
+      env: { ...process.env, npm_config_manage_package_manager_versions: "false", CI: "true" },
+    });
+    let tail = "";
+    child.stderr?.on("data", (b: Buffer) => { tail = (tail + b.toString("utf8")).slice(-2_000); });
+    const timer = setTimeout(() => child.kill("SIGKILL"), timeoutMs);
+    timer.unref();
+    child.on("error", (err) => { clearTimeout(timer); reject(new Error(`pnpm fetch could not start: ${err.message}`)); });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (code !== 0) return reject(new Error(`pnpm fetch exited ${code}: ${tail.trim().split("\n").slice(-3).join(" | ")}`));
+      // Readable by the agent group; the plane user stays the only writer.
+      const chmod = spawn("chmod", ["-R", "a+rX,go-w", "--", join(storeDir, "v10", "files"), join(storeDir, "v10", "index")], { stdio: "ignore" });
+      chmod.on("error", () => resolve());
+      chmod.on("close", () => resolve());
+    });
+  });
+}
+
 /* -------------------------------------------------------------- runner -- */
 
 export type AcceptanceRunState = "preparing" | "running" | "passed" | "failed" | "blocked" | "cut" | "crashed";
@@ -350,6 +380,12 @@ export interface AcceptanceDeps {
   agentIdle?: () => { ok: true } | { ok: false; detail: string };
   /** TEST-ONLY: accept an executor that does not declare itself offline. */
   allowOnlineExecutor?: boolean;
+  /**
+   * §C.2.7 step 4: "dependencies come from the store the plane prepared before the run". Called with the
+   * fresh snapshot, as the plane user (which has the network the run lacks), before the tree is locked down.
+   * A throw blocks the run: `pnpm install --offline` could not succeed without it.
+   */
+  prefetch?: (snapshot: string) => Promise<void>;
 }
 
 interface RunRow {
@@ -526,6 +562,7 @@ export class AcceptanceRunner {
     try {
       mkdirSync(this.d.snapshotsRoot, { recursive: true });
       await git(task.repo_path!, ["worktree", "add", "--detach", snapshot, sha!]);
+      await this.d.prefetch?.(snapshot);
       lockDown(snapshot, spec.writable, spec.writableFiles);
       const paths = await trackedPaths(snapshot);
       const before = hashTrackedTree(snapshot, paths);
