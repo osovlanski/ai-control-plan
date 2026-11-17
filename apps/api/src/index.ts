@@ -6,7 +6,7 @@ import { scheduleDailyJobs } from "./modules/jobs.js";
 
 const config = loadConfig();
 const db = openDb(config.dbPath);
-const { app, registry, orchestrator, scheduler, modelCatalog, registryFederation, memoryFederation, acceptance, dispatcher } = buildServer({ config, db });
+const { app, registry, orchestrator, scheduler, modelCatalog, registryFederation, memoryFederation, acceptance, dispatcher, restore } = buildServer({ config, db });
 
 registry.init();
 const reconciled = await orchestrator.reconcileOnBoot();
@@ -18,6 +18,9 @@ await memoryFederation.sync();
 // P0-4/P0-6: an acceptance run a crash interrupted is `crashed` (replay or blocked) before anything dispatches.
 await acceptance?.reconcileOnBoot();
 await scheduler.reconcileOnBoot();
+// P0-7b (§C.5): a restored database gets its one reconciliation now, off the boot path. It reads
+// GitHub and the disk and launches nothing; a start stays refused until its report is read back.
+void restore.reconcileIfPending();
 scheduler.startTimer();
 // P0-6: the in-plane dispatcher. It selects only while the autopilot is running, which a boot never makes it.
 dispatcher.startTimer();

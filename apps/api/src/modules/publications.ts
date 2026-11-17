@@ -125,8 +125,11 @@ export function readGitHubTokenFile(path: string): string {
   return token;
 }
 
+/** P0-7b: the reconciliation reads at most this many pages of 100; more is an incomplete report, never a partial one. */
+const RECONCILE_MAX_PAGES = 30;
+
 /** Minimal GitHub REST client. The token is read per request from its file, so a rotation needs no restart. */
-export class GitHubRestClient implements PublicationGitHub, ReservationGitHub {
+export class GitHubRestClient implements PublicationGitHub, ReservationGitHub, ReconcileGitHub {
   private readonly fetchImpl: typeof fetch;
   constructor(private readonly opts: { apiBase?: string; tokenFile?: string; token?: () => string; timeoutMs?: number; fetch?: typeof fetch }) {
     this.fetchImpl = opts.fetch ?? fetch;
@@ -189,6 +192,36 @@ export class GitHubRestClient implements PublicationGitHub, ReservationGitHub {
     try { return toPull(json); } catch { throw new GitHubError("unknown", status, "POST pulls: unreadable PR in the answer"); }
   }
 
+  /* P0-7b (§C.5): the restore reconciliation's reads. Paged, bounded; a short page ends the list. */
+
+  async listBranches(repo: string, prefix: string): Promise<Array<{ branch: string; sha: string }>> {
+    if (!/^[\w./-]+\/$/.test(prefix) || prefix.includes("..")) throw new GitHubError("rejected", undefined, "listBranches: the prefix must end with /");
+    const out: Array<{ branch: string; sha: string }> = [];
+    const path = `/repos/${repo}/git/matching-refs/heads/${prefix.split("/").map(encodeURIComponent).join("/")}`;
+    for (let page = 1; page <= RECONCILE_MAX_PAGES; page++) {
+      const { status, json } = await this.call("GET", `${path}?per_page=100&page=${page}`);
+      if (status !== 200 || !Array.isArray(json)) throw new GitHubError(status === 200 ? "unknown" : "rejected", status, `GET matching-refs ${prefix}: HTTP ${status}`);
+      for (const r of json as Array<{ ref?: unknown; object?: { sha?: unknown } }>) {
+        if (typeof r?.ref !== "string" || !r.ref.startsWith("refs/heads/") || typeof r.object?.sha !== "string") throw new GitHubError("unknown", status, "GET matching-refs: unreadable ref");
+        out.push({ branch: r.ref.slice("refs/heads/".length), sha: r.object.sha });
+      }
+      if (json.length < 100) return out;
+    }
+    throw new GitHubError("unknown", undefined, `GET matching-refs ${prefix}: more than ${RECONCILE_MAX_PAGES * 100} refs`);
+  }
+  async listPulls(repo: string): Promise<PullRequest[]> {
+    const out: PullRequest[] = [];
+    for (let page = 1; page <= RECONCILE_MAX_PAGES; page++) {
+      const { status, json } = await this.call("GET", `/repos/${repo}/pulls?state=all&per_page=100&page=${page}&sort=created&direction=asc`);
+      if (status !== 200 || !Array.isArray(json)) throw new GitHubError(status === 200 ? "unknown" : "rejected", status, `GET pulls: HTTP ${status}`);
+      for (const raw of json) {
+        try { out.push(toPull(raw)); } catch { throw new GitHubError("unknown", status, "GET pulls: unreadable pull request"); }
+      }
+      if (json.length < 100) return out;
+    }
+    throw new GitHubError("unknown", undefined, `GET pulls: more than ${RECONCILE_MAX_PAGES * 100} pull requests`);
+  }
+
   /* P0-6 (§C.2.2): the reservation calls. */
 
   async getCommit(repo: string, sha: string): Promise<GitCommit | null> {
@@ -232,6 +265,15 @@ export interface ReservationGitHub {
   getCommit(repo: string, sha: string): Promise<GitCommit | null>;
   createCommit(repo: string, input: ReservationCommitInput): Promise<string>;
   createRef(repo: string, branch: string, sha: string): Promise<"created" | "exists">;
+}
+
+/** P0-7b (§C.5): what the restore reconciliation reads from GitHub. Reads only. */
+export interface ReconcileGitHub {
+  /** Every branch whose name starts with `prefix` (which ends with `/`), with its head SHA. */
+  listBranches(repo: string, prefix: string): Promise<Array<{ branch: string; sha: string }>>;
+  /** Every pull request of the repository, any state. */
+  listPulls(repo: string): Promise<PullRequest[]>;
+  getCommit(repo: string, sha: string): Promise<GitCommit | null>;
 }
 
 function toPull(raw: unknown): PullRequest {

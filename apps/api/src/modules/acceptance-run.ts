@@ -39,6 +39,7 @@ import { parse as parseYaml } from "yaml";
 import type { AgentUserConfig, ResolvedAutopilotConfig } from "../config.js";
 import type { Db } from "../db/index.js";
 import { commitCheckpoint } from "../repo/git.js";
+import { restoreInsideWindow } from "./autopilot.js";
 
 const execFileP = promisify(execFile);
 
@@ -493,15 +494,17 @@ export class AcceptanceRunner {
 
     // §C.2.3 deadline, recomputed; acceptance is charged to the attempt's budget.
     const nowMs = this.now().getTime();
-    const window = this.db.prepare("SELECT id, closes_at FROM autopilot_windows WHERE opens_at <= ? AND closes_at > ? ORDER BY opens_at DESC LIMIT 1")
-      .get(this.iso(), this.iso()) as { id: string; closes_at: string } | undefined;
+    const window = this.db.prepare("SELECT id, opens_at, closes_at FROM autopilot_windows WHERE opens_at <= ? AND closes_at > ? ORDER BY opens_at DESC LIMIT 1")
+      .get(this.iso(), this.iso()) as { id: string; opens_at: string; closes_at: string } | undefined;
     const remainingBudget = attempt.runtime_budget_ms - this.usedMs(attemptId);
     if (remainingBudget <= 0) {
       this.setAttempt(attemptId, "failed", "budget_exhausted: no runtime left for acceptance");
       return notStarted("budget_exhausted");
     }
     const closesMs = window ? Date.parse(window.closes_at) : 0;
-    if (!window || closesMs - nowMs < this.d.bounds.minSliceMs) {
+    // P0-7b (§C.5): a window open when a restore was detected is exhausted; acceptance runs as the agent too.
+    const exhausted = window ? restoreInsideWindow(this.db, window.opens_at, window.closes_at) : undefined;
+    if (!window || exhausted || closesMs - nowMs < this.d.bounds.minSliceMs) {
       // G25: acceptance that would cross the close is not started; the attempt waits for the next window.
       this.setAttempt(attemptId, "suspended", "window_closed: acceptance waits for the next window");
       return notStarted("window_closed");

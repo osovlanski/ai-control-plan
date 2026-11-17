@@ -56,7 +56,29 @@ export interface AutopilotAttempt {
   /** An operator released this `blocked` attempt for a retry. */
   requeuedAt?: string; requeuedBy?: string;
 }
-export interface AutopilotWindow { id: string; opensAt: string; closesAt: string; maxItems: number; charged: number }
+export interface AutopilotWindow {
+  id: string; opensAt: string; closesAt: string; maxItems: number; charged: number;
+  /** P0-7b (§C.5): the restore detected while this window was open. Such a window admits no launch. */
+  exhaustedByRestore?: string;
+}
+
+/**
+ * P0-7b (§C.5 "treats the current window as exhausted"): the restore, if any, that the plane
+ * detected while the window `[opensAt, closesAt)` was open. Every such window admits nothing,
+ * even after a start, so the first launch after a restore is in the next window. Keyed on the
+ * detection time, so a window added after the restore that covers that moment counts too.
+ */
+export function restoreInsideWindow(db: Db, opensAt: string, closesAt: string): string | undefined {
+  return (db.prepare("SELECT id FROM autopilot_restores WHERE detected_at >= ? AND detected_at < ? ORDER BY detected_at LIMIT 1").get(opensAt, closesAt) as { id: string } | undefined)?.id;
+}
+
+/** P0-7b: what a pending restore says about a start. Set by the composition root. */
+export interface AutopilotStartGate {
+  /** Why a start must be refused now, named like a setting; undefined = no restore is pending. */
+  blocker(): { setting: string; detail: string } | undefined;
+  /** Called in the start's transaction once the start is accepted: the pending restore is cleared. */
+  cleared(by: string): void;
+}
 
 /** What the scheduler does with a refused launch (§C.2.3 table). Decided here, applied there, in one transaction. */
 export type AutopilotPark =
@@ -107,6 +129,8 @@ export class AutopilotService {
   scheduler?: AutopilotSchedulerPort;
   /** P0-6: called after an attempt reaches `settled`, so the dispatcher starts acceptance without waiting for its timer. */
   onSettled?: () => void;
+  /** P0-7b: the restore gate on `start` (§C.5). Absent = no restore gate (tests that build the service alone). */
+  startGate?: AutopilotStartGate;
   /** A final-check refusal, held until the refused session settles and the orchestrator parks its task. */
   private readonly finalRefusals = new Map<string, AutopilotRefusalReason>();
 
@@ -156,7 +180,13 @@ export class AutopilotService {
   start(startedBy: string): ReturnType<AutopilotService["status"]> {
     const problem = this.settingProblems()[0];
     if (problem) throw new AutopilotStartRefused(problem.setting, problem.detail);
-    this.db.prepare("UPDATE autopilot_state SET status = 'running', stop_reason = NULL, started_by = ?, updated_at = ? WHERE id = 1").run(startedBy, this.iso());
+    this.db.transaction(() => {
+      // P0-7b (§C.5): a restored database starts only after its reconciliation report was read back.
+      const blocked = this.startGate?.blocker();
+      if (blocked) throw new AutopilotStartRefused(blocked.setting, blocked.detail);
+      this.db.prepare("UPDATE autopilot_state SET status = 'running', stop_reason = NULL, started_by = ?, updated_at = ? WHERE id = 1").run(startedBy, this.iso());
+      this.startGate?.cleared(startedBy);
+    })();
     return this.status();
   }
 
@@ -210,7 +240,8 @@ export class AutopilotService {
   }
   private toWindow(w: WindowRow): AutopilotWindow {
     const charged = (this.db.prepare("SELECT COUNT(*) AS n FROM autopilot_window_charges WHERE window_id = ?").get(w.id) as { n: number }).n;
-    return { id: w.id, opensAt: w.opens_at, closesAt: w.closes_at, maxItems: w.max_items, charged };
+    const exhaustedByRestore = restoreInsideWindow(this.db, w.opens_at, w.closes_at);
+    return { id: w.id, opensAt: w.opens_at, closesAt: w.closes_at, maxItems: w.max_items, charged, ...(exhaustedByRestore ? { exhaustedByRestore } : {}) };
   }
   private openWindowRow(): WindowRow | undefined {
     const at = this.iso();
@@ -271,6 +302,11 @@ export class AutopilotService {
   currentAttempt(): AutopilotAttempt | undefined { const r = this.currentRow(); return r ? this.toAttempt(r) : undefined; }
   attempts(limit = 50): AutopilotAttempt[] {
     return (this.db.prepare("SELECT * FROM autopilot_attempts ORDER BY created_at DESC, rowid DESC LIMIT ?").all(limit) as AttemptRow[]).map((r) => this.toAttempt(r));
+  }
+  /** P0-7b: the reservation id of an external reservation the restore reconciliation recorded for this item, if any. */
+  externalReservationOf(itemId: string): string | undefined {
+    const r = this.db.prepare("SELECT reservation_id, sha FROM autopilot_externals WHERE kind = 'reservation' AND item_id = ? ORDER BY id LIMIT 1").get(itemId) as { reservation_id: string | null; sha: string | null } | undefined;
+    return r ? (r.reservation_id ?? `(no reservation commit, ${r.sha?.slice(0, 12) ?? "?"})`) : undefined;
   }
   /** Whether this task belongs to an autopilot attempt, in any state. */
   owns(taskId: string): boolean { return !!this.rowOfTask(taskId); }
@@ -490,6 +526,9 @@ export class AutopilotService {
       if (!window) refuse("window_closed", "no window is open");
       const closesMs = Date.parse(window!.closes_at);
       if (closesMs - nowMs < this.cfg.minSliceMs) refuse("window_closed", `the window closes in ${closesMs - nowMs} ms, below minSliceMs ${this.cfg.minSliceMs}`);
+      // P0-7b (§C.5): a window that was open when a restore was detected is exhausted.
+      const restore = restoreInsideWindow(this.db, window!.opens_at, window!.closes_at);
+      if (restore) refuse("window_closed", `restore ${restore} was detected inside window ${window!.id}; nothing launches until the next window`);
 
       // 5. Attempt budget left.
       const remainingBudget = attempt.runtime_budget_ms - this.usedMs(attempt.id);
@@ -712,6 +751,35 @@ export class AutopilotService {
       if (!isFinal(attempt.state)) this.finalize(attempt, "blocked", `approval ${kind}`);
       return true;
     })();
+  }
+
+  /**
+   * P0-7b (§C.5): the restore reconciliation's rule for a `running` attempt whose session did not
+   * survive (no live `runs` row): the session was cut, as by a window close (§C.2.1 `running` →
+   * `suspended`). It resumes in a later window and is charged again there. Nothing launches here.
+   * Returns false when the attempt is not `running` or a session of it is still live.
+   */
+  suspendLostSession(attemptId: string, reason: string): boolean {
+    return this.db.transaction((): boolean => {
+      const attempt = this.row(attemptId);
+      if (attempt?.state !== "running") return false;
+      this.syncRuntime(attempt.id);
+      if (this.liveSession(attempt.id)) return false;
+      this.setState(attempt.id, "suspended", reason);
+      return true;
+    })();
+  }
+
+  /**
+   * P0-7b (§C.5): a `reserving` attempt whose reservation commit the reconciliation found at the
+   * head of `os/<item>`'s history: record the SHA so the dispatcher admits instead of creating
+   * again. Same rule as an owned 422 (§C.2.2). No-op when the outcome is already recorded.
+   */
+  reattachReservation(attemptId: string, sha: string): boolean {
+    const row = this.row(attemptId);
+    if (row?.state !== "reserving" || row.reservation_outcome) return false;
+    this.reservationOwned(attemptId, sha, "owned");
+    return true;
   }
 
   /**
