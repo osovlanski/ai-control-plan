@@ -459,6 +459,19 @@ describe("approvals of an unattended session", () => {
     await dispatcher().idle();
   });
 
+  it("a composition that asks for prompt-on-escalation cannot park an unattended run on a prompt nobody answers (second live run)", async () => {
+    await boot([{ id: "item-a" }]);
+    for (const risk of ["low", "normal", "high"] as const) rig!.config.composer.policy.riskPermission[risk] = "prompt-on-escalation";
+    open();
+    await dispatcher().tick();
+    const a = ap().currentAttempt()!;
+    await runTask(a.taskId!);
+    expect(approvalOf(a.taskId!)).toEqual(["auto-approve"]);
+    ap().stop("now", "test");
+    await dispatcher().tick();
+    await dispatcher().idle();
+  });
+
   it("autopilot.approvalMode: prompt-on-escalation keeps the workspace prompt", async () => {
     await boot([{ id: "item-a" }]);
     rig!.config.autopilot.approvalMode = "prompt-on-escalation";

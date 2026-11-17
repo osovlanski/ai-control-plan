@@ -724,7 +724,7 @@ export class Orchestrator {
       const launchModel = this.requestedModel(taskId, assistantId, options.routingDecisionRef, composed?.compositionRevisionId);
       const request = buildExecutionRequest({ taskId, dispatchId: options.dispatchId, assistantId, attempt, prompt, workdir, model: launchModel?.id,
         worktree: envelope.repository ? { repoPath: envelope.repository.path, branch: taskRow.branch ?? envelope.repository.branch, worktreePath: workdir, baseRef: taskRow.base_ref ?? 'HEAD' } : undefined,
-        scratchPath, target: executionTarget, approvalMode: policy?.approvalMode ?? this.approvalBaseline(taskId),
+        scratchPath, target: executionTarget, approvalMode: this.effectiveApproval(taskId, policy?.approvalMode),
         // P0-2: an autopilot request is never materialised with more runtime than its attempt and
         // window had left at the early check. The final check recomputes the deadline it runs under.
         maxRuntimeMs: Math.min(policy?.maxRuntimeMs ?? this.maxRuntimeMs, autopilotLaunch?.remainingMs ?? Number.POSITIVE_INFINITY),
@@ -803,7 +803,7 @@ export class Orchestrator {
             : undefined,
           scratchPath,
           target: executionTarget,
-          approvalMode: policy?.approvalMode ?? this.approvalBaseline(taskId),
+          approvalMode: this.effectiveApproval(taskId, policy?.approvalMode),
           maxRuntimeMs: policy?.maxRuntimeMs ?? this.maxRuntimeMs,
           routingDecisionRef,
           verification: projectVerification.plan?.checks ?? [],
@@ -1891,7 +1891,25 @@ export class Orchestrator {
    * sandbox is the boundary). `read-only` is never loosened, and no other task is affected.
    */
   private tightenedApproval(saved: ApprovalMode, taskId: string): ApprovalMode {
+    if (this.unattended(taskId)) return saved === "read-only" ? saved : this.approvalBaseline(taskId);
     return stricterApproval(saved, this.approvalBaseline(taskId));
+  }
+
+  /** An autopilot task in the agent sandbox has no human to answer a prompt. */
+  private unattended(taskId: string): boolean {
+    return this.tasks.get(taskId)?.run_as === "agent" && !!this.autopilot?.owns(taskId);
+  }
+
+  /**
+   * The mode a launch runs under. Normally the stricter of the composition and the baseline. For an unattended
+   * autopilot task a composition's `prompt-on-escalation` would park the run on an approval nobody can answer
+   * (G15: 30 minutes lost), so only `read-only` may tighten it.
+   */
+  private effectiveApproval(taskId: string, composed: ApprovalMode | undefined): ApprovalMode {
+    const baseline = this.approvalBaseline(taskId);
+    if (!composed) return baseline;
+    if (this.unattended(taskId)) return composed === "read-only" ? composed : baseline;
+    return composed;
   }
 
   private approvalBaseline(taskId: string): ApprovalMode {
