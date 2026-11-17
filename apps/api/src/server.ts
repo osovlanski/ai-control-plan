@@ -35,7 +35,7 @@ import { routingHistory } from "./modules/router.js";
 import { TaskEventBus } from "./modules/sse.js";
 import { TaskStageReader } from "./modules/task-stage.js";
 import { Scheduler } from "./modules/scheduler.js";
-import { AutopilotService, AutopilotStartRefused, type AutopilotDeps } from "./modules/autopilot.js";
+import { AutopilotService, AutopilotStartRefused, ExternalInvalid, ExternalNotFound, type AutopilotDeps } from "./modules/autopilot.js";
 import { GitHubRestClient, PublicationRefused, PublicationService, readGitHubTokenFile, type PublicationGit, type PublicationGitHub, type ReconcileGitHub, type ReservationGitHub } from "./modules/publications.js";
 import { agentIdleFromConfig, hostGateFromConfig, syncCloseSchedule } from "./modules/host-admission.js";
 import { AcceptanceRunner, agentAcceptanceExecutor, pnpmStorePrefetch, type AcceptanceExecutor } from "./modules/acceptance-run.js";
@@ -587,6 +587,18 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     try { return restore.readReport(operatorKid(req)); } catch (err) {
       if (err instanceof RestoreRefused) return reply.status(404).send({ error: err.message });
       throw err;
+    }
+  });
+  // P0-7c (§C.5): external records (a reservation or marker PR a restore found and this database
+  // did not know). Listing is read-only; dismissing one is itay's decision and needs `autopilot.operate`.
+  app.get<{ Querystring: { all?: string } }>("/api/autopilot/externals", read.tasks, (req) => ({ externals: autopilot.externals({ includeResolved: req.query.all === "1" || req.query.all === "true" }) }));
+  app.post<{ Params: { id: string }; Body: { action?: unknown; note?: unknown } }>("/api/autopilot/externals/:id/resolve", operate, (req, reply) => {
+    const id = Number(req.params.id);
+    if (!Number.isSafeInteger(id) || id <= 0) return reply.status(400).send({ error: "external record id must be a positive integer" });
+    try { const external = autopilot.resolveExternal(id, req.body?.action, req.body?.note, operatorKid(req)); dispatcher.kick(); return { external }; } catch (err) {
+      if (err instanceof ExternalNotFound) return reply.status(404).send({ error: err.message });
+      if (err instanceof ExternalInvalid) return reply.status(400).send({ error: err.message });
+      return reply.status(409).send({ error: err instanceof Error ? err.message : String(err) });
     }
   });
   app.post("/api/autopilot/start", operate, (req, reply) => {

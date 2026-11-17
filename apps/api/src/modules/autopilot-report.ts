@@ -12,7 +12,8 @@
  *   - charges: the window's charged count against its `max_items`;
  *   - stop reason: the autopilot's state now and why it is not running;
  *   - unresolved remote effects: publications waiting on itay, unsettled or unknown publication
- *     mutations nobody resolved, and acceptance runs that recorded effects the plane cannot know;
+ *     mutations nobody resolved, acceptance runs that recorded effects the plane cannot know, and
+ *     external records from a restore that itay has not dismissed (P0-7c);
  *   - heartbeat gaps: from the D-14 ping ledger (P0-7a, `autopilot-heartbeat.ts`); with no
  *     `autopilot.heartbeat` configured the report says the figure is not tracked rather than
  *     reporting zero gaps;
@@ -59,12 +60,14 @@ export interface MorningReportAttempt {
 }
 
 export interface UnresolvedEffect {
-  kind: "publication_waiting" | "mutation_unsettled" | "mutation_unknown" | "acceptance_unknown_effects";
-  attemptId: string;
+  kind: "publication_waiting" | "mutation_unsettled" | "mutation_unknown" | "acceptance_unknown_effects" | "external_record";
+  /** Absent for `external_record`: a restore found it, and no attempt of this database owns it. */
+  attemptId?: string;
   detail: string;
   publicationId?: string;
   mutationId?: number;
   acceptanceRunId?: string;
+  externalId?: number;
 }
 
 export interface MorningReport {
@@ -168,6 +171,11 @@ export function morningReport(d: MorningReportDeps, opts: { windowId?: string } 
     unresolvedEffects.push({ kind: "acceptance_unknown_effects", attemptId: a.attempt_id, acceptanceRunId: a.id, detail: a.unknown_effects_json });
   }
 
+  // P0-7c: an external record blocks its item until itay dismisses it, so it stays in view until then.
+  for (const x of db.prepare("SELECT id, kind, head, pr_number, detail FROM autopilot_externals WHERE resolved_at IS NULL ORDER BY id").all() as Array<{ id: number; kind: string; head: string; pr_number: number | null; detail: string }>) {
+    unresolvedEffects.push({ kind: "external_record", externalId: x.id, detail: `${x.kind} ${x.head}${x.pr_number ? ` (PR #${x.pr_number})` : ""}: ${x.detail}` });
+  }
+
   const att = db.prepare("SELECT attested_at, expires_at, extra_usage_off, auto_reload_off FROM autopilot_billing_attestations ORDER BY id DESC LIMIT 1").get() as
     { attested_at: string; expires_at: string; extra_usage_off: number; auto_reload_off: number } | undefined;
 
@@ -220,7 +228,7 @@ export function renderMorningReport(r: MorningReport): string {
     ? `Tokens: ${r.tokens.used} (provisional); overshoot ${r.tokens.overshoot} across ${r.tokens.attemptsOverCap} attempt(s)`
     : "Tokens: not available (composer off)");
   out.push(r.unresolvedEffects.length ? `Unresolved remote effects: ${r.unresolvedEffects.length}` : "Unresolved remote effects: none");
-  for (const e of r.unresolvedEffects) out.push(`  ${e.kind} · attempt ${e.attemptId}${e.publicationId ? ` · publication ${e.publicationId}` : ""} · ${e.detail}`);
+  for (const e of r.unresolvedEffects) out.push(`  ${e.kind}${e.attemptId ? ` · attempt ${e.attemptId}` : ""}${e.externalId ? ` · external ${e.externalId}` : ""}${e.publicationId ? ` · publication ${e.publicationId}` : ""} · ${e.detail}`);
   const hb = r.heartbeat;
   if (!hb.tracked || hb.gaps === null) out.push(`Heartbeat gaps: not tracked (${hb.detail})`);
   else {
