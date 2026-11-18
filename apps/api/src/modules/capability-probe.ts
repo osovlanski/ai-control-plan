@@ -4,29 +4,36 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { runtimeFor, type ProbeSpec } from "./runtime-catalog.js";
 
 const execFileAsync = promisify(execFile);
 
 export interface ProbeResult { fingerprint: string; version: string; authState: string; models: string[]; configHash: string }
 export type CapabilityProbe = (provider: string, options?: Record<string, unknown>) => Promise<ProbeResult>;
 
+/**
+ * The provider branches this used to hold are now `RuntimeDescriptor.probe` in the runtime
+ * catalogue. An uncatalogued provider gets the empty spec, which is what the old branches gave it.
+ */
 export async function probeCapability(provider: string, options: Record<string, unknown> = {}): Promise<ProbeResult> {
-  const root = provider === "anthropic" ? join(homedir(), ".claude") : provider === "openai" ? join(homedir(), ".codex") : "";
-  const command = provider === "anthropic" ? "claude" : provider === "openai" ? "codex" : undefined;
-  const version = command ? await probeVersion(command) : "in-process";
-  const openRouterKeyEnv = typeof options.apiKeyEnv === "string" ? options.apiKeyEnv : "OPENROUTER_API_KEY";
-  const authState = provider === "openrouter"
-    ? (process.env[openRouterKeyEnv] ? "ok" : "missing")
-    : root && (existsSync(join(root, ".credentials.json")) || existsSync(join(root, "auth.json"))) ? "ok" : provider === "fake" ? "ok" : "missing";
-  const files = root ? ["config.json", "settings.json", "settings.local.json", "config.toml"] : [];
-  if (provider === "anthropic") files.push("../.claude.json", "plugins/installed_plugins.json");
+  const spec: ProbeSpec = runtimeFor(provider)?.probe ?? {};
+  // Kept as the empty string when there is no config root: the directory signatures below then
+  // read `skills`/`plugins` relative to the working directory, exactly as before (a pre-existing
+  // quirk this refactor preserves so fingerprints do not move; see the PR notes).
+  const root = spec.configRoot ? join(homedir(), spec.configRoot) : "";
+  const version = spec.command ? await probeVersion(spec.command) : "in-process";
+  const credentialEnv = spec.credentialEnv?.(options);
+  const authState = credentialEnv !== undefined
+    ? (process.env[credentialEnv] ? "ok" : "missing")
+    : root && (spec.authFiles ?? []).some((name) => existsSync(join(root, name))) ? "ok" : spec.fixed ? spec.fixed.authState : "missing";
+  const files = root ? ["config.json", "settings.json", "settings.local.json", "config.toml", ...(spec.extraConfigFiles ?? [])] : [];
   const content = [...files.map((name) => fileSignature(join(root, name))), directorySignature(join(root, "skills")), directorySignature(join(root, "plugins"))].join("|");
   const configText = files.map((name) => safeText(join(root, name))).join("\n");
   // Feeds the fingerprint only: a changed model config should trigger a
   // re-describe(). The adapter's describe() remains the authority on models.
-  const models = provider === "fake" ? ["fake-1"] : Array.from(configText.matchAll(/model\s*[:=]\s*["' ]?([A-Za-z0-9._-]+)/gi), (m) => m[1]!).sort();
+  const models = spec.fixed ? [...spec.fixed.models] : Array.from(configText.matchAll(/model\s*[:=]\s*["' ]?([A-Za-z0-9._-]+)/gi), (m) => m[1]!).sort();
   const configHash = createHash("sha256").update(content).digest("hex");
-  const details = JSON.stringify({ version, authState, models, configHash, credentialEnv: provider === "openrouter" ? openRouterKeyEnv : undefined });
+  const details = JSON.stringify({ version, authState, models, configHash, credentialEnv });
   return { version, authState, models, configHash, fingerprint: createHash("sha256").update(details).digest("hex") };
 }
 /**

@@ -12,7 +12,7 @@
  */
 import { join } from "node:path";
 import {
-  harnessForProvider, ProvisioningError, type AgentSpec, type ProvisioningPort, type ProvisioningPredictRequest, type ProvisioningPrediction, type ApprovalMode, type AssistantId, type BundlePort, type BundlePortResult, type BundleRenderDraft,
+  harnessForProvider, HARNESS_APPROVAL_MODES_BY_KIND, ProvisioningError, type AgentSpec, type ProvisioningPort, type ProvisioningPredictRequest, type ProvisioningPrediction, type ApprovalMode, type AssistantId, type BundlePort, type BundlePortResult, type BundleRenderDraft,
   type CapabilityManifest, type Harness, type HarnessModelCandidate, type HarnessModelChoice, type HarnessModelFilter,
   type HarnessModelPort, type HarnessModelProjection, type HarnessModelRequest, type ModelPrice, type ModelPrecedenceSource, type ModelSource, type RoutingExplanation,
   pickModel,
@@ -29,7 +29,7 @@ const COMPOSER_MODEL_SOURCE: Readonly<Record<ModelPrecedenceSource, ModelSource>
 /**
  * The approval modes each harness's adapter enforces; it refuses the rest before a process starts
  * (PROJECT_MEMORY 2026-10-05 "adapters enforce or refuse the approval mode"). Manifests do not
- * declare this, so the port carries it, and `composer-preview.test.ts` checks it against the
+ * declare this, so the port carries it (derived from core `RUNTIME_KINDS`), and `composer-preview.test.ts` checks it against the
  * adapters' own refusals.
  *
  * - claude-code: all three. `prompt-on-escalation` relays approvals through `canUseTool`;
@@ -41,12 +41,7 @@ const COMPOSER_MODEL_SOURCE: Readonly<Record<ModelPrecedenceSource, ModelSource>
  * - bedrock: none. Tools run remotely and the adapter enforces no mode; claiming one would be
  *   false. Bundle v1 has no bedrock renderer, so the pipeline stops before stage 5 anyway.
  */
-export const HARNESS_APPROVAL_MODES: Readonly<Record<Harness, readonly ApprovalMode[]>> = {
-  "claude-code": ["auto-approve", "prompt-on-escalation", "read-only"],
-  codex: ["auto-approve", "read-only"],
-  cursor: ["auto-approve"],
-  bedrock: [],
-};
+export const HARNESS_APPROVAL_MODES: Readonly<Record<Harness, readonly ApprovalMode[]>> = HARNESS_APPROVAL_MODES_BY_KIND;
 
 const HARNESSES = Object.keys(HARNESS_APPROVAL_MODES) as Harness[];
 

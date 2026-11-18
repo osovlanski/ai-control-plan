@@ -3,7 +3,7 @@ import { ensureCredential } from "./auth/credential-file.js";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { parse, stringify } from "yaml";
-import type { McpToolAccess, McpToolPolicy } from "@agent-plane/core";
+import { runtimeConfigProblems, type McpToolAccess, type McpToolPolicy } from "@agent-plane/core";
 
 /**
  * Workspace instance configuration (revised architecture §1).
@@ -12,7 +12,7 @@ import type { McpToolAccess, McpToolPolicy } from "@agent-plane/core";
  * provider CLIs/SDKs authenticate in place.
  */
 export interface AssistantConfig {
-  /** anthropic | openai | openrouter | cursor | bedrock | fake (dev). */
+  /** A core `RUNTIME_KINDS` provider: anthropic | openai | openrouter | cursor | bedrock | fake (dev). Checked at load. */
   provider: string;
   enabled?: boolean;
   /**
@@ -1165,10 +1165,10 @@ function validate(config: WorkspaceConfig, path: string): void {
   if (!modes.includes(config.policy.approvalMode)) {
     problems.push(`policy.approvalMode must be one of ${modes.join(" | ")}, got ${config.policy.approvalMode}`);
   }
+  // Provider and known option types come from core `RUNTIME_KINDS`, so a bad provider fails here
+  // with its config path instead of later at `Registry.init` (runtime registry design, PR 2).
   for (const [id, assistant] of Object.entries(config.assistants)) {
-    if (!assistant || typeof assistant.provider !== "string") {
-      problems.push(`assistants.${id} must have a provider`);
-    }
+    problems.push(...runtimeConfigProblems(id, assistant?.provider, assistant?.options));
   }
   if (typeof config.execution?.harnessModes?.single !== "boolean") {
     problems.push(

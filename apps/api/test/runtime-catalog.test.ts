@@ -9,8 +9,9 @@
  * 2. Observable behaviour of the built adapter: `describe()` fields, Codex `sessionInput`, and the
  *    approval modes the adapter refuses before any process starts.
  * 3. Drift: the catalogue's harness, registry vocabulary and approval modes equal the three maps
- *    that still hold the same facts (`harnessForProvider`, `REGISTRY_ASSISTANT`,
- *    `HARNESS_APPROVAL_MODES`).
+ *    that held the same facts (`harnessForProvider`, `REGISTRY_ASSISTANT`,
+ *    `HARNESS_APPROVAL_MODES`). Since PR 2 those maps derive from core `RUNTIME_KINDS`, so these
+ *    are identity tests; `runtime-kinds.test.ts` pins the maps to their former literals.
  */
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
