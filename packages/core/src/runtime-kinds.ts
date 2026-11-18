@@ -61,7 +61,9 @@ export const RUNTIME_KINDS: readonly RuntimeKind[] = Object.freeze([
   kind({ provider: "bedrock", harness: "bedrock", approvalModes: [], options: { agentRuntimeArn: "string", qualifier: "string", region: "string" } }),
   // Test-only: accepts every mode and enforces none. `harness` is only type-checked here: the
   // adapter's constructor keeps refusing an unknown value with its own message.
-  kind({ provider: "fake", approvalModes: ALL_MODES, options: { harness: "string", agentUser: "boolean", models: "model-list", sessionRefAfterStart: "boolean" } }),
+  // `conformanceRequired` is a per-instance TEST option of the fake (like `harness`): it lets a fake
+  // stand in for a future runtime that requires version-bound conformance evidence.
+  kind({ provider: "fake", approvalModes: ALL_MODES, options: { harness: "string", agentUser: "boolean", models: "model-list", sessionRefAfterStart: "boolean", conformanceRequired: "boolean" } }),
 ]);
 
 /** The row for a workspace `provider`, or `undefined` when this build has none (prototype keys included). */

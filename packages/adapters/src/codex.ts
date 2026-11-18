@@ -229,7 +229,12 @@ export class CodexAdapter implements AgentAdapter {
       for await (const event of events) {
         ended = this.mapEvent(event, handle, emit, state) || ended;
       }
-      if (!ended) emit({ type: "run.ended", summary: "Stream closed", payload: { ok: true } });
+      // A stream that closes without `turn.completed` or `turn.failed` has no outcome to report.
+      // It is never a success (Agent Runtime Registry PR 4, conformance check: completion).
+      if (!ended) {
+        emit({ type: "error", summary: "Codex stream closed without a terminal turn event" });
+        emit({ type: "run.ended", summary: "Stream closed without a result", payload: { ok: false, reason: "no_terminal_event" } });
+      }
       state.queue.end();
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);

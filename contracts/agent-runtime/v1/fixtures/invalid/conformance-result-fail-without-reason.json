@@ -1,0 +1,90 @@
+{
+  "schemaVersion": "1.1",
+  "assistantId": "personal-claude",
+  "provider": "anthropic",
+  "descriptorVersion": 1,
+  "cliVersion": "unavailable",
+  "status": "fail",
+  "reasons": [],
+  "recorded": true,
+  "checkedAt": "2026-11-18T14:00:00.000Z",
+  "checks": [
+    {
+      "name": "executable",
+      "status": "unavailable",
+      "level": "host",
+      "reason": "executable_missing"
+    },
+    {
+      "name": "approval-refusal",
+      "status": "unsupported",
+      "level": "build",
+      "reason": "all_modes_enforced"
+    },
+    {
+      "name": "manifest-claims",
+      "status": "pass",
+      "level": "build",
+      "reason": "claims_backed"
+    },
+    {
+      "name": "host-claims",
+      "status": "pass",
+      "level": "host",
+      "reason": "no_host_claim"
+    },
+    {
+      "name": "manifest-redaction",
+      "status": "pass",
+      "level": "host",
+      "reason": "no_secret_in_manifest"
+    },
+    {
+      "name": "self-description",
+      "status": "not-run",
+      "level": "provider",
+      "reason": "quota_free_unverified"
+    }
+  ],
+  "lifecycle": {
+    "schemaVersion": "1.1",
+    "catalogued": true,
+    "configured": true,
+    "installed": {
+      "state": "missing",
+      "observedAt": "2026-11-18T09:00:00.000Z"
+    },
+    "auth": {
+      "state": "ok",
+      "source": "runtime-probe",
+      "observedAt": "2026-11-18T09:00:00.000Z"
+    },
+    "conformance": {
+      "required": false,
+      "state": "fail",
+      "descriptorVersion": 1,
+      "cliVersion": "unavailable",
+      "checkedAt": "2026-11-18T14:00:00.000Z"
+    },
+    "enablement": {
+      "config": true,
+      "operator": "none",
+      "effective": true
+    },
+    "readiness": {
+      "scope": "request-independent",
+      "ready": true,
+      "reasons": []
+    },
+    "requestDependent": [
+      "repository-allowlist",
+      "filesystem-and-shell",
+      "cooldown",
+      "quota",
+      "workspace-policy",
+      "approval-mode",
+      "user-override",
+      "composition"
+    ]
+  }
+}

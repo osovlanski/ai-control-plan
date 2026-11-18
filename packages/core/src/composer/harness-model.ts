@@ -32,6 +32,8 @@ const FILTER_REASONS: Readonly<Record<HarnessFilterName, (kinds: string[]) => st
   disabled: (k) => (k.includes("operator") ? (k.includes("config") ? "disabled in workspace config or by operator" : "disabled by operator") : "disabled in workspace config"),
   no_manifest: () => "no capability manifest (sync has not run)",
   auth: (k) => (k.length ? `auth ${k.join(", ")}` : "auth not ok"),
+  // Only an instance that requires version-bound conformance evidence (none shipped: G.3). Kinds are conformance states.
+  conformance: (k) => (k.length ? `conformance required: ${k.join(", ")}` : "conformance required"),
   no_filesystem: () => "no filesystem capability",
   no_shell: () => "no shell capability",
   repo_not_allowlisted: () => "repository path not in workspace allowlist",

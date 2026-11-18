@@ -45,6 +45,8 @@ export interface AdapterContext {
 export interface ProbeSpec {
   /** CLI whose `--version` is part of the fingerprint. Absent: version `in-process`. */
   readonly command?: string;
+  /** Option key whose string value, when set, replaces `command` (Cursor's CLI name is configurable). */
+  readonly commandOption?: string;
   /** Config directory under the home directory, such as `.claude`. */
   readonly configRoot?: string;
   /** Files under `configRoot` whose presence means auth `ok`. */
@@ -68,6 +70,30 @@ export interface SessionInputBinding {
   resolve(owner: () => AgentAdapter): SessionInputAdapter | undefined;
 }
 
+/**
+ * What the runtime conformance probe (`runtime-conformance.ts`, `POST /api/assistants/:id/test`)
+ * may do for a runtime. Every check it enables is credential-free and quota-free by construction.
+ */
+export interface ConformanceSpec {
+  /**
+   * The runtime's real adapter class with its provider entry point pointed at `missingBinary`, a
+   * path that cannot exist, or otherwise unable to reach a provider. Used ONLY to check that each
+   * approval mode outside `approvalModes` is refused before any launch; a missed refusal can then
+   * only fail to start, never reach a model. Absent: those checks are `unsupported`.
+   */
+  refusalAdapter?(id: AssistantId, options: Record<string, unknown>, missingBinary: string): AgentAdapter;
+  /**
+   * A CLI self-description (a session's init record, a rendered prompt input) that would carry more
+   * evidence than `--version`, but that this build has not proven to make no model call. Reported
+   * `not-run` with the reason, never executed (PR 4 boundary).
+   */
+  selfDescription?: { readonly command: string; readonly reason: "quota_free_unverified" };
+  /** In-process runtimes only (the fake): a scripted run is quota-free by construction, so it runs. */
+  readonly inProcessRun?: boolean;
+  /** A per-instance requirement on top of `conformanceRequired` (the fake's test option only). */
+  requiredFor?(options: Record<string, unknown>): boolean;
+}
+
 /** Named idle quota probes (`quota-probe.ts` holds the implementations). */
 export type QuotaProbeKind = "claude-oauth-usage";
 
@@ -88,7 +114,13 @@ export interface RuntimeDescriptor extends RuntimeKind {
   readonly probe?: ProbeSpec;
   readonly quotaProbe?: QuotaProbeKind;
   readonly sessionInput?: SessionInputBinding;
+  readonly conformance: ConformanceSpec;
   create(ctx: AdapterContext, id: AssistantId, options: Record<string, unknown>): AgentAdapter;
+}
+
+/** Whether a passing version-bound conformance row is required before this instance is routed. */
+export function conformanceRequiredFor(descriptor: RuntimeDescriptor, options: Record<string, unknown> = {}): boolean {
+  return descriptor.conformanceRequired || descriptor.conformance.requiredFor?.(options) === true;
 }
 
 type Own = Omit<RuntimeDescriptor, keyof RuntimeKind>;
@@ -112,6 +144,9 @@ export const RUNTIME_CATALOG: readonly RuntimeDescriptor[] = Object.freeze([
     descriptorVersion: 1, transport: "native", conformanceRequired: false, label: "Claude Code", maturity: "verified",
     probe: { command: "claude", configRoot: ".claude", authFiles: CLI_AUTH_FILES, extraConfigFiles: ["../.claude.json", "plugins/installed_plugins.json"] },
     quotaProbe: "claude-oauth-usage",
+    // Claude enforces every approval mode, so there is nothing to refuse. `system/init` then cancel
+    // (S5a) is not proven to stop before the first model request, so it is not run.
+    conformance: { selfDescription: { command: "claude -p --output-format stream-json (system/init, then cancel)", reason: "quota_free_unverified" } },
     sessionInput: {
       perAssistant: true,
       // Only a live-input ClaudeAdapter can be delivered to. Anything else has no capability
@@ -130,6 +165,11 @@ export const RUNTIME_CATALOG: readonly RuntimeDescriptor[] = Object.freeze([
   descriptor("openai", {
     descriptorVersion: 1, transport: "native", conformanceRequired: false, label: "Codex", maturity: "verified",
     probe: { command: "codex", configRoot: ".codex", authFiles: CLI_AUTH_FILES },
+    conformance: {
+      // The refusal is checked on the SDK path (shared with the app-server path: codexPermissions).
+      refusalAdapter: (id, _options, missingBinary) => new CodexAdapter(id, { codex: { codexPathOverride: missingBinary } }),
+      selfDescription: { command: "codex debug prompt-input", reason: "quota_free_unverified" },
+    },
     sessionInput: {
       perAssistant: false,
       resolve: (owner) => { const agent = owner(); return agent instanceof CodexAdapter ? agent.sessionInput : undefined; },
@@ -139,22 +179,30 @@ export const RUNTIME_CATALOG: readonly RuntimeDescriptor[] = Object.freeze([
   descriptor("openrouter", {
     descriptorVersion: 1, transport: "native", conformanceRequired: false, label: "Codex via OpenRouter", maturity: "verified",
     probe: { credentialEnv: (options) => (typeof options.apiKeyEnv === "string" ? options.apiKeyEnv : "OPENROUTER_API_KEY") },
+    conformance: { refusalAdapter: (id, options, missingBinary) => new OpenRouterCodexAdapter(id, options as OpenRouterOptions, { codexPathOverride: missingBinary }) },
     create: (_ctx, id, options) => new OpenRouterCodexAdapter(id, options as OpenRouterOptions),
   }),
   descriptor("cursor", {
     descriptorVersion: 1, transport: "native", conformanceRequired: false, label: "Cursor CLI", maturity: "scaffold",
+    // The installed CLI's version, so `installed` and version-bound conformance see the real CLI.
+    probe: { command: "agent", commandOption: "command" },
+    conformance: { refusalAdapter: (id, options, missingBinary) => new CursorAdapter(id, { ...(options as CursorOptions), command: missingBinary }) },
     create: (_ctx, id, options) => new CursorAdapter(id, options as CursorOptions),
   }),
   descriptor("bedrock", {
     descriptorVersion: 1, transport: "native", conformanceRequired: false, label: "Bedrock AgentCore", maturity: "verified",
     // Bedrock hosts YOUR agent: the runtime ARN is configuration, not
     // something the plane can discover (review §2.4).
+    // No runtime ARN, a fixed region: start() can only fail before any AgentCore request. Bedrock
+    // enforces no approval mode and refuses none (a known gap), so these checks report it.
+    conformance: { refusalAdapter: (id) => new BedrockAdapter(id, { region: "us-east-1" }) },
     create: (_ctx, id, options) => new BedrockAdapter(id, options as BedrockOptions),
   }),
   descriptor("fake", {
     descriptorVersion: 1, transport: "native", conformanceRequired: false, label: "Fake (tests)", maturity: "verified",
     probe: { fixed: { authState: "ok", models: ["fake-1"] } },
     sessionInput: { perAssistant: true, resolve: () => new FakeSessionInputAdapter() },
+    conformance: { inProcessRun: true, requiredFor: (options) => options.conformanceRequired === true },
     create: (_ctx, id, options) => new FakeAdapter(id, undefined, options as FakeOptions),
   }),
 ]);

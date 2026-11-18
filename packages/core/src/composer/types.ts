@@ -143,7 +143,7 @@ export interface ComposerInputs {
 
 /** route()'s filterFailures, projected to fixed names (§2 stage 2), in this order. */
 export const HARNESS_FILTERS = [
-  "disabled", "no_manifest", "auth", "no_filesystem", "no_shell", "repo_not_allowlisted", "cooldown", "quota_blocked", "quota_exhausted",
+  "disabled", "no_manifest", "auth", "conformance", "no_filesystem", "no_shell", "repo_not_allowlisted", "cooldown", "quota_blocked", "quota_exhausted",
 ] as const;
 export type HarnessFilterName = (typeof HARNESS_FILTERS)[number];
 

@@ -46,8 +46,14 @@ export interface CapabilityManifest {
       filesystem: boolean;
       web: TriState;
     };
+    /**
+     * What the adapter itself observed about a provider credential mechanism. `ok` only on a
+     * verified signal. `unknown`: the runtime is installed but the adapter has no verified way to
+     * tell whether it is signed in (Agent Runtime Registry PR 4). Anything but `ok` is ineligible
+     * for routing (router.ts), so `unknown` fails closed.
+     */
     auth: {
-      state: "ok" | "expired" | "missing";
+      state: "ok" | "expired" | "missing" | "unknown";
       account?: string;
     };
     /** Best-effort pre-routing quota view; refreshed continuously from run events. */

@@ -33,6 +33,7 @@ import type { planProjectVerification } from "./modules/project-verification.js"
 import { Registry } from "./modules/registry.js";
 import { sessionInputResolver } from "./modules/runtime-catalog.js";
 import { AGENT_RUNTIME_SCHEMA_VERSION, RuntimeLifecycleReader, runtimeCatalogProjection } from "./modules/runtime-lifecycle.js";
+import { ConformanceBusyError, RuntimeConformance, type RuntimeConformanceOptions } from "./modules/runtime-conformance.js";
 import { routingHistory } from "./modules/router.js";
 import { TaskEventBus } from "./modules/sse.js";
 import { TaskStageReader } from "./modules/task-stage.js";
@@ -108,6 +109,8 @@ export interface ServerDeps {
   autopilotReconcileGitHub?: ReconcileGitHub;
   /** P0-7b: the agent slice census the restore report shows. Defaults to the real slice when an agent user is configured. */
   autopilotRestoreAgentSlice?: () => { ok: true } | { ok: false; detail: string };
+  /** PR 4: bounds and the `--version` seam of `POST /api/assistants/:id/test` (tests). */
+  conformance?: RuntimeConformanceOptions;
   /** P0-6: the acceptance executor. Defaults to `setup/accept-as-agent` when an agent user is configured. TEST-ONLY when not offline. */
   acceptanceExecutor?: AcceptanceExecutor;
   /** P0-6: where acceptance snapshots go. Defaults to `<agent worktreesRoot>/acceptance`. */
@@ -441,6 +444,20 @@ export function buildServer(deps: ServerDeps): BuiltServer {
       return { schemaVersion: AGENT_RUNTIME_SCHEMA_VERSION, assistantId: row.id, operatorState: state, changed: result.changed, lifecycle: lifecycles.of(row) };
     });
   }
+
+  // PR 4: the credential-free, quota-free conformance probe. It never calls the registered adapter,
+  // starts a generation, installs anything or writes config; it stores one version-bound row.
+  const conformance = new RuntimeConformance(db, config, registry, now, deps.conformance);
+  app.post<{ Params: { id: string } }>("/api/assistants/:id/test", write, async (req, reply) => {
+    try {
+      const result = await conformance.test(req.params.id);
+      if (!result) return reply.status(404).send({ error: `Unknown assistant: ${req.params.id}` });
+      app.log.info({ assistantId: result.assistantId, status: result.status, recorded: result.recorded }, "runtime conformance tested");
+      return result;
+    } catch (err) {
+      return reply.status(409).send({ error: err instanceof ConformanceBusyError ? err.message : message(err) });
+    }
+  });
 
   app.post<{ Params: { id: string } }>("/api/assistants/:id/sync", write, async (req, reply) => {
     try {

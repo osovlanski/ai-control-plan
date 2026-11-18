@@ -21,7 +21,11 @@ export class OpenRouterCodexAdapter implements AgentAdapter {
   private delegate: CodexAdapter;
   private model: string;
 
-  constructor(id: AssistantId, options: OpenRouterOptions = {}) {
+  /**
+   * `seam.codexPathOverride` is not a config option: the runtime conformance probe uses it to
+   * point the Codex SDK at a binary that cannot exist, so a refusal check can never launch a model.
+   */
+  constructor(id: AssistantId, options: OpenRouterOptions = {}, seam: { codexPathOverride?: string } = {}) {
     this.id = id;
     this.model = options.model ?? "stealth/ox-alpha";
     const baseUrl = options.baseUrl ?? "https://openrouter.ai/api/v1";
@@ -38,6 +42,7 @@ export class OpenRouterCodexAdapter implements AgentAdapter {
         experimental: true,
       },
       codex: {
+        ...(seam.codexPathOverride ? { codexPathOverride: seam.codexPathOverride } : {}),
         config: {
           model_provider: "openrouter",
           model: this.model,

@@ -12,7 +12,7 @@ import { openDb, type Db } from "../src/db/index.js";
 import { buildServer, type BuiltServer } from "../src/server.js";
 import { credentialPath, readCredential, rotateCredential } from "../src/auth/credential-file.js";
 import {
-  AGENT_RUNTIME_CONTRACT_DIR, validateAssistantLifecycle, validateOperatorStateChange, validateRuntimeCatalog,
+  AGENT_RUNTIME_CONTRACT_DIR, validateAssistantLifecycle, validateConformanceResult, validateOperatorStateChange, validateRuntimeCatalog,
 } from "../src/agent-runtime-contract.js";
 import { QuotaProjection } from "../src/modules/quota.js";
 import { RUNTIME_CATALOG } from "../src/modules/runtime-catalog.js";
@@ -79,7 +79,7 @@ const failuresOf = (r: Awaited<ReturnType<typeof routeFor>>, id: string) => r.ca
 
 describe("agent-runtime v1 contract fixtures", () => {
   it("pass and fail the reference validators as named", () => {
-    const validators = { catalog: validateRuntimeCatalog, lifecycle: validateAssistantLifecycle, "operator-state-change": validateOperatorStateChange };
+    const validators = { catalog: validateRuntimeCatalog, lifecycle: validateAssistantLifecycle, "operator-state-change": validateOperatorStateChange, "conformance-result": validateConformanceResult };
     let seen = 0;
     for (const kind of ["valid", "invalid"] as const) {
       const dir = join(AGENT_RUNTIME_CONTRACT_DIR, "fixtures", kind);
@@ -97,7 +97,7 @@ describe("agent-runtime v1 contract fixtures", () => {
   it("uses the registry contract's inline-credential guard, not a copy that can drift", () => {
     const pattern = (file: string) => (JSON.parse(readFileSync(file, "utf8")) as { $defs: { noInlineSecret: unknown } }).$defs.noInlineSecret;
     const registry = pattern(join(AGENT_RUNTIME_CONTRACT_DIR, "../../registry/v1/registry-snapshot.schema.json"));
-    for (const name of ["catalog.schema.json", "assistant-lifecycle.schema.json"]) {
+    for (const name of ["catalog.schema.json", "assistant-lifecycle.schema.json", "conformance-result.schema.json"]) {
       expect(pattern(join(AGENT_RUNTIME_CONTRACT_DIR, name)), name).toEqual(registry);
     }
   });

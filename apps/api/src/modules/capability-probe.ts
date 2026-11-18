@@ -21,7 +21,8 @@ export async function probeCapability(provider: string, options: Record<string, 
   // read `skills`/`plugins` relative to the working directory, exactly as before (a pre-existing
   // quirk this refactor preserves so fingerprints do not move; see the PR notes).
   const root = spec.configRoot ? join(homedir(), spec.configRoot) : "";
-  const version = spec.command ? await probeVersion(spec.command) : "in-process";
+  const command = probeCommand(spec, options);
+  const version = command ? await probeVersion(command) : "in-process";
   const credentialEnv = spec.credentialEnv?.(options);
   const authState = credentialEnv !== undefined
     ? (process.env[credentialEnv] ? "ok" : "missing")
@@ -35,6 +36,12 @@ export async function probeCapability(provider: string, options: Record<string, 
   const configHash = createHash("sha256").update(content).digest("hex");
   const details = JSON.stringify({ version, authState, models, configHash, credentialEnv });
   return { version, authState, models, configHash, fingerprint: createHash("sha256").update(details).digest("hex") };
+}
+/** The CLI the probe runs for these options, or `undefined` for an in-process runtime. */
+export function probeCommand(spec: ProbeSpec, options: Record<string, unknown> = {}): string | undefined {
+  if (!spec.command) return undefined;
+  const override = spec.commandOption ? options[spec.commandOption] : undefined;
+  return typeof override === "string" && override.length > 0 ? override : spec.command;
 }
 /**
  * Async on purpose: this runs on the boot path and in the daily job, and the

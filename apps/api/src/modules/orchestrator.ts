@@ -67,6 +67,7 @@ import type { Registry } from "./registry.js";
 import { persistRoutingDecision, routeTask } from "./router.js";
 import { decideContextContinuation } from "./context-continuation.js";
 import { runSessionRefStored } from "./usage.js";
+import { conformanceBlock } from "./runtime-lifecycle.js";
 import type { TaskEventBus } from "./sse.js";
 import type { TaskStore } from "./tasks.js";
 import type { ProjectVerificationDiscovery } from "./project-verification.js";
@@ -369,7 +370,7 @@ export class Orchestrator {
     const intent = JSON.parse(this.tasks.get(taskId)!.intent_json) as TaskIntent;
     // The operator overlay removes a candidate here exactly as route() does, so a disabled
     // assistant never makes a task look runnable (or quota-blocked) on its behalf.
-    const candidates = this.registry.list().filter(a => a.enabled && a.operator_state !== 'disabled' && a.manifestParsed &&
+    const candidates = this.registry.list().filter(a => a.enabled && a.operator_state !== 'disabled' && a.manifestParsed && !conformanceBlock(this.db, this.config, a) &&
       (!intent.overrides?.assistantId || intent.overrides.assistantId === a.id) &&
       (!intent.repository || (a.manifestParsed.core.execution.filesystem && a.manifestParsed.core.execution.shell &&
         this.config.repoAllowlist.some(p => intent.repository!.path === p || intent.repository!.path.startsWith(`${p}/`)))));
@@ -2167,6 +2168,9 @@ export class Orchestrator {
       if (config && operator) reasons.push(`${id} is disabled in workspace config (assistants.${id}.enabled is false) and by operator (POST /api/assistants/${id}/enable clears only the operator disable)`);
       else if (config) reasons.push(`${id} is disabled in workspace config (assistants.${id}.enabled is false)`);
       else if (operator) reasons.push(`${id} is disabled by operator (POST /api/assistants/${id}/enable clears it)`);
+      // A runtime that requires conformance evidence fails closed here exactly as in route().
+      const conformance = conformanceBlock(this.db, this.config, row);
+      if (conformance) reasons.push(`${id}: ${conformance} (POST /api/assistants/${id}/test records it)`);
     }
     return reasons.length > 0 ? reasons.join("; ") : undefined;
   }
