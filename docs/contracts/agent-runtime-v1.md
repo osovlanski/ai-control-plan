@@ -1,13 +1,14 @@
 # Agent runtime contract v1
 
 Status: normative for agent runtime v1 (API 2.10, Agent Runtime Registry PR 3, owner decision
-G.1 of 2026-11-18). It fixes the read-only projection of the plane's in-tree runtime catalogue,
+G.1 of 2026-11-18), v1.1 (API 2.11, PR 4: the conformance probe). It fixes the read-only projection of the plane's in-tree runtime catalogue,
 each assistant's lifecycle states, and the operator disable overlay. Consumers: the Control Plane
 web UI and the planned `aos` CLI. Cockpit does not read it; it vendors this contract only if it
 ever does.
 
 The JSON Schemas (draft 2020-12) under `contracts/agent-runtime/v1/` are the wire authority:
-`catalog.schema.json`, `assistant-lifecycle.schema.json` and `operator-state-change.schema.json`.
+`catalog.schema.json`, `assistant-lifecycle.schema.json`, `operator-state-change.schema.json` and
+(1.1) `conformance-result.schema.json`.
 `apps/api/src/agent-runtime-contract.ts` is the reference validator and adds the rules a schema
 cannot state. The fixtures in `contracts/agent-runtime/v1/fixtures/` are run by the API tests.
 
@@ -37,6 +38,7 @@ runtime's `registryAssistant`, which is a registry v1 `compatibility.assistants`
 | `GET /api/assistants/:id/lifecycle` | `tasks.read` | 2.10 | `AssistantLifecycle`; 404 for an unknown id |
 | `POST /api/assistants/:id/disable` | `commands.write` | 2.10 | `OperatorStateChange`; 404 for an unknown id |
 | `POST /api/assistants/:id/enable` | `commands.write` | 2.10 | `OperatorStateChange`; 404 for an unknown id |
+| `POST /api/assistants/:id/test` | `commands.write` | 2.11 | `ConformanceResult`; 404 for an unknown id; 409 while a test of the same assistant runs or when the assistant is no longer configured |
 
 No new capability is introduced (owner decision G.4), so no credential rotation is needed. An
 unknown id is one the registry has no row for; the 404 body is `{ "error": "Unknown assistant: <id>" }`
@@ -65,7 +67,7 @@ Separate states, each with its own evidence. No state implies the next.
 | `catalogued` | code | this build has a descriptor for the provider |
 | `configured` | config file | the workspace config defines this assistant now |
 | `installed.state` | `capability_probes` | `present` (with `version` when it is safe to repeat), `missing` (the CLI did not run), `in-process` (no CLI), `unknown` (no probe yet) |
-| `auth.state` | the adapter's manifest | `core.auth.state`, or `unknown` when no manifest exists; `source` is the manifest's evidence source |
+| `auth.state` | the adapter's manifest | `core.auth.state`, or `unknown` when no manifest exists; `source` is the manifest's evidence source. Since 1.1 the manifest itself may say `unknown`: installed, sign-in not verified (Cursor) |
 | `conformance` | `runtime_conformance` | see below |
 | `enablement` | config + overlay | `config` (config `enabled`), `operator` (`none` or `disabled`), `effective` = config AND operator is not `disabled` |
 | `readiness` | derived | see below |
@@ -75,8 +77,9 @@ Separate states, each with its own evidence. No state implies the next.
 
 `readiness` has `scope: "request-independent"`. `ready` is true exactly when `reasons` is empty.
 The reasons are the router's own hard-filter texts for the facts that do not depend on a task:
-`disabled in workspace config`, `disabled by operator`, `no capability manifest (sync has not run)`
-and `auth <state>`, in that order.
+`disabled in workspace config`, `disabled by operator`, `no capability manifest (sync has not run)`,
+`auth <state>` and (1.1, only for an instance that requires conformance)
+`conformance required: <state> for the observed CLI and descriptor version`, in that order.
 
 A ready assistant MAY still be filtered for a specific task. Whether an assistant is eligible for
 a task is decided only by the router (and Prepare) for that request, against the constraints in
@@ -95,12 +98,42 @@ Rows are keyed by `(assistant_id, cli_version, descriptor_version)`. `conformanc
   no probe yet). Earlier evidence never vouches for a version it was not taken on.
 - `not-run`: no row exists.
 
-Nothing writes `runtime_conformance` before PR 4 (the conformance probe and
-`POST /api/assistants/:id/test`), so every assistant reads `not-run` today. The stored `checks`
-column is never served. In v1.0 conformance gates nothing: every descriptor has
-`conformanceRequired: false` (owner decision G.3), which keeps every existing runtime's
-established eligibility, and a test pins that no descriptor sets it until PR 4 adds the router
-check together with the probe.
+`POST /api/assistants/:id/test` writes the rows (below). The stored `checks` column is never
+served by the lifecycle.
+
+`conformance.required` is the instance's effective requirement: the descriptor's
+`conformanceRequired`, or (the fake only) its per-instance test option `conformanceRequired: true`.
+Every shipped descriptor has `conformanceRequired: false` (owner decision G.3, pinned by a test), so
+a failed, missing or stale row never changes an existing runtime's eligibility. An instance that
+requires conformance fails closed: the router, the quota plan, the Composer's stage 2 (filter
+`conformance`) and an explicit compare/race start all refuse it unless `state` is `pass`, and
+`readiness.ready` is false with the router's text. A CLI or descriptor version change voids the
+evidence (`stale`) until the instance is tested again.
+
+### ConformanceResult (1.1)
+
+`POST /api/assistants/:id/test` runs only checks that are credential-free and quota-free by
+construction. It never calls the registered adapter, starts a generation, installs a runtime,
+changes a credential or writes config.
+
+| Check | Level | What it does |
+| --- | --- | --- |
+| `executable` | host | `<cli> --version` (the probe's command, bounded, default 5 s). `pass`, `unavailable` (`executable_missing`, `executable_not_runnable`), `fail` (`timeout`, `nonzero_exit`, `empty_version`, `unsafe_version_output`) or `unsupported` for an in-process runtime |
+| `approval-refusal:<mode>` | build | for each mode outside the descriptor's `approvalModes`: the runtime's real adapter class, its provider entry point pointed at a binary that cannot exist (Bedrock: no runtime ARN), must refuse with `NotSupportedError` naming the mode. A missed refusal can only fail to start. `approval-refusal` is `unsupported` when every mode is enforced |
+| `manifest-claims` | build | every unit-level `harness` claim of the stored manifest is one the adapter conformance suite proves (`UNIT_PROVEN_CLAIMS`) |
+| `host-claims` | host | `pass` when the manifest makes no host-level claim (`processIsolation` other than `none`, `agentUser`); otherwise `not-run` (`host_probe_not_authorized`): host evidence needs a separately authorized probe, and the result is `fail` |
+| `manifest-redaction` | host | the stored manifest carries no inline credential and no value of a credential-named environment variable |
+| `self-description` | provider | never executed: no CLI self-description (Claude `system/init` then cancel, Codex `debug prompt-input`) is proven here to make no model call, so it is `not-run` (`quota_free_unverified`), or `unsupported` where none exists |
+| `in-process-run` | build | the in-process fake only: a scripted run ends exactly once, last, ok |
+
+`status` is `pass` when no check is `fail` or `unavailable`, no claim is unproven and at least one
+check passed; `unsupported` when nothing could be checked (not recorded); otherwise `fail` with
+classified `reasons`. A `pass` covers exactly the checks listed as `pass`: `not-run` and
+`unsupported` checks are never counted as passing. The row is keyed by the version this test
+observed (`in-process`, or `unavailable` when the CLI did not run) and the descriptor version; a
+re-test of the same pair replaces it. An unsafe version string is neither repeated nor recorded.
+The response and the row carry check names, statuses, evidence levels, fixed reasons and
+timestamps only: never stdout, stderr, a transcript or a credential.
 
 ## The operator disable overlay
 
@@ -118,8 +151,9 @@ check together with the probe.
 - It affects future routing decisions (intake, wake, run-now, failover, handoff, the Composer's
   stage 2) and quota planning. It does not touch a session that is already running, which
   finishes on the assistant it started on. An explicit operator `compare`/`race` start names its
-  assistants directly and is not a routing decision; it ignores config `enabled` today and the
-  overlay likewise.
+  assistants directly and is not a routing decision; since the parallel disable gate (#195) it is
+  refused (HTTP 409) when a named assistant is config-disabled or operator-disabled, and since 1.1
+  when one requires conformance it does not have.
 - It survives restarts: `Registry.init()` re-seeds provider and config `enabled` only.
 - In the Composer's decision the overlay is the existing `disabled` filter; its reason reads
   `disabled by operator` (or `disabled in workspace config or by operator` when both sources
@@ -135,7 +169,7 @@ pattern as registry v1, pinned by a test). Malformed timestamps are omitted rath
 
 ## Versioning
 
-`schemaVersion` is `1.0`. A reader accepts the same major with a minor no newer than its own: the
+`schemaVersion` is `1.1` (1.0 plus `ConformanceResult` and the conformance readiness reason). A reader accepts the same major with a minor no newer than its own: the
 objects are closed (`additionalProperties: false`), so an older reader cannot honour a newer field.
 A new field is a minor bump of this contract and of the Control Plane API.
 

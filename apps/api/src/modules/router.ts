@@ -9,6 +9,7 @@ import { recommendModel } from "./model-selection.js";
 import type { Db } from "../db/index.js";
 import { TelemetryService, taskKindOf, type AssistantScore } from "./telemetry.js";
 import { continuationProvenance } from "./context-continuation.js";
+import { conformanceBlock } from "./runtime-lifecycle.js";
 
 export interface RouteCandidate {
   id: AssistantId;
@@ -19,6 +20,11 @@ export interface RouteCandidate {
    * hard filter whatever `enabled` says, and its absence never adds one back.
    */
   operatorDisabled?: boolean;
+  /**
+   * The conformance hard filter's text (runtime-lifecycle.ts `conformanceBlock`): set only for an
+   * instance that requires version-bound conformance evidence and lacks a passing row.
+   */
+  conformanceBlocked?: string;
   manifest: CapabilityManifest | null;
 }
 
@@ -64,6 +70,7 @@ export function route(req: RouteRequest, candidates: RouteCandidate[]): RoutingE
       if (req.needsRepo && !c.manifest.core.execution.filesystem) failures.push("no filesystem capability");
       if (req.needsRepo && !c.manifest.core.execution.shell) failures.push("no shell capability");
     }
+    if (c.conformanceBlocked) failures.push(c.conformanceBlocked);
     if (req.needsRepo && !req.repoPathAllowed) failures.push("repository path not in workspace allowlist");
     const cooldown = req.cooldowns.get(c.id);
     if (cooldown) failures.push(`cooldown: ${cooldown}`);
@@ -290,7 +297,10 @@ export function routeInputs(deps: RouteDeps, taskId: string, origin: RouteOrigin
   const telemetry = new TelemetryService(deps.db);
   const scores = telemetry.scores();
   for (const [id, score] of telemetry.scores(taskKindOf(row))) scores.set(id, score);
-  const candidates = deps.registry.list().map(a => ({ id: a.id as AssistantId, enabled: a.enabled === 1 && a.id !== options.exclude, ...(a.operator_state === 'disabled' ? { operatorDisabled: true } : {}), manifest: a.manifestParsed }));
+  const candidates = deps.registry.list().map(a => {
+    const conformanceBlocked = conformanceBlock(deps.db, deps.config, a);
+    return { id: a.id as AssistantId, enabled: a.enabled === 1 && a.id !== options.exclude, ...(a.operator_state === 'disabled' ? { operatorDisabled: true } : {}), ...(conformanceBlocked ? { conformanceBlocked } : {}), manifest: a.manifestParsed };
+  });
   const dispatch = options.dispatchId ? deps.db.prepare('SELECT checkpoint_id FROM dispatches WHERE dispatch_id = ? AND task_id = ?').get(options.dispatchId, taskId) as { checkpoint_id: string | null } | undefined : undefined;
   // K11 provenance: read back from the checkpoint anchor, never from a second
   // continuation-history store. Absent for every other origin.

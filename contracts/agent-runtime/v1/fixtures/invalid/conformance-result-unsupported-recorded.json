@@ -1,0 +1,91 @@
+{
+  "schemaVersion": "1.1",
+  "assistantId": "personal-claude",
+  "provider": "anthropic",
+  "descriptorVersion": 1,
+  "cliVersion": "2.1.0 (Claude Code)",
+  "status": "unsupported",
+  "reasons": [],
+  "recorded": true,
+  "checkedAt": "2026-11-18T14:00:00.000Z",
+  "checks": [
+    {
+      "name": "executable",
+      "status": "pass",
+      "level": "host",
+      "reason": "version_reported"
+    },
+    {
+      "name": "approval-refusal",
+      "status": "unsupported",
+      "level": "build",
+      "reason": "all_modes_enforced"
+    },
+    {
+      "name": "manifest-claims",
+      "status": "pass",
+      "level": "build",
+      "reason": "claims_backed"
+    },
+    {
+      "name": "host-claims",
+      "status": "pass",
+      "level": "host",
+      "reason": "no_host_claim"
+    },
+    {
+      "name": "manifest-redaction",
+      "status": "pass",
+      "level": "host",
+      "reason": "no_secret_in_manifest"
+    },
+    {
+      "name": "self-description",
+      "status": "not-run",
+      "level": "provider",
+      "reason": "quota_free_unverified"
+    }
+  ],
+  "lifecycle": {
+    "schemaVersion": "1.1",
+    "catalogued": true,
+    "configured": true,
+    "installed": {
+      "state": "present",
+      "version": "2.1.0 (Claude Code)",
+      "observedAt": "2026-11-18T09:00:00.000Z"
+    },
+    "auth": {
+      "state": "ok",
+      "source": "runtime-probe",
+      "observedAt": "2026-11-18T09:00:00.000Z"
+    },
+    "conformance": {
+      "required": false,
+      "state": "pass",
+      "descriptorVersion": 1,
+      "cliVersion": "2.1.0 (Claude Code)",
+      "checkedAt": "2026-11-18T14:00:00.000Z"
+    },
+    "enablement": {
+      "config": true,
+      "operator": "none",
+      "effective": true
+    },
+    "readiness": {
+      "scope": "request-independent",
+      "ready": true,
+      "reasons": []
+    },
+    "requestDependent": [
+      "repository-allowlist",
+      "filesystem-and-shell",
+      "cooldown",
+      "quota",
+      "workspace-policy",
+      "approval-mode",
+      "user-override",
+      "composition"
+    ]
+  }
+}

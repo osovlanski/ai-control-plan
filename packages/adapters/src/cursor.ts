@@ -19,6 +19,9 @@ export interface CursorOptions {
   model?: string;
 }
 
+/** How long a cancelled CLI gets to exit on SIGTERM before it is killed. */
+export const CURSOR_CANCEL_GRACE_MS = 2_000;
+
 interface CursorRunState {
   queue: EventQueue<NormalizedEvent>;
   child?: ChildProcessWithoutNullStreams;
@@ -88,7 +91,7 @@ export class CursorAdapter implements AgentAdapter {
         // Cursor Agent is a coding agent operating on a working tree; claiming
         // otherwise would make it unroutable for the only tasks it exists for.
         execution: { shell: true, filesystem: true, web: "unknown" },
-        auth: version === "unavailable" ? { state: "missing", account: "cursor CLI not found" } : { state: "ok" },
+        auth: cursorAuth(version),
       },
       // M14 K9: no verified context-occupancy mechanism at this CLI layer.
       context: {
@@ -168,6 +171,15 @@ export class CursorAdapter implements AgentAdapter {
     let stderr = "";
     child.stderr.on("data", (d: Buffer) => (stderr += d.toString()));
 
+    // `close` can fire before stdout is drained, so it is awaited from the start.
+    // A missing or unrunnable binary is an `error` event, not a throw; without a listener it
+    // would crash the plane.
+    let spawnError: Error | undefined;
+    const closed: Promise<number | null> = new Promise((resolve) => {
+      child.on("close", resolve);
+      child.on("error", (err) => { spawnError = err; resolve(null); });
+    });
+    let unrecognised = 0;
     const lines = createInterface({ input: child.stdout });
     for await (const line of lines) {
       if (!line.trim()) continue;
@@ -176,13 +188,21 @@ export class CursorAdapter implements AgentAdapter {
       } catch (err) {
         // Loud, not silent: an unmapped line means this adapter is out of date
         // with the installed CLI, and pretending otherwise hides the problem.
+        unrecognised += 1;
         emit({ type: "error", summary: err instanceof Error ? err.message : String(err), raw: { line } });
       }
     }
 
-    const code: number | null = await new Promise((resolve) => child.on("close", resolve));
+    const code: number | null = await closed;
     if (state.cancelled) {
       emit({ type: "run.ended", summary: "Run cancelled", payload: { ok: false, reason: "cancelled" } });
+    } else if (spawnError) {
+      emit({ type: "error", summary: `Failed to start ${this.command}: ${spawnError.message}` });
+      emit({ type: "run.ended", summary: "Run ended with error", payload: { ok: false, reason: "spawn_failed" } });
+    } else if (unrecognised > 0) {
+      // Scaffold quarantine: output this mapping could not read means the run's outcome is
+      // unknown, so it never ends as a success, whatever the exit code says.
+      emit({ type: "run.ended", summary: `Run ended: ${unrecognised} unrecognised CLI line(s)`, payload: { ok: false, reason: "unrecognised_output", exitCode: code } });
     } else if (code === 0) {
       emit({ type: "run.ended", summary: "Run completed", payload: { ok: true } });
     } else {
@@ -203,8 +223,29 @@ export class CursorAdapter implements AgentAdapter {
     const state = this.runs.get(handle.runId);
     if (!state) return;
     state.cancelled = true;
-    state.child?.kill("SIGTERM");
+    const child = state.child;
+    if (!child) return;
+    child.kill("SIGTERM");
+    // A CLI that ignores SIGTERM must not hold the run open: escalate after a grace period.
+    const escalate = setTimeout(() => {
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    }, CURSOR_CANCEL_GRACE_MS);
+    escalate.unref();
+    child.once("close", () => clearTimeout(escalate));
   }
+}
+
+/**
+ * Install presence is not authentication (Agent Runtime Registry PR 4). `agent --version` proves
+ * the CLI runs; it says nothing about a signed-in account. This build has no documented and
+ * verified Cursor authentication signal (no pinned CLI was available to verify one against), so an
+ * installed CLI reports `unknown`, which the router treats as ineligible, and `ok` is never
+ * reported. Nothing here starts a login or reads a credential.
+ */
+export function cursorAuth(version: string): CapabilityManifest["core"]["auth"] {
+  return version === "unavailable"
+    ? { state: "missing", account: "cursor CLI not found" }
+    : { state: "unknown", account: "cursor CLI installed; sign-in not verified" };
 }
 
 /**

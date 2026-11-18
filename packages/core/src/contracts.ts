@@ -39,7 +39,12 @@
 // `lifecycle` field on every `GET /api/assistants` element, and the operator disable overlay
 // `POST /api/assistants/:id/disable` / `enable` (`commands.write`). Every earlier field keeps its
 // meaning (`enabled` is still config `enabled`). No new capability, so no credential rotation.
-export const CONTROL_PLANE_API_VERSION = "2.10";
+// 2.11 (additive, Agent Runtime Registry PR 4, agent-runtime v1.1): `POST /api/assistants/:id/test`
+// (`commands.write`), the credential-free, quota-free conformance probe that writes one version-bound
+// `runtime_conformance` row; `core.auth.state` gains `unknown` (installed, sign-in not verified;
+// ineligible like every state but `ok`); a runtime that requires conformance is routed only with a
+// passing row for the observed CLI and descriptor version (no shipped runtime requires it).
+export const CONTROL_PLANE_API_VERSION = "2.11";
 export const NORMALIZED_EVENT_VERSION = "1.0";
 
 export const OBSERVABILITY_CAPABILITIES = [

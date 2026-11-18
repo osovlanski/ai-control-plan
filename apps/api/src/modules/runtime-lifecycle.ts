@@ -17,12 +17,17 @@ import type { ResolvedConfig } from "../config.js";
 import type { Db } from "../db/index.js";
 import { INLINE_SECRET } from "../registry-contract.js";
 import type { AssistantRow, OperatorState } from "./registry.js";
-import { RUNTIME_CATALOG, runtimeFor } from "./runtime-catalog.js";
+import { conformanceRequiredFor, RUNTIME_CATALOG, runtimeFor } from "./runtime-catalog.js";
 
-export const AGENT_RUNTIME_SCHEMA_VERSION = "1.0";
+/** 1.1 (API 2.11, PR 4): adds the conformance result of `POST /api/assistants/:id/test`. */
+export const AGENT_RUNTIME_SCHEMA_VERSION = "1.1";
 
 /** The router's failure text for the operator overlay (router.ts). */
 export const OPERATOR_DISABLED_REASON = "disabled by operator";
+
+/** The router's failure text for a runtime that requires conformance evidence it does not have. */
+export const conformanceFailureText = (state: Exclude<ConformanceState, "pass">) =>
+  `conformance required: ${state} for the observed CLI and descriptor version`;
 
 /**
  * Constraints the router and Prepare evaluate for a specific request (or at routing time), which
@@ -97,7 +102,10 @@ export interface ConformanceRow { cli_version: string; descriptor_version: numbe
 export interface LifecycleFacts {
   row: Pick<AssistantRow, "provider" | "enabled" | "operator_state" | "operator_state_at"> & { manifestParsed: CapabilityManifest | null };
   configured: boolean;
-  /** The catalogue's answer for the row's provider; absent when this build has no descriptor. */
+  /**
+   * The catalogue's answer for the row's provider; absent when this build has no descriptor.
+   * `conformanceRequired` is the instance's effective requirement (`conformanceRequiredFor`).
+   */
   descriptor?: { descriptorVersion: number; conformanceRequired: boolean };
   /** The last capability probe (`capability_probes`), if one ran. */
   probe?: { version: string; observedAt: string };
@@ -164,13 +172,14 @@ export function deriveLifecycle(facts: LifecycleFacts): AssistantLifecycle {
   };
 
   // The router's hard filters that do not depend on the request, in the router's order and
-  // with its texts. Conformance is reported above but gates nothing until PR 4 adds the router
-  // check; no descriptor sets `conformanceRequired` (pinned by a test), so this stays truthful.
+  // with its texts. Conformance gates only an instance that requires it (no shipped descriptor
+  // does, owner decision G.3), and then only a `pass` for the observed version pair clears it.
   const reasons: string[] = [];
   if (!configEnabled) reasons.push("disabled in workspace config");
   if (operator === "disabled") reasons.push(OPERATOR_DISABLED_REASON);
   if (!manifest) reasons.push("no capability manifest (sync has not run)");
   else if (manifest.core.auth.state !== "ok") reasons.push(`auth ${manifest.core.auth.state}`);
+  if (conformanceView.required && conformanceView.state !== "pass") reasons.push(conformanceFailureText(conformanceView.state));
 
   return {
     schemaVersion: AGENT_RUNTIME_SCHEMA_VERSION,
@@ -209,9 +218,23 @@ export class RuntimeLifecycleReader {
     return deriveLifecycle({
       row,
       configured: Object.prototype.hasOwnProperty.call(this.config.assistants, row.id),
-      ...(descriptor ? { descriptor: { descriptorVersion: descriptor.descriptorVersion, conformanceRequired: descriptor.conformanceRequired } } : {}),
+      ...(descriptor ? { descriptor: { descriptorVersion: descriptor.descriptorVersion, conformanceRequired: conformanceRequiredFor(descriptor, this.config.assistants[row.id]?.options ?? {}) } } : {}),
       ...(probe ? { probe } : {}),
       conformance,
     });
   }
+}
+
+/**
+ * The router's conformance hard filter for one registry row: the failure text when the instance
+ * requires conformance (descriptor or, for the fake, its test option) and has no `pass` row for the
+ * CLI version the last probe observed and the current descriptor version; `undefined` otherwise.
+ * An instance that does not require it is answered without reading the database, so every shipped
+ * runtime routes exactly as before (owner decision G.3).
+ */
+export function conformanceBlock(db: Db, config: ResolvedConfig, row: AssistantRow & { manifestParsed: CapabilityManifest | null }): string | undefined {
+  const descriptor = runtimeFor(row.provider);
+  if (!descriptor || !conformanceRequiredFor(descriptor, config.assistants[row.id]?.options ?? {})) return undefined;
+  const state = new RuntimeLifecycleReader(db, config).of(row).conformance.state;
+  return state === "pass" ? undefined : conformanceFailureText(state);
 }

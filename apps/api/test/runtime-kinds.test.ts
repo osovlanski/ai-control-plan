@@ -169,6 +169,9 @@ describe("capability probe: fingerprints equal the former provider branches", ()
             process.env.HOME = home;
             apply();
             if (options.apiKeyEnv === "FAKE_OR_KEY") process.env.FAKE_OR_KEY = "FAKE-or-not-real"; else delete process.env.FAKE_OR_KEY;
+            // PR 4 moved Cursor's fingerprint on purpose: it now probes the installed `agent` CLI
+            // (pinned in the next test) instead of reading as `in-process`. Every other provider is unchanged.
+            if (provider === "cursor") continue;
             const before = await legacyProbeCapability(provider, options);
             const after = await probeCapability(provider, options);
             expect(after, `${provider} home=${homeName} env=${envName} options=${JSON.stringify(options)}`).toEqual(before);
@@ -177,7 +180,7 @@ describe("capability probe: fingerprints equal the former provider branches", ()
         }
       }
     }
-    expect(compared).toBe(3 * 2 * 3 * PROVIDERS.length);
+    expect(compared).toBe(3 * 2 * 3 * (PROVIDERS.length - 1));
   });
 
   it("the fixtures exercise the branches (not all fingerprints collapse to one value)", async () => {
@@ -191,7 +194,9 @@ describe("capability probe: fingerprints equal the former provider branches", ()
     process.env.HOME = homes.empty!;
     expect((await probeCapability("anthropic")).authState).toBe("missing");
     expect(await probeCapability("fake")).toMatchObject({ version: "in-process", authState: "ok", models: ["fake-1"] });
-    expect(await probeCapability("cursor")).toMatchObject({ version: "in-process", authState: "missing", models: [] });
+    // Cursor probes its CLI (`agent`, or `options.command`): absent here, so `unavailable`.
+    expect(await probeCapability("cursor")).toMatchObject({ version: "unavailable", authState: "missing", models: [] });
+    expect(await probeCapability("cursor", { command: join(bin, "claude") })).toMatchObject({ version: "2.9.9 (Claude Code)", authState: "missing" });
   });
 });
 

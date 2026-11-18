@@ -72,6 +72,10 @@ function projectFilters(inputs: RouteInputs, explanation: RoutingExplanation): H
       }
       else if (failure.startsWith("no capability manifest")) filters.push({ filter: "no_manifest", assistantIds: [id] });
       else if (failure.startsWith("auth ")) filters.push({ filter: "auth", assistantIds: [id], ...(manifest ? { kinds: [manifest.core.auth.state] } : {}) });
+      else if (failure.startsWith("conformance required: ")) {
+        const state = /^conformance required: ([a-z-]+) /.exec(failure)?.[1];
+        filters.push({ filter: "conformance", assistantIds: [id], ...(state ? { kinds: [state] } : {}) });
+      }
       else if (failure === "no filesystem capability") filters.push({ filter: "no_filesystem", assistantIds: [id] });
       else if (failure === "no shell capability") filters.push({ filter: "no_shell", assistantIds: [id] });
       else if (failure.startsWith("repository path not in workspace allowlist")) filters.push({ filter: "repo_not_allowlisted", assistantIds: [id] });
