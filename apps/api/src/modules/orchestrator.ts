@@ -2077,6 +2077,11 @@ export class Orchestrator {
     }
 
     if (this.db.prepare("SELECT 1 FROM dispatches WHERE task_id = ? AND phase IN ('reserved','start_attempted')").get(taskId)) throw new Error("Scheduler owns task; parallel starts are not allowed");
+    // The operator picked these candidates, so route()'s hard filters never ran on them. The two
+    // disable sources it enforces are enforced here, before the task's mode, a routing decision, a
+    // worktree, a revision or a provider exists. Read live: a later disable never stops a running run.
+    const disabled = this.disabledForNewStart(assistantIds);
+    if (disabled) throw new Error(`Cannot start a ${mode} with ${assistantIds.join(", ")}: ${disabled}`);
 
     // With the composer on, every candidate composes its own revision before anything starts, so
     // a blocked candidate (no budget left, requireRevision) starts none and leaves the task fresh.
@@ -2144,6 +2149,26 @@ export class Orchestrator {
       `${mode === "race" ? "Racing" : "Comparing"} ${assistantIds.join(" vs ")} in separate worktrees.`,
     );
     return { runs: started };
+  }
+
+  /**
+   * Why some of these explicitly chosen assistants cannot take a NEW start, or undefined when every
+   * one can: unknown, config `enabled: false`, or the operator disable overlay (migration 051) —
+   * the same disable sources as route()'s hard filters, named by cause in the given order.
+   */
+  private disabledForNewStart(assistantIds: readonly AssistantId[]): string | undefined {
+    const rows = new Map(this.registry.list().map((a) => [a.id, a]));
+    const reasons: string[] = [];
+    for (const id of new Set(assistantIds)) {
+      const row = rows.get(id);
+      if (!row) { reasons.push(`${id} is not a configured assistant`); continue; }
+      const config = row.enabled !== 1;
+      const operator = row.operator_state === "disabled";
+      if (config && operator) reasons.push(`${id} is disabled in workspace config (assistants.${id}.enabled is false) and by operator (POST /api/assistants/${id}/enable clears only the operator disable)`);
+      else if (config) reasons.push(`${id} is disabled in workspace config (assistants.${id}.enabled is false)`);
+      else if (operator) reasons.push(`${id} is disabled by operator (POST /api/assistants/${id}/enable clears it)`);
+    }
+    return reasons.length > 0 ? reasons.join("; ") : undefined;
   }
 
   /**
