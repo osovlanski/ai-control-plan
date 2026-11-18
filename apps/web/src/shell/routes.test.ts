@@ -2,9 +2,9 @@ import { describe, expect, it } from "vitest";
 import { APPLICATIONS, readRoute } from "./routes.js";
 
 describe("application routes", () => {
-  it("defaults to Overview and round-trips all seven applications", () => {
+  it("defaults to Overview and round-trips all eight applications", () => {
     expect(readRoute("").screen).toBe("overview");
-    expect(APPLICATIONS).toHaveLength(7);
+    expect(APPLICATIONS).toHaveLength(8);
     for (const { screen } of APPLICATIONS) expect(readRoute(`#/${screen}`).screen).toBe(screen);
   });
   it("addresses Shell history and an existing mission without path traversal", () => {
