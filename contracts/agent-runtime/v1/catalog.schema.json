@@ -1,0 +1,126 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-plane.local/contracts/agent-runtime/v1/catalog.schema.json",
+  "title": "RuntimeCatalog",
+  "description": "Agent runtime v1: the read-only projection of the plane's in-tree runtime catalogue (GET /api/runtimes/catalog). Data only: no code, no adapter options, no executable path, no credential. Being listed grants nothing. Normative text: docs/contracts/agent-runtime-v1.md.",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "descriptorVersion",
+    "runtimes"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {
+      "type": "string",
+      "pattern": "^1\\.\\d+$"
+    },
+    "descriptorVersion": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "runtimes": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "$ref": "#/$defs/runtime"
+      }
+    }
+  },
+  "$defs": {
+    "noInlineSecret": {
+      "description": "Rejects a recognised inline credential (Bearer token, key=/token=/secret=/password= value, quoted or not, with optional spaces around =) unless it is a ${VAR} placeholder or the redaction marker ***.",
+      "type": "string",
+      "maxLength": 4096,
+      "not": {
+        "pattern": "\\b(?:[Bb][Ee][Aa][Rr][Ee][Rr]\\s+|(?:[Aa][Pp][Ii]_?[Kk][Ee][Yy]|[Tt][Oo][Kk][Ee][Nn]|[Aa][Cc][Cc][Ee][Ss][Ss]_[Tt][Oo][Kk][Ee][Nn]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]|[Kk][Ee][Yy])\\s*=\\s*[\"']?)(?!\\$\\{|\\*\\*\\*)[^\\s&\"']"
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "label",
+        "transport",
+        "maturity",
+        "approvalModes",
+        "conformanceRequired"
+      ],
+      "properties": {
+        "provider": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]{0,31}$"
+        },
+        "label": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/noInlineSecret"
+            }
+          ],
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "transport": {
+          "enum": [
+            "native",
+            "acp"
+          ]
+        },
+        "maturity": {
+          "enum": [
+            "verified",
+            "scaffold"
+          ]
+        },
+        "harness": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]{0,31}$",
+          "description": "Composition vocabulary. Absent: the runtime can be routed to but is never composed."
+        },
+        "registryAssistant": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]{0,31}$",
+          "description": "Registry v1 compatibility.assistants id, where one exists."
+        },
+        "approvalModes": {
+          "type": "array",
+          "uniqueItems": true,
+          "maxItems": 3,
+          "items": {
+            "enum": [
+              "auto-approve",
+              "prompt-on-escalation",
+              "read-only"
+            ]
+          },
+          "description": "Modes the adapter enforces; it refuses the rest before a process starts."
+        },
+        "conformanceRequired": {
+          "type": "boolean"
+        },
+        "docs": {
+          "type": "object",
+          "additionalProperties": false,
+          "minProperties": 1,
+          "properties": {
+            "install": {
+              "type": "string",
+              "format": "uri",
+              "pattern": "^https://",
+              "maxLength": 512
+            },
+            "auth": {
+              "type": "string",
+              "format": "uri",
+              "pattern": "^https://",
+              "maxLength": 512
+            }
+          },
+          "description": "Official URLs shown to the operator. The plane never fetches them."
+        }
+      }
+    }
+  }
+}

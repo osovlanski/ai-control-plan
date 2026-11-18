@@ -34,7 +34,12 @@
 // `GET /api/tasks` element and every SSE `state` frame (task-stage v1,
 // docs/contracts/task-stage-v1.md), derived in core by `deriveStage`. No new
 // route or capability; a client written before 2.9 ignores the field.
-export const CONTROL_PLANE_API_VERSION = "2.9";
+// 2.10 (additive, Agent Runtime Registry PR 3, agent-runtime v1, docs/contracts/agent-runtime-v1.md):
+// `GET /api/runtimes/catalog` and `GET /api/assistants/:id/lifecycle` (`tasks.read`), a
+// `lifecycle` field on every `GET /api/assistants` element, and the operator disable overlay
+// `POST /api/assistants/:id/disable` / `enable` (`commands.write`). Every earlier field keeps its
+// meaning (`enabled` is still config `enabled`). No new capability, so no credential rotation.
+export const CONTROL_PLANE_API_VERSION = "2.10";
 export const NORMALIZED_EVENT_VERSION = "1.0";
 
 export const OBSERVABILITY_CAPABILITIES = [

@@ -12,7 +12,13 @@ export interface AssistantRow {
   enabled: number;
   manifest: string | null;
   manifest_updated_at: string | null;
+  /** Operator overlay (migration 051): `disabled`, or NULL for no operator opinion. Config `enabled` is separate. */
+  operator_state: string | null;
+  operator_state_at: string | null;
 }
+
+/** The operator overlay as the API names it. There is no operator `enabled`: the overlay can only remove. */
+export type OperatorState = "none" | "disabled";
 
 /**
  * Assistant registry: seeds instances from workspace config, holds the
@@ -65,12 +71,40 @@ export class Registry {
 
   list(): Array<AssistantRow & { manifestParsed: CapabilityManifest | null }> {
     const rows = this.db
-      .prepare("SELECT id, provider, tier, enabled, manifest, manifest_updated_at FROM assistants ORDER BY id")
+      .prepare("SELECT id, provider, tier, enabled, manifest, manifest_updated_at, operator_state, operator_state_at FROM assistants ORDER BY id")
       .all() as AssistantRow[];
     return rows.map((r) => ({
       ...r,
       manifestParsed: r.manifest ? (JSON.parse(r.manifest) as CapabilityManifest) : null,
     }));
+  }
+
+  /** One row as `list()` returns it, or `undefined` for an id the registry has never seen. */
+  get(id: string): (AssistantRow & { manifestParsed: CapabilityManifest | null }) | undefined {
+    return this.list().find((r) => r.id === id);
+  }
+
+  /**
+   * Sets or clears the operator disable overlay (Agent Runtime Registry design §B.3). Idempotent:
+   * a request for the state the row already has changes nothing and records nothing. A change
+   * appends a `capability_changes` row `operator.state`. Only the overlay is written: config
+   * `enabled`, options and manifests are untouched, so clearing the overlay can never enable what
+   * config disables, and an in-flight session is never touched (the overlay affects routing only).
+   * `undefined` for an unknown assistant.
+   */
+  setOperatorState(id: string, state: OperatorState, now: () => Date = () => new Date()): { changed: boolean } | undefined {
+    return this.db.transaction(() => {
+      const row = this.db.prepare("SELECT operator_state FROM assistants WHERE id = ?").get(id) as { operator_state: string | null } | undefined;
+      if (!row) return undefined;
+      const current: OperatorState = row.operator_state === "disabled" ? "disabled" : "none";
+      if (current === state) return { changed: false };
+      const at = now().toISOString();
+      this.db.prepare("UPDATE assistants SET operator_state = ?, operator_state_at = ? WHERE id = ?").run(state === "disabled" ? "disabled" : null, at, id);
+      this.db
+        .prepare("INSERT INTO capability_changes (assistant_id, field, old_value, new_value, source, observed_at) VALUES (?, 'operator.state', ?, ?, 'manual', ?)")
+        .run(id, current, state, at);
+      return { changed: true };
+    })();
   }
 
   manifest(id: string): CapabilityManifest | null {

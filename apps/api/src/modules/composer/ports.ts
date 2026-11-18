@@ -65,7 +65,11 @@ function projectFilters(inputs: RouteInputs, explanation: RoutingExplanation): H
     const id = String(candidate.assistantId);
     const manifest = inputs.candidates.find((c) => c.id === candidate.assistantId)?.manifest;
     for (const failure of candidate.filterFailures) {
-      if (failure === "disabled in workspace config") filters.push({ filter: "disabled", assistantIds: [id] });
+      // Both disable sources are the one `disabled` filter; the kind says which, from the candidate itself.
+      if (failure === "disabled in workspace config") filters.push({ filter: "disabled", assistantIds: [id], kinds: ["config"] });
+      else if (failure === "disabled by operator" && inputs.candidates.find((c) => c.id === candidate.assistantId)?.operatorDisabled) {
+        filters.push({ filter: "disabled", assistantIds: [id], kinds: ["operator"] });
+      }
       else if (failure.startsWith("no capability manifest")) filters.push({ filter: "no_manifest", assistantIds: [id] });
       else if (failure.startsWith("auth ")) filters.push({ filter: "auth", assistantIds: [id], ...(manifest ? { kinds: [manifest.core.auth.state] } : {}) });
       else if (failure === "no filesystem capability") filters.push({ filter: "no_filesystem", assistantIds: [id] });

@@ -1,0 +1,32 @@
+{
+  "schemaVersion": "1.0",
+  "descriptorVersion": 1,
+  "runtimes": [
+    {
+      "provider": "openai",
+      "label": "Codex",
+      "transport": "native",
+      "maturity": "verified",
+      "harness": "codex",
+      "registryAssistant": "codex",
+      "approvalModes": [
+        "auto-approve",
+        "read-only"
+      ],
+      "conformanceRequired": false
+    },
+    {
+      "provider": "agy",
+      "label": "Antigravity CLI",
+      "transport": "native",
+      "maturity": "scaffold",
+      "approvalModes": [
+        "auto-approve"
+      ],
+      "conformanceRequired": true,
+      "docs": {
+        "install": "http://example.invalid/install"
+      }
+    }
+  ]
+}

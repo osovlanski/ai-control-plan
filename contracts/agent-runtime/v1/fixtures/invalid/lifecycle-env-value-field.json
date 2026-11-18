@@ -1,0 +1,41 @@
+{
+  "schemaVersion": "1.0",
+  "catalogued": true,
+  "configured": true,
+  "installed": {
+    "state": "present",
+    "version": "codex-cli 0.99.0",
+    "observedAt": "2026-11-18T09:00:00.000Z"
+  },
+  "auth": {
+    "state": "ok",
+    "source": "runtime-probe",
+    "observedAt": "2026-11-18T09:00:00.000Z",
+    "credentialEnvValue": "FAKE-openrouter-not-real"
+  },
+  "conformance": {
+    "required": false,
+    "state": "not-run",
+    "descriptorVersion": 1
+  },
+  "enablement": {
+    "config": true,
+    "operator": "none",
+    "effective": true
+  },
+  "readiness": {
+    "scope": "request-independent",
+    "ready": true,
+    "reasons": []
+  },
+  "requestDependent": [
+    "repository-allowlist",
+    "filesystem-and-shell",
+    "cooldown",
+    "quota",
+    "workspace-policy",
+    "approval-mode",
+    "user-override",
+    "composition"
+  ]
+}

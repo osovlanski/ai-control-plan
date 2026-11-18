@@ -1,0 +1,251 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-plane.local/contracts/agent-runtime/v1/assistant-lifecycle.schema.json",
+  "title": "AssistantLifecycle",
+  "description": "Agent runtime v1: one configured assistant's lifecycle states, each with its own evidence (`lifecycle` on every GET /api/assistants element, and GET /api/assistants/:id/lifecycle). No state implies the next. `readiness` is request-INDEPENDENT: it is not task eligibility, which the router decides per request. Normative text: docs/contracts/agent-runtime-v1.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "catalogued",
+    "configured",
+    "installed",
+    "auth",
+    "conformance",
+    "enablement",
+    "readiness",
+    "requestDependent"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "type": "string",
+      "pattern": "^1\\.\\d+$"
+    },
+    "catalogued": {
+      "type": "boolean",
+      "description": "This build has a runtime descriptor for the assistant's provider."
+    },
+    "configured": {
+      "type": "boolean",
+      "description": "The workspace config defines this assistant now."
+    },
+    "installed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state"
+      ],
+      "properties": {
+        "state": {
+          "enum": [
+            "present",
+            "missing",
+            "in-process",
+            "unknown"
+          ],
+          "description": "From the last capability probe: `unknown` when none ran."
+        },
+        "version": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/noInlineSecret"
+            }
+          ],
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "observedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "auth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state"
+      ],
+      "properties": {
+        "state": {
+          "enum": [
+            "ok",
+            "expired",
+            "missing",
+            "unknown"
+          ],
+          "description": "The adapter's own manifest (`core.auth.state`); `unknown` when no manifest exists."
+        },
+        "source": {
+          "enum": [
+            "runtime-probe",
+            "provider-api",
+            "local-config",
+            "manual"
+          ]
+        },
+        "observedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "conformance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "required",
+        "state",
+        "descriptorVersion"
+      ],
+      "properties": {
+        "required": {
+          "type": "boolean"
+        },
+        "state": {
+          "enum": [
+            "not-run",
+            "pass",
+            "fail",
+            "stale"
+          ],
+          "description": "`stale`: evidence exists, but not for the observed CLI version and this descriptor version."
+        },
+        "descriptorVersion": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "cliVersion": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/noInlineSecret"
+            }
+          ],
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "checkedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "enablement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "config",
+        "operator",
+        "effective"
+      ],
+      "properties": {
+        "config": {
+          "type": "boolean",
+          "description": "Config `enabled` (the meaning of the element's top-level `enabled`)."
+        },
+        "operator": {
+          "enum": [
+            "none",
+            "disabled"
+          ],
+          "description": "The operator overlay. It can only remove: there is no operator `enabled`."
+        },
+        "operatorChangedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "effective": {
+          "type": "boolean",
+          "description": "config AND operator is not disabled."
+        }
+      }
+    },
+    "readiness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scope",
+        "ready",
+        "reasons"
+      ],
+      "properties": {
+        "scope": {
+          "const": "request-independent"
+        },
+        "ready": {
+          "type": "boolean"
+        },
+        "reasons": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "allOf": [
+              {
+                "$ref": "#/$defs/noInlineSecret"
+              }
+            ],
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          }
+        }
+      },
+      "if": {
+        "type": "object",
+        "properties": {
+          "ready": {
+            "const": true
+          }
+        }
+      },
+      "then": {
+        "type": "object",
+        "properties": {
+          "reasons": {
+            "type": "array",
+            "maxItems": 0
+          }
+        }
+      },
+      "else": {
+        "type": "object",
+        "properties": {
+          "reasons": {
+            "type": "array",
+            "minItems": 1
+          }
+        }
+      },
+      "description": "Request-independent readiness: `ready` exactly when `reasons` is empty. Reasons are the router's own failure texts."
+    },
+    "requestDependent": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "repository-allowlist",
+          "filesystem-and-shell",
+          "cooldown",
+          "quota",
+          "workspace-policy",
+          "approval-mode",
+          "user-override",
+          "composition"
+        ]
+      },
+      "description": "Constraints the router and Prepare evaluate per request, which readiness does not cover."
+    }
+  },
+  "$defs": {
+    "noInlineSecret": {
+      "description": "Rejects a recognised inline credential (Bearer token, key=/token=/secret=/password= value, quoted or not, with optional spaces around =) unless it is a ${VAR} placeholder or the redaction marker ***.",
+      "type": "string",
+      "maxLength": 4096,
+      "not": {
+        "pattern": "\\b(?:[Bb][Ee][Aa][Rr][Ee][Rr]\\s+|(?:[Aa][Pp][Ii]_?[Kk][Ee][Yy]|[Tt][Oo][Kk][Ee][Nn]|[Aa][Cc][Cc][Ee][Ss][Ss]_[Tt][Oo][Kk][Ee][Nn]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]|[Kk][Ee][Yy])\\s*=\\s*[\"']?)(?!\\$\\{|\\*\\*\\*)[^\\s&\"']"
+      }
+    }
+  }
+}
