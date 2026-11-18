@@ -1,21 +1,9 @@
 import type { AgentAdapter, AssistantId, CapabilityManifest } from "@agent-plane/core";
-import {
-  BedrockAdapter,
-  ClaudeAdapter,
-  CodexAdapter,
-  CursorAdapter,
-  FakeAdapter,
-  OpenRouterCodexAdapter,
-  type BedrockOptions,
-  type CursorOptions,
-  type FakeOptions,
-  type OpenRouterOptions,
-  type AgentLauncher,
-  type ClaudeLaunchProfile,
-} from "@agent-plane/adapters";
+import type { ClaudeLaunchProfile } from "@agent-plane/adapters";
 import { agentLauncher, type ResolvedConfig } from "../config.js";
 import type { Db } from "../db/index.js";
 import { probeCapability, type CapabilityProbe } from "./capability-probe.js";
+import { createAdapter } from "./runtime-catalog.js";
 
 export interface AssistantRow {
   id: string;
@@ -49,10 +37,12 @@ export class Registry {
     for (const [id, cfg] of Object.entries(this.config.assistants)) {
       this.adapters.set(
         id,
-        createAdapter(id as AssistantId, cfg.provider, cfg.options ?? {}, this.config.sessionInput.enabled,
+        createAdapter(id as AssistantId, cfg.provider, cfg.options ?? {}, {
+          sessionInputEnabled: this.config.sessionInput.enabled,
           // server configs are checked by the CLI at launch; config only checks their shape
-          this.config.execution.providerProfile as ClaudeLaunchProfile | undefined,
-          this.config.execution.agentUser ? agentLauncher(this.config.execution.agentUser) : undefined),
+          providerProfile: this.config.execution.providerProfile as ClaudeLaunchProfile | undefined,
+          agentLauncher: this.config.execution.agentUser ? agentLauncher(this.config.execution.agentUser) : undefined,
+        }),
       );
       upsert.run(id, cfg.provider, cfg.enabled === false ? 0 : 1);
     }
@@ -191,36 +181,6 @@ export class Registry {
         "SELECT assistant_id, field, old_value, new_value, source, observed_at FROM capability_changes ORDER BY id DESC LIMIT ?",
       )
       .all(limit);
-  }
-}
-
-function createAdapter(
-  id: AssistantId,
-  provider: string,
-  options: Record<string, unknown> = {},
-  sessionInputEnabled = false,
-  profile?: ClaudeLaunchProfile,
-  launcher?: AgentLauncher,
-): AgentAdapter {
-  switch (provider) {
-    case "anthropic":
-      return new ClaudeAdapter(id, undefined, { liveInput: sessionInputEnabled, ...(profile ? { profile } : {}), ...(launcher ? { agentLauncher: launcher } : {}) });
-    case "openai":
-      return new CodexAdapter(id, { appServerInput: sessionInputEnabled && options.appServerInput === true });
-    case "openrouter":
-      return new OpenRouterCodexAdapter(id, options as OpenRouterOptions);
-    case "cursor":
-      return new CursorAdapter(id, options as CursorOptions);
-    case "bedrock":
-      // Bedrock hosts YOUR agent: the runtime ARN is configuration, not
-      // something the plane can discover (review §2.4).
-      return new BedrockAdapter(id, options as BedrockOptions);
-    case "fake":
-      return new FakeAdapter(id, undefined, options as FakeOptions);
-    default:
-      throw new Error(
-        `Unsupported provider "${provider}" for assistant ${id} (supported: anthropic, openai, openrouter, cursor, bedrock, fake)`,
-      );
   }
 }
 

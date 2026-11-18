@@ -10,7 +10,7 @@ import { byCodeUnit, overrideWhy, sortedUnique, type RawCandidate, type RawFilte
 import type { ComposedIntent, ComposerAsset, ComposerInputs, ComposerOptIn, Harness } from "./types.js";
 
 /** The registry's assistant vocabulary (registry v1 `compatibility.assistants`) for each harness. */
-const REGISTRY_ASSISTANT: Readonly<Record<Harness, string | undefined>> = {
+export const REGISTRY_ASSISTANT: Readonly<Record<Harness, string | undefined>> = {
   "claude-code": "claude", codex: "codex", cursor: "cursor", bedrock: undefined,
 };
 /** Harnesses bundle v1 renders a skill file for (`.claude/skills/<name>/SKILL.md`). */
