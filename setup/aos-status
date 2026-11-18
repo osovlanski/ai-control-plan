@@ -19,7 +19,7 @@ c "plane git does not trust it"  '! { git config --system --get-all safe.directo
 c "sudoers /etc/sudoers.d/aos"   'visudo -cf /etc/sudoers.d/aos'
 c "/var/lib/aos/schedule 2750"   '[ "$(stat -c %a /var/lib/aos/schedule)" = 2750 ]'
 c "close script root-owned"      '[ "$(stat -c %U:%a /usr/local/lib/aos/aos-close)" = root:755 ]'
-c "close timer active (aos-agent)" 'systemctl --user -M aos-agent@ is-active aos-close.timer'
+c "close timer active (aos-agent)" 'runuser -u aos-agent -- env XDG_RUNTIME_DIR=/run/user/1002 systemctl --user is-active aos-close.timer'
 c "close schedule written"       '[ -s /var/lib/aos/schedule/windows ]'
 c "nft table aos_agent_net"      'nft list table inet aos_agent_net'
 c "nft unit enabled"             'systemctl is-enabled aos-agent-net.service'

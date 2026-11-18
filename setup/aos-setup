@@ -74,7 +74,9 @@ for u in aos-close.service aos-close.timer; do
   cmp -s "$L/$u" "/etc/systemd/user/$u" || install -o root -g root -m 0644 "$L/$u" "/etc/systemd/user/$u"
 done
 systemctl --global enable --quiet aos-close.timer
-agentctl(){ systemctl --user -M aos-agent@ "$@"; }
+# Not `systemctl --user -M aos-agent@`: the machine bus answers "Transport endpoint is not connected" on the OCI box
+# while the manager is up (G15, 2026-11-18). aos-agent's own runtime dir is what works.
+agentctl(){ runuser -u aos-agent -- env XDG_RUNTIME_DIR=/run/user/1002 systemctl --user "$@"; }
 agentctl daemon-reload && agentctl start aos-close.timer || say "WARN: could not start aos-close.timer in aos-agent's manager (is linger on? try again after: loginctl enable-linger aos-agent)"
 [ "${1:-}" = --no-net ] && { say "done (sudoers + nft skipped)"; exit 0; }
 visudo -cf "$L/aos-sudoers" >/dev/null
