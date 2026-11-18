@@ -31,3 +31,4 @@ export * from "./memory-proposals.js";
 export * from "./memory-shadow.js";
 export * from "./task-stage.js";
 export * from "./composer/index.js";
+export * from "./runtime-kinds.js";

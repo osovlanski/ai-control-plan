@@ -1,22 +1,27 @@
 /**
  * The runtime catalogue: one static, typed, in-tree entry per provider the plane can construct an
- * adapter for (Agent Runtime Registry design, PR 1).
+ * adapter for (Agent Runtime Registry design, PRs 1 and 2).
  *
  * This is NOT a plugin system. The catalogue is a frozen array literal; a runtime is added by a
- * reviewed PR that adds an adapter class and one descriptor here. Nothing is registered at runtime,
- * nothing is imported from a path or package name taken from configuration, and no executable path
- * is read from here. Adapters still author their own capability manifests through `describe()`;
- * a descriptor only says which class to build and restates three facts the composer already holds
- * (`harnessForProvider`, `REGISTRY_ASSISTANT`, `HARNESS_APPROVAL_MODES`). Drift tests in
- * `test/runtime-catalog.test.ts` pin those copies to each other until a later PR removes them.
+ * reviewed PR that adds an adapter class, one row in core `RUNTIME_KINDS` and one descriptor here.
+ * Nothing is registered at runtime, nothing is imported from a path or package name taken from
+ * configuration, and no executable path is read from here. Adapters still author their own
+ * capability manifests through `describe()`.
+ *
+ * Each descriptor extends its core `RuntimeKind` row (provider, harness, registry vocabulary,
+ * approval modes, option types), which the composer's maps are derived from, with what only the
+ * API can hold: the adapter constructor, the cheap capability-probe inputs, the idle quota probe
+ * and the session-input binding.
  */
-import type { AgentAdapter, ApprovalMode, AssistantId, Harness } from "@agent-plane/core";
+import { runtimeKindFor, type AgentAdapter, type AssistantId, type RuntimeKind, type SessionInputAdapter } from "@agent-plane/core";
 import {
   BedrockAdapter,
   ClaudeAdapter,
+  ClaudeCodeSessionInputAdapter,
   CodexAdapter,
   CursorAdapter,
   FakeAdapter,
+  FakeSessionInputAdapter,
   OpenRouterCodexAdapter,
   type AgentLauncher,
   type BedrockOptions,
@@ -33,69 +38,115 @@ export interface AdapterContext {
   readonly agentLauncher?: AgentLauncher;
 }
 
-export interface RuntimeDescriptor {
+/**
+ * What `capability-probe.ts` reads for a provider. The probe only decides WHETHER to re-describe
+ * (version + config fingerprint); it never authors manifest values.
+ */
+export interface ProbeSpec {
+  /** CLI whose `--version` is part of the fingerprint. Absent: version `in-process`. */
+  readonly command?: string;
+  /** Config directory under the home directory, such as `.claude`. */
+  readonly configRoot?: string;
+  /** Files under `configRoot` whose presence means auth `ok`. */
+  readonly authFiles?: readonly string[];
+  /** Fingerprinted besides `config.json`, `settings.json`, `settings.local.json`, `config.toml`. */
+  readonly extraConfigFiles?: readonly string[];
+  /** Auth is `ok` exactly when this environment variable is set (its name, never its value, is fingerprinted). */
+  credentialEnv?(options: Record<string, unknown>): string;
+  /** In-process test runtime: fixed auth state and models. */
+  readonly fixed?: { readonly authState: string; readonly models: readonly string[] };
+}
+
+/**
+ * How the session-input service reaches a provider's delivery adapter (docs/contracts/session-input.md).
+ * `perAssistant: true` builds one on first use and reuses it; `false` reads it from the adapter each
+ * time. `owner` looks the assistant's agent adapter up lazily, so a binding that does not need it
+ * never touches the registry.
+ */
+export interface SessionInputBinding {
+  readonly perAssistant: boolean;
+  resolve(owner: () => AgentAdapter): SessionInputAdapter | undefined;
+}
+
+/** Named idle quota probes (`quota-probe.ts` holds the implementations). */
+export type QuotaProbeKind = "claude-oauth-usage";
+
+export interface RuntimeDescriptor extends RuntimeKind {
   /** Version of this interface (not a wire contract). A breaking change bumps every entry. */
   readonly descriptorVersion: 1;
-  /** Workspace config `assistants.<id>.provider`. */
-  readonly provider: string;
   readonly label: string;
-  /** Composition vocabulary. Absent: routable, never composed (the fake's harness is a per-instance test option). */
-  readonly harness?: Harness;
-  /** Registry v1 `compatibility.assistants` id for the harness, where one exists. */
-  readonly registryAssistant?: string;
-  /** Approval modes the adapter accepts; it refuses the rest before a process starts. */
-  readonly approvalModes: readonly ApprovalMode[];
   /** `scaffold`: the event mapping is not proven against a pinned CLI (the adapter says `providerDetail.mappingVerified: false`). */
   readonly maturity: "verified" | "scaffold";
+  readonly probe?: ProbeSpec;
+  readonly quotaProbe?: QuotaProbeKind;
+  readonly sessionInput?: SessionInputBinding;
   create(ctx: AdapterContext, id: AssistantId, options: Record<string, unknown>): AgentAdapter;
 }
 
-const ALL_MODES: readonly ApprovalMode[] = Object.freeze(["auto-approve", "prompt-on-escalation", "read-only"]);
+type Own = Omit<RuntimeDescriptor, keyof RuntimeKind>;
+/** A descriptor is its core row plus the API-side wiring; the row's facts are never restated here. */
+const descriptor = (provider: string, own: Own): RuntimeDescriptor => {
+  const kind = runtimeKindFor(provider);
+  if (!kind) throw new Error(`runtime catalogue: no RUNTIME_KINDS row for ${provider}`);
+  return Object.freeze({ ...kind, ...own, ...(own.probe ? { probe: Object.freeze({ ...own.probe }) } : {}) });
+};
 
-const descriptor = (d: RuntimeDescriptor): RuntimeDescriptor =>
-  Object.freeze({ ...d, approvalModes: Object.freeze([...d.approvalModes]) });
+const CLI_AUTH_FILES = Object.freeze([".credentials.json", "auth.json"]);
 
 /**
- * In the order the unknown-provider error has always listed them. Each `create` body is the
- * corresponding case of the former `createAdapter` switch in `registry.ts`, unchanged.
+ * In the order the unknown-provider error has always listed them (the order of `RUNTIME_KINDS`).
+ * Each `create` body is the corresponding case of the former `createAdapter` switch, unchanged;
+ * each `probe`, `quotaProbe` and `sessionInput` is the former provider branch in
+ * `capability-probe.ts`, `quota-probe.ts` and `server.ts`, unchanged.
  */
 export const RUNTIME_CATALOG: readonly RuntimeDescriptor[] = Object.freeze([
-  descriptor({
-    descriptorVersion: 1, provider: "anthropic", label: "Claude Code", harness: "claude-code", registryAssistant: "claude",
-    approvalModes: ALL_MODES, maturity: "verified",
+  descriptor("anthropic", {
+    descriptorVersion: 1, label: "Claude Code", maturity: "verified",
+    probe: { command: "claude", configRoot: ".claude", authFiles: CLI_AUTH_FILES, extraConfigFiles: ["../.claude.json", "plugins/installed_plugins.json"] },
+    quotaProbe: "claude-oauth-usage",
+    sessionInput: {
+      perAssistant: true,
+      // Only a live-input ClaudeAdapter can be delivered to. Anything else has no capability
+      // rather than a silently faked one. Delivery is proven from the CLI's own transcript.
+      resolve: (owner) => {
+        const agent = owner();
+        return agent instanceof ClaudeAdapter ? new ClaudeCodeSessionInputAdapter((sessionId) => agent.liveSession(sessionId)) : undefined;
+      },
+    },
     create: (ctx, id) => new ClaudeAdapter(id, undefined, {
       liveInput: ctx.sessionInputEnabled,
       ...(ctx.providerProfile ? { profile: ctx.providerProfile } : {}),
       ...(ctx.agentLauncher ? { agentLauncher: ctx.agentLauncher } : {}),
     }),
   }),
-  descriptor({
-    descriptorVersion: 1, provider: "openai", label: "Codex", harness: "codex", registryAssistant: "codex",
-    approvalModes: ["auto-approve", "read-only"], maturity: "verified",
+  descriptor("openai", {
+    descriptorVersion: 1, label: "Codex", maturity: "verified",
+    probe: { command: "codex", configRoot: ".codex", authFiles: CLI_AUTH_FILES },
+    sessionInput: {
+      perAssistant: false,
+      resolve: (owner) => { const agent = owner(); return agent instanceof CodexAdapter ? agent.sessionInput : undefined; },
+    },
     create: (ctx, id, options) => new CodexAdapter(id, { appServerInput: ctx.sessionInputEnabled && options.appServerInput === true }),
   }),
-  descriptor({
-    descriptorVersion: 1, provider: "openrouter", label: "Codex via OpenRouter", harness: "codex", registryAssistant: "codex",
-    approvalModes: ["auto-approve", "read-only"], maturity: "verified",
+  descriptor("openrouter", {
+    descriptorVersion: 1, label: "Codex via OpenRouter", maturity: "verified",
+    probe: { credentialEnv: (options) => (typeof options.apiKeyEnv === "string" ? options.apiKeyEnv : "OPENROUTER_API_KEY") },
     create: (_ctx, id, options) => new OpenRouterCodexAdapter(id, options as OpenRouterOptions),
   }),
-  descriptor({
-    descriptorVersion: 1, provider: "cursor", label: "Cursor CLI", harness: "cursor", registryAssistant: "cursor",
-    approvalModes: ["auto-approve"], maturity: "scaffold",
+  descriptor("cursor", {
+    descriptorVersion: 1, label: "Cursor CLI", maturity: "scaffold",
     create: (_ctx, id, options) => new CursorAdapter(id, options as CursorOptions),
   }),
-  descriptor({
-    descriptorVersion: 1, provider: "bedrock", label: "Bedrock AgentCore", harness: "bedrock",
-    // Tools run remotely and the adapter enforces no mode; claiming one would be false.
-    approvalModes: [], maturity: "verified",
+  descriptor("bedrock", {
+    descriptorVersion: 1, label: "Bedrock AgentCore", maturity: "verified",
     // Bedrock hosts YOUR agent: the runtime ARN is configuration, not
     // something the plane can discover (review §2.4).
     create: (_ctx, id, options) => new BedrockAdapter(id, options as BedrockOptions),
   }),
-  descriptor({
-    descriptorVersion: 1, provider: "fake", label: "Fake (tests)",
-    // Test-only: accepts every mode and enforces none; its harness is `options.harness`.
-    approvalModes: ALL_MODES, maturity: "verified",
+  descriptor("fake", {
+    descriptorVersion: 1, label: "Fake (tests)", maturity: "verified",
+    probe: { fixed: { authState: "ok", models: ["fake-1"] } },
+    sessionInput: { perAssistant: true, resolve: () => new FakeSessionInputAdapter() },
     create: (_ctx, id, options) => new FakeAdapter(id, undefined, options as FakeOptions),
   }),
 ]);
@@ -122,4 +173,29 @@ export function createAdapter(
     throw new Error(`Unsupported provider "${provider}" for assistant ${id} (supported: ${supportedProviders().join(", ")})`);
   }
   return runtime.create(ctx, id, options);
+}
+
+/**
+ * The session-input service's resolver (server.ts), driven by each descriptor's `sessionInput`
+ * binding. `providerOf` reads the assistant's provider (the `assistants` row); `adapterOf` is
+ * `Registry.adapter`, called only by a binding that needs the agent adapter and only on a cache miss.
+ * A `perAssistant` binding's result is cached per assistant once it is defined; `undefined` is not
+ * cached, so a later call tries again, as before.
+ */
+export function sessionInputResolver(
+  providerOf: (assistantId: string) => string | undefined,
+  adapterOf: (assistantId: string) => AgentAdapter,
+): (assistantId: string) => SessionInputAdapter | undefined {
+  const perAssistant = new Map<string, SessionInputAdapter>();
+  return (assistantId) => {
+    const provider = providerOf(assistantId);
+    const binding = provider === undefined ? undefined : runtimeFor(provider)?.sessionInput;
+    if (!binding) return undefined;
+    if (!binding.perAssistant) return binding.resolve(() => adapterOf(assistantId));
+    const cached = perAssistant.get(assistantId);
+    if (cached) return cached;
+    const adapter = binding.resolve(() => adapterOf(assistantId));
+    if (adapter) perAssistant.set(assistantId, adapter);
+    return adapter;
+  };
 }

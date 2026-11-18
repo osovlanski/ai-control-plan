@@ -31,6 +31,7 @@ import { effectiveStateSql, effectiveUsageJoin, effectiveUsageSql } from "./modu
 import { Orchestrator } from "./modules/orchestrator.js";
 import type { planProjectVerification } from "./modules/project-verification.js";
 import { Registry } from "./modules/registry.js";
+import { sessionInputResolver } from "./modules/runtime-catalog.js";
 import { routingHistory } from "./modules/router.js";
 import { TaskEventBus } from "./modules/sse.js";
 import { TaskStageReader } from "./modules/task-stage.js";
@@ -67,7 +68,7 @@ import { RepositoryIdentityRegistry } from "./repo/identity-registry.js";
 import { renderHandoffMd } from "./render/handoff.js";
 import { renderProgressMd } from "./render/progress.js";
 import { registerAuth, type SessionMap } from "./auth/index.js";
-import { ClaudeAdapter, ClaudeCodeSessionInputAdapter, CodexAdapter, FakeSessionInputAdapter } from "@agent-plane/adapters";
+import { CodexAdapter } from "@agent-plane/adapters";
 import { CredentialStore, credentialPath } from "./auth/credential-file.js";
 import { onRunSessionRef, UsageLedger, validateUsageRecord } from "./modules/usage.js";
 import { AssetTelemetry } from "./modules/asset-telemetry.js";
@@ -1495,41 +1496,15 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   let sessionInputs: SessionInputService | undefined;
   let sessionInputRedelivery: (() => Promise<unknown>) | undefined;
   if (config.sessionInput.enabled) {
-    const fakes = new Map<string, FakeSessionInputAdapter>();
-    const lives = new Map<string, ClaudeCodeSessionInputAdapter>();
-    const resolve: SessionInputAdapterResolver = deps.sessionInputAdapters ?? ((assistantId) => {
-      // `AgentAdapter.send` is still NOT reused as the delivery seam: it has no
-      // idempotency, receipt or acknowledgement contract, and a typed method is
-      // not acceptance evidence. Claude Code gets its own adapter, which proves
-      // delivery from the CLI's own transcript; every OTHER provider still
-      // declares no session-input capability at all.
-      const row = db.prepare("SELECT provider FROM assistants WHERE id = ?").get(assistantId) as
-        | { provider: string }
-        | undefined;
-      if (row?.provider === "openai") {
-        const owner = registry.adapter(assistantId);
-        return owner instanceof CodexAdapter ? owner.sessionInput : undefined;
-      }
-      if (row?.provider === "anthropic") {
-        let adapter = lives.get(assistantId);
-        if (!adapter) {
-          const agent = registry.adapter(assistantId);
-          // Only a live-input ClaudeAdapter can be delivered to. Anything else
-          // has no capability rather than a silently faked one.
-          if (!(agent instanceof ClaudeAdapter)) return undefined;
-          adapter = new ClaudeCodeSessionInputAdapter((sessionId) => agent.liveSession(sessionId));
-          lives.set(assistantId, adapter);
-        }
-        return adapter;
-      }
-      if (row?.provider !== "fake") return undefined;
-      let adapter = fakes.get(assistantId);
-      if (!adapter) {
-        adapter = new FakeSessionInputAdapter();
-        fakes.set(assistantId, adapter);
-      }
-      return adapter;
-    });
+    // `AgentAdapter.send` is still NOT reused as the delivery seam: it has no
+    // idempotency, receipt or acknowledgement contract, and a typed method is
+    // not acceptance evidence. Which providers can deliver, and how, is each
+    // runtime descriptor's `sessionInput` binding (Claude Code, Codex, the
+    // fake); every OTHER provider declares no session-input capability at all.
+    const resolve: SessionInputAdapterResolver = deps.sessionInputAdapters ?? sessionInputResolver(
+      (assistantId) => (db.prepare("SELECT provider FROM assistants WHERE id = ?").get(assistantId) as { provider: string } | undefined)?.provider,
+      (assistantId) => registry.adapter(assistantId),
+    );
     sessionInputs = new SessionInputService(db, { workspace: config.workspace, adapters: resolve, now });
     // A previous incarnation's in-flight attempts are unknown outcomes, not
     // deliveries and not failures. Fence them before serving anything.

@@ -4,16 +4,20 @@
  * turns that projection into the decision entry: candidates `<assistantId>/<modelId>`, filters
  * under fixed names with reasons written here from blocker kinds only, and the model source.
  */
+import { RUNTIME_KINDS } from "../runtime-kinds.js";
 import { overrideWhy, type RawCandidate, type RawFilter, type RawStage } from "./explain.js";
 import {
   HARNESS_FILTERS, type ComposedIntent, type ComposerInputs, type Harness, type HarnessFilterName, type HarnessModelChoice,
   type HarnessModelPort, type HarnessModelProjection,
 } from "./types.js";
 
-/** Provider → harness (§2 stage 2). A fake assistant's harness is the port's test-only option. */
-const PROVIDER_HARNESS: Readonly<Record<string, Harness>> = {
-  anthropic: "claude-code", openai: "codex", openrouter: "codex", cursor: "cursor", bedrock: "bedrock",
-};
+/**
+ * Provider → harness (§2 stage 2), derived from `RUNTIME_KINDS`. A fake assistant's harness is the
+ * port's test-only option, so the fake (no `harness` in its row) is absent here.
+ */
+const PROVIDER_HARNESS: Readonly<Record<string, Harness>> = Object.freeze(
+  Object.fromEntries(RUNTIME_KINDS.flatMap((k) => (k.harness ? [[k.provider, k.harness] as const] : []))),
+);
 
 /** The harness a provider's assistants run under, for the port; `undefined` for an unknown provider. */
 export function harnessForProvider(provider: string): Harness | undefined {
