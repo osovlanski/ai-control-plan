@@ -472,6 +472,19 @@ describe("approvals of an unattended session", () => {
     await dispatcher().idle();
   });
 
+  it("the task constraints tell the agent the plane runs acceptance and background processes are not allowed (G15 fourth run)", async () => {
+    await boot([{ id: "item-a" }]);
+    open();
+    await dispatcher().tick();
+    const a = ap().currentAttempt()!;
+    const row = rig!.db.prepare("SELECT envelope FROM tasks WHERE id = ?").get(a.taskId!) as { envelope: string };
+    expect(row.envelope).toMatch(/do not run the full test suite/i);
+    expect(row.envelope).toMatch(/Never start background processes/);
+    ap().stop("now", "test");
+    await dispatcher().tick();
+    await dispatcher().idle();
+  });
+
   it("autopilot.approvalMode: prompt-on-escalation keeps the workspace prompt", async () => {
     await boot([{ id: "item-a" }]);
     rig!.config.autopilot.approvalMode = "prompt-on-escalation";

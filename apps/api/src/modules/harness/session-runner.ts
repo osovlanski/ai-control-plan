@@ -111,6 +111,12 @@ export interface RunnerDeps {
   runnerId?: string;
   /** Poll interval while a session is AWAITING_APPROVAL. */
   approvalPollMs?: number;
+  /**
+   * After the provider's `run.ended`, how long the runner keeps reading for trailing events before it stops
+   * waiting for the stream to close. A background child the agent left running keeps the provider process, and so
+   * the stream, open until the hard timeout (G15, 2026-11-18: 19 idle minutes, then a failed attempt). Default 10 s.
+   */
+  endedGraceMs?: number;
   /** `execution.maxConcurrentProviderStarts`; unset = unlimited (no queue, no trace event). */
   maxConcurrentProviderStarts?: number;
   /** Resolves the request's secret REFERENCES at the launch boundary (§3). */
@@ -238,6 +244,7 @@ export class SessionRunner {
   private readonly softThresholdPct: number;
   private readonly runnerId: string;
   private readonly approvalPollMs: number;
+  private readonly endedGrace: number;
 
   readonly starts: StartSlots;
 
@@ -247,6 +254,7 @@ export class SessionRunner {
     this.softThresholdPct = deps.softThresholdPct ?? 80;
     this.runnerId = deps.runnerId ?? `runner_${newExecutionSessionId()}`;
     this.approvalPollMs = deps.approvalPollMs ?? 20;
+    this.endedGrace = deps.endedGraceMs ?? 10_000;
   }
 
   /** Execute one request end to end. Always returns a persisted ExecutionResult (H-I3). */
@@ -326,6 +334,9 @@ export class SessionRunner {
   }
   get pollMs(): number {
     return this.approvalPollMs;
+  }
+  get endedGraceMs(): number {
+    return this.endedGrace;
   }
   static readonly UNENFORCEABLE = POLICY_UNENFORCEABLE;
 }
@@ -529,6 +540,11 @@ class RunContext {
     let firstEvent = true;
     let terminalPlan: TerminalPlan | undefined;
     const iter = adapter.events(handle)[Symbol.asyncIterator]();
+    // Once the provider says the run ended, the stream gets `endedGraceMs` to close on its own; a leftover
+    // background child must not hold a finished session open until the hard timeout. The provider tree is
+    // terminated when the run settles ("run ended" below), which also ends that child.
+    let graceTimer: ReturnType<typeof setTimeout> | undefined;
+    let graceUp: Promise<IteratorResult<NormalizedEvent>> | undefined;
     try {
       for (;;) {
         // Race the next event against the abort signal so a truly hung iterator
@@ -536,6 +552,7 @@ class RunContext {
         const step = await Promise.race([
           iter.next(),
           this.abort.promise.then(() => ({ done: true, value: undefined }) as IteratorResult<NormalizedEvent>),
+          ...(graceUp ? [graceUp] : []),
         ]);
         if (step.done || this.tickPlan) break;
         const event = step.value;
@@ -559,6 +576,11 @@ class RunContext {
           this.reportFirstEvent(adapter, handle);
         }
         this.observe(event);
+        if (event.type === "run.ended" && !graceUp) {
+          graceUp = new Promise((resolve) => {
+            graceTimer = setTimeout(() => resolve({ done: true, value: undefined }), this.runner.endedGraceMs);
+          });
+        }
         const gate = await this.evaluateToolGate(event, adapter);
         const directive = evaluateGuards(this.snapshot, { kind: "event", event, atMs: this.runner.clock(), gate });
         const nontrivial = directive.action !== "continue";
@@ -618,6 +640,7 @@ class RunContext {
       ]);
     } finally {
       clearInterval(heartbeat);
+      if (graceTimer) clearTimeout(graceTimer);
       void iter.return?.(undefined); // release a still-open iterator
     }
     if (this.fencedReason) throw new SessionFencedError(this.sessionId, this.fencedReason);
