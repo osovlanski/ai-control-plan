@@ -59,7 +59,66 @@ export interface Assistant {
       limits?: { window: string; usedPercent: number; resetsAt?: string }[];
     };
     providerDetail: Record<string, unknown>;
+    evidence?: { source: string; observedAt: string };
   } | null;
+  /** Agent runtime v1 (API 2.10+). Absent on an older plane: show nothing rather than guess. */
+  lifecycle?: AssistantLifecycle;
+}
+
+// ---- Agent runtime v1 (API 2.10/2.11, docs/contracts/agent-runtime-v1.md) ------------------------
+// Shapes mirror apps/api `runtime-lifecycle.ts` and `runtime-conformance.ts`. The browser renders
+// them as served: readiness and its reasons are the plane's, never recomputed here.
+
+/** `GET /api/runtimes/catalog`: the in-tree catalogue as data. Being listed grants nothing. */
+export interface RuntimeCatalogEntry {
+  provider: string;
+  label: string;
+  transport: "native" | "acp";
+  maturity: "verified" | "scaffold";
+  harness?: string;
+  registryAssistant?: string;
+  approvalModes: string[];
+  conformanceRequired: boolean;
+  /** Official `https://` links for the operator. The plane never fetches them. */
+  docs?: { install?: string; auth?: string };
+}
+export interface RuntimeCatalog { schemaVersion: string; descriptorVersion: number; runtimes: RuntimeCatalogEntry[] }
+
+/** Each state has its own evidence; none implies the next. */
+export interface AssistantLifecycle {
+  schemaVersion: string;
+  catalogued: boolean;
+  configured: boolean;
+  installed: { state: "present" | "missing" | "in-process" | "unknown"; version?: string; observedAt?: string };
+  auth: { state: "ok" | "expired" | "missing" | "unknown"; source?: string; observedAt?: string };
+  conformance: { required: boolean; state: "not-run" | "pass" | "fail" | "stale"; descriptorVersion: number; cliVersion?: string; checkedAt?: string };
+  enablement: { config: boolean; operator: "none" | "disabled"; operatorChangedAt?: string; effective: boolean };
+  /** Request-independent only. It is NOT "will be routed": the router decides that per task. */
+  readiness: { scope: "request-independent"; ready: boolean; reasons: string[] };
+  requestDependent: string[];
+}
+
+export interface OperatorStateChange { schemaVersion: string; assistantId: string; operatorState: "none" | "disabled"; changed: boolean; lifecycle: AssistantLifecycle }
+
+export interface ConformanceCheck {
+  name: string;
+  status: "pass" | "fail" | "unsupported" | "unavailable" | "not-run";
+  level: "build" | "host" | "provider";
+  reason: string;
+}
+/** `POST /api/assistants/:id/test`. A `pass` covers exactly the checks listed as `pass`. */
+export interface ConformanceResult {
+  schemaVersion: string;
+  assistantId: string;
+  provider: string;
+  descriptorVersion: number;
+  cliVersion?: string;
+  status: "pass" | "fail" | "unsupported";
+  reasons: string[];
+  recorded: boolean;
+  checkedAt: string;
+  checks: ConformanceCheck[];
+  lifecycle: AssistantLifecycle;
 }
 
 export interface CapabilityChange { assistant_id: string; field: string; old_value: string; new_value: string; source: string; observed_at: string }
@@ -456,6 +515,13 @@ export const api = {
   assistants: () => req<Assistant[]>("/api/assistants"),
   changes: () => req<CapabilityChange[]>("/api/assistants/changes"),
   syncAssistant: (id: string) => req<unknown>(`/api/assistants/${id}/sync`, { method: "POST" }),
+  runtimeCatalog: () => req<RuntimeCatalog>("/api/runtimes/catalog"),
+  /** Credential-free, quota-free conformance probe; never starts a generation. */
+  testAssistant: (id: string) => req<ConformanceResult>(`/api/assistants/${encodeURIComponent(id)}/test`, { method: "POST" }),
+  /** Operator overlay only: removes the assistant from future routing; config is never written. */
+  disableAssistant: (id: string) => req<OperatorStateChange>(`/api/assistants/${encodeURIComponent(id)}/disable`, { method: "POST" }),
+  /** Clears the operator overlay and nothing else: a config-disabled assistant stays disabled. */
+  enableAssistant: (id: string) => req<OperatorStateChange>(`/api/assistants/${encodeURIComponent(id)}/enable`, { method: "POST" }),
   runNow: (id: string, generation: number) => req(`/api/tasks/${id}/run-now`, { method: "POST", body: JSON.stringify({ generation }) }),
   schedulerStatus: () => req<SchedulerStatus>("/api/scheduler/status"),
   // K5. Queue order, backlog count and the active occurrence task all come from
