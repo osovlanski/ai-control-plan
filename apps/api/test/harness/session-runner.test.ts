@@ -218,6 +218,30 @@ describe("time-based guards while the stream is stalled", () => {
   });
 });
 
+describe("a finished run whose provider process lingers (G15 fourth run: a background pnpm test held the session open for 19 minutes)", () => {
+  const lingering = (): AgentAdapter => ({
+    id: "a1" as AssistantId,
+    describe: async () => MANIFEST,
+    start: async () => ({ runId: "l1", assistantId: "a1" as AssistantId }),
+    resume: async () => ({ runId: "l1", assistantId: "a1" as AssistantId }),
+    events: async function* () {
+      const ts = () => new Date().toISOString();
+      yield { runId: "l1" as RunId, ts: ts(), type: "run.started", summary: "started" };
+      yield { runId: "l1" as RunId, ts: ts(), type: "run.ended", summary: "Run completed", payload: { ok: true } };
+      await new Promise(() => {}); // the stream never closes: a background child holds the process
+    },
+    cancel: async () => {},
+  });
+
+  it("settles from run.ended after the grace instead of waiting for the hard timeout", async () => {
+    const runner = new SessionRunner(deps(lingering(), { approvalPollMs: 5, endedGraceMs: 40 }));
+    const t0 = Date.now();
+    const result = await runner.run(request({ policy: { ...request().policy, timeout: { hardMs: 60_000 } } }));
+    expect(result.outcome).toBe("completed");
+    expect(Date.now() - t0).toBeLessThan(5_000);
+  });
+});
+
 const promptOnEscalation = (): Partial<ExecutionRequest> => ({
   policy: { ...request().policy, approval: { mode: "prompt-on-escalation" } },
 });
