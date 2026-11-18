@@ -77,6 +77,14 @@ export interface RuntimeDescriptor extends RuntimeKind {
   readonly label: string;
   /** `scaffold`: the event mapping is not proven against a pinned CLI (the adapter says `providerDetail.mappingVerified: false`). */
   readonly maturity: "verified" | "scaffold";
+  /** How the plane speaks to the runtime. Every runtime today has a native adapter; `acp` is reserved for the ACP bridge (design PR 9). */
+  readonly transport: "native";
+  /**
+   * Whether a passing `runtime_conformance` row for the observed CLI version and this
+   * `descriptorVersion` is required before routing (design §B.3). False for every existing
+   * runtime, which keeps their established eligibility (owner decision G.3).
+   */
+  readonly conformanceRequired: boolean;
   readonly probe?: ProbeSpec;
   readonly quotaProbe?: QuotaProbeKind;
   readonly sessionInput?: SessionInputBinding;
@@ -101,7 +109,7 @@ const CLI_AUTH_FILES = Object.freeze([".credentials.json", "auth.json"]);
  */
 export const RUNTIME_CATALOG: readonly RuntimeDescriptor[] = Object.freeze([
   descriptor("anthropic", {
-    descriptorVersion: 1, label: "Claude Code", maturity: "verified",
+    descriptorVersion: 1, transport: "native", conformanceRequired: false, label: "Claude Code", maturity: "verified",
     probe: { command: "claude", configRoot: ".claude", authFiles: CLI_AUTH_FILES, extraConfigFiles: ["../.claude.json", "plugins/installed_plugins.json"] },
     quotaProbe: "claude-oauth-usage",
     sessionInput: {
@@ -120,7 +128,7 @@ export const RUNTIME_CATALOG: readonly RuntimeDescriptor[] = Object.freeze([
     }),
   }),
   descriptor("openai", {
-    descriptorVersion: 1, label: "Codex", maturity: "verified",
+    descriptorVersion: 1, transport: "native", conformanceRequired: false, label: "Codex", maturity: "verified",
     probe: { command: "codex", configRoot: ".codex", authFiles: CLI_AUTH_FILES },
     sessionInput: {
       perAssistant: false,
@@ -129,22 +137,22 @@ export const RUNTIME_CATALOG: readonly RuntimeDescriptor[] = Object.freeze([
     create: (ctx, id, options) => new CodexAdapter(id, { appServerInput: ctx.sessionInputEnabled && options.appServerInput === true }),
   }),
   descriptor("openrouter", {
-    descriptorVersion: 1, label: "Codex via OpenRouter", maturity: "verified",
+    descriptorVersion: 1, transport: "native", conformanceRequired: false, label: "Codex via OpenRouter", maturity: "verified",
     probe: { credentialEnv: (options) => (typeof options.apiKeyEnv === "string" ? options.apiKeyEnv : "OPENROUTER_API_KEY") },
     create: (_ctx, id, options) => new OpenRouterCodexAdapter(id, options as OpenRouterOptions),
   }),
   descriptor("cursor", {
-    descriptorVersion: 1, label: "Cursor CLI", maturity: "scaffold",
+    descriptorVersion: 1, transport: "native", conformanceRequired: false, label: "Cursor CLI", maturity: "scaffold",
     create: (_ctx, id, options) => new CursorAdapter(id, options as CursorOptions),
   }),
   descriptor("bedrock", {
-    descriptorVersion: 1, label: "Bedrock AgentCore", maturity: "verified",
+    descriptorVersion: 1, transport: "native", conformanceRequired: false, label: "Bedrock AgentCore", maturity: "verified",
     // Bedrock hosts YOUR agent: the runtime ARN is configuration, not
     // something the plane can discover (review §2.4).
     create: (_ctx, id, options) => new BedrockAdapter(id, options as BedrockOptions),
   }),
   descriptor("fake", {
-    descriptorVersion: 1, label: "Fake (tests)", maturity: "verified",
+    descriptorVersion: 1, transport: "native", conformanceRequired: false, label: "Fake (tests)", maturity: "verified",
     probe: { fixed: { authState: "ok", models: ["fake-1"] } },
     sessionInput: { perAssistant: true, resolve: () => new FakeSessionInputAdapter() },
     create: (_ctx, id, options) => new FakeAdapter(id, undefined, options as FakeOptions),

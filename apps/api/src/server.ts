@@ -32,6 +32,7 @@ import { Orchestrator } from "./modules/orchestrator.js";
 import type { planProjectVerification } from "./modules/project-verification.js";
 import { Registry } from "./modules/registry.js";
 import { sessionInputResolver } from "./modules/runtime-catalog.js";
+import { AGENT_RUNTIME_SCHEMA_VERSION, RuntimeLifecycleReader, runtimeCatalogProjection } from "./modules/runtime-lifecycle.js";
 import { routingHistory } from "./modules/router.js";
 import { TaskEventBus } from "./modules/sse.js";
 import { TaskStageReader } from "./modules/task-stage.js";
@@ -397,6 +398,12 @@ export function buildServer(deps: ServerDeps): BuiltServer {
 
   // ---- Assistants / registry ----
 
+  // Agent runtime v1 (API 2.10, docs/contracts/agent-runtime-v1.md): read-only projections and the
+  // operator disable overlay. Same scopes as the routes beside them, so no credential rotation.
+  const lifecycles = new RuntimeLifecycleReader(db, config);
+
+  app.get("/api/runtimes/catalog", read.tasks, () => runtimeCatalogProjection());
+
   app.get("/api/assistants", read.tasks, () =>
     registry.list().map((a) => {
       // Effective headroom, not the manifest's copy: a fresh idle probe (K3)
@@ -405,14 +412,35 @@ export function buildServer(deps: ServerDeps): BuiltServer {
       return {
         id: a.id,
         provider: a.provider,
+        // Config `enabled`, as it always meant. The operator overlay is `lifecycle.enablement`.
         enabled: a.enabled === 1,
         manifest: a.manifestParsed,
         manifestUpdatedAt: a.manifest_updated_at,
         quota: projection.quota,
         quotaObservations: projection.observations,
+        lifecycle: lifecycles.of(a),
       };
     }),
   );
+
+  app.get<{ Params: { id: string } }>("/api/assistants/:id/lifecycle", read.tasks, (req, reply) => {
+    const row = registry.get(req.params.id);
+    if (!row) return reply.status(404).send({ error: `Unknown assistant: ${req.params.id}` });
+    return lifecycles.of(row);
+  });
+
+  // Overlay only (design §B.3): disable removes the assistant from FUTURE routing decisions; enable
+  // clears the overlay and nothing else, so a config-disabled assistant stays disabled. Neither
+  // touches a session already running. Idempotent: a repeat reports `changed: false`.
+  for (const [action, state] of [["disable", "disabled"], ["enable", "none"]] as const) {
+    app.post<{ Params: { id: string } }>(`/api/assistants/:id/${action}`, write, (req, reply) => {
+      const result = registry.setOperatorState(req.params.id, state, now);
+      const row = result && registry.get(req.params.id);
+      if (!result || !row) return reply.status(404).send({ error: `Unknown assistant: ${req.params.id}` });
+      if (result.changed) app.log.info({ assistantId: row.id, operatorState: state }, "assistant operator state changed");
+      return { schemaVersion: AGENT_RUNTIME_SCHEMA_VERSION, assistantId: row.id, operatorState: state, changed: result.changed, lifecycle: lifecycles.of(row) };
+    });
+  }
 
   app.post<{ Params: { id: string } }>("/api/assistants/:id/sync", write, async (req, reply) => {
     try {

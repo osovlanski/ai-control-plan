@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-plane.local/contracts/agent-runtime/v1/operator-state-change.schema.json",
+  "title": "OperatorStateChange",
+  "description": "Agent runtime v1: the response of POST /api/assistants/:id/disable and /enable. Idempotent: a repeated request reports `changed: false`. Normative text: docs/contracts/agent-runtime-v1.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "assistantId",
+    "operatorState",
+    "changed",
+    "lifecycle"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "type": "string",
+      "pattern": "^1\\.\\d+$"
+    },
+    "assistantId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "operatorState": {
+      "enum": [
+        "none",
+        "disabled"
+      ]
+    },
+    "changed": {
+      "type": "boolean"
+    },
+    "lifecycle": {
+      "$ref": "assistant-lifecycle.schema.json"
+    }
+  }
+}

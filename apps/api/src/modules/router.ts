@@ -12,7 +12,13 @@ import { continuationProvenance } from "./context-continuation.js";
 
 export interface RouteCandidate {
   id: AssistantId;
+  /** Config `enabled` (and not the excluded handoff source). */
   enabled: boolean;
+  /**
+   * The operator disable overlay (migration 051). It only removes: a candidate it marks fails a
+   * hard filter whatever `enabled` says, and its absence never adds one back.
+   */
+  operatorDisabled?: boolean;
   manifest: CapabilityManifest | null;
 }
 
@@ -51,6 +57,7 @@ export function route(req: RouteRequest, candidates: RouteCandidate[]): RoutingE
   const evaluated = candidates.map((c) => {
     const failures: string[] = [];
     if (!c.enabled) failures.push("disabled in workspace config");
+    if (c.operatorDisabled) failures.push("disabled by operator");
     if (!c.manifest) failures.push("no capability manifest (sync has not run)");
     if (c.manifest) {
       if (c.manifest.core.auth.state !== "ok") failures.push(`auth ${c.manifest.core.auth.state}`);
@@ -283,7 +290,7 @@ export function routeInputs(deps: RouteDeps, taskId: string, origin: RouteOrigin
   const telemetry = new TelemetryService(deps.db);
   const scores = telemetry.scores();
   for (const [id, score] of telemetry.scores(taskKindOf(row))) scores.set(id, score);
-  const candidates = deps.registry.list().map(a => ({ id: a.id as AssistantId, enabled: a.enabled === 1 && a.id !== options.exclude, manifest: a.manifestParsed }));
+  const candidates = deps.registry.list().map(a => ({ id: a.id as AssistantId, enabled: a.enabled === 1 && a.id !== options.exclude, ...(a.operator_state === 'disabled' ? { operatorDisabled: true } : {}), manifest: a.manifestParsed }));
   const dispatch = options.dispatchId ? deps.db.prepare('SELECT checkpoint_id FROM dispatches WHERE dispatch_id = ? AND task_id = ?').get(options.dispatchId, taskId) as { checkpoint_id: string | null } | undefined : undefined;
   // K11 provenance: read back from the checkpoint anchor, never from a second
   // continuation-history store. Absent for every other origin.

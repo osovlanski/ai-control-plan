@@ -367,7 +367,9 @@ export class Orchestrator {
 
   quotaPlan(taskId: string, attempt = 0) {
     const intent = JSON.parse(this.tasks.get(taskId)!.intent_json) as TaskIntent;
-    const candidates = this.registry.list().filter(a => a.enabled && a.manifestParsed &&
+    // The operator overlay removes a candidate here exactly as route() does, so a disabled
+    // assistant never makes a task look runnable (or quota-blocked) on its behalf.
+    const candidates = this.registry.list().filter(a => a.enabled && a.operator_state !== 'disabled' && a.manifestParsed &&
       (!intent.overrides?.assistantId || intent.overrides.assistantId === a.id) &&
       (!intent.repository || (a.manifestParsed.core.execution.filesystem && a.manifestParsed.core.execution.shell &&
         this.config.repoAllowlist.some(p => intent.repository!.path === p || intent.repository!.path.startsWith(`${p}/`)))));

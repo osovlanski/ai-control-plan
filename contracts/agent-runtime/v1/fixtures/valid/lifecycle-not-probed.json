@@ -1,0 +1,38 @@
+{
+  "schemaVersion": "1.0",
+  "catalogued": true,
+  "configured": true,
+  "installed": {
+    "state": "unknown"
+  },
+  "auth": {
+    "state": "unknown"
+  },
+  "conformance": {
+    "required": false,
+    "state": "not-run",
+    "descriptorVersion": 1
+  },
+  "enablement": {
+    "config": true,
+    "operator": "none",
+    "effective": true
+  },
+  "readiness": {
+    "scope": "request-independent",
+    "ready": false,
+    "reasons": [
+      "no capability manifest (sync has not run)"
+    ]
+  },
+  "requestDependent": [
+    "repository-allowlist",
+    "filesystem-and-shell",
+    "cooldown",
+    "quota",
+    "workspace-policy",
+    "approval-mode",
+    "user-override",
+    "composition"
+  ]
+}
