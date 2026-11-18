@@ -10,13 +10,13 @@ test.beforeEach(async () => {
 });
 test.afterEach(async () => { await h.close(); });
 
-test("seven routes, keyboard focus, private draft retention, history and reload", async ({ context }) => {
+test("eight routes, keyboard focus, private draft retention, history and reload", async ({ context }) => {
   const page = await h.openApp(context);
   const nav = page.getByRole("navigation", { name: "System" });
-  await expect(nav.getByRole("link")).toHaveCount(7);
+  await expect(nav.getByRole("link")).toHaveCount(8);
   await page.keyboard.press("Tab");
   await expect(page.getByRole("link", { name: "Skip to workspace", exact: true })).toBeFocused();
-  for (const label of ["Overview", "Agents", "Memory", "Routing", "Traces", "Tools", "Settings"]) {
+  for (const label of ["Overview", "Agents", "Memory", "Routing", "Traces", "Tools", "Settings", "About"]) {
     await page.keyboard.press("Tab");
     await expect(nav.getByRole("link", { name: label, exact: true })).toBeFocused();
   }

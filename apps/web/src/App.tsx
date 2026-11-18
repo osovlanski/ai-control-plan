@@ -9,6 +9,7 @@ import { ApplicationWorkspace } from "./shell/ApplicationWorkspace.js";
 import { APPLICATIONS, readRoute, useShellRoute } from "./shell/routes.js";
 import { ShellView } from "./shell-view/ShellView.js";
 import { useOverviewView } from "./shell-view/viewMode.js";
+import { About } from "./shell/About.js";
 
 /** Scheduler ownership as the system health signal — read, never inferred. */
 function SystemHealth() {
@@ -119,7 +120,8 @@ export function App() {
           onBack={() => { window.location.hash = "/overview"; }} />}
         {route.screen === "agents" && <><div className="application-heading"><h1>Agents</h1>
           <p>Configured environments and their observed capabilities. Missions route automatically.</p></div><Catalog /></>}
-        {route.screen !== "overview" && route.screen !== "mission" && route.screen !== "shell" && route.screen !== "agents" &&
+        {route.screen === "about" && <About />}
+        {route.screen !== "overview" && route.screen !== "mission" && route.screen !== "shell" && route.screen !== "agents" && route.screen !== "about" &&
           <ApplicationWorkspace screen={route.screen} workspace={workspace} />}
       </main>
     </div>

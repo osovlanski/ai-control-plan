@@ -8,6 +8,7 @@ export const APPLICATIONS = [
   { screen: "traces", label: "Traces", icon: "M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01" },
   { screen: "tools", label: "Tools", icon: "m14 6 4 4 4-4a7 7 0 0 1-9 9l-6 6a3 3 0 0 1-4-4l6-6a7 7 0 0 1 9-9Z" },
   { screen: "settings", label: "Settings", icon: "M4 6h16M4 12h16M4 18h16M8 3v6M16 9v6M10 15v6" },
+  { screen: "about", label: "About", icon: "M12 8h.01M11 12h1v5m9-5a9 9 0 1 1-18 0 9 9 0 0 1 18 0" },
 ] as const;
 export type Application = typeof APPLICATIONS[number]["screen"];
 export type Route = { screen: "shell"; taskId?: string; key: string } | { screen: Application | "unavailable"; key: string } | { screen: "mission"; taskId: string; key: string };
