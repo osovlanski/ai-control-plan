@@ -1663,6 +1663,15 @@ export class Orchestrator {
     return sid && this.harnessRecovery?.isResumeOffered?.(sid) ? sid : undefined;
   }
 
+  /**
+   * A handoff refused after its source drained: the source's settle was suppressed (the handoff
+   * owned the transition), so a task still RUNNING has nothing running. Park it rather than strand it.
+   */
+  private parkDrainedHandoffSource(taskId: string): void {
+    if (this.tasks.get(taskId)?.state !== "RUNNING" || this.isActive(taskId)) return;
+    this.publishState(taskId, this.tasks.transition(taskId, "WAITING_INPUT", "no_candidate"));
+  }
+
   /** Routing excludes a handoff's source; a crash-parked task continues on it through `/restart`. */
   private restartHint(taskId: string, source: string): string {
     return this.resumeOfferedSession(taskId)
@@ -1721,6 +1730,7 @@ export class Orchestrator {
     // A manual handoff away from an assistant shouldn't immediately re-pick it.
     const { explanation, routingDecisionId } = this.routeTask(taskId, "failover", { exclude: fromAssistantId, override: to });
     if (!explanation.chosen) {
+      this.parkDrainedHandoffSource(taskId);
       throw new Error(`No eligible assistant for handoff. ${this.describeHandoffWaits(taskId, explanation, fromAssistantId)}`);
     }
     // M2 S6: the handoff target is a changed assistant and gets a new revision with the remainder.
@@ -1812,6 +1822,7 @@ export class Orchestrator {
     if (this.tasks.get(taskId)!.mode !== "single") this.tasks.setMode(taskId, "single");
     const { explanation, routingDecisionId } = this.routeTask(taskId, "failover", { exclude: fromAssistantId, override: to });
     if (!explanation.chosen) {
+      this.parkDrainedHandoffSource(taskId);
       throw new Error(`No eligible assistant for handoff. ${this.describeHandoffWaits(taskId, explanation, fromAssistantId)}`);
     }
     // M2 S6: the handoff target is a changed assistant and gets a new revision with the remainder.

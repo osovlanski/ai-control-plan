@@ -59,7 +59,7 @@ async function stop() {
   }
 }
 
-it.fails("leaves a task RUNNING after the handoff target is disabled during source drain", async () => {
+it("leaves a task RUNNING after the handoff target is disabled during source drain", async () => {
   const { server, db, request } = boot();
   await server.registry.sync(A);
   await server.registry.sync(B);
