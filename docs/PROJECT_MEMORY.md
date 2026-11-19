@@ -972,3 +972,8 @@ Migration 041 adds `runs.harness_cli_version` (TEXT NULL, forward only, no backf
 - `GET /api/autopilot/scope` + `morning-report.mjs --scope`: points done over total across the whole backlog (S=1, M=3, L=8), done = `os/<id>` PR merged. Read-only; detail in `docs/progress/README.md`.
 - **Decision:** it is labelled an estimate and carries `addedToday`, `unknown` and `unsized`, so a growing backlog or an unreadable repo cannot make the figure look better than it is.
 - `DispatchGit` gained `lastCommitBefore`; any fake of it needs the method.
+
+## 2026-11-19 — Crash recovery honours a disable (SHIPPED on merge)
+
+- **Defect:** `Scheduler.start()` replays the routing decision a `reserved` dispatch stored before a crash, without asking whether that assistant is still enabled. A disable made between the crash and the reboot (workspace config or the operator overlay, migration 051) was ignored. This was the open side finding from the compare/race disable fix.
+- **Fix:** the replay checks the stored choice with `Orchestrator.disabledForNewStart`. A disabled choice re-parks the dispatch (`reparked`, reason `assistant_disabled`) with no provider call, and the successor routes afresh. `start_attempted` dispatches are untouched: a start that may have happened is never second-guessed, and a disable never stops a running run.
