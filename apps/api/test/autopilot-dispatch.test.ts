@@ -119,6 +119,7 @@ class FlakyGit implements DispatchGit {
   }
   revParse(repoPath: string, rev: string) { return this.real.revParse(repoPath, rev); }
   show(repoPath: string, rev: string, path: string) { return this.real.show(repoPath, rev, path); }
+  lastCommitBefore(repoPath: string, rev: string, before: string) { return this.real.lastCommitBefore(repoPath, rev, before); }
   commitTree(repoPath: string, input: Parameters<DispatchGit["commitTree"]>[1]) { return this.real.commitTree(repoPath, input); }
 }
 
@@ -666,5 +667,27 @@ describe("config and the GitHub token file", () => {
     replies.push(json(201, { sha: "c".repeat(40) }));
     expect(await client.createCommit("o/r", { tree: "t".repeat(40), parent: "p".repeat(40), message: "m\n", name: "n", email: "e@x.invalid", date: "2030-01-01T00:00:00Z" })).toBe("c".repeat(40));
     expect(calls.at(-1)!.body).toMatchObject({ parents: ["p".repeat(40)], author: { date: "2030-01-01T00:00:00Z" }, committer: { date: "2030-01-01T00:00:00Z" } });
+  });
+});
+
+describe("P1-2 estimated scope", () => {
+  it("weighs every lane by S/M/L points, counts merged PRs as done, and reads the day's added scope from the backlog history", async () => {
+    await boot([{ id: "item-a" }, { id: "item-b" }, { id: "item-c", lane: "manual-cloud" }]);
+    const pr = (id: string, state: "open" | "closed", merged: boolean): PullRequest => ({ number: 1, state, merged, body: "", headRef: `os/${id}`, headSha: "x", baseRef: "main" });
+    gh.prs.push(pr("item-a", "closed", true), pr("item-b", "open", false));
+    const res = await rig!.built.app.inject({ method: "GET", url: "/api/autopilot/scope?day=2000-01-01", headers: rig!.auth() });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as { scope: Record<string, unknown>; items: Array<{ id: string; state: string }> };
+    expect(body.items.map((i) => [i.id, i.state])).toEqual([["item-a", "done"], ["item-b", "in review"], ["item-c", "remaining"]]);
+    expect(body.scope).toMatchObject({ estimate: true, totalPoints: 3, donePoints: 1, inReviewPoints: 1, remainingPoints: 1, percentDone: 33, done: 1, inReview: 1, remaining: 1, unknown: [], unsized: [] });
+    // No commit precedes 2000-01-01: no baseline, so no addedToday claim.
+    expect(body.scope.addedToday).toBeUndefined();
+    // A later day has the whole backlog as its baseline: nothing added.
+    const tomorrow = new Date(Date.now() + 36 * 3600_000).toISOString().slice(0, 10);
+    const later = (await rig!.built.app.inject({ method: "GET", url: `/api/autopilot/scope?day=${tomorrow}`, headers: rig!.auth() })).json() as { scope: { addedToday: { ids: string[]; points: number } } };
+    expect(later.scope.addedToday).toEqual({ ids: [], points: 0 });
+    const text = await rig!.built.app.inject({ method: "GET", url: "/api/autopilot/scope?format=text", headers: rig!.auth() });
+    expect(text.body).toContain("33% done — 1 of 3 points");
+    expect((await rig!.built.app.inject({ method: "GET", url: "/api/autopilot/scope?day=tomorrow", headers: rig!.auth() })).statusCode).toBe(400);
   });
 });

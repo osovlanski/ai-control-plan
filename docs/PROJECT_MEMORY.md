@@ -967,3 +967,8 @@ Migration 041 adds `runs.harness_cli_version` (TEXT NULL, forward only, no backf
 - **Found while driving:** the catalog keeps one evidence row per (provider, model, source), so several AA rows for one model must reach it as one observation; the parser merges them.
 - **Open:** add the missing effort rows (Opus 5.5 medium/high/xhigh, Opus 5 medium, Sonnet 5 medium) from the next refresh's list. Attaching a prior needs an effort dimension on `ExecutionIdentity`. Detail in `docs/agentic-os-k8-artificial-analysis.md` §17, §17b.
 
+## 2026-11-19 — Autopilot P1-2: "% of estimated scope" (SHIPPED on merge)
+
+- `GET /api/autopilot/scope` + `morning-report.mjs --scope`: points done over total across the whole backlog (S=1, M=3, L=8), done = `os/<id>` PR merged. Read-only; detail in `docs/progress/README.md`.
+- **Decision:** it is labelled an estimate and carries `addedToday`, `unknown` and `unsized`, so a growing backlog or an unreadable repo cannot make the figure look better than it is.
+- `DispatchGit` gained `lastCommitBefore`; any fake of it needs the method.
