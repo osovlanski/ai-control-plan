@@ -56,7 +56,7 @@ import {
 import { renderCommittedHandoff, renderHandoffPrompt } from "../render/handoff.js";
 import { renderTaskPrompt } from "../render/prompt.js";
 import { ensureScratch, removeScratch, sweepScratch } from "../repo/scratch.js";
-import type { CheckpointReason, CheckpointService } from "./checkpoint.js";
+import type { Checkpoint, CheckpointReason, CheckpointService } from "./checkpoint.js";
 import type { HarnessBridge } from "./harness/control-plane-bridge.js";
 import type { AutopilotRefusalReason, AutopilotService } from "./autopilot.js";
 import { deriveEnvelopeUpdate } from "./harness/envelope-derivation.js";
@@ -102,6 +102,18 @@ export type StartTrigger = "initial" | "handoff";
 export type HandoffResult =
   | { runId: string; assistantId: string }
   | { deferred: 'resource'; resource: string; units: number };
+
+/** What one manual handoff has done so far, for the park its failure leaves behind. */
+interface HandoffAttempt {
+  /** The handoff owns the task's next transition: a throw from here on parks the task. */
+  owns: boolean;
+  /** The drained source run or Harness session. */
+  sourceRunId?: string;
+  /** The continuation anchor: the drained source's checkpoint, or the retried park's. */
+  checkpoint?: Checkpoint;
+  /** Why the handoff stopped, when that is a known pause rather than an error. */
+  pause?: PauseKind;
+}
 
 export interface StartOptions {
   trigger?: StartTrigger;
@@ -226,6 +238,8 @@ export class Orchestrator {
    * flight at once (one worktree per competing assistant).
    */
   private active = new Map<string, ActiveRun>();
+  /** Tasks with a manual handoff in flight (`handoff` is single-flight per task). */
+  private readonly handoffsInFlight = new Set<string>();
   scheduler?: Scheduler;
   /** P0-2: set by the composition root. Absent = no task is the autopilot's. */
   autopilot?: AutopilotService;
@@ -1557,7 +1571,7 @@ export class Orchestrator {
   private async deferResourceContinuation(
     taskId: string,
     options: { trigger: 'manual' | 'quota' | 'failure'; reason: string; to?: AssistantId; from?: AssistantId; checkpointId?: string },
-  ): Promise<HandoffResult | undefined> {
+  ): Promise<HandoffResult | 'expired' | undefined> {
     const need = this.scheduler?.requirement(taskId);
     if (!need || !this.scheduler) return undefined;
     const from = options.from ?? (this.lastAssistant(taskId) as AssistantId | undefined);
@@ -1584,6 +1598,8 @@ export class Orchestrator {
       const run = this.db.prepare('SELECT id, assistant_id FROM runs WHERE dispatch_id = ?').get(wake.dispatchId) as { id: string; assistant_id: string } | undefined;
       if (run) return { runId: run.id, assistantId: run.assistant_id };
     }
+    // The pool can no longer grant the request: the wake expired it and parked the task for an operator.
+    if (this.scheduler.condition(taskId)?.state === 'expired') return 'expired';
     this.notice(taskId, 'info', `${options.reason} It needs ${need.units} unit(s) of ${need.resource} first, and starts as soon as the pool can grant them.`);
     return { deferred: 'resource', resource: need.resource, units: need.units };
   }
@@ -1609,19 +1625,15 @@ export class Orchestrator {
   }
 
   /**
-   * Starts a manual handoff's successor. A start that throws parks the task in WAITING_INPUT with
-   * a notice carrying the error, so it is never left in HANDING_OFF (or ROUTING) with nothing running.
+   * Starts a manual handoff's successor. A start that throws leaves a notice carrying the error;
+   * `handoff` then parks the task (`intervention_required`), so it is never left in HANDING_OFF (or
+   * ROUTING) with nothing running.
    */
   private async startHandoffSuccessor(taskId: string, assistantId: AssistantId, options: StartOptions): Promise<{ runId: string }> {
     try {
       return await this.startTask(taskId, assistantId, options);
     } catch (err) {
-      if (!this.isActive(taskId)) {
-        try {
-          this.publishState(taskId, this.tasks.transition(taskId, "WAITING_INPUT", "intervention_required"));
-        } catch { /* already moved on */ }
-        this.notice(taskId, "warn", `Handoff to ${assistantId} did not start; task parked: ${message(err)}`);
-      }
+      if (!this.isActive(taskId)) this.notice(taskId, "warn", `Handoff to ${assistantId} did not start; task parked: ${message(err)}`);
       throw err;
     }
   }
@@ -1663,15 +1675,6 @@ export class Orchestrator {
     return sid && this.harnessRecovery?.isResumeOffered?.(sid) ? sid : undefined;
   }
 
-  /**
-   * A handoff refused after its source drained: the source's settle was suppressed (the handoff
-   * owned the transition), so a task still RUNNING has nothing running. Park it rather than strand it.
-   */
-  private parkDrainedHandoffSource(taskId: string): void {
-    if (this.tasks.get(taskId)?.state !== "RUNNING" || this.isActive(taskId)) return;
-    this.publishState(taskId, this.tasks.transition(taskId, "WAITING_INPUT", "no_candidate"));
-  }
-
   /** Routing excludes a handoff's source; a crash-parked task continues on it through `/restart`. */
   private restartHint(taskId: string, source: string): string {
     return this.resumeOfferedSession(taskId)
@@ -1679,10 +1682,23 @@ export class Orchestrator {
       : "";
   }
 
-  /** Manual handoff: route, checkpoint, then move the task to another assistant. */
+  /**
+   * Manual handoff: drain the source, route, checkpoint, then move the task to another assistant.
+   *
+   * One handoff per task at a time: a second one would read the first's transitional state (a
+   * successor whose start is still pending looks like a drained source) and park a live task.
+   *
+   * From the moment the handoff owns the task's next transition (its source is cancelled, it is
+   * retrying a handoff park, or it has moved the task to HANDING_OFF/ROUTING) any throw parks the
+   * task in WAITING_INPUT with a handoff park (`Scheduler.parkHandoff`) anchored to the source's
+   * checkpoint, which a later `/handoff` or `/run-now` consumes. The legacy source's `handingOff`
+   * flag is always cleared on the way out; a Harness source's `planeOwnsTerminal` mark is consumed
+   * by its own settle, so a settle that arrives after the handoff gave up still publishes nothing.
+   */
   async handoff(taskId: string, to?: AssistantId): Promise<HandoffResult> {
     const row = this.tasks.get(taskId);
     if (!row) throw new Error(`Unknown task ${taskId}`);
+    if (this.handoffsInFlight.has(taskId)) throw new Error(`Task ${taskId} already has a pending manual continuation: another handoff is in progress`);
     this.assertNoMixedOwnership(taskId);
     if (row.state === "WAITING_RESOURCE" || this.db.prepare("SELECT 1 FROM dispatches WHERE task_id = ? AND phase IN ('reserved','start_attempted')").get(taskId)) throw new Error("Scheduler owns task; use run-now");
     if (isTerminal(row.state)) {
@@ -1696,19 +1712,75 @@ export class Orchestrator {
       throw new Error(`Handoff to ${to} refused: ${to} is the source assistant, and a handoff excludes its source.${this.restartHint(taskId, to)}`);
     }
 
-    if (this.harnessOwns(taskId)) return this.harnessHandoff(taskId, to);
-
-    const current = this.soleRun(taskId);
-    const fromAssistantId = current?.assistantId ?? this.lastAssistant(taskId);
-
-    if (current) {
-      // Claim the task's next transition before cancelling, so the draining
-      // run does not race us into a terminal state.
-      current.handingOff = true;
-      await current.adapter.cancel(current.handle);
-      await this.waitUntilInactive(taskId);
+    // A retry of a parked handoff continues from the checkpoint the park holds, so the successor
+    // keeps the original source's provenance rather than a run-less checkpoint of its own.
+    const park = this.scheduler?.handoffPark(taskId);
+    const attempt: HandoffAttempt = {
+      owns: park !== undefined,
+      ...(park?.checkpointId ? { checkpoint: this.checkpoints.latest(taskId, park.checkpointId) } : {}),
+    };
+    const harness = this.harnessOwns(taskId);
+    const current = harness ? undefined : this.soleRun(taskId);
+    this.handoffsInFlight.add(taskId);
+    try {
+      let fromAssistantId = this.lastAssistant(taskId);
+      if (harness) {
+        await this.drainHarnessSource(taskId, attempt);
+      } else if (current) {
+        // Claim the task's next transition before cancelling, so the draining
+        // run does not race us into a terminal state.
+        current.handingOff = true;
+        attempt.owns = true;
+        attempt.sourceRunId = current.runId;
+        fromAssistantId = current.assistantId;
+        await current.adapter.cancel(current.handle);
+        await this.waitUntilInactive(taskId);
+      }
+      return await this.continueHandoff(taskId, to, fromAssistantId, attempt, park?.generation);
+    } catch (err) {
+      if (attempt.owns) await this.parkStoppedHandoff(taskId, attempt, err);
+      throw err;
+    } finally {
+      this.handoffsInFlight.delete(taskId);
+      if (current) current.handingOff = false;
     }
+  }
 
+  /**
+   * Durable-cancels a Harness-owned task's source session under `planeOwnsTerminal` (PLAN.md
+   * 8c.3), so its detached `settleFromResult` does NOT transition the task. A session that already
+   * ended while its task is still RUNNING has a settle yet to arrive; marking it makes the handoff
+   * that settle's single owner rather than a second publisher.
+   */
+  private async drainHarnessSource(taskId: string, attempt: HandoffAttempt): Promise<void> {
+    const sid = this.harnessBridge!.liveSessionId(taskId)
+      ?? (this.tasks.get(taskId)?.state === "RUNNING" ? this.harnessBridge!.latestSessionId(taskId) : undefined);
+    if (!sid) return;
+    this.harnessBridge!.markPlaneOwnsTerminal(sid);
+    attempt.owns = true;
+    attempt.sourceRunId = sid;
+    this.harnessBridge!.requestCancel(sid);
+    if (!(await this.waitUntilSessionTerminal(sid))) {
+      // Drain stalled. Park the task and bail — planeOwnsTerminal stays SET so
+      // the source session's eventual settlement no-ops the task (never
+      // stranded in HANDING_OFF, Codex 8c review).
+      attempt.owns = false;
+      try {
+        const envelope = this.tasks.transition(taskId, "WAITING_INPUT", "harness_error");
+        this.publishState(taskId, envelope);
+      } catch {
+        /* already moved on */
+      }
+      this.notice(taskId, "warn", `Handoff aborted — session ${sid} did not settle in time; task parked.`);
+      throw new Error(`harness session ${sid} did not settle for handoff`);
+    }
+  }
+
+  /** The shared tail of both paths, once the source (if any) has settled. */
+  private async continueHandoff(
+    taskId: string, to: AssistantId | undefined, fromAssistantId: string | undefined,
+    attempt: HandoffAttempt, parkGeneration: number | undefined,
+  ): Promise<HandoffResult> {
     // The source has settled, so its claim is the predecessor's to give back: a
     // task that still owes the pool a slot re-enters the wake funnel here and
     // acquires a NEW dispatch-backed claim, rather than a successor being
@@ -1718,45 +1790,50 @@ export class Orchestrator {
       trigger: 'manual', to, reason: 'A manual handoff was requested by the user.',
       from: fromAssistantId as AssistantId | undefined,
     });
+    if (deferred === 'expired') {
+      // The scheduler expired the request and parked the task for intervention; that park stands.
+      attempt.owns = false;
+      throw new Error(`Handoff not started: the pool can no longer grant this task's resource request; task ${taskId} needs an operator decision.`);
+    }
     if (deferred) return deferred;
 
-    // The cancelled run's checkpoint is its continuation anchor even if routing refuses. A run-less
+    // The drained source's checkpoint is its continuation anchor even if routing refuses. A run-less
     // one is written only once the handoff will happen: left behind, it would block `/wait`.
-    let checkpoint = current ? await this.checkpoints.create(taskId, current.runId, "handoff") : undefined;
+    if (attempt.sourceRunId) attempt.checkpoint = await this.checkpoints.create(taskId, attempt.sourceRunId, "handoff");
 
     // A settled compare/race continues as ONE run (see `parallelContinuationWorktree`), so it is a
     // single task from here: it routes and composes on the single path and settles as one run.
-    if (row.mode !== "single") this.tasks.setMode(taskId, "single");
+    if (this.tasks.get(taskId)!.mode !== "single") this.tasks.setMode(taskId, "single");
     // A manual handoff away from an assistant shouldn't immediately re-pick it.
     const { explanation, routingDecisionId } = this.routeTask(taskId, "failover", { exclude: fromAssistantId, override: to });
     if (!explanation.chosen) {
-      this.parkDrainedHandoffSource(taskId);
+      attempt.pause = "no_candidate";
       throw new Error(`No eligible assistant for handoff. ${this.describeHandoffWaits(taskId, explanation, fromAssistantId)}`);
     }
     // M2 S6: the handoff target is a changed assistant and gets a new revision with the remainder.
     const recomposed = await this.recompose(taskId, explanation.chosen, "failover", routingDecisionId);
     if (recomposed?.kind === "blocked") {
-      try {
-        const envelope = this.tasks.transition(taskId, "WAITING_INPUT", recomposed.pauseKind);
-        this.publishState(taskId, envelope);
-      } catch { /* already parked */ }
+      attempt.pause = recomposed.pauseKind;
       throw new Error(`Handoff to ${explanation.chosen} was not started: ${recomposed.reason}`);
     }
-    checkpoint ??= await this.checkpoints.create(taskId, null, "handoff");
+    const checkpoint = attempt.checkpoint ??= await this.checkpoints.create(taskId, null, "handoff");
 
-    const state = this.tasks.get(taskId)!.state;
-    if (state === "RUNNING" || state === "WAITING_INPUT" || state === "LIMIT_PAUSED") {
-      if (state === "RUNNING") this.tasks.transition(taskId, "LIMIT_PAUSED");
-      this.tasks.transition(taskId, "HANDING_OFF");
-    } else if (state === "CREATED") {
-      this.tasks.transition(taskId, "ROUTING");
-    }
-
-    this.db
-      .prepare(
-        "INSERT INTO handoffs (id, task_id, from_run_id, to_run_id, checkpoint_id, trigger, at) VALUES (?, ?, ?, NULL, ?, 'manual', ?)",
-      )
-      .run(newHandoffId(), taskId, current?.runId ?? null, checkpoint.id, new Date().toISOString());
+    this.db.transaction(() => {
+      const state = this.tasks.get(taskId)!.state;
+      if (state === "RUNNING" || state === "WAITING_INPUT" || state === "LIMIT_PAUSED") {
+        if (state === "RUNNING") this.tasks.transition(taskId, "LIMIT_PAUSED");
+        this.tasks.transition(taskId, "HANDING_OFF");
+      } else if (state === "CREATED") {
+        this.tasks.transition(taskId, "ROUTING");
+      }
+      if (parkGeneration !== undefined) this.scheduler?.retireHandoffPark(taskId, parkGeneration);
+      this.db
+        .prepare(
+          "INSERT INTO handoffs (id, task_id, from_run_id, to_run_id, checkpoint_id, trigger, at) VALUES (?, ?, ?, NULL, ?, 'manual', ?)",
+        )
+        .run(newHandoffId(), taskId, checkpoint.runId ?? null, checkpoint.id, new Date().toISOString());
+    })();
+    attempt.owns = true;
 
     this.notice(taskId, "info", `Manual handoff to ${explanation.chosen}.`);
     const { runId } = await this.startHandoffSuccessor(taskId, explanation.chosen, {
@@ -1774,95 +1851,32 @@ export class Orchestrator {
   }
 
   /**
-   * Manual handoff for a Harness-owned task (PLAN.md 8c.3): durable-cancel the
-   * source session under `planeOwnsTerminal` so its detached `settleFromResult`
-   * does NOT transition the task, then start a fresh Harness session on the
-   * target with a handoff-rendered prompt.
+   * Parks a task whose handoff stopped after owning its next transition. A legacy source whose
+   * cancel threw may still be draining, so this waits for it first; from the `isActive` check to
+   * the caller's `finally` nothing awaits, so a source still running keeps its own settle (the
+   * cleared `handingOff` hands it back) and one that drained is parked here, never both.
    */
-  private async harnessHandoff(taskId: string, to?: AssistantId): Promise<HandoffResult> {
-    const sid = this.harnessBridge!.liveSessionId(taskId);
-    const fromAssistantId = this.lastAssistant(taskId);
-
-    if (sid) {
-      this.harnessBridge!.markPlaneOwnsTerminal(sid);
-      this.harnessBridge!.requestCancel(sid);
-      const settled = await this.waitUntilSessionTerminal(sid);
-      if (!settled) {
-        // Drain stalled. Park the task and bail — planeOwnsTerminal stays SET so
-        // the source session's eventual settlement no-ops the task (never
-        // stranded in HANDING_OFF, Codex 8c review).
-        try {
-          const envelope = this.tasks.transition(taskId, "WAITING_INPUT", "harness_error");
-          this.publishState(taskId, envelope);
-        } catch {
-          /* already moved on */
-        }
-        this.notice(taskId, "warn", `Handoff aborted — session ${sid} did not settle in time; task parked.`);
-        throw new Error(`harness session ${sid} did not settle for handoff`);
-      }
+  private async parkStoppedHandoff(taskId: string, attempt: HandoffAttempt, err: unknown): Promise<void> {
+    await this.waitUntilInactive(taskId).catch(() => undefined);
+    // A source drained before its checkpoint was taken (a cancel or deferral that threw) still
+    // anchors the park; a checkpoint store that is itself failing leaves the park without one.
+    if (attempt.sourceRunId && attempt.checkpoint?.runId !== attempt.sourceRunId) {
+      attempt.checkpoint = await this.checkpoints.create(taskId, attempt.sourceRunId, "handoff").catch(() => attempt.checkpoint);
     }
-
-    // Same boundary as the legacy path: the source session has settled, so the
-    // predecessor's claim goes back and the successor acquires its own through
-    // the wake funnel. (Shared code, because the defect was shared.)
-    const deferred = await this.deferResourceContinuation(taskId, {
-      trigger: 'manual', to, reason: 'A manual handoff was requested by the user.',
-      from: fromAssistantId as AssistantId | undefined,
-    });
-    if (deferred) return deferred;
-
-    // Session-scoped checkpoint on the captured harness sid — the target's
-    // handoff-prompt render reads checkpoints.latest(taskId). (The runner's own
-    // cancel checkpoint would also serve; this labels one 'handoff' for parity.)
-    // As on the legacy path: a run-less checkpoint waits until routing has accepted the handoff.
-    let checkpoint = sid ? await this.checkpoints.create(taskId, sid, "handoff") : undefined;
-
-    // A settled compare/race continues as ONE run (see `parallelContinuationWorktree`), so it is a
-    // single task from here: it routes and composes on the single path and settles as one run.
-    if (this.tasks.get(taskId)!.mode !== "single") this.tasks.setMode(taskId, "single");
-    const { explanation, routingDecisionId } = this.routeTask(taskId, "failover", { exclude: fromAssistantId, override: to });
-    if (!explanation.chosen) {
-      this.parkDrainedHandoffSource(taskId);
-      throw new Error(`No eligible assistant for handoff. ${this.describeHandoffWaits(taskId, explanation, fromAssistantId)}`);
-    }
-    // M2 S6: the handoff target is a changed assistant and gets a new revision with the remainder.
-    const recomposed = await this.recompose(taskId, explanation.chosen, "failover", routingDecisionId);
-    if (recomposed?.kind === "blocked") {
-      try {
-        const envelope = this.tasks.transition(taskId, "WAITING_INPUT", recomposed.pauseKind);
-        this.publishState(taskId, envelope);
-      } catch { /* already parked */ }
-      throw new Error(`Handoff to ${explanation.chosen} was not started: ${recomposed.reason}`);
-    }
-    checkpoint ??= await this.checkpoints.create(taskId, null, "handoff");
-
-    const state = this.tasks.get(taskId)!.state;
-    if (state === "RUNNING" || state === "WAITING_INPUT" || state === "LIMIT_PAUSED") {
-      if (state === "RUNNING") this.tasks.transition(taskId, "LIMIT_PAUSED");
-      this.tasks.transition(taskId, "HANDING_OFF");
-    } else if (state === "CREATED") {
-      this.tasks.transition(taskId, "ROUTING");
-    }
-
-    this.db
-      .prepare(
-        "INSERT INTO handoffs (id, task_id, from_run_id, to_run_id, checkpoint_id, trigger, at) VALUES (?, ?, ?, NULL, ?, 'manual', ?)",
-      )
-      .run(newHandoffId(), taskId, sid ?? null, checkpoint.id, new Date().toISOString());
-
-    this.notice(taskId, "info", `Manual handoff to ${explanation.chosen}.`);
-    const { runId } = await this.startHandoffSuccessor(taskId, explanation.chosen, {
-      trigger: "handoff",
-      continuation: { kind: "checkpoint", checkpointId: checkpoint.id },
-      reason: "A manual handoff was requested by the user.",
-      fromAssistantId,
-      routingDecisionRef: String(routingDecisionId),
-      ...(recomposed?.kind === "compose" ? { composition: recomposed.composition } : {}),
-    });
-    this.db
-      .prepare("UPDATE handoffs SET to_run_id = ? WHERE task_id = ? AND to_run_id IS NULL")
-      .run(runId, taskId);
-    return { runId, assistantId: explanation.chosen };
+    const row = this.tasks.get(taskId);
+    if (!row || isTerminal(row.state) || row.state === "WAITING_RESOURCE" || this.isActive(taskId)) return;
+    if (this.db.prepare("SELECT 1 FROM dispatches WHERE task_id = ? AND phase IN ('reserved','start_attempted')").get(taskId)) return;
+    const pauseKind = attempt.pause ?? "intervention_required";
+    const moved = row.state !== "WAITING_INPUT" || row.pause_kind !== pauseKind;
+    const envelope = this.db.transaction(() => {
+      // A retry that stops for a different reason re-pauses through HANDING_OFF, the one legal way
+      // from one WAITING_INPUT pause to another.
+      if (row.state === "WAITING_INPUT" && moved) this.tasks.transition(taskId, "HANDING_OFF");
+      const parked = moved ? this.tasks.transition(taskId, "WAITING_INPUT", pauseKind) : undefined;
+      this.scheduler?.parkHandoff(taskId, attempt.checkpoint?.id, `Handoff stopped: ${message(err)}`);
+      return parked;
+    })();
+    if (envelope) this.publishState(taskId, envelope);
   }
 
   /** `describeWaits`, with the excluded source reported as excluded rather than "disabled". */

@@ -74,7 +74,7 @@ function signal() {
   return { promise, resolve };
 }
 
-it.fails("a refused overlapping handoff parks a successor whose legacy start is pending", async () => {
+it("a refused overlapping handoff parks a successor whose legacy start is pending", async () => {
   const t = await boot();
   await t.start();
   const adapter = t.server.registry.adapter(B);
@@ -100,7 +100,7 @@ it.fails("a refused overlapping handoff parks a successor whose legacy start is 
   expect(t.state().state, "A live successor must remain RUNNING").toBe("RUNNING");
 });
 
-it.fails("a rejected cancel acknowledgment suppresses late legacy settlement", async () => {
+it("a rejected cancel acknowledgment suppresses late legacy settlement", async () => {
   const t = await boot();
   await t.start();
   const adapter = t.server.registry.adapter(A);
@@ -115,7 +115,7 @@ it.fails("a rejected cancel acknowledgment suppresses late legacy settlement", a
   expect(t.state().state, "A drained source must leave RUNNING after cancellation throws").not.toBe("RUNNING");
 });
 
-it.fails("a failed Harness handoff checkpoint strands the drained task", async () => {
+it("a failed Harness handoff checkpoint strands the drained task", async () => {
   const t = await boot({ harness: true });
   await t.start();
   t.db.exec(`CREATE TRIGGER reject_handoff_checkpoint BEFORE INSERT ON checkpoints
@@ -126,7 +126,7 @@ it.fails("a failed Harness handoff checkpoint strands the drained task", async (
   expect(t.state().state, "A failed handoff checkpoint must leave the drained task out of RUNNING").not.toBe("RUNNING");
 });
 
-it.fails("a refused handoff and a terminal Harness callback both publish settlement", async () => {
+it("a refused handoff and a terminal Harness callback both publish settlement", async () => {
   const t = await boot({ harness: true, goal: "Finish the fake run" });
   await t.setTarget(false);
   const terminal = signal();
@@ -158,7 +158,7 @@ it.fails("a refused handoff and a terminal Harness callback both publish settlem
   expect(settlements, "Exactly one owner must publish settlement of the Harness source").toHaveLength(1);
 });
 
-it.fails("run-now cannot resume a no_candidate task after its target becomes eligible", async () => {
+it("run-now cannot resume a no_candidate task after its target becomes eligible", async () => {
   const t = await boot();
   await t.start();
   await t.parkThenEnable();
@@ -167,7 +167,7 @@ it.fails("run-now cannot resume a no_candidate task after its target becomes eli
   expect(t.active()).toBe(true);
 });
 
-it.fails("blocked recomposition on retry retains the obsolete no_candidate pause", async () => {
+it("blocked recomposition on retry retains the obsolete no_candidate pause", async () => {
   const t = await boot();
   await t.start();
   await t.parkThenEnable();
@@ -179,7 +179,7 @@ it.fails("blocked recomposition on retry retains the obsolete no_candidate pause
   expect(t.state().pause_kind, "The pause must reflect the retry's composition block").toBe("intervention_required");
 });
 
-it.fails("a successful Harness handoff retry loses the source checkpoint provenance", async () => {
+it("a successful Harness handoff retry loses the source checkpoint provenance", async () => {
   const t = await boot({ harness: true });
   const source = await t.start();
   await t.parkThenEnable();
@@ -190,7 +190,7 @@ it.fails("a successful Harness handoff retry loses the source checkpoint provena
     .toEqual({ from_assistant_id: A, source_session_id: source });
 });
 
-it.fails("an expired pool continuation is reported as a deferred handoff", async () => {
+it("an expired pool continuation is reported as a deferred handoff", async () => {
   const t = await boot({ pool: true });
   const wait = await t.action("wait", { kind: "resource", resource: "gpu", units: 1, reason: "needs a slot" });
   expect(wait.statusCode).toBe(200);
