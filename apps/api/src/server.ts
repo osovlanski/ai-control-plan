@@ -409,7 +409,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   app.get("/api/runtimes/catalog", read.tasks, () => runtimeCatalogProjection());
 
   app.get("/api/assistants", read.tasks, () =>
-    registry.list().map((a) => {
+    Promise.all(registry.list().map(async (a) => {
       // Effective headroom, not the manifest's copy: a fresh idle probe (K3)
       // supersedes a stale run-stream snapshot and vice versa, by observedAt.
       const projection = new QuotaProjection(db, now).for(a.id, a.manifestParsed);
@@ -422,27 +422,28 @@ export function buildServer(deps: ServerDeps): BuiltServer {
         manifestUpdatedAt: a.manifest_updated_at,
         quota: projection.quota,
         quotaObservations: projection.observations,
-        lifecycle: lifecycles.of(a),
+        lifecycle: await lifecycles.withInstallation(lifecycles.of(a), a.provider),
       };
-    }),
+    })),
   );
 
   app.get<{ Params: { id: string } }>("/api/assistants/:id/lifecycle", read.tasks, (req, reply) => {
     const row = registry.get(req.params.id);
     if (!row) return reply.status(404).send({ error: `Unknown assistant: ${req.params.id}` });
-    return lifecycles.of(row);
+    return lifecycles.withInstallation(lifecycles.of(row), row.provider);
   });
 
   // Overlay only (design §B.3): disable removes the assistant from FUTURE routing decisions; enable
   // clears the overlay and nothing else, so a config-disabled assistant stays disabled. Neither
   // touches a session already running. Idempotent: a repeat reports `changed: false`.
   for (const [action, state] of [["disable", "disabled"], ["enable", "none"]] as const) {
-    app.post<{ Params: { id: string } }>(`/api/assistants/:id/${action}`, write, (req, reply) => {
+    app.post<{ Params: { id: string } }>(`/api/assistants/:id/${action}`, write, async (req, reply) => {
       const result = registry.setOperatorState(req.params.id, state, now);
       const row = result && registry.get(req.params.id);
       if (!result || !row) return reply.status(404).send({ error: `Unknown assistant: ${req.params.id}` });
       if (result.changed) app.log.info({ assistantId: row.id, operatorState: state }, "assistant operator state changed");
-      return { schemaVersion: AGENT_RUNTIME_SCHEMA_VERSION, assistantId: row.id, operatorState: state, changed: result.changed, lifecycle: lifecycles.of(row) };
+      const lifecycle = await lifecycles.withInstallation(lifecycles.of(row), row.provider);
+      return { schemaVersion: AGENT_RUNTIME_SCHEMA_VERSION, assistantId: row.id, operatorState: state, changed: result.changed, lifecycle };
     });
   }
 
@@ -454,7 +455,8 @@ export function buildServer(deps: ServerDeps): BuiltServer {
       const result = await conformance.test(req.params.id);
       if (!result) return reply.status(404).send({ error: `Unknown assistant: ${req.params.id}` });
       app.log.info({ assistantId: result.assistantId, status: result.status, recorded: result.recorded }, "runtime conformance tested");
-      return result;
+      const lifecycle = await lifecycles.withInstallation(result.lifecycle, result.provider);
+      return { ...result, lifecycle };
     } catch (err) {
       return reply.status(409).send({ error: err instanceof ConformanceBusyError ? err.message : message(err) });
     }

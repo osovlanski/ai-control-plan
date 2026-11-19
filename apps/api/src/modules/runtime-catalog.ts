@@ -178,7 +178,7 @@ export const RUNTIME_CATALOG: readonly RuntimeDescriptor[] = Object.freeze([
   }),
   descriptor("openrouter", {
     descriptorVersion: 1, transport: "native", conformanceRequired: false, label: "Codex via OpenRouter", maturity: "verified",
-    probe: { command: "codex", credentialEnv: (options) => (typeof options.apiKeyEnv === "string" ? options.apiKeyEnv : "OPENROUTER_API_KEY") },
+    probe: { credentialEnv: (options) => (typeof options.apiKeyEnv === "string" ? options.apiKeyEnv : "OPENROUTER_API_KEY") },
     conformance: { refusalAdapter: (id, options, missingBinary) => new OpenRouterCodexAdapter(id, options as OpenRouterOptions, { codexPathOverride: missingBinary }) },
     create: (_ctx, id, options) => new OpenRouterCodexAdapter(id, options as OpenRouterOptions),
   }),

@@ -3,7 +3,8 @@
  * §B.3–B.4, PR 3): the runtime catalogue projection and each assistant's lifecycle states.
  *
  * Every state has its own evidence and none implies the next: catalogued (code), configured
- * (config file), installed (`capability_probes`), authenticated (the adapter's own manifest),
+ * (config file), installed (`capability_probes` or OpenRouter's live CLI check), authenticated
+ * (the adapter's own manifest),
  * conformant (`runtime_conformance`, written from PR 4 on) and enabled (config `enabled` plus the
  * operator overlay). `readiness` folds only the request-independent ones, using the router's own
  * failure texts. It is NOT task eligibility: the router decides that per request, against the
@@ -16,6 +17,7 @@ import type { CapabilityManifest } from "@agent-plane/core";
 import type { ResolvedConfig } from "../config.js";
 import type { Db } from "../db/index.js";
 import { INLINE_SECRET } from "../registry-contract.js";
+import { probeVersion } from "./capability-probe.js";
 import type { AssistantRow, OperatorState } from "./registry.js";
 import { conformanceRequiredFor, RUNTIME_CATALOG, runtimeFor } from "./runtime-catalog.js";
 
@@ -126,7 +128,8 @@ export function deriveLifecycle(facts: LifecycleFacts): AssistantLifecycle {
   const manifest = row.manifestParsed;
 
   let installed: AssistantLifecycle["installed"] = { state: "unknown" };
-  if (probe) {
+  // OpenRouter capability probes carry no installation evidence.
+  if (probe && row.provider !== "openrouter") {
     const observedAt = at(probe.observedAt);
     const stamp = observedAt ? { observedAt } : {};
     if (probe.version === "unavailable") installed = { state: "missing", ...stamp };
@@ -196,6 +199,8 @@ export function deriveLifecycle(facts: LifecycleFacts): AssistantLifecycle {
 
 /** Reads the facts for registry rows from the database and derives their lifecycles. */
 export class RuntimeLifecycleReader {
+  private codexInstallation: Promise<AssistantLifecycle["installed"]> | undefined;
+
   constructor(private db: Db, private config: ResolvedConfig) {}
 
   of(row: AssistantRow & { manifestParsed: CapabilityManifest | null }): AssistantLifecycle {
@@ -207,10 +212,7 @@ export class RuntimeLifecycleReader {
     if (probeRow) {
       try {
         const version = (JSON.parse(probeRow.details) as { version?: unknown }).version;
-        // Older OpenRouter rows recorded "in-process" before the Codex CLI probe was wired.
-        if (typeof version === "string" && !(row.provider === "openrouter" && version === "in-process")) {
-          probe = { version, observedAt: probeRow.observed_at };
-        }
+        if (typeof version === "string") probe = { version, observedAt: probeRow.observed_at };
       } catch {
         // An unreadable probe row is "no probe", never a guess.
       }
@@ -225,6 +227,18 @@ export class RuntimeLifecycleReader {
       ...(probe ? { probe } : {}),
       conformance,
     });
+  }
+
+  /** Refresh installation evidence for API responses without changing capability or conformance evidence. */
+  async withInstallation(lifecycle: AssistantLifecycle, provider: string): Promise<AssistantLifecycle> {
+    if (provider !== "openrouter" || !lifecycle.configured) return lifecycle;
+
+    // Concurrent responses, including a list with several OpenRouter assistants, share one host check.
+    this.codexInstallation ??= probeVersion("codex").then((version): AssistantLifecycle["installed"] => ({
+      state: version === "unavailable" ? "missing" : "present",
+      observedAt: new Date().toISOString(),
+    })).finally(() => { this.codexInstallation = undefined; });
+    return { ...lifecycle, installed: await this.codexInstallation };
   }
 }
 
