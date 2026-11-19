@@ -148,7 +148,7 @@ it.fails("returns 500 after disabling a healthy assistant when another cached ma
     .toBe(200);
 });
 
-it.fails("returns 414 when disabling a listed assistant with a 101-character ID", async () => {
+it("returns 414 when disabling a listed assistant with a 101-character ID", async () => {
   const id = "a".repeat(101);
   const { request } = boot({ [id]: { provider: "fake" } });
   const list = await request("GET", "/api/assistants");
@@ -159,7 +159,7 @@ it.fails("returns 414 when disabling a listed assistant with a 101-character ID"
     .toBe(200);
 });
 
-it.fails("reports OpenRouter as in-process even though it uses the Codex CLI", async () => {
+it("reports OpenRouter as in-process even though it uses the Codex CLI", async () => {
   const { server, request } = boot({
     router: { provider: "openrouter", options: { apiKeyEnv: "FAKE_HO_194_OPENROUTER_KEY" } },
   });

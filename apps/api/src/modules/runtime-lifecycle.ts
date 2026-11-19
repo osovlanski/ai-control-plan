@@ -207,7 +207,10 @@ export class RuntimeLifecycleReader {
     if (probeRow) {
       try {
         const version = (JSON.parse(probeRow.details) as { version?: unknown }).version;
-        if (typeof version === "string") probe = { version, observedAt: probeRow.observed_at };
+        // Older OpenRouter rows recorded "in-process" before the Codex CLI probe was wired.
+        if (typeof version === "string" && !(row.provider === "openrouter" && version === "in-process")) {
+          probe = { version, observedAt: probeRow.observed_at };
+        }
       } catch {
         // An unreadable probe row is "no probe", never a guess.
       }
