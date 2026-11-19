@@ -5,7 +5,8 @@
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import * as adapters from "@agent-plane/adapters";
 import type { AssistantId } from "@agent-plane/core";
 import { loadConfig } from "../src/config.js";
 import { openDb, type Db } from "../src/db/index.js";
@@ -27,6 +28,7 @@ let db: Db | undefined;
 let built: BuiltServer | undefined;
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   await built?.orchestrator.shutdown();
   await built?.app.close();
   db?.close();
@@ -336,6 +338,7 @@ describe("conformance evidence", () => {
 
 describe("credential redaction", () => {
   it("no lifecycle or catalogue field carries an environment value or a credential-shaped version", async () => {
+    vi.spyOn(adapters, "codexSdkBinary").mockReturnValue(process.execPath);
     process.env.FAKE_RUNTIME_LIFECYCLE_KEY = FAKE_ENV_VALUE;
     await boot(`${TWO_FAKES}  router:\n    provider: openrouter\n    options:\n      apiKeyEnv: FAKE_RUNTIME_LIFECYCLE_KEY\n`);
     await built!.registry.syncChanged("router");

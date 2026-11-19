@@ -13,6 +13,7 @@
  * Pure reads. Nothing here writes, and nothing here reads `runtime_conformance.checks`, adapter
  * options or an environment value.
  */
+import { codexSdkBinary } from "@agent-plane/adapters";
 import type { CapabilityManifest } from "@agent-plane/core";
 import type { ResolvedConfig } from "../config.js";
 import type { Db } from "../db/index.js";
@@ -197,6 +198,17 @@ export function deriveLifecycle(facts: LifecycleFacts): AssistantLifecycle {
   };
 }
 
+/** The SDK resolver can fail before --version runs if its platform package is absent. */
+async function probeCodexInstallation(): Promise<AssistantLifecycle["installed"]> {
+  let version: string;
+  try {
+    version = await probeVersion(codexSdkBinary());
+  } catch {
+    version = "unavailable";
+  }
+  return { state: version === "unavailable" ? "missing" : "present", observedAt: new Date().toISOString() };
+}
+
 /** Reads the facts for registry rows from the database and derives their lifecycles. */
 export class RuntimeLifecycleReader {
   private codexInstallation: Promise<AssistantLifecycle["installed"]> | undefined;
@@ -234,10 +246,7 @@ export class RuntimeLifecycleReader {
     if (provider !== "openrouter" || !lifecycle.configured) return lifecycle;
 
     // Concurrent responses, including a list with several OpenRouter assistants, share one host check.
-    this.codexInstallation ??= probeVersion("codex").then((version): AssistantLifecycle["installed"] => ({
-      state: version === "unavailable" ? "missing" : "present",
-      observedAt: new Date().toISOString(),
-    })).finally(() => { this.codexInstallation = undefined; });
+    this.codexInstallation ??= probeCodexInstallation().finally(() => { this.codexInstallation = undefined; });
     return { ...lifecycle, installed: await this.codexInstallation };
   }
 }

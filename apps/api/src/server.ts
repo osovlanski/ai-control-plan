@@ -181,6 +181,8 @@ export interface BuiltServer {
   sessionInputRedelivery?: () => Promise<unknown>;
 }
 
+const MAX_ASSISTANT_ID_LENGTH = 128;
+
 export function buildServer(deps: ServerDeps): BuiltServer {
   const { config, db } = deps;
   const now = deps.now ?? (() => new Date());
@@ -195,8 +197,10 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   const telemetry = new TelemetryService(db);
   const retention = new EventRetention(db);
   const repositoryIdentities = new RepositoryIdentityRegistry(db);
+  // find-my-way counts UTF-16 code units. A contract-valid assistant ID can use two per code point.
+  const routerOptions = { maxParamLength: 2 * MAX_ASSISTANT_ID_LENGTH };
   // pino's default `base` adds the machine's hostname to every line; the plane never logs hostnames.
-  const app = Fastify({ routerOptions: { maxParamLength: 128 }, logger: { base: { pid: process.pid }, stream: { write: (line) => process.stdout.write(redactSecrets(line)) }, serializers: { req: (r) => ({ method: r.method, url: String(r.url).split("?")[0] }), res: (r) => ({ statusCode: r.statusCode }) }, redact: ["req.headers.authorization", "req.headers.cookie", "res.headers[\"set-cookie\"]"] } });
+  const app = Fastify({ routerOptions, logger: { base: { pid: process.pid }, stream: { write: (line) => process.stdout.write(redactSecrets(line)) }, serializers: { req: (r) => ({ method: r.method, url: String(r.url).split("?")[0] }), res: (r) => ({ statusCode: r.statusCode }) }, redact: ["req.headers.authorization", "req.headers.cookie", "res.headers[\"set-cookie\"]"] } });
   const credentials = new CredentialStore(credentialPath(config.dir), now);
   const authSessions: SessionMap = new Map();
   registerAuth(app, { config, credentials, sessions: authSessions, db, now });
@@ -404,6 +408,15 @@ export function buildServer(deps: ServerDeps): BuiltServer {
 
   // Agent runtime v1 (API 2.10, docs/contracts/agent-runtime-v1.md): read-only projections and the
   // operator disable overlay. Same scopes as the routes beside them, so no credential rotation.
+  const assistantIdSchema = {
+    params: {
+      type: "object",
+      required: ["id"],
+      properties: { id: { type: "string", minLength: 1, maxLength: MAX_ASSISTANT_ID_LENGTH } },
+    },
+  };
+  const assistantRead = { ...read.tasks, schema: assistantIdSchema };
+  const assistantWrite = { ...write, schema: assistantIdSchema };
   const lifecycles = new RuntimeLifecycleReader(db, config);
 
   app.get("/api/runtimes/catalog", read.tasks, () => runtimeCatalogProjection());
@@ -427,7 +440,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     })),
   );
 
-  app.get<{ Params: { id: string } }>("/api/assistants/:id/lifecycle", read.tasks, (req, reply) => {
+  app.get<{ Params: { id: string } }>("/api/assistants/:id/lifecycle", assistantRead, (req, reply) => {
     const row = registry.get(req.params.id);
     if (!row) return reply.status(404).send({ error: `Unknown assistant: ${req.params.id}` });
     return lifecycles.withInstallation(lifecycles.of(row), row.provider);
@@ -437,7 +450,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   // clears the overlay and nothing else, so a config-disabled assistant stays disabled. Neither
   // touches a session already running. Idempotent: a repeat reports `changed: false`.
   for (const [action, state] of [["disable", "disabled"], ["enable", "none"]] as const) {
-    app.post<{ Params: { id: string } }>(`/api/assistants/:id/${action}`, write, async (req, reply) => {
+    app.post<{ Params: { id: string } }>(`/api/assistants/:id/${action}`, assistantWrite, async (req, reply) => {
       const result = registry.setOperatorState(req.params.id, state, now);
       const row = result && registry.get(req.params.id);
       if (!result || !row) return reply.status(404).send({ error: `Unknown assistant: ${req.params.id}` });
@@ -450,7 +463,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   // PR 4: the credential-free, quota-free conformance probe. It never calls the registered adapter,
   // starts a generation, installs anything or writes config; it stores one version-bound row.
   const conformance = new RuntimeConformance(db, config, registry, now, deps.conformance);
-  app.post<{ Params: { id: string } }>("/api/assistants/:id/test", write, async (req, reply) => {
+  app.post<{ Params: { id: string } }>("/api/assistants/:id/test", assistantWrite, async (req, reply) => {
     try {
       const result = await conformance.test(req.params.id);
       if (!result) return reply.status(404).send({ error: `Unknown assistant: ${req.params.id}` });
@@ -462,7 +475,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     }
   });
 
-  app.post<{ Params: { id: string } }>("/api/assistants/:id/sync", write, async (req, reply) => {
+  app.post<{ Params: { id: string } }>("/api/assistants/:id/sync", assistantWrite, async (req, reply) => {
     try {
       return await registry.sync(req.params.id);
     } catch (err) {
