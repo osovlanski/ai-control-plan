@@ -3,7 +3,7 @@
 Status: normative for agent runtime v1 (API 2.10, Agent Runtime Registry PR 3, owner decision
 G.1 of 2026-11-18), v1.1 (API 2.11, PR 4: the conformance probe). It fixes the read-only projection of the plane's in-tree runtime catalogue,
 each assistant's lifecycle states, and the operator disable overlay. Consumers: the Control Plane
-web UI and the planned `aos` CLI. Cockpit does not read it; it vendors this contract only if it
+web UI and the `aos runtimes` CLI (`apps/cli`). Cockpit does not read it; it vendors this contract only if it
 ever does.
 
 The JSON Schemas (draft 2020-12) under `contracts/agent-runtime/v1/` are the wire authority:
