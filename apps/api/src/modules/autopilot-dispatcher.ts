@@ -652,7 +652,7 @@ function taskGoal(itemId: string, item: BacklogItem | undefined): string {
 
 function taskConstraints(branch: string, item: BacklogItem | undefined): string[] {
   const out = [
-    `This worktree is based on the reservation commit of ${branch}. Commit your work here; the plane checkpoints, accepts and publishes it. Do not push, open PRs or change branches.`,
+    `This worktree is based on the reservation commit of ${branch}. Leave your changes in this worktree and do not run git commit (the agent user cannot write the shared object store): the plane commits, accepts and publishes them. Do not push, open PRs or change branches.`,
     "Acceptance runs offline on a read-only snapshot of your checkpoint with commands from origin/main; changing tests or acceptance commands does not change what runs.",
     // G15, fourth run: the agent started the full `pnpm test` in a background shell and ended its turn; the session stayed open
     // until the 30-minute limit and the attempt failed before acceptance ever ran.

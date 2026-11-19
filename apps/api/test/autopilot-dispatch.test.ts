@@ -480,6 +480,7 @@ describe("approvals of an unattended session", () => {
     const row = rig!.db.prepare("SELECT envelope FROM tasks WHERE id = ?").get(a.taskId!) as { envelope: string };
     expect(row.envelope).toMatch(/do not run the full test suite/i);
     expect(row.envelope).toMatch(/Never start background processes/);
+    expect(row.envelope).toMatch(/do not run git commit/i);
     ap().stop("now", "test");
     await dispatcher().tick();
     await dispatcher().idle();

@@ -809,7 +809,7 @@ export class Orchestrator {
           approvalMode: this.effectiveApproval(taskId, policy?.approvalMode),
           maxRuntimeMs: policy?.maxRuntimeMs ?? this.maxRuntimeMs,
           routingDecisionRef,
-          verification: projectVerification.plan?.checks ?? [],
+          verification: agentVerification(projectVerification.plan?.checks ?? [], runAs),
           verificationPlan: projectVerification.plan,
           ...(runAs ? { runAs } : {}),
           ...(composed && policy ? { compositionRevisionId: composed.compositionRevisionId, budget: policy.budget } : {}),
@@ -2479,6 +2479,16 @@ function firstResetsAt(event: NormalizedEvent): string | undefined {
  * A required check that ran and failed is a failure. Otherwise a blocked one (missing dependencies)
  * is reported as blocked, with the install command its summary carries.
  */
+/**
+ * An agent-user task never runs repository commands in the plane's session (G21): the verifier reports
+ * them `skipped`, and a required skip fails the run before acceptance, the real gate, can look at the
+ * work. So those checks are reported without being required there. Artifact checks still count.
+ */
+export function agentVerification<T extends { kind: string; required: boolean }>(checks: readonly T[], runAs: "agent" | undefined): T[] {
+  if (runAs !== "agent") return [...checks];
+  return checks.map((check) => (check.kind === "artifact_exists" ? check : { ...check, required: false }));
+}
+
 function verificationNotice(checks: VerificationCheckResult[]): string {
   const unmet = checks.filter((c) => c.required && c.status !== "passed" && !(c.status === undefined && c.passed));
   const blocked = unmet.filter((c) => c.status === "blocked");
