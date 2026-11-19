@@ -1,10 +1,10 @@
 import { Restart, namesRestartRoute, useRestartOffered } from "./Restart.js";
 import { WaitingSummary } from "./WaitingSummary.js";
+import { TaskRouting } from "./TaskRouting.js";
 import { useEffect, useRef, useState, type ComponentProps } from "react";
 import {
   api,
   type Comparison,
-  type RoutingExplanation,
   type SessionDetail,
   type SessionSummary,
   type TaskDetail as Detail,
@@ -67,7 +67,7 @@ export function TaskDetail({ taskId, onBack }: { taskId: string; onBack: () => v
   const [events, setEvents] = useState<TaskEvent[]>([]);
   const [state, setState] = useState<string>("");
   const [approval, setApproval] = useState<PendingApproval | null>(null);
-  const [routing, setRouting] = useState<Array<{ chosen: string | null; at: string; explanation: RoutingExplanation }>>([]);
+  const [routing, setRouting] = useState<Awaited<ReturnType<typeof api.routing>>>([]);
   const [notices, setNotices] = useState<Notice[]>([]);
   const [handoffs, setHandoffs] = useState<
     Array<{ id: string; trigger: string; at: string; from_assistant: string | null; to_assistant: string | null }>
@@ -335,22 +335,7 @@ export function TaskDetail({ taskId, onBack }: { taskId: string; onBack: () => v
 
       {tab === "routing" && (
         <Card>
-          {routing.map((r, i) => (
-            <div key={i} style={{ marginBottom: "0.9rem", fontSize: "0.88rem" }}>
-              <div style={{ color: tokens.muted }}>{new Date(r.at).toLocaleString()}</div>
-              <div>
-                chose <strong>{r.chosen ?? "nothing"}</strong> —{" "}
-                <code style={{ fontFamily: tokens.mono }}>{r.explanation.ruleFired}</code>
-              </div>
-              {r.explanation.candidates
-                .filter((c) => c.filterFailures.length > 0)
-                .map((c) => (
-                  <div key={c.assistantId} style={{ color: tokens.muted, fontSize: "0.82rem" }}>
-                    {c.assistantId}: {c.filterFailures.join(", ")}
-                  </div>
-                ))}
-            </div>
-          ))}
+          <TaskRouting routing={routing} unavailable={unavailable.includes("Routing")} runs={readError ? null : detail.runs} />
         </Card>
       )}
 

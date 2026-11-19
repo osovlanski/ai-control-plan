@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import type { ModelRecommendation, Schedule, ScheduleOccurrence, ScheduleOverlap } from "@agent-plane/core";
 import { api } from "../api.js";
-import type { SchedulerStatus, TaskContext } from "../api.js";
+import type { RoutingExplanation, SchedulerStatus, TaskContext } from "../api.js";
 import { actualStatusLine, probeFreshness, type ActualLifecycle } from "../orbital.js";
 
 /** K3 idle quota probe evidence, read from `/api/scheduler/status`. */
@@ -263,7 +263,10 @@ export function ContextReadout({ context }: { context: TaskContext | null }) {
   );
 }
 
-type RecommendationActual = { assistantId: string | null; running: boolean; lifecycle?: ActualLifecycle };
+type RecommendationActual = { assistantId: string | null } & (
+  | { recorded: true }
+  | { recorded?: false; running: boolean; lifecycle?: ActualLifecycle }
+);
 
 /** The recorded decision, readable before its supporting engineering evidence. */
 export function DecisionSummary({ recommendation, actual }: {
@@ -271,58 +274,93 @@ export function DecisionSummary({ recommendation, actual }: {
   actual: RecommendationActual;
 }) {
   const applied = recommendation.mode === "applied";
+  const status = actual.recorded
+    ? "Recorded selection"
+    : actual.lifecycle
+      ? actualStatusLine(actual.lifecycle)
+      : actual.running ? "Executing" : "Routed · execution unchanged";
   return (
     <section className="mission-decision" aria-label="Decision summary">
       <h3>Decision summary</h3>
-      {/* Two truths, side by side and never merged: what runs vs what K13 would
-          choose. In shadow mode the shadow column can never be the executing one. */}
       <div className="truth-split">
         <div className="truth truth-actual">
-          <span className="truth-tag">ACTUAL</span>
-          <strong className="mono">{actual?.assistantId ?? "Not routed"}</strong>
+          <span className="truth-tag">ACTUAL{actual.recorded ? " · selected assistant" : ""}</span>
+          <strong className="mono">{actual.assistantId ?? "None selected"}</strong>
           <small>
-            {actual?.lifecycle
-              ? actualStatusLine(actual.lifecycle)
-              : actual?.running
-                ? "Executing"
-                : "Routed · execution unchanged"}{" "}
-            · {recommendation.execution.requestedModelSelector ?? "Model: unspecified"}
+            {status} · {recommendation.execution.requestedModelSelector
+              ? `Requested model: ${recommendation.execution.requestedModelSelector}`
+              : "Model: unspecified"}
           </small>
         </div>
         <div className={`truth ${applied ? "truth-applied" : "truth-shadow"}`}>
           <span className="truth-tag">{applied ? "APPLIED" : "SHADOW · would choose"}</span>
-          <strong className="mono">{recommendation.recommended ?? "no candidate"}</strong>
-          <small>{applied ? "Carried into execution" : "K13 advisory · not executing"}</small>
+          <strong className="mono">{recommendation.recommended ?? "No model recommended"}</strong>
+          <small>{applied ? "Selector committed to execution request" : "Advice only · did not change execution"}</small>
         </div>
       </div>
 
-      <p className="decision-why"><span>Why</span>{recommendation.reason}.</p>
-      <ul className="relationship-key" aria-label="Model relationship key">
-        <li className="key-actual"><i />Solid blue · ACTUAL</li>
-        <li className="key-shadow"><i />Dashed amber · SHADOW</li>
-        <li className="key-excluded"><i />Muted / dotted · EXCLUDED</li>
-      </ul>
+      <p className="decision-why"><span>Why</span>{recommendation.reason}</p>
+      {actual.recorded ? (
+        <>
+          <p className="fine-print">{recommendation.execution.detail}</p>
+          {applied && <p className="fine-print">Check run evidence for the provider-reported model.</p>}
+          <ModelOverride recommendation={recommendation} />
+        </>
+      ) : (
+        <ul className="relationship-key" aria-label="Model relationship key">
+          <li className="key-actual"><i />Solid blue · ACTUAL</li>
+          <li className="key-shadow"><i />Dashed amber · SHADOW</li>
+          <li className="key-excluded"><i />Muted / dotted · EXCLUDED</li>
+        </ul>
+      )}
     </section>
   );
 }
 
+export function AssistantEligibility({ candidates }: { candidates: RoutingExplanation["candidates"] }) {
+  if (!candidates.length) return <p className="fine-print">No assistant eligibility evidence was recorded.</p>;
+  return (
+    <ul className="candidate-list">
+      {candidates.map((candidate) => (
+        <li key={candidate.assistantId}>
+          <strong>{candidate.assistantId}</strong>
+          <span className={candidate.passedFilters ? "tone-complete" : "tone-failed"}>
+            {candidate.passedFilters ? "Eligible" : "Excluded"}
+          </span>
+          <small>{candidate.filterFailures.join(" · ") || (candidate.passedFilters
+            ? "Passed recorded hard filters"
+            : "No exclusion reason recorded")}</small>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function ModelOverride({ recommendation }: { recommendation: ModelRecommendation }) {
+  if (!recommendation.userOverride) return null;
+  return (
+    <p className="fine-print">
+      Operator override <span className="mono">{recommendation.userOverride.selector}</span>{" · "}
+      {recommendation.userOverride.detail}
+    </p>
+  );
+}
+
 /**
- * K13 shadow model recommendation. It must be impossible to read this panel and
- * think the recommendation affected the run: the heading says SHADOW, the
- * execution line states what actually ran, and every number carries the source
- * and sample size it came from.
+ * K13 recorded recommendation. SHADOW is advice; APPLIED commits a request,
+ * never a provider-reported identity. Evidence retains its source and sample size.
  */
 export function ModelRecommendationReadout({
   recommendation,
+  summaryShown = false,
 }: {
   recommendation: ModelRecommendation | null | undefined;
+  summaryShown?: boolean;
 }) {
   if (!recommendation) {
     return (
       <p className="fine-print">
-        No model recommendation was recorded for this decision. Routing never
-        waits on model intelligence, so a missing catalog simply leaves this
-        empty.
+        No model recommendation was recorded for this decision.
       </p>
     );
   }
@@ -340,47 +378,33 @@ export function ModelRecommendationReadout({
   return (
     <>
       <div className="section-label">
-        {applied ? "Applied model selection" : "Shadow model recommendation"}{" "}
+        {summaryShown ? "Model selection evidence" : applied ? "Applied model selection" : "Shadow model recommendation"}{" "}
         <span className={applied ? "tone-complete" : "tone-limit"}>
           {applied ? "APPLIED" : "SHADOW"}
         </span>
       </div>
 
-      <p>
-        {recommendation.recommended ? (
-          <>
-            {applied ? "Chose" : "Would choose"}{" "}
-            <span className="mono">{recommendation.recommended}</span>.
-          </>
-        ) : (
-          <>No model is recommended: {recommendation.reason}</>
-        )}
-      </p>
-
-      {applied ? (
-        <p className="fine-print">
-          Current execution: <strong>this model</strong>. The decision committed{" "}
-          <span className="mono">{recommendation.execution.requestedModelSelector}</span>,
-          and {recommendation.execution.authority} carries it into the run — it
-          remains the only authority for the requested model.
-        </p>
-      ) : (
-        <p className="fine-print">
-          Current execution: <strong>unchanged</strong>. This recommendation did
-          not set the requested model
-          {recommendation.execution.requestedModelSelector ? (
-            <>
-              {" "}— the run asked for{" "}
-              <span className="mono">
-                {recommendation.execution.requestedModelSelector}
-              </span>
-            </>
-          ) : (
-            " — the run named no model"
-          )}
-          , and {recommendation.execution.authority} remains the only authority
-          for it. ({recommendation.execution.detail})
-        </p>
+      {!summaryShown && (
+        <>
+          <p>
+            {recommendation.recommended ? (
+              <>
+                {applied ? "Chose" : "Would choose"}{" "}
+                <span className="mono">{recommendation.recommended}</span>.
+              </>
+            ) : (
+              <>No model is recommended: {recommendation.reason}</>
+            )}
+          </p>
+          <p className="fine-print">
+            Execution request: <strong>{applied ? "selector committed" : "unchanged"}</strong>.
+            {" "}{recommendation.execution.detail}
+          </p>
+          <p className="fine-print">
+            Recorded requested model: <span className="mono">{recommendation.execution.requestedModelSelector ?? "unspecified"}</span>
+            {" · "}{recommendation.execution.authority}
+          </p>
+        </>
       )}
 
       {winner && (
@@ -421,12 +445,7 @@ export function ModelRecommendationReadout({
       {recommendation.tieBreaker && (
         <p className="fine-print">Tie-break: {recommendation.tieBreaker}</p>
       )}
-      {recommendation.userOverride && (
-        <p className="fine-print">
-          Operator override <span className="mono">{recommendation.userOverride.selector}</span>:{" "}
-          {recommendation.userOverride.detail}
-        </p>
-      )}
+      {!summaryShown && <ModelOverride recommendation={recommendation} />}
 
       {alternatives.length > 0 && (
         <>

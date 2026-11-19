@@ -359,7 +359,7 @@ test("Demo B/1: deterministic SHADOW recommendation, and the provider request pr
   // --- the operator surface ---------------------------------------------------
   const inspector = await selectAndOpenDecision(page, taskId);
   await expect(inspector.getByText("Shadow model recommendation")).toBeVisible();
-  await expect(inspector.getByText(/Current execution:/)).toContainText("unchanged");
+  await expect(inspector.locator(".decision-evidence").getByText(/Execution request:/)).toContainText("unchanged");
   await expect(inspector.getByText(/Because:/)).toBeVisible();
   await expect(inspector.getByText("external:artificial-analysis").first()).toBeVisible();
   await expect(inspector.getByText(/Identity: catalog-exact/)).toBeVisible();

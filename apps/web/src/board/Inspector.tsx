@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api } from "../api.js";
 import { actualLifecycle, describeState, modelIdentityView, nextStep, observedModel, resourceNextStep, verificationFromEvent, waitKindLabel } from "../orbital.js";
 import { VerificationChecks, VerificationVerdict } from "../VerificationChecks.js";
-import { QuotaReadout, ContextReadout, ModelRecommendationReadout, DecisionSummary, ScheduleQueueReadout } from "./readouts.js";
+import { AssistantEligibility, QuotaReadout, ContextReadout, ModelRecommendationReadout, DecisionSummary, ScheduleQueueReadout } from "./readouts.js";
 import { executionRead, missionState, type Mission } from "./execution.js";
 import { WorkspaceCompositionPanel } from "../TaskDetail.js";
 
@@ -300,24 +300,7 @@ export function Inspector({
                 {routing.explanation.tieBreaker && (
                   <p>Tie-break: {routing.explanation.tieBreaker}</p>
                 )}
-                <ul className="candidate-list">
-                  {routing.explanation.candidates.map((c) => (
-                    <li key={c.assistantId}>
-                      <strong>{c.assistantId}</strong>
-                      <span
-                        className={
-                          c.passedFilters ? "tone-complete" : "tone-failed"
-                        }
-                      >
-                        {c.passedFilters ? "Eligible" : "Excluded"}
-                      </span>
-                      <small>
-                        {c.filterFailures.join(" · ") ||
-                          "Passed recorded hard filters"}
-                      </small>
-                    </li>
-                  ))}
-                </ul>
+                <AssistantEligibility candidates={routing.explanation.candidates} />
               </>
             )}
             <ModelRecommendationReadout

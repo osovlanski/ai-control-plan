@@ -237,6 +237,7 @@ export interface TaskSummary {
 }
 
 export interface RoutingExplanation {
+  origin?: string;
   candidates: Array<{
     assistantId: string;
     passedFilters: boolean;
@@ -247,7 +248,7 @@ export interface RoutingExplanation {
   chosen?: string;
   tieBreaker?: string;
   userOverride?: string;
-  /** K13 shadow model recommendation, recorded on the decision (§4.4.3). */
+  /** K13 model recommendation, recorded on the decision (§4.4.3). */
   modelRecommendation?: ModelRecommendation;
 }
 
