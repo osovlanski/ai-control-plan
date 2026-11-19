@@ -163,6 +163,7 @@ function recordCodingRun(taskId: string, assistantId: string, resolved: string):
 }
 
 test.beforeAll(async () => {
+  const clock = new Clock();
   h = await boot(
     4179,
     "demo-b",
@@ -171,10 +172,12 @@ test.beforeAll(async () => {
       [B]: { provider: "fake", accountKind: "api", options: { models: [{ id: SWIFT }] } },
       [C]: { provider: "fake", accountKind: "api", options: { models: [{ id: ALIAS }] } },
     },
-    new Clock(),
+    clock,
     (config) => {
       // K13 ships SHADOW. Demo B never flips this — the point is real evidence.
       config.models.selection.enabled = false;
+      // The scripted benchmark represents the fake provider's base configuration.
+      config.models.selection.baseConfigAttestedAt = clock.current.toISOString();
       config.execution = { harnessModes: { single: true } };
     },
     new Map(),
