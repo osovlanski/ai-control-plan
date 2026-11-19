@@ -1,6 +1,6 @@
 import { HandoffService } from './harness/handoff.js';
 import { randomUUID } from 'node:crypto';
-import { canTransition, isTerminal, redactValue, type ContinuationIntent, type Dispatch, type DispatchOrigin, type PauseKind, type TaskState, type OnDependencyFailure, type ResourcePool, type RoutingExplanation, type SchedulerEvent, type WaitInput, type WaitCondition } from '@agent-plane/core';
+import { canTransition, isTerminal, type AssistantId, redactValue, type ContinuationIntent, type Dispatch, type DispatchOrigin, type PauseKind, type TaskState, type OnDependencyFailure, type ResourcePool, type RoutingExplanation, type SchedulerEvent, type WaitInput, type WaitCondition } from '@agent-plane/core';
 import type { Db } from '../db/index.js';
 import type { ResolvedConfig } from '../config.js';
 import type { TaskStore } from './tasks.js';
@@ -851,17 +851,26 @@ export class Scheduler {
     // assistant it is moving away from steer THIS routing decision, and the
     // reason is what the receiving agent is shown. Routing itself still runs now.
     const intent = this.intent(taskId, dispatch.condition_generation);
+    let disabledStored: string | undefined;
     const routed = this.d.db.transaction(() => {
       const current = this.dispatch(id);
       if (current.routing_decision_id !== null) {
         const row = this.d.db.prepare('SELECT explanation FROM routing_decisions WHERE id = ? AND task_id = ?').get(current.routing_decision_id, taskId) as { explanation: string };
-        return { explanation: JSON.parse(row.explanation) as RoutingExplanation, routingDecisionId: current.routing_decision_id };
+        const stored = JSON.parse(row.explanation) as RoutingExplanation;
+        // Crash recovery replays a decision made before the crash. Nothing has started yet (still
+        // `reserved`), so a disable since then (workspace config or operator overlay) must win.
+        if (stored.chosen) disabledStored = this.d.orchestrator.disabledForNewStart([stored.chosen as AssistantId]);
+        return { explanation: stored, routingDecisionId: current.routing_decision_id };
       }
       const result = this.d.orchestrator.routeTask(taskId, dispatch.origin, { dispatchId: id, exclude: intent?.from, override: intent?.to });
       this.d.db.prepare('UPDATE dispatches SET routing_decision_id = ?, updated_at = ? WHERE dispatch_id = ?').run(result.routingDecisionId, this.iso(), id);
       return result;
     })();
     if (this.d.boundary) await this.d.boundary('routed', this.dispatch(id));
+    if (disabledStored) {
+      // Re-park (the reason is recorded on dispatch.reparked): the successor dispatch routes afresh, and route() never picks a disabled assistant.
+      this.repark(dispatch, 'assistant_disabled'); return;
+    }
     if (!routed.explanation.chosen) {
       // Retry from current quota evidence; time waits retain their bounded fallback.
       this.repark(dispatch, 'no_candidate'); return;

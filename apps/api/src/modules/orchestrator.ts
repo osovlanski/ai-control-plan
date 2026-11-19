@@ -2157,7 +2157,7 @@ export class Orchestrator {
    * one can: unknown, config `enabled: false`, or the operator disable overlay (migration 051) —
    * the same disable sources as route()'s hard filters, named by cause in the given order.
    */
-  private disabledForNewStart(assistantIds: readonly AssistantId[]): string | undefined {
+  disabledForNewStart(assistantIds: readonly AssistantId[]): string | undefined {
     const rows = new Map(this.registry.list().map((a) => [a.id, a]));
     const reasons: string[] = [];
     for (const id of new Set(assistantIds)) {
