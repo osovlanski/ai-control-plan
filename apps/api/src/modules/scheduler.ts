@@ -844,6 +844,36 @@ export class Scheduler {
       .run(taskId, generation, HANDOFF_PARK);
   }
 
+  /**
+   * A manual handoff whose own pool wake reserved a dispatch and claim and then failed before any
+   * provider start has already been refused to the operator. Rolls back that dispatch, its claim
+   * and the wait it consumed, so no later tick starts a successor nobody is waiting for. Called
+   * inside the orchestrator's park transaction, which then replaces the restored wait with its park.
+   * False when an open dispatch is not this handoff's to roll back: a start was attempted (outcome
+   * unknown, recovery decides) or a tick is driving it right now.
+   */
+  rollbackRefusedDispatch(taskId: string, reason: string): boolean {
+    const open = this.d.db.prepare("SELECT * FROM dispatches WHERE task_id = ? AND phase IN ('reserved','start_attempted')").all(taskId) as Dispatch[];
+    if (open.some(d => d.phase !== 'reserved' || this.inFlight.has(d.dispatch_id))) return false;
+    for (const d of open) {
+      const envelope = this.d.db.prepare("SELECT id, state FROM handoff_envelopes WHERE claimed_by_request_id = ?").get(d.dispatch_id) as { id: string; state: string } | undefined;
+      if (envelope?.state === 'claimed') new HandoffService(this.d.db).release(envelope.id, d.dispatch_id);
+      this.d.db.prepare('UPDATE execution_requests SET superseded = 1 WHERE id = ?').run(d.dispatch_id);
+      this.phase(d.dispatch_id, 'aborted', reason);
+      this.d.db.prepare("UPDATE wait_conditions SET state = 'active', consumed_at = NULL, consumed_by = NULL WHERE task_id = ? AND generation = ? AND state = 'consumed'")
+        .run(taskId, d.condition_generation);
+      this.record(taskId, 'dispatch.aborted', d.condition_generation, d.dispatch_id, { reason });
+      const held = this.d.db.prepare('SELECT claim_id, resource, units FROM resource_claims WHERE dispatch_id = ? AND released_at IS NULL')
+        .get(d.dispatch_id) as { claim_id: number; resource: string; units: number } | undefined;
+      if (!held) continue;
+      this.d.db.prepare('UPDATE resource_claims SET released_at = ?, release_reason = ? WHERE claim_id = ?').run(this.iso(), reason, held.claim_id);
+      this.record(taskId, 'resource.released', undefined, d.dispatch_id, { resource: held.resource, units: held.units, reason });
+      // After the caller's transaction commits, the freed units go to the next FIFO waiter.
+      queueMicrotask(() => this.notifyResource(held.resource));
+    }
+    return true;
+  }
+
   /** `runNow` on a handoff park: the same wait `/wait` would attach, from the park's anchor. */
   private rearmHandoffPark(taskId: string, park: WaitCondition): number | string {
     try {

@@ -1757,9 +1757,16 @@ export class Orchestrator {
       ?? (this.tasks.get(taskId)?.state === "RUNNING" ? this.harnessBridge!.latestSessionId(taskId) : undefined);
     if (!sid) return;
     this.harnessBridge!.markPlaneOwnsTerminal(sid);
+    try {
+      this.harnessBridge!.requestCancel(sid);
+    } catch (err) {
+      // No cancel was requested, so the source still owns its settlement; a mark left set would
+      // make that settle publish nothing and strand the task RUNNING.
+      this.harnessBridge!.consumePlaneOwnsTerminal(sid);
+      throw err;
+    }
     attempt.owns = true;
     attempt.sourceRunId = sid;
-    this.harnessBridge!.requestCancel(sid);
     if (!(await this.waitUntilSessionTerminal(sid))) {
       // Drain stalled. Park the task and bail — planeOwnsTerminal stays SET so
       // the source session's eventual settlement no-ops the task (never
@@ -1812,6 +1819,14 @@ export class Orchestrator {
     }
     // M2 S6: the handoff target is a changed assistant and gets a new revision with the remainder.
     const recomposed = await this.recompose(taskId, explanation.chosen, "failover", routingDecisionId);
+    // A retry owns only the park generation it read; `/run-now` may have consumed it (and started
+    // a successor) while this awaited. Then the task is no longer this handoff's to move.
+    const assertOwnsPark = () => {
+      if (parkGeneration === undefined || this.scheduler?.handoffPark(taskId)?.generation === parkGeneration) return;
+      attempt.owns = false;
+      throw new Error(`Handoff not started: task ${taskId} was continued by another request while this handoff was routing.`);
+    };
+    assertOwnsPark();
     if (recomposed?.kind === "blocked") {
       attempt.pause = recomposed.pauseKind;
       throw new Error(`Handoff to ${explanation.chosen} was not started: ${recomposed.reason}`);
@@ -1819,6 +1834,7 @@ export class Orchestrator {
     const checkpoint = attempt.checkpoint ??= await this.checkpoints.create(taskId, null, "handoff");
 
     this.db.transaction(() => {
+      assertOwnsPark();
       const state = this.tasks.get(taskId)!.state;
       if (state === "RUNNING" || state === "WAITING_INPUT" || state === "LIMIT_PAUSED") {
         if (state === "RUNNING") this.tasks.transition(taskId, "LIMIT_PAUSED");
@@ -1865,10 +1881,13 @@ export class Orchestrator {
     }
     const row = this.tasks.get(taskId);
     if (!row || isTerminal(row.state) || row.state === "WAITING_RESOURCE" || this.isActive(taskId)) return;
-    if (this.db.prepare("SELECT 1 FROM dispatches WHERE task_id = ? AND phase IN ('reserved','start_attempted')").get(taskId)) return;
     const pauseKind = attempt.pause ?? "intervention_required";
     const moved = row.state !== "WAITING_INPUT" || row.pause_kind !== pauseKind;
     const envelope = this.db.transaction(() => {
+      // A dispatch this handoff's own pool wake reserved goes back with the park, in one commit,
+      // so nothing starts the successor after the operator was told 409. One a start was attempted
+      // for (or a tick is driving) is the scheduler's to settle, and the task is left to it.
+      if (this.scheduler?.rollbackRefusedDispatch(taskId, `handoff refused: ${message(err)}`) === false) return undefined;
       // A retry that stops for a different reason re-pauses through HANDING_OFF, the one legal way
       // from one WAITING_INPUT pause to another.
       if (row.state === "WAITING_INPUT" && moved) this.tasks.transition(taskId, "HANDING_OFF");
