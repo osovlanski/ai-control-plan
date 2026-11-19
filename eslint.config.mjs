@@ -13,6 +13,8 @@ export default tseslint.config(
       "eval/fixtures/**",
       // Untracked agent worktrees are other checkouts, not this tree's code.
       "worktrees/**",
+      // Nested agent checkouts under .claude/worktrees are other trees, not this one.
+      ".claude/worktrees/**",
     ],
   },
   js.configs.recommended,
