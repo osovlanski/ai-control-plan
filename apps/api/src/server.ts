@@ -42,6 +42,7 @@ import { AutopilotService, AutopilotStartRefused, ExternalInvalid, ExternalNotFo
 import { GitHubRestClient, PublicationRefused, PublicationService, readGitHubTokenFile, type PublicationGit, type PublicationGitHub, type ReconcileGitHub, type ReservationGitHub } from "./modules/publications.js";
 import { agentIdleFromConfig, hostGateFromConfig, syncCloseSchedule } from "./modules/host-admission.js";
 import { AcceptanceRunner, agentAcceptanceExecutor, pnpmStorePrefetch, type AcceptanceExecutor } from "./modules/acceptance-run.js";
+import { renderScope } from "./modules/autopilot-scope.js";
 import { AutopilotDispatcher, type DispatchGit } from "./modules/autopilot-dispatcher.js";
 import { QuotaProbeService, type QuotaProbeFn } from "./modules/quota-probe.js";
 import { ModelCatalogService, CATALOG_REVISION, type CatalogSource } from "./modules/model-catalog.js";
@@ -887,6 +888,13 @@ export function buildServer(deps: ServerDeps): BuiltServer {
       if (err instanceof UnknownWindow) return reply.status(404).send({ error: "not found", windowId: err.windowId });
       throw err;
     }
+  });
+  // P1-2: "% of estimated scope" over the whole backlog (S=1, M=3, L=8), merged PRs counting as done. Read-only.
+  app.get<{ Querystring: { day?: string; format?: string } }>("/api/autopilot/scope", read.tasks, async (req, reply) => {
+    if (req.query.day !== undefined && !/^\d{4}-\d{2}-\d{2}$/.test(req.query.day)) return reply.status(400).send({ error: "day must be YYYY-MM-DD" });
+    const r = await dispatcher.scope(req.query.day);
+    if ("problem" in r) return reply.status(503).send({ error: r.problem });
+    return req.query.format === "text" ? reply.type("text/plain; charset=utf-8").send(renderScope(r.scope, r.day)) : r;
   });
   // M6 S1: settles project composed sessions into asset_usage; reconcileOnBoot backfills the rest.
   orchestrator.assetTelemetry = new AssetTelemetry(db, app.log);

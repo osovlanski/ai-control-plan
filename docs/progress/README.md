@@ -83,3 +83,16 @@ The first `backlog.yaml` (P0-9) lists only open work, from: the auto copilot pla
 open findings in both repositories' `docs/PROJECT_MEMORY.md`, and the open PRs in both
 repositories (none on 2026-11-13). Shipped work stays in `PROJECT_MEMORY.md`. Items whose code
 claim was checked against `main` say so in `source`; the others say "re-check on main first".
+
+## "% of estimated scope" (P1-2)
+
+`GET /api/autopilot/scope[?day=YYYY-MM-DD][&format=text]` (and `node scripts/morning-report.mjs --scope`)
+reads `docs/progress/backlog.yaml` at the backlog repo's `origin/main`, asks GitHub for each item's
+`os/<id>` PR in the item's repo, and sums points: S=1, M=3, L=8. An item is **done** when that PR is
+merged, **in review** when one is open, otherwise remaining. Every lane counts, not only `oci-loop`.
+
+It is an estimate and says so: sizes are guesses, a merged PR is not a measure of effort, and the
+denominator is the backlog as it stands now, so adding items lowers the percentage. Two guards keep that
+honest: `addedToday` lists items (and points) not in the backlog at the last commit before 00:00 UTC of
+`day`, and items that could not be read (repo not configured, GitHub error) or carry no S/M/L size are
+listed by id instead of silently dropped. Read-only: it fetches `origin/main` and never reserves.

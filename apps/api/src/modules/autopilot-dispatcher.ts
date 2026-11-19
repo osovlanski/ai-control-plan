@@ -40,6 +40,7 @@
  * Nothing here runs repository code or a provider. Git commands run as the plane user with hooks
  * off, only `fetch`, `rev-parse`, `show` and `commit-tree`.
  */
+import { summariseScope, type ScopeItem, type ScopeState, type ScopeSummary } from "./autopilot-scope.js";
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { parse as parseYaml } from "yaml";
@@ -127,6 +128,8 @@ export interface DispatchGit {
   fetch(repoPath: string, refspecs: string[]): Promise<void>;
   /** The full SHA `rev` names, or null. */
   revParse(repoPath: string, rev: string): Promise<string | null>;
+  /** The newest commit of `rev` made strictly before `before` (ISO 8601), or null. */
+  lastCommitBefore(repoPath: string, rev: string, before: string): Promise<string | null>;
   /** `git show <rev>:<path>`, or null when it does not exist. */
   show(repoPath: string, rev: string, path: string): Promise<string | null>;
   /** `git commit-tree` with the given content, fixed identity and date. Returns the SHA. */
@@ -157,6 +160,10 @@ export function dispatchGitCli(): DispatchGit {
     async revParse(repoPath, rev) {
       const r = await gitRun(repoPath, ["rev-parse", "--verify", "--quiet", rev]);
       return r.code === 0 ? r.stdout.trim() : null;
+    },
+    async lastCommitBefore(repoPath, rev, before) {
+      const r = await gitRun(repoPath, ["rev-list", "-1", `--before=${before}`, rev]);
+      return r.code === 0 && r.stdout.trim() ? r.stdout.trim() : null;
     },
     async show(repoPath, rev, path) {
       const r = await gitRun(repoPath, ["show", `${rev}:${path}`]);
@@ -570,6 +577,46 @@ export class AutopilotDispatcher {
       return await this.finishReservation(attempt);
     } catch (err) {
       return { action: "drove", attemptId: attempt.id, state: "reserving", detail: this.githubFailure(err, "reservation") };
+    }
+  }
+
+  /**
+   * P1-2: the estimated-scope summary over every backlog item, any lane. Read-only: fetches origin/main, asks GitHub
+   * about each `os/<id>` PR, never reserves or writes. `day` (YYYY-MM-DD, UTC; default today) only sets the baseline
+   * backlog for "added today".
+   */
+  async scope(day?: string): Promise<{ day: string; backlogSha: string; scope: ScopeSummary; items: ScopeItem[] } | { problem: string }> {
+    const github = this.d.github;
+    const backlogRepo = this.cfg.repos[this.cfg.backlogRepo];
+    if (!github) return { problem: "autopilot.github.tokenFile is not configured" };
+    if (!backlogRepo) return { problem: `autopilot.repos.${this.cfg.backlogRepo} (the backlog repo) is not configured` };
+    const today = (day ?? this.now().toISOString()).slice(0, 10);
+    try {
+      await this.git.fetch(backlogRepo.path, [`+refs/heads/main:refs/remotes/origin/main`]);
+      const sha = await this.git.revParse(backlogRepo.path, "origin/main^{commit}");
+      if (!sha) return { problem: "origin/main does not resolve in the backlog repo" };
+      const text = await this.git.show(backlogRepo.path, sha, BACKLOG_PATH);
+      if (text === null) return { problem: `${BACKLOG_PATH} does not exist at origin/main` };
+      const parsed = parseBacklog(text);
+      if ("problem" in parsed) return { problem: `backlog at ${sha.slice(0, 12)}: ${parsed.problem}` };
+      const states = new Map<string, ScopeState>();
+      for (const item of parsed.items) {
+        const repo = this.cfg.repos[item.repo];
+        if (!repo) { states.set(item.id, "unknown"); continue; }
+        try {
+          const s = prState(await github.listPullsForHead(repo.github, `os/${item.id}`));
+          states.set(item.id, s === "merged" ? "done" : s === "open" ? "in review" : "remaining");
+        } catch { states.set(item.id, "unknown"); }
+      }
+      let dayStartIds: Set<string> | undefined;
+      const base = await this.git.lastCommitBefore(backlogRepo.path, sha, `${today}T00:00:00Z`);
+      const baseText = base ? await this.git.show(backlogRepo.path, base, BACKLOG_PATH) : null;
+      const baseParsed = baseText === null ? undefined : parseBacklog(baseText);
+      if (baseParsed && "items" in baseParsed) dayStartIds = new Set(baseParsed.items.map((i) => i.id));
+      const r = summariseScope(parsed.items, states, dayStartIds);
+      return { day: today, backlogSha: sha, scope: r.summary, items: r.items };
+    } catch (err) {
+      return { problem: `scope read failed: ${err instanceof Error ? err.message : String(err)}` };
     }
   }
 
