@@ -74,10 +74,12 @@ export const AA_SPEED_SCALE_MAX = 200; // output tokens/s that maps to a 1.0 spe
  * to this many UNMATCHED rows whose creator is Anthropic, as `{ id, slug, name }`
  * plus the distinct creator ids seen. It is the evidence `AA_MODEL_MAP` must be
  * grounded in: the map is edited from this list, never from a guessed slug.
- * Bounded so a large catalog cannot grow the refresh log; no other row field
+ * 2026-11-19: the first list was cut at 50 and hid 18 of 68 Anthropic rows,
+ * including some 5.5 effort rows, so the cap is now 200. Bounded so a large
+ * catalog cannot grow the refresh log; no other row field
  * (evaluations, pricing, performance) is ever copied — this is not the payload.
  */
-export const AA_DIAGNOSTIC_LIMIT = 50;
+export const AA_DIAGNOSTIC_LIMIT = 200;
 /** Per-field cap for a diagnostic string; AA ids/slugs/names are far shorter. */
 const AA_DIAGNOSTIC_FIELD_MAX = 120;
 /** Distinct Anthropic creator ids recorded (AA may key the creator by UUID). */
@@ -119,7 +121,39 @@ export interface AaModelMapEntry {
   /** Why this AA `(id, creator)` is the same model as this catalog identity,
    *  including the benchmark configuration assumed. */
   evidence: string;
+  /**
+   * The reasoning-effort configuration AA benchmarked under this id. Set on every
+   * 5.x row (AA scores each effort as its own id). It is recorded on the prior
+   * (`provenance.benchmark.configuration = "effort=<x>"`) and K13 withholds such
+   * a prior: `ExecutionIdentity` records no effort, so no run can be shown to
+   * match it (K8 doc §17a). Absent on the older "base configuration" entries.
+   */
+  effort?: AaEffort;
 }
+export type AaEffort = 'max' | 'xhigh' | 'high' | 'medium' | 'low';
+/**
+ * One AA effort row for a seeded Anthropic model (grounded 2026-11-19 from the
+ * refresh grounding list; `aaCreatorId` is the creator id that list recorded).
+ * The catalog identity is the model the AA row names, with the effort kept on the
+ * prior rather than in the identity, so no effort-specific score can reach a run
+ * (K13 withholds effort-tagged priors; K8 doc §17a).
+ */
+const AA_ANTHROPIC_CREATOR_ID = 'f0aa413f-e8ae-4fcd-9c48-0e049f4f3128';
+function aaEffortRow(aaId: string, slug: string, modelId: string, effort: AaEffort): AaModelMapEntry {
+  return {
+    aaId,
+    aaCreatorId: AA_ANTHROPIC_CREATOR_ID,
+    provider: 'anthropic',
+    modelId,
+    aaSlugHint: slug,
+    effort,
+    evidence:
+      `AA lists this id under its Anthropic creator id as ${slug}, the ${effort}-effort configuration of ${modelId}; ` +
+      'copied from a refresh grounding list. The score is recorded with its effort and is not attributed to any run, ' +
+      'because the plane records no effort for an execution.',
+  };
+}
+
 export const AA_MODEL_MAP: AaModelMapEntry[] = [
   {
     aaId: 'claude-4-1-opus',
@@ -141,6 +175,42 @@ export const AA_MODEL_MAP: AaModelMapEntry[] = [
       'AA lists Anthropic Claude Sonnet 4.5 under this id; catalog id is the K7 price-seed identity for the same model. ' +
       'Base (non-effort) configuration — an AA "…max"/effort variant has its own id and is left unmatched.',
   },
+  {
+    // 4.x has no effort ladder in the list: AA scores 4.5 Sonnet as separate non-reasoning and reasoning rows.
+    aaId: '91cb6144-4937-4e4e-aeda-b4341d355c10',
+    aaCreatorId: AA_ANTHROPIC_CREATOR_ID,
+    provider: 'anthropic',
+    modelId: 'claude-sonnet-4-5',
+    aaSlugHint: 'claude-4-5-sonnet',
+    evidence:
+      'AA lists Claude 4.5 Sonnet (Non-reasoning) under this id and its Anthropic creator id; copied from the 2026-11-19 refresh grounding list. ' +
+      'Non-reasoning configuration; the reasoning row has its own id (90e078f2-…) and is left unmatched.',
+  },
+  // Claude Fable 5.1: AA scores each effort as its own id.
+  aaEffortRow('3e87c73e-a257-495e-9730-367a66229811', 'claude-fable-5-1', 'claude-fable-5-1', 'max'),
+  aaEffortRow('9b166bf3-42db-4f63-8338-1c4a1244ffe8', 'claude-fable-5-1-xhigh', 'claude-fable-5-1', 'xhigh'),
+  aaEffortRow('9d7d72cd-d95d-45a0-b109-4ad292c9aabd', 'claude-fable-5-1-high', 'claude-fable-5-1', 'high'),
+  aaEffortRow('3b7de71c-e034-4591-8ca6-6b6be2fa471f', 'claude-fable-5-1-medium', 'claude-fable-5-1', 'medium'),
+  aaEffortRow('05776db7-f5c0-40f7-b824-079160f8cfa8', 'claude-fable-5-1-low', 'claude-fable-5-1', 'low'),
+  // Claude Opus 5.5: AA scores each effort as its own id.
+  aaEffortRow('2f3c4dc9-a450-4303-8697-0237257cf08f', 'claude-opus-5-5', 'claude-opus-5-5', 'max'),
+  aaEffortRow('4416ca93-fde6-4b7b-abbc-3a6be109cc3d', 'claude-opus-5-5-low', 'claude-opus-5-5', 'low'),
+  // Claude Opus 5: AA scores each effort as its own id.
+  aaEffortRow('b8fc61f7-5e9a-49e6-8547-6ac56db24627', 'claude-opus-5', 'claude-opus-5', 'max'),
+  aaEffortRow('1305c921-7aaa-4d6d-99b5-99b3acf15e19', 'claude-opus-5-xhigh', 'claude-opus-5', 'xhigh'),
+  aaEffortRow('712be54a-77ae-41b2-9a58-21181479d6ee', 'claude-opus-5-high', 'claude-opus-5', 'high'),
+  aaEffortRow('20928ba9-3a3f-415f-9519-b84ff64ecf34', 'claude-opus-5-low', 'claude-opus-5', 'low'),
+  // Claude Sonnet 5.5: AA scores each effort as its own id.
+  aaEffortRow('b171d979-5ec1-45de-b8b9-db1ee65e77ec', 'claude-sonnet-5-5', 'claude-sonnet-5-5', 'max'),
+  aaEffortRow('975aeaef-50bd-4a65-9c73-f1015adcd4d4', 'claude-sonnet-5-5-xhigh', 'claude-sonnet-5-5', 'xhigh'),
+  aaEffortRow('268525e2-f873-4178-bc07-e6a0ee1f002d', 'claude-sonnet-5-5-high', 'claude-sonnet-5-5', 'high'),
+  aaEffortRow('042e8a37-fcd0-40f4-8f41-99215fb68eda', 'claude-sonnet-5-5-medium', 'claude-sonnet-5-5', 'medium'),
+  aaEffortRow('bbc2ffea-cf6b-43be-8c41-1769347e234d', 'claude-sonnet-5-5-low', 'claude-sonnet-5-5', 'low'),
+  // Claude Sonnet 5: AA scores each effort as its own id.
+  aaEffortRow('23c86e4a-c769-43c0-a056-79e3cd15834f', 'claude-sonnet-5', 'claude-sonnet-5', 'max'),
+  aaEffortRow('99f376bf-cbcb-4124-bf3e-6b0a4e6e9bea', 'claude-sonnet-5-xhigh', 'claude-sonnet-5', 'xhigh'),
+  aaEffortRow('ba0224cf-0351-4f56-8508-b3f1a740ae4a', 'claude-sonnet-5-high', 'claude-sonnet-5', 'high'),
+  aaEffortRow('142b93bf-09c4-42dc-9c3a-50b1a222cbd4', 'claude-sonnet-5-low', 'claude-sonnet-5', 'low'),
 ];
 
 /**
@@ -345,6 +415,7 @@ export function parseAaBody(
   const byId = new Map(AA_MODEL_MAP.map((m) => [m.aaId, m]));
 
   const observations: CatalogObservation[] = [];
+  const byModel = new Map<string, CatalogObservation>();
   let mapped = 0;
   let unmatched = 0;
   let creatorMismatch = 0;
@@ -403,7 +474,7 @@ export function parseAaBody(
       } else {
         const normalized = normalizeBenchmark({ value: codingRaw, direction: 'higher', scaleMax: AA_CODING_SCALE_MAX });
         if (normalized !== undefined) {
-          priors.push(codingPrior(id, slug, codingRaw, normalized, release, modelReleaseDate, observedAt, nowMs));
+          priors.push(codingPrior(id, slug, codingRaw, normalized, release, modelReleaseDate, observedAt, nowMs, target.effort));
         }
       }
     }
@@ -413,7 +484,7 @@ export function parseAaBody(
     if (speedRaw !== undefined) {
       const normalized = normalizeBenchmark({ value: speedRaw, direction: 'higher', scaleMax: AA_SPEED_SCALE_MAX });
       if (normalized !== undefined) {
-        priors.push(speedPrior(id, slug, speedRaw, normalized, modelReleaseDate, observedAt, nowMs));
+        priors.push(speedPrior(id, slug, speedRaw, normalized, modelReleaseDate, observedAt, nowMs, target.effort));
       }
     }
 
@@ -422,7 +493,16 @@ export function parseAaBody(
       continue;
     }
     mapped += 1;
-    observations.push({
+    // The catalog keeps ONE evidence row per (provider, model, source), so several AA
+    // rows for one model (its efforts) must arrive as one observation carrying all
+    // their priors; a second observation would silently replace the first.
+    const key = `${target.provider}\u0000${target.modelId}`;
+    const existing = byModel.get(key);
+    if (existing) {
+      existing.benchmarks!.push(...priors);
+      continue;
+    }
+    const obs: CatalogObservation = {
       modelId: target.modelId,
       provider: target.provider,
       // Entry-level provenance mirrors the priors' — but this observation never
@@ -430,7 +510,9 @@ export function parseAaBody(
       // rows), so this is only carried for the unmerged evidence row.
       provenance: priors[0]!.provenance,
       benchmarks: priors,
-    });
+    };
+    byModel.set(key, obs);
+    observations.push(obs);
   }
 
   const parts = [`${mapped} mapped`, `${unmatched} unmatched`];
@@ -460,6 +542,7 @@ function codingPrior(
   modelReleaseDate: string | undefined,
   observedAt: string,
   nowMs: number,
+  effort?: AaEffort,
 ): BenchmarkPrior {
   const provenance: Provenance = {
     source: 'external:artificial-analysis',
@@ -467,6 +550,7 @@ function codingPrior(
     observedAt,
     benchmark: {
       release: `intelligence-index-${release}`,
+      ...(effort ? { configuration: `effort=${effort}` } : {}),
       category: 'coding',
       ...(aaSlug ? { sourceSlug: aaSlug } : {}),
       ...(modelReleaseDate ? { modelReleaseDate } : {}),
@@ -493,6 +577,7 @@ function speedPrior(
   modelReleaseDate: string | undefined,
   observedAt: string,
   nowMs: number,
+  effort?: AaEffort,
 ): BenchmarkPrior {
   const provenance: Provenance = {
     source: 'external:artificial-analysis',
@@ -500,7 +585,7 @@ function speedPrior(
     observedAt,
     benchmark: {
       release: 'aa-speed-measurement',
-      configuration: AA_SPEED_CONFIGURATION,
+      configuration: effort ? `${AA_SPEED_CONFIGURATION}; effort=${effort}` : AA_SPEED_CONFIGURATION,
       category: 'speed',
       ...(aaSlug ? { sourceSlug: aaSlug } : {}),
       ...(modelReleaseDate ? { modelReleaseDate } : {}),

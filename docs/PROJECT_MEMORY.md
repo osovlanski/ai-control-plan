@@ -959,3 +959,11 @@ Migration 041 adds `runs.harness_cli_version` (TEXT NULL, forward only, no backf
 - **Decision:** the CLI writes nothing locally. It never calls `loadConfig` (which creates a default config and a credential on first boot); `readApiEndpoint()` in `config.ts` reads only `api.host` / `api.port`. Credential: the workspace `api-credential.json` (same file Cockpit reads, validated 0600/owner), newest active secret holding the command's scope. It refuses any non-loopback or non-`http:` origin before reading the credential.
 - **Decision:** text and the config snippet come from the web's `apps/web/src/shell/runtime-registry.ts` (imported, not copied), so both clients word every state identically. `aos runtimes test` exits 1 unless the result is `pass`.
 - **Parity:** `apps/cli/test/parity.test.ts` observes calls (web client against a recording fetch, CLI against a real plane) instead of trusting declarations. `GET /api/cooldowns` is a parity row although design §E omits it (the Agents card shows cooldowns, so `show` does). The Agents file's K7 model-catalogue calls are explicit, reasoned exemptions.
+
+## 2026-11-19 — K8 grounded AA effort rows (SHIPPED on merge)
+
+- **Defect found by the live list:** the grounding list was cut at 50 and hid 18 of 68 Anthropic rows. `AA_DIAGNOSTIC_LIMIT` is now 200.
+- **Decision (itay, one row per effort):** `AA_MODEL_MAP` gains 21 grounded rows (creator id from the list): 20 effort rows with an `effort` field and Sonnet 4.5 Non-reasoning, untagged. The prior records `effort=<x>` in its benchmark configuration and K13 withholds every effort-tagged prior, because K13 attaches all of an entry's priors and a run records no effort; mapping several efforts onto one entry would blend them. So the scores are stored and visible but still attach to nothing.
+- **Found while driving:** the catalog keeps one evidence row per (provider, model, source), so several AA rows for one model must reach it as one observation; the parser merges them.
+- **Open:** add the missing effort rows (Opus 5.5 medium/high/xhigh, Opus 5 medium, Sonnet 5 medium) from the next refresh's list. Attaching a prior needs an effort dimension on `ExecutionIdentity`. Detail in `docs/agentic-os-k8-artificial-analysis.md` §17, §17b.
+

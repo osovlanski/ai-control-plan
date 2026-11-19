@@ -324,7 +324,7 @@ describe('unmatched Anthropic grounding diagnostic (§17)', () => {
     expect(unmatchedAnthropic.rows).toEqual([{ id: UUID(1), slug: aaId, name: 'Claude Opus 4.1' }]);
     expect(unmatchedAnthropic.creatorIds).toEqual([ANTHROPIC.id]);
     // The count line carries the same list, readable from model_catalog_refresh.
-    expect(detail).toContain('anthropic unmatched 1 (listed 1, cap 50)');
+    expect(detail).toContain(`anthropic unmatched 1 (listed 1, cap ${AA_DIAGNOSTIC_LIMIT})`);
     expect(detail).toContain(JSON.stringify({ id: UUID(1), slug: aaId, name: 'Claude Opus 4.1' }));
   });
 
@@ -344,11 +344,12 @@ describe('unmatched Anthropic grounding diagnostic (§17)', () => {
     const data = Array.from({ length: AA_DIAGNOSTIC_LIMIT + 10 }, (_, i) =>
       live({ id: UUID(100 + i), slug: `claude-s-${i}`, name: `Claude ${i}` }));
     const { unmatchedAnthropic, detail } = parseRows(data);
-    expect(AA_DIAGNOSTIC_LIMIT).toBe(50);
-    expect(unmatchedAnthropic.total).toBe(60);
-    expect(unmatchedAnthropic.rows).toHaveLength(50);
-    expect(detail).toContain('anthropic unmatched 60 (listed 50, cap 50)');
-    expect(detail).not.toContain('claude-s-50');
+    // 200: the first live list (68 Anthropic rows) was cut at 50 and hid 18 of them.
+    expect(AA_DIAGNOSTIC_LIMIT).toBe(200);
+    expect(unmatchedAnthropic.total).toBe(AA_DIAGNOSTIC_LIMIT + 10);
+    expect(unmatchedAnthropic.rows).toHaveLength(AA_DIAGNOSTIC_LIMIT);
+    expect(detail).toContain(`anthropic unmatched ${AA_DIAGNOSTIC_LIMIT + 10} (listed ${AA_DIAGNOSTIC_LIMIT}, cap ${AA_DIAGNOSTIC_LIMIT})`);
+    expect(detail).not.toContain(`claude-s-${AA_DIAGNOSTIC_LIMIT}"`);
   });
 
   it('a creator-mismatch row on a mapped id is listed too; a mapped row is not', () => {
@@ -387,7 +388,7 @@ describe('unmatched Anthropic grounding diagnostic (§17)', () => {
     expect(urls).toEqual([`${AA_ENDPOINT}?page=1`, `${AA_ENDPOINT}?page=2`]);
     const rec = built.modelCatalog.refreshes().find((r) => r.source === 'artificial-analysis')!;
     expect(rec.status).toBe('ok');
-    expect(rec.detail).toContain('2 page(s); 3 rows: 0 mapped, 3 unmatched; anthropic unmatched 2 (listed 2, cap 50)');
+    expect(rec.detail).toContain(`2 page(s); 3 rows: 0 mapped, 3 unmatched; anthropic unmatched 2 (listed 2, cap ${AA_DIAGNOSTIC_LIMIT})`);
     expect(rec.detail).toContain('"slug":"claude-opus-5-5-high"');
     expect(rec.detail).not.toContain('gpt-x');
     expect(rec.detail).not.toContain(FAKE_KEY);
@@ -711,5 +712,93 @@ describe('K13 readiness — candidate availability is derived, not granted', () 
     expect(sonnet.availableVia).toEqual([]);
     expect(codingOf(sonnet)).toBeTruthy();
     expect(sonnet.provenance.source).not.toBe('external:artificial-analysis');
+  });
+});
+
+// --- grounded effort rows (2026-11-19): one AA row per effort ------------------
+
+describe('grounded AA effort rows', () => {
+  const CREATOR = 'f0aa413f-e8ae-4fcd-9c48-0e049f4f3128';
+  const efforts = AA_MODEL_MAP.filter((m) => m.effort);
+  const parse = (data: unknown[]) =>
+    parseAaBody({ intelligence_index_version: 4.1, data }, '2030-01-01T00:00:00Z', Date.parse('2030-01-01T00:00:00Z'));
+  const aaRow = (aaId: string, over: Record<string, unknown> = {}) => ({
+    id: aaId, slug: 'whatever', name: 'Whatever', model_creator: { id: CREATOR, name: 'Anthropic', slug: 'anthropic' },
+    evaluations: { artificial_analysis_coding_index: 70 }, performance: { median_output_tokens_per_second: 100 },
+    ...over,
+  });
+
+  it('every effort row is a distinct id under the recorded creator and names a seeded Anthropic model', () => {
+    expect(efforts).toHaveLength(20);
+    expect(new Set(AA_MODEL_MAP.map((m) => m.aaId)).size).toBe(AA_MODEL_MAP.length);
+    for (const m of efforts) {
+      expect(m.aaCreatorId).toBe(CREATOR);
+      expect(m.provider).toBe('anthropic');
+      expect(['claude-fable-5-1', 'claude-opus-5-5', 'claude-opus-5', 'claude-sonnet-5-5', 'claude-sonnet-5']).toContain(m.modelId);
+      expect(m.aaId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+      expect(m.evidence).toContain(`${m.effort}-effort`);
+    }
+    // One row per effort per model: no model has the same effort twice.
+    const seen = new Set(efforts.map((m) => `${m.modelId}/${m.effort}`));
+    expect(seen.size).toBe(efforts.length);
+  });
+
+  it('maps each effort row to its model and tags the prior with that effort, never blending efforts', () => {
+    const max = efforts.find((m) => m.modelId === 'claude-opus-5-5' && m.effort === 'max')!;
+    const low = efforts.find((m) => m.modelId === 'claude-opus-5-5' && m.effort === 'low')!;
+    const { observations, detail } = parse([
+      aaRow(max.aaId, { evaluations: { artificial_analysis_coding_index: 80 } }),
+      aaRow(low.aaId, { evaluations: { artificial_analysis_coding_index: 40 } }),
+    ]);
+    expect(detail).toContain('2 mapped, 0 unmatched');
+    // One observation for the model: the catalog keeps a single evidence row per (provider, model,
+    // source), so two observations would let the later effort replace the earlier one.
+    expect(observations).toHaveLength(1);
+    expect(observations[0]!.modelId).toBe('claude-opus-5-5');
+    const priors = observations[0]!.benchmarks!.map((b) => [b.dimension, b.raw.value, b.provenance.benchmark?.configuration, b.sourceModelId]);
+    expect(priors).toEqual([
+      ['coding', 80, 'effort=max', max.aaId],
+      ['speed', 100, `${AA_SPEED_CONFIGURATION}; effort=max`, max.aaId],
+      ['coding', 40, 'effort=low', low.aaId],
+      ['speed', 100, `${AA_SPEED_CONFIGURATION}; effort=low`, low.aaId],
+    ]);
+  });
+
+  it('stored through the catalog, every effort of a model survives a refresh (none replaces another)', async () => {
+    const max = efforts.find((m) => m.modelId === 'claude-opus-5-5' && m.effort === 'max')!;
+    const low = efforts.find((m) => m.modelId === 'claude-opus-5-5' && m.effort === 'low')!;
+    const data = [aaRow(max.aaId, { evaluations: { artificial_analysis_coding_index: 80 } }), aaRow(low.aaId, { evaluations: { artificial_analysis_coding_index: 40 } })];
+    await boot([createArtificialAnalysisSource({ apiKey: undefined, now, fixtureBody: { intelligence_index_version: 4.1, data } })]);
+    await built.modelCatalog.refresh();
+    const entry = built.modelCatalog.list().find((m) => m.modelKey === 'anthropic:claude-opus-5-5')!;
+    expect((entry.benchmarkPriors ?? []).filter((p) => p.dimension === 'coding').map((p) => [p.provenance.benchmark?.configuration, p.raw.value])).toEqual([
+      ['effort=max', 80],
+      ['effort=low', 40],
+    ]);
+  });
+
+  it('the grounded Sonnet 4.5 non-reasoning row maps untagged; its reasoning row stays unmatched', () => {
+    const { observations, unmatchedAnthropic } = parse([
+      aaRow('91cb6144-4937-4e4e-aeda-b4341d355c10', { slug: 'claude-4-5-sonnet', name: 'Claude 4.5 Sonnet (Non-reasoning)' }),
+      aaRow('90e078f2-051b-4c63-8919-76618971cb3f', { slug: 'claude-4-5-sonnet-thinking', name: 'Claude 4.5 Sonnet (Reasoning)' }),
+    ]);
+    expect(observations.map((o) => o.modelId)).toEqual(['claude-sonnet-4-5']);
+    expect(observations[0]!.benchmarks![0]!.provenance.benchmark?.configuration).toBeUndefined();
+    expect(unmatchedAnthropic.rows.map((r) => r.slug)).toEqual(['claude-4-5-sonnet-thinking']);
+  });
+
+  it('the same ids under another creator, or a slug alone, never map', () => {
+    const row0 = efforts[0]!;
+    const wrongCreator = parse([aaRow(row0.aaId, { model_creator: { id: 'someone-else' } })]);
+    expect(wrongCreator.observations).toHaveLength(0);
+    expect(wrongCreator.detail).toContain('1 creator-mismatch');
+    const slugOnly = parse([aaRow('00000000-0000-4000-8000-000000000000', { slug: row0.aaSlugHint })]);
+    expect(slugOnly.observations).toHaveLength(0);
+  });
+
+  it('a row the map does not list (an effort that was cut off the first list) stays unmatched and is listed', () => {
+    const { observations, unmatchedAnthropic } = parse([aaRow('11111111-1111-4111-8111-111111111111', { slug: 'claude-opus-5-5-high', name: 'Claude Opus 5.5 (High)' })]);
+    expect(observations).toHaveLength(0);
+    expect(unmatchedAnthropic.rows.map((r) => r.slug)).toEqual(['claude-opus-5-5-high']);
   });
 });
