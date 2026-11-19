@@ -4,6 +4,11 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+patchedDependencies:
+  '@openai/codex-sdk@0.154.0':
+    hash: 3a48f6c73fcfde286b3222b3055f826a4edeec3ecf7b13d2f2eefaeb55524946
+    path: patches/@openai__codex-sdk@0.154.0.patch
+
 importers:
 
   .:
@@ -173,7 +178,7 @@ importers:
         version: 3.1116.0
       '@openai/codex-sdk':
         specifier: 0.154.0
-        version: 0.154.0
+        version: 0.154.0(patch_hash=3a48f6c73fcfde286b3222b3055f826a4edeec3ecf7b13d2f2eefaeb55524946)
     devDependencies:
       '@types/node':
         specifier: ^22.20.1
@@ -2912,7 +2917,7 @@ snapshots:
   '@napi-rs/lzma-linux-x64-gnu@1.5.1':
     optional: true
 
-  '@openai/codex-sdk@0.154.0':
+  '@openai/codex-sdk@0.154.0(patch_hash=3a48f6c73fcfde286b3222b3055f826a4edeec3ecf7b13d2f2eefaeb55524946)':
     dependencies:
       '@openai/codex': 0.154.0
 

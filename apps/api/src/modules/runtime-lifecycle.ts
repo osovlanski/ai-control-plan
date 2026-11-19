@@ -18,7 +18,7 @@ import type { CapabilityManifest } from "@agent-plane/core";
 import type { ResolvedConfig } from "../config.js";
 import type { Db } from "../db/index.js";
 import { INLINE_SECRET } from "../registry-contract.js";
-import { probeVersion } from "./capability-probe.js";
+import { runVersion } from "./run-version.js";
 import type { AssistantRow, OperatorState } from "./registry.js";
 import { conformanceRequiredFor, RUNTIME_CATALOG, runtimeFor } from "./runtime-catalog.js";
 
@@ -200,13 +200,18 @@ export function deriveLifecycle(facts: LifecycleFacts): AssistantLifecycle {
 
 /** The SDK resolver can fail before --version runs if its platform package is absent. */
 async function probeCodexInstallation(): Promise<AssistantLifecycle["installed"]> {
-  let version: string;
+  let binary: string;
   try {
-    version = await probeVersion(codexSdkBinary());
+    binary = codexSdkBinary();
   } catch {
-    version = "unavailable";
+    // The pinned SDK throws when it cannot select a native CLI on this host.
+    return { state: "missing", observedAt: new Date().toISOString() };
   }
-  return { state: version === "unavailable" ? "missing" : "present", observedAt: new Date().toISOString() };
+  const { kind } = await runVersion(binary, 1500);
+  let state: InstalledState = "unknown";
+  if (kind === "ok" || kind === "empty") state = "present";
+  if (kind === "missing" || kind === "not-runnable") state = "missing";
+  return { state, observedAt: new Date().toISOString() };
 }
 
 /** Reads the facts for registry rows from the database and derives their lifecycles. */

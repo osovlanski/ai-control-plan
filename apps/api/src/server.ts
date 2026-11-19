@@ -197,8 +197,9 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   const telemetry = new TelemetryService(db);
   const retention = new EventRetention(db);
   const repositoryIdentities = new RepositoryIdentityRegistry(db);
-  // find-my-way counts UTF-16 code units. A contract-valid assistant ID can use two per code point.
-  const routerOptions = { maxParamLength: 2 * MAX_ASSISTANT_ID_LENGTH };
+  // find-my-way counts decoded UTF-16 units. Let even the first invalid code-point length
+  // reach the assistant schema (400), including IDs made entirely of surrogate pairs.
+  const routerOptions = { maxParamLength: 2 * (MAX_ASSISTANT_ID_LENGTH + 1) };
   // pino's default `base` adds the machine's hostname to every line; the plane never logs hostnames.
   const app = Fastify({ routerOptions, logger: { base: { pid: process.pid }, stream: { write: (line) => process.stdout.write(redactSecrets(line)) }, serializers: { req: (r) => ({ method: r.method, url: String(r.url).split("?")[0] }), res: (r) => ({ statusCode: r.statusCode }) }, redact: ["req.headers.authorization", "req.headers.cookie", "res.headers[\"set-cookie\"]"] } });
   const credentials = new CredentialStore(credentialPath(config.dir), now);

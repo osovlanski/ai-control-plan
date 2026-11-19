@@ -66,12 +66,19 @@ Separate states, each with its own evidence. No state implies the next.
 | --- | --- | --- |
 | `catalogued` | code | this build has a descriptor for the provider |
 | `configured` | config file | the workspace config defines this assistant now |
-| `installed.state` | `capability_probes`, or a live check of the SDK-bundled Codex executable for a configured OpenRouter assistant | `present` (with `version` when it is safe to repeat), `missing` (the CLI did not run), `in-process` (no CLI), `unknown` (no probe yet) |
+| `installed.state` | `capability_probes`, or a live check of the SDK-bundled Codex executable for a configured OpenRouter assistant | `present` (with `version` when it is safe to repeat), `missing` (the CLI did not run), `in-process` (no CLI), `unknown` (no conclusive observation) |
 | `auth.state` | the adapter's manifest | `core.auth.state`, or `unknown` when no manifest exists; `source` is the manifest's evidence source. Since 1.1 the manifest itself may say `unknown`: installed, sign-in not verified (Cursor) |
 | `conformance` | `runtime_conformance` | see below |
 | `enablement` | config + overlay | `config` (config `enabled`), `operator` (`none` or `disabled`), `effective` = config AND operator is not `disabled` |
 | `readiness` | derived | see below |
 | `requestDependent` | fixed list | constraints evaluated per request, which `readiness` does not cover |
+
+For OpenRouter, the live installation check uses the same native executable resolution as a fresh
+Codex SDK launch. A successful `--version` exit gives `present`. If the SDK cannot select a CLI,
+or the selected file is missing or cannot execute, the state is `missing`. An inconclusive
+version check (for example, a timeout or nonzero exit) gives `unknown`, as does a cached assistant
+removed from configuration. This observation neither publishes CLI output nor updates the capability
+fingerprint.
 
 ### Readiness is not eligibility
 

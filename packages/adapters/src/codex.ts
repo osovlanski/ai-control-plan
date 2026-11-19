@@ -72,7 +72,6 @@ export interface CodexAdapterOptions {
  *   (codexPermissions) and prompt-on-escalation is refused at start.
  */
 export class CodexAdapter implements AgentAdapter {
-  private codex?: Codex;
   private readonly appServer?: CodexAppServerRuntime;
 
   get sessionInput() { return this.appServer?.sessionInput; }
@@ -184,8 +183,8 @@ export class CodexAdapter implements AgentAdapter {
    */
   private codexFor(run: RunSpec): Codex {
     const launch = run.profile?.launch;
-    // Registry initialization and describe() also run when the SDK binary is missing.
-    if (!launch || launch.harness !== "codex") return this.codex ??= new Codex(this.options.codex);
+    // The SDK selects its executable at construction. Resolve at launch, including after a package repair.
+    if (!launch || launch.harness !== "codex") return new Codex(this.options.codex);
     const secretEnv = mcpSecretEnv(run.profile, run.secretEnv);
     return new Codex({
       ...this.options.codex,

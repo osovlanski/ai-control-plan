@@ -1,8 +1,10 @@
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { execFile } from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import * as adapters from "@agent-plane/adapters";
 import { credentialPath, readCredential } from "../src/auth/credential-file.js";
 import { loadConfig } from "../src/config.js";
 import { openDb } from "../src/db/index.js";
@@ -153,8 +155,11 @@ it.each([
   ["128 ASCII", "a".repeat(128), 200],
   ["128 mixed code points", "a".repeat(127) + "🚀", 200],
   ["128 supplementary code points", "🚀".repeat(128), 200],
+  ["128 URL-reserved characters", "/%?#".repeat(32), 200],
   ["129 ASCII", "a".repeat(129), 400],
-  ["129 code points", "a".repeat(128) + "🚀", 400],
+  ["129 code points, 130 UTF-16 units", "a".repeat(128) + "🚀", 400],
+  ["129 code points, 257 UTF-16 units", "a" + "🚀".repeat(128), 400],
+  ["129 code points, 258 UTF-16 units", "🚀".repeat(129), 400],
 ] as const)("validates %s on every assistant-ID route", async (_label, id, status) => {
   const { request } = boot({ [id]: { provider: "fake" } });
   const list = await request("GET", "/api/assistants");
@@ -166,36 +171,21 @@ it.each([
   }
 });
 
-it("reports the OpenRouter SDK executable independently of PATH and cached capability evidence", async () => {
-  const { server, request, db } = boot({ router: { provider: "openrouter" } });
-  await server.registry.syncChanged("router");
-  const evidence = () => db.prepare("SELECT fingerprint, details, observed_at FROM capability_probes WHERE assistant_id = 'router'").get();
-  const original = evidence();
-  expect(original).toMatchObject({ fingerprint: expect.any(String), details: expect.stringContaining('"version":"in-process"') });
-  const sdkBinary = vi.spyOn(adapters, "codexSdkBinary").mockReturnValue(process.execPath);
-  vi.stubEnv("PATH", home); // no PATH codex; the absolute executable supports --version
-  try {
-    const installed = async () => {
-      const res = await request("GET", "/api/assistants/router/lifecycle");
-      expect(res.statusCode).toBe(200);
-      return res.json().installed.state;
-    };
-    expect(await installed()).toBe("present");
-    symlinkSync(process.execPath, join(home, process.platform === "win32" ? "codex.exe" : "codex"));
-    sdkBinary.mockReturnValue(join(home, "absent-sdk-binary"));
-    expect(await installed()).toBe("missing");
-    sdkBinary.mockImplementation(() => { throw new Error("SDK platform package missing"); });
-    expect(await installed()).toBe("missing");
-    expect(evidence()).toEqual(original);
-
-    await stop();
-    sdkBinary.mockClear().mockReturnValue(process.execPath);
-    const removed = boot({});
-    const response = await removed.request("GET", "/api/assistants/router/lifecycle");
-    expect(response.statusCode).toBe(200);
-    expect(response.json()).toMatchObject({ configured: false, installed: { state: "unknown" } });
-    expect(sdkBinary).not.toHaveBeenCalled();
-  } finally {
-    vi.unstubAllEnvs();
+it("rejects malformed UTF-8 and oversized decoded parameters at the router", async () => {
+  const { request } = boot();
+  for (const [segment, status] of [["%ED%A0%80", 400], ["%F0%9F", 400], ["a".repeat(259), 414]] as const) {
+    const response = await request("GET", `/api/assistants/${segment}/lifecycle`);
+    expect(response.statusCode, segment).toBe(status);
   }
 });
+
+it.skipIf(!["linux", "darwin"].includes(process.platform) || !["x64", "arm64"].includes(process.arch))(
+  "agrees with the OpenRouter SDK across packaged and legacy executable layouts", async () => {
+    await promisify(execFile)(process.execPath, ["--import", "tsx", fileURLToPath(new URL("./fixtures/openrouter-installation.mts", import.meta.url)), home], {
+      cwd: fileURLToPath(new URL("..", import.meta.url)),
+      // pnpm can add the real CLI package to Node's global require search paths.
+      env: { ...process.env, NODE_PATH: "" },
+      timeout: 60_000,
+    });
+  }, 65_000,
+);
