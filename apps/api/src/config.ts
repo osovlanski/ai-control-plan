@@ -634,6 +634,26 @@ export function workspaceName(env: NodeJS.ProcessEnv = process.env): string {
 }
 
 /**
+ * Where the active workspace's API listens and where its credential file lives, for a client on
+ * this machine (the `aos` CLI). Read-only: unlike `loadConfig` it creates no directory, default
+ * config or credential, and it validates nothing but `api.host` / `api.port`. A missing config file
+ * means the workspace defaults, which is what the plane would boot with.
+ */
+export function readApiEndpoint(env: NodeJS.ProcessEnv = process.env): { workspace: string; dir: string; host: string; port: number } {
+  const workspace = workspaceName(env);
+  const dir = join(configHome(env), workspace);
+  const configPath = join(dir, "config.yaml");
+  const defaults = defaultsFor(workspace).api;
+  if (!existsSync(configPath)) return { workspace, dir, host: defaults.host, port: defaults.port };
+  const raw: unknown = parse(readFileSync(configPath, "utf8"));
+  const api = (raw as { api?: { host?: unknown; port?: unknown } } | null)?.api;
+  const host = api?.host ?? defaults.host;
+  const port = api?.port ?? defaults.port;
+  if (typeof host !== "string" || !Number.isInteger(port)) throw new Error(`${configPath} api.host must be a string and api.port an integer`);
+  return { workspace, dir, host, port: port as number };
+}
+
+/**
  * Loads the active workspace config, creating a commented default on first boot.
  * Unknown keys are preserved-ignored; missing keys fall back to defaults so a
  * hand-edited partial file still boots.
