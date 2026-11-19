@@ -1,4 +1,17 @@
 /* Stable application boundaries; the existing Orbital design tokens are shared. */
+.task-routing { overflow-wrap: anywhere; }
+.task-routing > * + section, .task-routing > details,
+.task-routing > details > section {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--line);
+}
+.task-routing > section > h3 { font-size: 0.95rem; margin-bottom: 0.4rem; }
+.task-routing .mission-decision { margin: 0.9rem 0; }
+.task-routing .fine-print + .fine-print { margin-top: 0.3rem; }
+.task-routing summary { cursor: pointer; font-size: 0.875rem; }
+.task-routing .decision-evidence { margin-top: 0.8rem; }
+
 [hidden] { display: none !important; }
 .os-nav { text-decoration: none; min-height: 48px; }
 .os-nav:last-child { margin-top: 18px; }
