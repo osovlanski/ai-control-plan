@@ -1531,7 +1531,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   }, 60_000);
   publicationSweep.unref();
   heartbeat?.start();
-  app.addHook("onClose", async () => { clearInterval(leaseSweep); clearInterval(publicationSweep); heartbeat?.stop(); dispatcher.stop(); scheduler.stop(); });
+  app.addHook("onClose", async () => { clearInterval(leaseSweep); clearInterval(publicationSweep); heartbeat?.stop(); dispatcher.stop(); scheduler.stop(); await dispatcher.idle(); });
   // ---- Durable session-addressed conversational input (default OFF) ----
   //
   // The whole capability is behind `sessionInput.enabled`. While it is false
