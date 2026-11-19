@@ -20,7 +20,7 @@ import { generateOperateSecret, hashOperateSecret, operateSecretPath, readOperat
 import { AGENT_USER_DEFAULTS, loadConfig, worktreesRoot, type ResolvedConfig } from "../src/config.js";
 import { openDb, type Db } from "../src/db/index.js";
 import { AGENT_UNITS_DIR, reapStrayAgentUnits } from "../src/modules/harness/provider-processes.js";
-import { CommandVerifier } from "../src/modules/harness/verification-providers.js";
+import { CommandVerifier, DEFAULT_VERIFICATION_PROVIDERS } from "../src/modules/harness/verification-providers.js";
 import { createTaskWorktree } from "../src/repo/git.js";
 import { buildServer, type BuiltServer } from "../src/server.js";
 
@@ -263,6 +263,18 @@ describe("CommandVerifier", () => {
     );
     expect(outcome.status).toBe("skipped");
     expect(reached).toBe(false);
+  });
+
+  it("a registry run over required command checks still passes when they are refused (G15 sixth run)", async () => {
+    const run = await DEFAULT_VERIFICATION_PROVIDERS.run(
+      [
+        { checkId: "c1", name: "test", kind: "tests", command: "npm test", required: true },
+        { checkId: "c2", name: "lint", kind: "lint", command: "npm run lint", required: true },
+      ],
+      { authority: {} as never, worktreePath: "/nowhere", repositoryCommands: "refused", remainingMs: () => 1000 },
+    );
+    expect(run?.evaluation.passed).toBe(true);
+    expect(run?.evaluation.checks.map((c) => [c.status, c.required])).toEqual([["skipped", false], ["skipped", false]]);
   });
 });
 

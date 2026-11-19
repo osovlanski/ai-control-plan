@@ -32,6 +32,8 @@ export interface VerificationProviderOutcome {
   status: VerificationCheckResult["status"];
   summary: string;
   ref?: string;
+  /** Report the check without letting it decide the run (a skip by design, not a failure). */
+  notRequired?: boolean;
   artifacts?: ExecutionArtifact[];
 }
 
@@ -54,7 +56,7 @@ function checkResult(spec: VerificationSpec, provider: VerificationProviderOutco
     kind: spec.kind,
     passed: provider.status === "passed",
     status: provider.status,
-    required: spec.required,
+    required: provider.notRequired ? false : spec.required,
     summary: redactText(provider.summary).slice(0, 2000),
     ...(provider.ref ? { ref: redactText(provider.ref).slice(0, 2000) } : {}),
   } as VerificationCheckResult;
@@ -124,7 +126,9 @@ export class CommandVerifier implements VerificationProvider {
   async run(spec: VerificationSpec, context: VerificationProviderContext): Promise<VerificationProviderOutcome> {
     // Before anything else: nothing below may be reached for an agent task (G21).
     if (context.repositoryCommands === "refused") {
-      return outcome("skipped", "skipped (repository commands never run as the plane user for an agent task; acceptance runs them isolated)");
+      // By design, not a failure: acceptance runs them isolated and is the real gate. A required
+      // skip would fail the whole run before acceptance could look at the work.
+      return { ...outcome("skipped", "skipped (repository commands never run as the plane user for an agent task; acceptance runs them isolated)"), notRequired: true };
     }
     if (!context.authority || !context.worktreePath) return outcome("skipped", "skipped (no workspace authority)");
     if (!spec.command) return outcome("skipped", "skipped (no command)");
