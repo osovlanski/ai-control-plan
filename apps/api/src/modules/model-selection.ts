@@ -159,6 +159,12 @@ export function recommendModel(
         advisories.push('context window unknown (advisory: the task declares no minimum)');
       }
       // Not an exclusion: a withheld prior only changes what evidence is offered.
+      const effortTagged = (entry?.benchmarkPriors ?? []).filter(isEffortTagged).length;
+      if (identity.resolvedModelKey && effortTagged > 0) {
+        advisories.push(
+          `${effortTagged} benchmark prior(s) withheld: each scores one reasoning effort and the plane records no effort for a run`,
+        );
+      }
       if (!baseConfig.fresh && identity.resolvedModelKey && (entry?.benchmarkPriors?.length ?? 0) > 0) {
         advisories.push(`benchmark prior withheld: ${baseConfig.reason}`);
       }
@@ -358,6 +364,11 @@ export interface BaseConfigAttestation {
   reason: string;
 }
 
+/** An AA prior scored at one named reasoning effort (`configuration` carries `effort=<x>`). */
+export function isEffortTagged(prior: { provenance: { benchmark?: { configuration?: string } } }): boolean {
+  return /(^|; )effort=/.test(prior.provenance.benchmark?.configuration ?? '');
+}
+
 /**
  * Whether the operator's `models.selection.baseConfigAttestedAt` currently
  * vouches that their own Claude configuration sets no effort or thinking
@@ -415,6 +426,9 @@ function gatherEvidence(
     // settings. Benchmark priors attach only under a fresh attestation that they
     // set none; the price prior is a tariff, not a measurement at a configuration.
     for (const prior of baseConfig.fresh ? (entry.benchmarkPriors ?? []) : []) {
+      // An effort-tagged AA row (K8 doc §17a) describes one reasoning effort. A run
+      // records no effort, so it can never be shown to match: withhold, never blend.
+      if (isEffortTagged(prior)) continue;
       const target = evidence[prior.dimension];
       if (!target) continue;
       target.priors.push({
