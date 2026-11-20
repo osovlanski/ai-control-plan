@@ -198,6 +198,8 @@ export function deriveLifecycle(facts: LifecycleFacts): AssistantLifecycle {
   };
 }
 
+const INSTALLATION_TTL_MS = 60_000;
+
 /** The SDK resolver can fail before --version runs if its platform package is absent. */
 async function probeCodexInstallation(): Promise<AssistantLifecycle["installed"]> {
   let binary: string;
@@ -217,6 +219,7 @@ async function probeCodexInstallation(): Promise<AssistantLifecycle["installed"]
 /** Reads the facts for registry rows from the database and derives their lifecycles. */
 export class RuntimeLifecycleReader {
   private codexInstallation: Promise<AssistantLifecycle["installed"]> | undefined;
+  private codexInstallationStartedAt = 0;
 
   constructor(private db: Db, private config: ResolvedConfig) {}
 
@@ -250,8 +253,12 @@ export class RuntimeLifecycleReader {
   async withInstallation(lifecycle: AssistantLifecycle, provider: string): Promise<AssistantLifecycle> {
     if (provider !== "openrouter" || !lifecycle.configured) return lifecycle;
 
-    // Concurrent responses, including a list with several OpenRouter assistants, share one host check.
-    this.codexInstallation ??= probeCodexInstallation().finally(() => { this.codexInstallation = undefined; });
+    // One host check serves concurrent responses (in flight) and every call for 60s after it started.
+    // The probe is bounded at 1.5s, so the window always outlives the flight.
+    if (!this.codexInstallation || Date.now() - this.codexInstallationStartedAt >= INSTALLATION_TTL_MS) {
+      this.codexInstallationStartedAt = Date.now();
+      this.codexInstallation = probeCodexInstallation();
+    }
     return { ...lifecycle, installed: await this.codexInstallation };
   }
 }

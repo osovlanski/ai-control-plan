@@ -360,6 +360,17 @@ describe("credential redaction", () => {
     expect(JSON.stringify(lifecycle)).not.toContain("FAKE_RUNTIME_LIFECYCLE_KEY");
   });
 
+  it("two list calls within 60s spawn the installation check once", async () => {
+    await boot(`${TWO_FAKES}  router:\n    provider: openrouter\n    options:\n      apiKeyEnv: FAKE_RUNTIME_LIFECYCLE_KEY\n`);
+    const log = join(home!, "version-spawns.log");
+    const stub = join(home!, "stub-codex.sh");
+    writeFileSync(stub, `#!/bin/sh\necho spawn >> "${log}"\necho codex-stub 1.0\n`, { mode: 0o755 });
+    vi.spyOn(adapters, "codexSdkBinary").mockReturnValue(stub);
+    expect((await inject("GET", "/api/assistants")).statusCode).toBe(200);
+    expect((await inject("GET", "/api/assistants")).statusCode).toBe(200);
+    expect(readFileSync(log, "utf8").trim().split("\n")).toEqual(["spawn"]);
+  });
+
   it("deriveLifecycle drops malformed evidence instead of publishing it", () => {
     const lifecycle = deriveLifecycle({
       row: { provider: "fake", enabled: 1, operator_state: "disabled", operator_state_at: "yesterday", manifestParsed: null },

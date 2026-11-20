@@ -30,13 +30,13 @@ writeFileSync(configFile, JSON.stringify({ assistants: { router: { provider: "op
 const config = loadConfig({ AGENT_PLANE_HOME: home });
 const db = openDb(config.dbPath);
 const registry = new Registry(db, config);
-const reader = new RuntimeLifecycleReader(db, config);
 registry.init(); // even with the CLI package absent
 await registry.syncChanged("router");
 const evidence = () => db.prepare("SELECT fingerprint, details, observed_at FROM capability_probes WHERE assistant_id = 'router'").get();
 const original = evidence();
 assert.match((original as { details: string }).details, /"version":"in-process"/);
-async function state(current = reader) {
+// A fresh reader per probe: each call must see the filesystem now, not the 60s cached result.
+async function state(current = new RuntimeLifecycleReader(db, config)) {
   const row = registry.get("router")!;
   return (await current.withInstallation(current.of(row), row.provider)).installed.state;
 }
