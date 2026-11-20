@@ -32,6 +32,12 @@ export interface RouteRequest {
   taskId: string;
   profile: RoutingProfile;
   needsRepo: boolean;
+  /**
+   * The task runs as the agent Unix user (autopilot, `tasks.run_as = 'agent'`). Only an adapter that
+   * declares `harness.agentUser` can be launched that way, so any other candidate fails a hard filter:
+   * routing it there only parks the task on `isolation_unavailable` (G15 attempts 9 and 10).
+   */
+  needsAgentUser?: boolean;
   repoPathAllowed: boolean;
   /** Assistants excluded by cooldown (failed/limited recently), with reason. */
   cooldowns: Map<string, string>;
@@ -69,6 +75,7 @@ export function route(req: RouteRequest, candidates: RouteCandidate[]): RoutingE
       if (c.manifest.core.auth.state !== "ok") failures.push(`auth ${c.manifest.core.auth.state}`);
       if (req.needsRepo && !c.manifest.core.execution.filesystem) failures.push("no filesystem capability");
       if (req.needsRepo && !c.manifest.core.execution.shell) failures.push("no shell capability");
+      if (req.needsAgentUser && c.manifest.harness?.agentUser !== true) failures.push("cannot launch as the agent user");
     }
     if (c.conformanceBlocked) failures.push(c.conformanceBlocked);
     if (req.needsRepo && !req.repoPathAllowed) failures.push("repository path not in workspace allowlist");
@@ -309,6 +316,7 @@ export function routeInputs(deps: RouteDeps, taskId: string, origin: RouteOrigin
     : undefined;
   const request: RouteRequest = {
     taskId, profile: intent.profile, needsRepo: !!intent.repository,
+    ...(row.run_as === 'agent' ? { needsAgentUser: true } : {}),
     repoPathAllowed: !intent.repository || deps.config.repoAllowlist.some(p => intent.repository!.path === p || intent.repository!.path.startsWith(`${p}/`)),
     cooldowns: new Map(), scores, projections: new Map(deps.registry.list().map(a => [a.id, new QuotaProjection(deps.db, deps.now).for(a.id, a.manifestParsed)])), userOverride: options.override ?? intent.overrides?.assistantId,
     preferSame: continuation?.previousAssistantId as AssistantId | undefined,

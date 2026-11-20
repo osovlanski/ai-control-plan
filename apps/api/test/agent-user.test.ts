@@ -233,13 +233,13 @@ describe("an agent task through the Harness (G21, fake provider)", () => {
     expect(result.verification?.checks.find((c) => c.kind === "tests")?.status).toBe("passed");
   });
 
-  it("is rejected at Prepare when the adapter cannot launch as the agent user", async () => {
+  it("is refused at routing when the adapter cannot launch as the agent user", async () => {
     await boot({ fakeDeclares: false });
     const taskId = (await post("/api/tasks", ordinary(), { goal: "agent task", repoPath: repo, runAs: "agent" })).json().taskId as string;
-    const { result } = await runToEnd(taskId);
-    expect(result.outcome).toBe("failed");
-    expect(result.failure?.kind).toBe("policy_unenforceable");
-    expect(result.failure?.message).toMatch(/adapter that can launch as the agent user/);
+    const started = await post(`/api/tasks/${taskId}/start`, ordinary(), { assistantId: "fake" });
+    expect(started.statusCode).toBe(422);
+    expect(started.body).toMatch(/cannot launch as the agent user/);
+    expect(db!.prepare("SELECT COUNT(*) AS n FROM runs WHERE task_id = ?").get(taskId)).toEqual({ n: 0 });
   });
 
   it("cannot start off the Harness path or as a parallel comparison", async () => {
