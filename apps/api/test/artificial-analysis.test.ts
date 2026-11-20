@@ -174,7 +174,7 @@ describe('malformed and partial responses', () => {
       intelligence_index_version: 4.1,
       data: [
         {
-          id: 'claude-4-1-opus', slug: 'claude-4-1-opus', model_creator: { id: 'anthropic' },
+          id: 'f2f60e3a-e5f5-4471-acd2-9f2f29c76007', slug: 'claude-4-1-opus', model_creator: { id: 'f0aa413f-e8ae-4fcd-9c48-0e049f4f3128' },
           evaluations: { artificial_analysis_coding_index: 71 },
           performance: { median_output_tokens_per_second: 88 },
         },
@@ -260,16 +260,16 @@ describe('model identity mapping (§12, §13, P1-B)', () => {
   });
 
   it('maps on the stable AA id -> reviewed (provider, modelId), never to a bare id', () => {
-    const { observations } = parseRows([row({ id: 'claude-4-5-sonnet' })]);
+    const { observations } = parseRows([row({ id: '91cb6144-4937-4e4e-aeda-b4341d355c10', model_creator: { id: 'f0aa413f-e8ae-4fcd-9c48-0e049f4f3128' } })]);
     expect(observations[0]!.provider).toBe('anthropic');
     expect(observations[0]!.modelId).toBe('claude-sonnet-4-5');
   });
 
   it('the stable id is the authority: a changed slug on a mapped id still maps (test #5)', () => {
-    const { observations } = parseRows([row({ id: 'claude-4-1-opus', slug: 'anthropic-opus-renamed-2027' })]);
+    const { observations } = parseRows([row({ id: 'f2f60e3a-e5f5-4471-acd2-9f2f29c76007', slug: 'anthropic-opus-renamed-2027', model_creator: { id: 'f0aa413f-e8ae-4fcd-9c48-0e049f4f3128' } })]);
     expect(observations).toHaveLength(1);
     expect(observations[0]!.modelId).toBe('claude-opus-4-1');
-    expect(observations[0]!.benchmarks![0]!.sourceModelId).toBe('claude-4-1-opus');
+    expect(observations[0]!.benchmarks![0]!.sourceModelId).toBe('f2f60e3a-e5f5-4471-acd2-9f2f29c76007');
   });
 
   it('a slug collision alone never misattributes: unknown id, mapped slug -> unmatched (test #6)', () => {
@@ -280,7 +280,7 @@ describe('model identity mapping (§12, §13, P1-B)', () => {
   });
 
   it('a creator mismatch on a mapped id never maps (test #7)', () => {
-    const { observations, detail } = parseRows([row({ id: 'claude-4-1-opus', model_creator: { id: 'not-anthropic' } })]);
+    const { observations, detail } = parseRows([row({ id: 'f2f60e3a-e5f5-4471-acd2-9f2f29c76007', model_creator: { id: 'not-anthropic' } })]);
     expect(observations).toHaveLength(0);
     expect(detail).toContain('1 creator-mismatch');
   });
@@ -354,8 +354,8 @@ describe('unmatched Anthropic grounding diagnostic (§17)', () => {
 
   it('a creator-mismatch row on a mapped id is listed too; a mapped row is not', () => {
     const { observations, unmatchedAnthropic } = parseRows([
-      live({ id: AA_MODEL_MAP[0]!.aaId, slug: 'opus-by-uuid-creator' }), // creator id is a UUID, not 'anthropic'
-      live({ id: AA_MODEL_MAP[1]!.aaId, slug: 'sonnet-ok', model_creator: { id: 'anthropic', name: 'Anthropic' } }),
+      live({ id: AA_MODEL_MAP.find((m) => m.modelId === 'claude-opus-4-1')!.aaId, slug: 'opus-by-uuid-creator' }), // creator id is a UUID, not 'anthropic'
+      live({ id: AA_MODEL_MAP.find((m) => m.modelId === 'claude-sonnet-4-5')!.aaId, slug: 'sonnet-ok', model_creator: { id: 'f0aa413f-e8ae-4fcd-9c48-0e049f4f3128', name: 'Anthropic' } }),
     ]);
     expect(observations).toHaveLength(1);
     expect(unmatchedAnthropic.rows.map((r) => r.slug)).toEqual(['opus-by-uuid-creator']);
@@ -422,7 +422,7 @@ describe('external provenance and normalization audit trail', () => {
     const opus = built.modelCatalog.list().find((m) => m.modelKey === opusKey)!;
     expect(codingOf(opus)!.raw).toEqual({ metric: 'artificial_analysis_coding_index', value: 71, unit: 'index-0-100' });
     expect(speedOf(opus)!.raw).toEqual({ metric: 'median_output_tokens_per_second', value: 88, unit: 'tokens/second' });
-    expect(codingOf(opus)!.sourceModelId).toBe('claude-4-1-opus');
+    expect(codingOf(opus)!.sourceModelId).toBe('f2f60e3a-e5f5-4471-acd2-9f2f29c76007');
   });
 
   it('stamps the normalization version on every prior (§10)', async () => {
@@ -436,7 +436,7 @@ describe('external provenance and normalization audit trail', () => {
   it('coding priors are skipped, with a diagnostic, when the response carries no benchmark release (§7)', () => {
     const body = {
       data: [{
-        id: 'claude-4-1-opus', slug: 'claude-4-1-opus', model_creator: { id: 'anthropic' },
+        id: 'f2f60e3a-e5f5-4471-acd2-9f2f29c76007', slug: 'claude-4-1-opus', model_creator: { id: 'f0aa413f-e8ae-4fcd-9c48-0e049f4f3128' },
         evaluations: { artificial_analysis_coding_index: 71 },
         performance: { median_output_tokens_per_second: 88 },
       }],
@@ -450,7 +450,7 @@ describe('external provenance and normalization audit trail', () => {
     const body = {
       intelligence_index_version: 4.1,
       data: [{
-        id: 'claude-4-1-opus', slug: 'claude-4-1-opus', model_creator: { id: 'anthropic' },
+        id: 'f2f60e3a-e5f5-4471-acd2-9f2f29c76007', slug: 'claude-4-1-opus', model_creator: { id: 'f0aa413f-e8ae-4fcd-9c48-0e049f4f3128' },
         evaluations: { artificial_analysis_coding_index: 71 },
         performance: { median_output_tokens_per_second: 123, median_time_to_first_token_seconds: 0.5 },
       }],
@@ -497,7 +497,7 @@ describe('missing values', () => {
     const body = {
       intelligence_index_version: 4.1,
       data: [{
-        id: 'claude-4-1-opus', slug: 'claude-4-1-opus', model_creator: { id: 'anthropic' },
+        id: 'f2f60e3a-e5f5-4471-acd2-9f2f29c76007', slug: 'claude-4-1-opus', model_creator: { id: 'f0aa413f-e8ae-4fcd-9c48-0e049f4f3128' },
         evaluations: { artificial_analysis_coding_index: null },
         performance: { median_output_tokens_per_second: 88 },
       }],
@@ -626,7 +626,7 @@ describe('pagination', () => {
       intelligence_index_version: 4.1,
       pagination: { page: 1, page_size: 1, total_pages: 2, has_more: true },
       data: [{
-        id: 'claude-4-1-opus', slug: 'claude-4-1-opus', model_creator: { id: 'anthropic' },
+        id: 'f2f60e3a-e5f5-4471-acd2-9f2f29c76007', slug: 'claude-4-1-opus', model_creator: { id: 'f0aa413f-e8ae-4fcd-9c48-0e049f4f3128' },
         release_date: '2025-08-05',
         evaluations: { artificial_analysis_coding_index: 71 },
         performance: { median_output_tokens_per_second: 88 },
@@ -636,7 +636,7 @@ describe('pagination', () => {
       intelligence_index_version: 4.1,
       pagination: { page: 2, page_size: 1, total_pages: 2, has_more: false },
       data: [{
-        id: 'claude-4-5-sonnet', slug: 'claude-4-5-sonnet', model_creator: { id: 'anthropic' },
+        id: '91cb6144-4937-4e4e-aeda-b4341d355c10', slug: 'claude-4-5-sonnet', model_creator: { id: 'f0aa413f-e8ae-4fcd-9c48-0e049f4f3128' },
         release_date: '2025-09-29',
         evaluations: { artificial_analysis_coding_index: 66 },
         performance: { median_output_tokens_per_second: 130 },
@@ -729,7 +729,7 @@ describe('grounded AA effort rows', () => {
   });
 
   it('every effort row is a distinct id under the recorded creator and names a seeded Anthropic model', () => {
-    expect(efforts).toHaveLength(20);
+    expect(efforts).toHaveLength(25);
     expect(new Set(AA_MODEL_MAP.map((m) => m.aaId)).size).toBe(AA_MODEL_MAP.length);
     for (const m of efforts) {
       expect(m.aaCreatorId).toBe(CREATOR);
