@@ -21,16 +21,20 @@ export function suggestedAssistantId(provider: string, takenIds: readonly string
 }
 
 /**
- * The smallest workspace-config entry the plane's config loader accepts for a provider. Options
+ * The entry lines for one provider, indented to sit under an existing `assistants:` key. Options
  * are left to the operator: the catalogue projection carries none by contract, so none are guessed.
  */
-export function configSnippet(provider: string, takenIds: readonly string[]): string {
+export function configEntry(provider: string, takenIds: readonly string[]): string {
   return [
-    "assistants:",
     `  ${suggestedAssistantId(provider, takenIds)}:`,
     `    provider: ${provider}`,
     "    enabled: true",
   ].join("\n");
+}
+
+/** The smallest workspace-config text the plane's config loader accepts for a provider, `assistants:` key included. */
+export function configSnippet(provider: string, takenIds: readonly string[]): string {
+  return `assistants:\n${configEntry(provider, takenIds)}`;
 }
 
 const INSTALLED_TEXT: Record<AssistantLifecycle["installed"]["state"], string> = {
@@ -76,4 +80,36 @@ export function statusTone(status: string): "ok" | "warn" | "danger" | "muted" {
   if (status === "fail" || status === "unavailable") return "danger";
   if (status === "not-run" || status === "stale") return "warn";
   return "muted";
+}
+
+/** The collapsed Agents row's standing chip. Words and tone come from the served lifecycle only. */
+export function agentStanding(lifecycle: AssistantLifecycle | undefined, configEnabled: boolean): { label: string; tone: "ok" | "warn" | "danger" | "muted" } {
+  if (!lifecycle) return configEnabled ? { label: "Enabled", tone: "muted" } : { label: "Disabled", tone: "warn" };
+  if (!lifecycle.enablement.effective) return { label: "Disabled", tone: "warn" };
+  return lifecycle.readiness.ready ? { label: "Ready", tone: "ok" } : { label: "Not ready", tone: "danger" };
+}
+
+const CONFORMANCE_SHORT: Record<AssistantLifecycle["conformance"]["state"], string> = {
+  pass: "test passed",
+  fail: "test failed",
+  stale: "test stale",
+  "not-run": "not tested",
+};
+
+/** The lifecycle facts the full list shows below it, in the same words. Enablement is the chip and the served reasons. */
+export function lifecycleDigest(lifecycle: AssistantLifecycle): string {
+  return [
+    installedText(lifecycle.installed),
+    CONFORMANCE_SHORT[lifecycle.conformance.state] ?? lifecycle.conformance.state,
+  ].join(" · ");
+}
+
+/** The header count, e.g. "3 agents · 2 ready · 1 not ready". Counts the standings the rows show. */
+export function agentTally(standings: readonly string[]): string {
+  const count = (label: string) => standings.filter((s) => s === label).length;
+  const parts = [`${standings.length} ${standings.length === 1 ? "agent" : "agents"}`];
+  for (const [label, text] of [["Ready", "ready"], ["Not ready", "not ready"], ["Disabled", "disabled"], ["Enabled", "enabled"]] as const) {
+    if (count(label)) parts.push(`${count(label)} ${text}`);
+  }
+  return parts.join(" · ");
 }

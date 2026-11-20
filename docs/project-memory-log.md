@@ -964,3 +964,9 @@ Migration 041 adds `runs.harness_cli_version` (TEXT NULL, forward only, no backf
 - **Decision:** a pool continuation whose grant started nothing is read from its dispatch row, not the latest wait: `aborted` is blocked recomposition, `reparked` into a pause is exhausted routing. Both are 409 with that cause and a handoff park; only the wake's own `resource.unsatisfiable` expiry still reports pool capacity.
 - **Decision:** a retry of a `no_candidate` pause with no tagged park (parked before #207) owns the task's next transition, and any owning retry with no anchor continues from the task's latest run, never a run-less checkpoint.
 - `Orchestrator.handoffDrainMs` (default 10 s) bounds the legacy cancel acknowledgment and drain together, and the Harness session drain. A Harness drain timeout now parks through the handoff park, anchored to the live source session.
+
+## 2026-11-20 — ux-02 compact Agents (SHIPPED on merge)
+
+- **Scope:** web only (`Agents.tsx`, `runtime-registry.ts`, `applications.css`). No contract, route, migration or API change; every action is the same agent-runtime v1 route as before.
+- **Decision:** each runtime is one collapsed row: id, label, standing chip (Ready / Not ready / Disabled, from the served `readiness` and `enablement.effective`), auth chip, Test / Disable routing / Sync, and one digest line (served reasons, installed, test state). Lifecycle list, Test report and models open on request; Test opens its own row so a result is never hidden. The "Ready covers only task-independent checks" caveat is shown once above the rows and again inside each opened row.
+- **Evidence:** before/after screenshots in `docs/ui/assets/agents-compact/`. `e2e/agents-runtime.spec.ts` now opens a row before reading lifecycle text.

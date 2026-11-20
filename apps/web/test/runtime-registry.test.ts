@@ -7,7 +7,7 @@ import { loadConfig } from "../../api/src/config.js";
 import { runtimeCatalogProjection } from "../../api/src/modules/runtime-lifecycle.js";
 import { api, type AssistantLifecycle, type RuntimeCatalog } from "../src/api.js";
 import {
-  authText, configSnippet, conformanceText, enablementText, installedText, statusTone, suggestedAssistantId, unconfiguredRuntimes,
+  agentStanding, agentTally, lifecycleDigest, authText, configEntry, configSnippet, conformanceText, enablementText, installedText, statusTone, suggestedAssistantId, unconfiguredRuntimes,
 } from "../src/shell/runtime-registry.js";
 
 afterEach(() => vi.unstubAllGlobals());
@@ -56,6 +56,25 @@ describe("Add a runtime", () => {
     expect(configSnippet("cursor", ["cursor"])).toBe("assistants:\n  cursor-2:\n    provider: cursor\n    enabled: true");
   });
 
+  it("the entry is the snippet without its assistants: line", () => {
+    expect(configSnippet("cursor", [])).toBe(`assistants:\n${configEntry("cursor", [])}`);
+    expect(configEntry("cursor", ["cursor"])).toBe("  cursor-2:\n    provider: cursor\n    enabled: true");
+  });
+
+  it.each(runtimeCatalogProjection().runtimes.map((r) => r.provider))("the plane's own config loader accepts the %s entry pasted under an existing assistants: key", (provider) => {
+    const home = mkdtempSync(join(tmpdir(), "acp-entry-"));
+    try {
+      mkdirSync(join(home, "personal"), { mode: 0o700 });
+      const existing = { personal: { provider: "fake", enabled: true } };
+      writeFileSync(join(home, "personal", "config.yaml"), `assistants:\n  personal:\n    provider: fake\n    enabled: true\n${configEntry(provider, ["personal"])}\n`);
+      const config = loadConfig({ AGENT_PLANE_HOME: home });
+      const id = suggestedAssistantId(provider, ["personal"]);
+      expect(config.assistants).toEqual({ ...existing, [id]: { provider, enabled: true } });
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   it.each(runtimeCatalogProjection().runtimes.map((r) => r.provider))("the plane's own config loader accepts the %s snippet as written", (provider) => {
     const home = mkdtempSync(join(tmpdir(), "acp-snippet-"));
     try {
@@ -101,5 +120,39 @@ describe("lifecycle text", () => {
     expect(statusTone("not-run")).toBe("warn");
     expect(statusTone("unsupported")).toBe("muted");
     expect(statusTone("unavailable")).toBe("danger");
+  });
+});
+
+describe("compact Agents row", () => {
+  const lifecycles = readdirSync(FIXTURES).filter((f) => f.startsWith("lifecycle-")).map((f) => [f, fixture<AssistantLifecycle>(f)] as const);
+
+  it.each(lifecycles)("%s: standing and digest follow the served lifecycle", (_f, l) => {
+    const standing = agentStanding(l, l.enablement.config);
+    if (!l.enablement.effective) expect(standing.label).toBe("Disabled");
+    else expect(standing.label).toBe(l.readiness.ready ? "Ready" : "Not ready");
+    expect(lifecycleDigest(l)).not.toMatch(/undefined|null|NaN/);
+  });
+
+  it("never calls an effectively disabled or not-ready runtime ready", () => {
+    const base = fixture<AssistantLifecycle>("lifecycle-ready.json");
+    expect(agentStanding({ ...base, enablement: { config: true, operator: "disabled", effective: false } }, true)).toEqual({ label: "Disabled", tone: "warn" });
+    expect(agentStanding({ ...base, readiness: { ...base.readiness, ready: false, reasons: ["sign-in missing"] } }, true)).toEqual({ label: "Not ready", tone: "danger" });
+  });
+
+  it("falls back to the config flag when the plane serves no lifecycle", () => {
+    expect(agentStanding(undefined, true).label).toBe("Enabled");
+    expect(agentStanding(undefined, false).label).toBe("Disabled");
+  });
+
+  it("digest keeps a stale or failed test apart from a pass", () => {
+    const base = fixture<AssistantLifecycle>("lifecycle-ready.json");
+    expect(lifecycleDigest({ ...base, conformance: { ...base.conformance, state: "stale" } })).toContain("test stale");
+    expect(lifecycleDigest({ ...base, conformance: { ...base.conformance, state: "fail" } })).toContain("test failed");
+    expect(lifecycleDigest({ ...base, conformance: { ...base.conformance, state: "not-run" } })).toContain("not tested");
+  });
+
+  it("tally counts the standings shown", () => {
+    expect(agentTally(["Ready", "Ready", "Not ready", "Disabled"])).toBe("4 agents · 2 ready · 1 not ready · 1 disabled");
+    expect(agentTally(["Ready"])).toBe("1 agent · 1 ready");
   });
 });
