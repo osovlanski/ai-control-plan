@@ -544,6 +544,23 @@ describe("retries", () => {
     expect(ap().currentAttempt()).toMatchObject({ attemptNo: 2, state: "admitted", reservationOutcome: "reused", reservationSha: a.reservationSha });
   });
 
+  it("a suspended attempt whose task an operator cancelled ends as cancelled, so it can be requeued (G15 attempt 9)", async () => {
+    // Live: a quota yield parked the task as `composition_unavailable` (attempt `suspended`), a release
+    // could not help, and cancelling the task left the attempt suspended for ever.
+    await boot([{ id: "item-a" }]);
+    open();
+    await dispatcher().tick();
+    const a = ap().currentAttempt()!;
+    rig!.db.prepare("UPDATE autopilot_attempts SET state = 'suspended', reason = 'composition_unavailable' WHERE id = ?").run(a.id);
+    expect(await dispatcher().tick()).toMatchObject({ action: "drove", state: "suspended" }); // a live parked task is left alone
+    rig!.db.prepare("UPDATE tasks SET state = 'CANCELLED' WHERE id = ?").run(a.taskId);
+    const out = await dispatcher().tick();
+    expect(out).toMatchObject({ action: "drove", attemptId: a.id, state: "cancelled", detail: expect.stringContaining("cancelled while suspended") });
+    ap().requeue(a.id, "op_test");
+    await dispatcher().tick();
+    expect(ap().currentAttempt()).toMatchObject({ attemptNo: 2 });
+  });
+
   it("a blocked attempt is not retried until the operator requeues it, and the retry still counts", async () => {
     await boot([{ id: "item-a" }]);
     open();
