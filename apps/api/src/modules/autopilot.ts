@@ -762,10 +762,13 @@ export class AutopilotService {
   taskEndedBeforeStart(attemptId: string): AutopilotAttempt | undefined {
     return this.db.transaction(() => {
       const attempt = this.row(attemptId);
-      if (!attempt || attempt.state !== "admitted" || !attempt.task_id || this.liveSession(attempt.id)) return undefined;
+      // `suspended` too: a held attempt (a typed park) whose task an operator then cancelled would
+      // otherwise stay suspended for ever, and `requeue` needs a cancelled attempt.
+      if (!attempt || (attempt.state !== "admitted" && attempt.state !== "suspended") || !attempt.task_id || this.liveSession(attempt.id)) return undefined;
       const state = this.d.tasks.get(attempt.task_id)?.state as TaskState | undefined;
-      if (state === "FAILED") this.finalize(attempt, "failed", "task failed before a session started");
-      else if (state === "CANCELLED") this.finalize(attempt, "cancelled", "task cancelled before a session started");
+      const when = attempt.state === "suspended" ? "while suspended" : "before a session started";
+      if (state === "FAILED") this.finalize(attempt, "failed", `task failed ${when}`);
+      else if (state === "CANCELLED") this.finalize(attempt, "cancelled", `task cancelled ${when}`);
       else return undefined;
       return this.attempt(attemptId);
     })();

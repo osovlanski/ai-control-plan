@@ -334,7 +334,15 @@ export class AutopilotDispatcher {
         const acceptance = this.d.acceptance;
         if (!acceptance) return drove("no acceptance runner");
         const task = a.taskId ? this.d.autopilot.taskState(a.taskId) : undefined;
-        if (a.state === "suspended" && task !== "COMPLETED") return drove("suspended with work left; the scheduler resumes it");
+        if (a.state === "suspended" && task !== "COMPLETED") {
+          // A cancelled or failed task never resumes: end the attempt so an operator can requeue it.
+          const ended = this.d.autopilot.taskEndedBeforeStart(a.id);
+          if (ended) {
+            this.log("warn", `attempt ${a.id} ${ended.state}: ${ended.reason}`);
+            return drove(`${ended.state}: ${ended.reason}`);
+          }
+          return drove("suspended with work left; the scheduler resumes it");
+        }
         if (this.busy.has(`accept:${a.id}`)) return drove("acceptance is running");
         this.runInBackground(a.id, `accept:${a.id}`, async () => {
           const out = await acceptance.accept(a.id);
