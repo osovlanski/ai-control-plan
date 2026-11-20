@@ -13,6 +13,8 @@ import type { TaskEventBus } from './sse.js';
 const RECHECK_MS = 60_000;
 const RECOVERY_WINDOW_MS = 60_000;
 const DEFAULT_MAX_AUTO_WAKES = 3;
+/** `created_by` of the condition a stopped manual handoff parks its task on. */
+const HANDOFF_PARK = 'handoff';
 /** A failed dependency is not the scheduler's decision to make on its own. */
 const DEFAULT_ON_DEPENDENCY_FAILURE: OnDependencyFailure = 'wait-input';
 
@@ -815,7 +817,91 @@ export class Scheduler {
     this.publish(taskId);
   }
 
+  /**
+   * A manual handoff that drained its source and then stopped (refused, blocked, failed) parks the
+   * task WAITING_INPUT on this row, anchored to the source's checkpoint. It is written `expired`
+   * because nothing may wake it on its own; an operator consumes it, either by `/handoff` (which
+   * continues from its checkpoint) or by `runNow`, which re-arms it where the pause allows a wait.
+   * Called inside the orchestrator's park transaction.
+   */
+  parkHandoff(taskId: string, checkpointId: string | undefined, reason: string): void {
+    this.d.db.prepare("UPDATE wait_conditions SET state = 'replaced' WHERE task_id = ? AND state = 'active'").run(taskId);
+    const old = this.condition(taskId);
+    this.insert(taskId, { kind: 'time', notBefore: this.iso(), reason }, HANDOFF_PARK, 0, old?.history ?? [], checkpointId, [], undefined,
+      { resource: old?.resource, units: old?.units });
+    this.d.db.prepare("UPDATE wait_conditions SET state = 'expired' WHERE task_id = ? AND state = 'active'").run(taskId);
+  }
+
+  /** The handoff park a parked task still carries, i.e. the one the next `/handoff` or `runNow` consumes. */
+  handoffPark(taskId: string): WaitCondition | undefined {
+    const c = this.condition(taskId);
+    return c?.state === 'expired' && c.createdBy === HANDOFF_PARK && this.d.tasks.get(taskId)?.state === 'WAITING_INPUT' ? c : undefined;
+  }
+
+  /** A handoff that went ahead consumed its park; a later `runNow` must not re-arm it. */
+  retireHandoffPark(taskId: string, generation: number): void {
+    this.d.db.prepare("UPDATE wait_conditions SET state = 'replaced' WHERE task_id = ? AND generation = ? AND state = 'expired' AND created_by = ?")
+      .run(taskId, generation, HANDOFF_PARK);
+  }
+
+  /**
+   * A manual handoff whose own pool wake reserved a dispatch and claim and then failed before any
+   * provider start has already been refused to the operator. Rolls back that dispatch, its claim
+   * and the wait it consumed, so no later tick starts a successor nobody is waiting for. Called
+   * inside the orchestrator's park transaction, which then replaces the restored wait with its park.
+   * False when an open dispatch is not this handoff's to roll back: a start was attempted (outcome
+   * unknown, recovery decides) or a tick is driving it right now.
+   */
+  rollbackRefusedDispatch(taskId: string, reason: string): boolean {
+    const open = this.d.db.prepare("SELECT * FROM dispatches WHERE task_id = ? AND phase IN ('reserved','start_attempted')").all(taskId) as Dispatch[];
+    if (open.some(d => d.phase !== 'reserved' || this.inFlight.has(d.dispatch_id))) return false;
+    for (const d of open) {
+      const envelope = this.d.db.prepare("SELECT id, state FROM handoff_envelopes WHERE claimed_by_request_id = ?").get(d.dispatch_id) as { id: string; state: string } | undefined;
+      if (envelope?.state === 'claimed') new HandoffService(this.d.db).release(envelope.id, d.dispatch_id);
+      this.d.db.prepare('UPDATE execution_requests SET superseded = 1 WHERE id = ?').run(d.dispatch_id);
+      this.phase(d.dispatch_id, 'aborted', reason);
+      this.d.db.prepare("UPDATE wait_conditions SET state = 'active', consumed_at = NULL, consumed_by = NULL WHERE task_id = ? AND generation = ? AND state = 'consumed'")
+        .run(taskId, d.condition_generation);
+      this.record(taskId, 'dispatch.aborted', d.condition_generation, d.dispatch_id, { reason });
+      const held = this.d.db.prepare('SELECT claim_id, resource, units FROM resource_claims WHERE dispatch_id = ? AND released_at IS NULL')
+        .get(d.dispatch_id) as { claim_id: number; resource: string; units: number } | undefined;
+      if (!held) continue;
+      this.d.db.prepare('UPDATE resource_claims SET released_at = ?, release_reason = ? WHERE claim_id = ?').run(this.iso(), reason, held.claim_id);
+      this.record(taskId, 'resource.released', undefined, d.dispatch_id, { resource: held.resource, units: held.units, reason });
+      // After the caller's transaction commits, the freed units go to the next FIFO waiter.
+      queueMicrotask(() => this.notifyResource(held.resource));
+    }
+    return true;
+  }
+
+  /** `runNow` on a handoff park: the same wait `/wait` would attach, from the park's anchor. */
+  private rearmHandoffPark(taskId: string, park: WaitCondition): number | string {
+    try {
+      return this.d.db.transaction((): number | string => {
+        const row = this.d.tasks.get(taskId)!;
+        if (!canTransition('WAITING_INPUT', 'WAITING_RESOURCE', row.pause_kind ?? undefined)) return `Task ${taskId} is paused (${row.pause_kind}) for an operator decision; use handoff`;
+        if (!park.checkpointId) return `Task ${taskId} has no checkpoint to continue from; use handoff`;
+        if (this.hasOwner(taskId)) return 'Existing execution prevents a run-now';
+        this.insert(taskId, { kind: 'time', notBefore: this.iso(), reason: park.reason }, 'operator', park.autoWakes, park.history, park.checkpointId, [], undefined,
+          { resource: park.resource, units: park.units });
+        this.d.tasks.transition(taskId, 'WAITING_RESOURCE');
+        const generation = this.condition(taskId)!.generation;
+        this.record(taskId, 'wait.attached', generation, undefined, { rearmed: 'handoff park', from: park.generation });
+        return generation;
+      })();
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }
+
   runNow(taskId: string, generation = this.condition(taskId)?.generation ?? 0, confirmNoLiveOwner = false): Promise<WakeResult> {
+    const park = this.handoffPark(taskId);
+    if (park && park.generation === generation) {
+      const rearmed = this.rearmHandoffPark(taskId, park);
+      if (typeof rearmed === 'string') return Promise.resolve({ outcome: 'stale', reason: rearmed });
+      this.publish(taskId);
+      generation = rearmed;
+    }
     const ambiguous = this.dispatches(taskId).find(d => d.phase === 'start_attempted' && d.execution_path === 'legacy');
     if (ambiguous && this.d.tasks.get(taskId)?.state === 'ROUTING') {
       if (!confirmNoLiveOwner || this.inFlight.has(ambiguous.dispatch_id)) return Promise.resolve({ outcome: 'stale', reason: 'Ambiguous legacy start: reconcile the provider, then confirmNoLiveOwner to re-arm' });
