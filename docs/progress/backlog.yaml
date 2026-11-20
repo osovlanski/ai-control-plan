@@ -296,32 +296,6 @@ items:
 
   # Runtime correctness, traceability, and UX
 
-  - id: handoff-followups
-    title: "Resolve the remaining handoff findings in issue #209"
-    phase: "Agentic OS follow-up"
-    repo: ai-control-plan
-    size: M
-    depends_on: []
-    files: ["apps/api/src/modules/orchestrator.ts", "apps/api/src/modules/scheduler.ts", "apps/api/test/**"]
-    lane: manual-cloud
-    profile: auto
-    night: false
-    source: "GitHub issue #209; #210 is the closed duplicate"
-    notes: "Cover M1–M5 and D2 with focused regressions against current main. Preserve the settlement and ownership guarantees shipped in #207."
-
-  - id: rt-03
-    title: "Fix the three remaining runtime lifecycle regressions"
-    phase: "Agentic OS follow-up"
-    repo: ai-control-plan
-    size: M
-    depends_on: []
-    files: ["apps/api/src/modules/runtime-lifecycle.ts", "apps/api/test/runtime-lifecycle-review-regressions.test.ts"]
-    lane: manual-cloud
-    profile: auto
-    night: false
-    source: "#194 follow-up after #203, #206 and #207"
-    notes: "Cover concurrent state readback, removed assistants appearing ready, and unrelated malformed manifests. Convert each expected failure to a normal passing test as fixed."
-
   - id: tlm-02a
     title: "Expose missing cross-record task provenance"
     phase: "Agentic OS follow-up"
