@@ -16,6 +16,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { openDb, type Db } from "../src/db/index.js";
 import {
   AcceptanceRunner, agentAcceptanceExecutor, parseBacklogAcceptance, type AcceptanceExecutor, type AcceptanceDeps,
+  pnpmStorePrefetch,
 } from "../src/modules/acceptance-run.js";
 
 const g = (cwd: string, ...args: string[]) => execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8" }).trim();
@@ -421,5 +422,27 @@ describe("host setup for the acceptance toolchain", () => {
     expect(wrapper).toContain("npm_config_package_import_method=copy");
     expect(wrapper).toContain("npm_config_manage_package_manager_versions=false");
     expect(read("setup/aos-setup")).toContain("/var/lib/aos/pnpm-store");
+  });
+});
+
+describe("pnpmStorePrefetch (G15 eighth run)", () => {
+  it("leaves no node_modules behind: pnpm fetch's virtual store is owned by the plane user and would break the agent's offline install", async () => {
+    const root = mkdtempSync(join(tmpdir(), "prefetch-"));
+    const bin = join(root, "bin");
+    const snapshot = join(root, "snap");
+    mkdirSync(bin); mkdirSync(snapshot);
+    // A stand-in pnpm that behaves like `pnpm fetch`: it builds node_modules/.pnpm in the cwd.
+    writeFileSync(join(bin, "pnpm"), "#!/bin/sh\nmkdir -p node_modules/.pnpm/tree-kill@1.2.2 && echo x > node_modules/.pnpm/tree-kill@1.2.2/cli.js\n");
+    chmodSync(join(bin, "pnpm"), 0o755);
+    const saved = process.env.PATH;
+    process.env.PATH = `${bin}:${saved}`;
+    try {
+      await pnpmStorePrefetch(join(root, "store"))(snapshot);
+    } finally {
+      process.env.PATH = saved;
+    }
+    expect(existsSync(join(snapshot, "node_modules"))).toBe(false);
+    expect(existsSync(join(root, "store", "v10", "projects"))).toBe(true);
+    rmSync(root, { recursive: true, force: true });
   });
 });

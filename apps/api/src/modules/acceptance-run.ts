@@ -340,6 +340,10 @@ export function pnpmStorePrefetch(storeDir: string, timeoutMs = 15 * 60_000): (s
     child.on("close", (code) => {
       clearTimeout(timer);
       if (code !== 0) return reject(new Error(`pnpm fetch exited ${code}: ${tail.trim().split("\n").slice(-3).join(" | ")}`));
+      // `pnpm fetch` also builds a virtual store in <snapshot>/node_modules/.pnpm, owned by the plane user.
+      // The agent user's offline install would then find it "up to date" and fail to chmod its bins
+      // (EPERM, G15 eighth run). Only the store is wanted from the fetch: the install makes node_modules.
+      try { rmSync(join(snapshot, "node_modules"), { recursive: true, force: true }); } catch (err) { return reject(new Error(`could not clear ${snapshot}/node_modules after pnpm fetch: ${err instanceof Error ? err.message : String(err)}`)); }
       // Readable by the agent group; the plane user stays the only writer.
       const chmod = spawn("chmod", ["-R", "a+rX,go-w", "--", join(storeDir, "v10", "files"), join(storeDir, "v10", "index")], { stdio: "ignore" });
       chmod.on("error", () => resolve());
