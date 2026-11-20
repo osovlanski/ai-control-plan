@@ -57,9 +57,13 @@ Agreement with K13 is reported, not a bar: matching K13 proves nothing about qua
 - `p1-8-jev-shadow` (classification) runs first. This site reuses its harness, report shape and approval, so it should not start earlier.
 - Contract and code come in later PRs: core type and site mapping, state builder with the allow-list, report, then the OCI run. Each is its own slice.
 
-## 7. Open questions for itay
+## 7. Decisions and open questions
 
-1. Is model selection allowed as a Jev site at all? It extends §D.6.
-2. Does D-7's $1 cover this site, or does it get its own cap?
-3. Is the quality bar in §5.4 acceptable, given that the pick is never executed and so cannot be scored on its own outcome? The alternative is a small paid A/B on real runs, which is spend and is out of scope here.
-4. Should the site be skipped in workspaces with no third-party egress (proposed), or fail closed per workspace config?
+Answered by itay, 2026-11-20:
+- **TypeSafe account:** itay signed up for TypeSafe and uses it on the OCI box. Whether the live config now carries `typesafeApiKeyRef` and `typesafeRoute` (missing at O2, 2026-11-05) is still to be checked on the box before any run.
+- **No-egress workspaces:** the site is skipped and logged as `skipped: egress` (accepted, as proposed in §3).
+
+Still open:
+1. Is model selection allowed as a Jev site at all? It extends §D.6. Recommendation: yes, shadow only, after `p1-8`.
+2. Does D-7's $1 cover this site? Recommendation: one shared $1 cap across `p1-8` and this site, with `p1-8` spending first. D-7 itself needs a fresh yes.
+3. Is the quality bar in §5.4 acceptable, given the pick is never executed? Recommendation: yes. The paid A/B alternative is spend and is out of scope.
