@@ -21,16 +21,20 @@ export function suggestedAssistantId(provider: string, takenIds: readonly string
 }
 
 /**
- * The smallest workspace-config entry the plane's config loader accepts for a provider. Options
+ * The entry lines for one provider, indented to sit under an existing `assistants:` key. Options
  * are left to the operator: the catalogue projection carries none by contract, so none are guessed.
  */
-export function configSnippet(provider: string, takenIds: readonly string[]): string {
+export function configEntry(provider: string, takenIds: readonly string[]): string {
   return [
-    "assistants:",
     `  ${suggestedAssistantId(provider, takenIds)}:`,
     `    provider: ${provider}`,
     "    enabled: true",
   ].join("\n");
+}
+
+/** The smallest workspace-config text the plane's config loader accepts for a provider, `assistants:` key included. */
+export function configSnippet(provider: string, takenIds: readonly string[]): string {
+  return `assistants:\n${configEntry(provider, takenIds)}`;
 }
 
 const INSTALLED_TEXT: Record<AssistantLifecycle["installed"]["state"], string> = {

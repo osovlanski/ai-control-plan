@@ -5,7 +5,7 @@ import {
 } from "../api.js";
 import { Button, Card, QuotaBar, tokens } from "../ui.jsx";
 import {
-  agentStanding, agentTally, authText, configSnippet, conformanceText, enablementText, installedText, lifecycleDigest, statusTone, unconfiguredRuntimes,
+  agentStanding, agentTally, authText, configEntry, configSnippet, conformanceText, enablementText, installedText, lifecycleDigest, statusTone, unconfiguredRuntimes,
 } from "./runtime-registry.js";
 
 /**
@@ -154,62 +154,115 @@ function TestReport({ result }: { result: ConformanceResult }) {
   );
 }
 
-function AddRuntime({ entries, takenIds }: { entries: RuntimeCatalogEntry[]; takenIds: string[] }) {
-  const [copied, setCopied] = useState<{ provider: string; ok: boolean } | null>(null);
-  const copy = async (provider: string, text: string) => {
+type CopyKind = "snippet" | "entry";
+
+/**
+ * Guided Add a runtime (ux-03). Pick one runtime, follow four steps; the YAML stays hidden until
+ * asked for. Nothing here writes configuration: the plane never installs, signs in or edits config.
+ */
+function AddRuntime({ entries, takenIds, onRecheck }: { entries: RuntimeCatalogEntry[]; takenIds: string[]; onRecheck: () => void }) {
+  const [selected, setSelected] = useState<string | null>(null);
+  const [showYaml, setShowYaml] = useState(false);
+  const [copied, setCopied] = useState<{ provider: string; kind: CopyKind; ok: boolean } | null>(null);
+  const choose = (provider: string) => {
+    setSelected((s) => (s === provider ? null : provider));
+    setShowYaml(false);
+    setCopied(null);
+  };
+  const copy = async (provider: string, kind: CopyKind, text: string) => {
     try {
       await navigator.clipboard.writeText(text);
-      setCopied({ provider, ok: true });
+      setCopied({ provider, kind, ok: true });
     } catch {
-      setCopied({ provider, ok: false });
+      setCopied({ provider, kind, ok: false });
     }
   };
   return (
     <details className="catalog-disclosure">
       <summary>Add a runtime</summary>
       <p className="fine-print">
-        The plane never installs a runtime, signs in or writes config. Install and sign in with the provider’s own tools,
-        add the entry under the existing <code>assistants:</code> key in this workspace’s <code>config.yaml</code>, set any
-        options the runtime needs, then restart the plane.
+        The plane never installs a runtime, signs in or writes config. Pick a runtime for the steps; you stay in control of every change.
       </p>
       {entries.length === 0 && <Card>Every runtime in this build’s catalogue is already configured.</Card>}
-      <div style={{ display: "grid", gap: "0.8rem", marginTop: "0.6rem" }}>
+      <ul className="add-runtime-list">
         {entries.map((r) => {
+          const open = selected === r.provider;
+          const panelId = `add-runtime-${r.provider}`;
           const snippet = configSnippet(r.provider, takenIds);
+          const entry = configEntry(r.provider, takenIds);
+          const status = copied?.provider === r.provider ? copied : null;
           return (
-            <Card key={r.provider}>
-              <section aria-label={`Add ${r.label}`}>
-                <div className="runtime-head">
-                  <strong>{r.label}</strong>
-                  <span style={{ fontSize: "0.8rem", color: tokens.muted }}>
-                    {r.provider} · {r.maturity}{r.maturity === "scaffold" ? " (event mapping not proven)" : ""} · {r.transport}
-                  </span>
-                </div>
-                <p style={{ margin: "0.5rem 0 0", fontSize: "0.83rem", color: tokens.muted }}>
-                  {r.approvalModes.length ? `Enforces: ${r.approvalModes.join(", ")}` : "Enforces no approval mode"}
-                  {` · conformance ${r.conformanceRequired ? "required before routing" : "not required"}`}
-                </p>
-                {r.docs?.install || r.docs?.auth ? (
-                  <p style={{ margin: "0.4rem 0 0", fontSize: "0.83rem" }}>
-                    {r.docs.install && <a href={r.docs.install} target="_blank" rel="noreferrer">Official install guide</a>}
-                    {r.docs.install && r.docs.auth ? " · " : ""}
-                    {r.docs.auth && <a href={r.docs.auth} target="_blank" rel="noreferrer">Official sign-in guide</a>}
-                  </p>
-                ) : (
-                  <p style={{ margin: "0.4rem 0 0", fontSize: "0.83rem", color: tokens.muted }}>This build lists no official install or sign-in link for it.</p>
+            <li key={r.provider} className="add-runtime-item">
+              <button type="button" className="agent-toggle add-runtime-choice" aria-expanded={open} aria-controls={panelId} onClick={() => choose(r.provider)}>
+                <span className="agent-chevron" aria-hidden="true">{open ? "▾" : "▸"}</span>
+                <strong>{r.label}</strong>
+                <span className="agent-sub">{r.provider} · {r.transport}</span>
+                {r.maturity === "scaffold" && <span className="agent-chip" data-tone="warn">scaffold</span>}
+              </button>
+              <div id={panelId} hidden={!open} className="add-runtime-panel">
+                {open && (
+                  <section aria-label={`Add ${r.label}`}>
+                    <p className="fine-print" style={{ marginTop: 0 }}>
+                      {r.maturity === "scaffold" ? "Scaffold: event mapping not proven. " : ""}
+                      {r.approvalModes.length ? `Enforces: ${r.approvalModes.join(", ")}` : "Enforces no approval mode"}
+                      {` · conformance ${r.conformanceRequired ? "required before routing" : "not required"}`}
+                    </p>
+                    <ol className="add-steps">
+                      <li>
+                        <strong>Install {r.label}</strong>
+                        <p>
+                          {r.docs?.install
+                            ? <a href={r.docs.install} target="_blank" rel="noreferrer">Official install guide</a>
+                            : "This build lists no official install link; use the provider’s own instructions."}
+                        </p>
+                      </li>
+                      <li>
+                        <strong>Sign in</strong>
+                        <p>
+                          {r.docs?.auth
+                            ? <a href={r.docs.auth} target="_blank" rel="noreferrer">Official sign-in guide</a>
+                            : "This build lists no official sign-in link; use the provider’s own tools."}
+                        </p>
+                      </li>
+                      <li>
+                        <strong>Add it to <code>config.yaml</code></strong>
+                        <p>
+                          Copy the entry and paste it under the existing <code>assistants:</code> key in this workspace’s <code>config.yaml</code>,
+                          matching its indentation. If the file has no <code>assistants:</code> key, copy the full snippet instead.
+                          Set any options the runtime needs.
+                        </p>
+                        <div className="runtime-actions">
+                          <Button variant="secondary" onClick={() => void copy(r.provider, "entry", entry)}>Copy entry</Button>
+                          <Button variant="secondary" onClick={() => void copy(r.provider, "snippet", snippet)}>Copy snippet</Button>
+                          <button type="button" className="agent-link add-runtime-yaml" aria-expanded={showYaml} aria-controls={`${panelId}-yaml`} onClick={() => setShowYaml((v) => !v)}>
+                            {showYaml ? "Hide YAML" : "Show YAML"}
+                          </button>
+                        </div>
+                        <p role="status" className="fine-print" style={{ margin: "0.3rem 0 0", color: status && !status.ok ? tokens.danger : undefined }}>
+                          {status ? (status.ok ? `Copied ${status.kind === "entry" ? "entry" : "snippet"}.` : "Copy failed: show the YAML, select the text and copy it.") : ""}
+                        </p>
+                        <div id={`${panelId}-yaml`} hidden={!showYaml}>
+                          {showYaml && <pre className="runtime-snippet" aria-label={`Config snippet for ${r.label}`}><code>{snippet}</code></pre>}
+                        </div>
+                      </li>
+                      <li>
+                        <strong>Restart the plane, then check</strong>
+                        <p>
+                          The plane reads <code>config.yaml</code> at start. Once restarted, {r.label} appears in the list above, where you can Test it.
+                          This page rereads every minute.
+                        </p>
+                        <div className="runtime-actions">
+                          <Button variant="secondary" onClick={onRecheck}>Check now</Button>
+                        </div>
+                      </li>
+                    </ol>
+                  </section>
                 )}
-                <pre className="runtime-snippet" aria-label={`Config snippet for ${r.label}`}><code>{snippet}</code></pre>
-                <div className="runtime-actions">
-                  <Button variant="secondary" onClick={() => void copy(r.provider, snippet)}>Copy snippet</Button>
-                  <span role="status" style={{ fontSize: "0.8rem", color: copied?.provider === r.provider && !copied.ok ? tokens.danger : tokens.muted }}>
-                    {copied?.provider === r.provider ? (copied.ok ? "Copied." : "Copy failed: select the text and copy it.") : ""}
-                  </span>
-                </div>
-              </section>
-            </Card>
+              </div>
+            </li>
           );
         })}
-      </div>
+      </ul>
     </details>
   );
 }
@@ -402,7 +455,7 @@ export function Catalog() {
         })}
       </div>
       {loaded && catalog && !unavailable.includes("Assistant discovery") && (
-        <AddRuntime entries={unconfiguredRuntimes(catalog.runtimes, assistants.map((a) => a.provider))} takenIds={assistants.map((a) => a.id)} />
+        <AddRuntime entries={unconfiguredRuntimes(catalog.runtimes, assistants.map((a) => a.provider))} takenIds={assistants.map((a) => a.id)} onRecheck={() => void load()} />
       )}
       <details className="catalog-disclosure"><summary>Model catalog & evidence</summary><ModelCatalogCard /></details>
     </div>
