@@ -98,7 +98,9 @@ async function openApp(context: BrowserContext) {
   const page = await context.newPage();
   await page.goto(l.url);
   await expect(page.getByRole("navigation", { name: "System" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: /Command the next wave/ })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Overview", level: 1 })).toBeVisible();
+  // The Overview is calm by default; this walkthrough reads the field, inspector and register.
+  await page.getByRole("region", { name: "Diagnostics" }).getByRole("button", { name: "Show diagnostics" }).click();
   return page;
 }
 

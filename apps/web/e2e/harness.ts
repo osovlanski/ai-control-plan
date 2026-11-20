@@ -29,6 +29,14 @@ import { mintBootstrapToken } from "../../api/src/auth/bootstrap-token.js";
 export const composerProbe = (m: ConsoleMessage) =>
   /status of 404/.test(m.text()) && /\/api\/tasks\/[^/]+\/(compose|composition(\/budget)?)$/.test(m.location().url);
 
+/** The Overview is calm by default. Specs that read the field, inspector or register open diagnostics first. */
+export async function showDiagnostics(page: Page) {
+  const bar = page.getByRole("region", { name: "Diagnostics" });
+  const show = bar.getByRole("button", { name: "Show diagnostics" });
+  if (await show.count()) await show.click();
+  await expect(bar.getByRole("button", { name: "Hide diagnostics" })).toHaveAttribute("aria-expanded", "true");
+}
+
 export const A = "fake-a" as AssistantId;
 export const B = "fake-b" as AssistantId;
 
@@ -171,7 +179,7 @@ export async function boot(
       await page.clock.setFixedTime(clock.current);
       await page.goto(l.url);
       await expect(page.getByRole("navigation", { name: "System" })).toBeVisible();
-      await expect(page.getByRole("heading", { name: /Command the next wave/ })).toBeVisible();
+      await expect(page.getByRole("heading", { name: "Overview", level: 1 })).toBeVisible();
       return page;
     },
     privileged: () =>

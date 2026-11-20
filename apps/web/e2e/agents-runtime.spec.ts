@@ -6,7 +6,7 @@
 import { expect, test, type Locator } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { A, B, boot, type Harness } from "./harness.js";
+import { A, B, boot, type Harness, showDiagnostics } from "./harness.js";
 
 let h: Harness;
 /** Rows are collapsed by default: open one by its toggle (named for the assistant id). */
@@ -16,6 +16,7 @@ test.afterEach(async () => { await h.close(); });
 
 test("disable reaches routing with its reason, re-enable clears only the overlay", async ({ context }, info) => {
   const page = await h.openApp(context);
+  await showDiagnostics(page);
   await page.getByRole("navigation", { name: "System" }).getByRole("link", { name: "Agents", exact: true }).click();
   const card = page.getByRole("region", { name: `Assistant ${A}` });
   await expect(card.getByText("config enabled · no operator override")).toBeHidden();
@@ -50,6 +51,7 @@ test("disable reaches routing with its reason, re-enable clears only the overlay
 
 test("Test renders the plane's conformance result and its recorded state", async ({ context }, info) => {
   const page = await h.openApp(context);
+  await showDiagnostics(page);
   await page.goto(`${h.origin}/#/agents`);
   const card = page.getByRole("region", { name: `Assistant ${A}` });
   await toggle(card, A).click();
