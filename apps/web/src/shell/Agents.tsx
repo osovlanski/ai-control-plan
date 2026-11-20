@@ -4,7 +4,9 @@ import {
   type RuntimeCatalog, type RuntimeCatalogEntry,
 } from "../api.js";
 import { Button, Card, QuotaBar, tokens } from "../ui.jsx";
-import { authText, configSnippet, conformanceText, enablementText, installedText, statusTone, unconfiguredRuntimes } from "./runtime-registry.js";
+import {
+  agentStanding, agentTally, authText, configSnippet, conformanceText, enablementText, installedText, lifecycleDigest, statusTone, unconfiguredRuntimes,
+} from "./runtime-registry.js";
 
 /**
  * K7 model catalog card: evidence with its provenance, never a ranking. The
@@ -226,6 +228,9 @@ export function Catalog() {
   const [actionError, setActionError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [tests, setTests] = useState<Record<string, ConformanceResult>>({});
+  // Rows are collapsed by default; a row opens on request, or when its own Test result arrives.
+  const [open, setOpen] = useState<ReadonlySet<string>>(new Set());
+  const toggle = (id: string) => setOpen((o) => { const next = new Set(o); if (!next.delete(id)) next.add(id); return next; });
 
   const load = async () => {
     const [agents, limits, updates, runtimes] = await Promise.allSettled([api.assistants(), api.cooldowns(), api.changes(), api.runtimeCatalog()]);
@@ -257,6 +262,7 @@ export function Catalog() {
       if (action === "test") {
         const result = await api.testAssistant(a.id);
         setTests((t) => ({ ...t, [a.id]: result }));
+        setOpen((o) => new Set(o).add(a.id));
         applyLifecycle(a.id, result.lifecycle);
         setNotice(`${a.id}: test ${result.status}.`);
       }
@@ -283,96 +289,118 @@ export function Catalog() {
   const today = changes.filter((c) => Date.now() - Date.parse(c.observed_at) < 86400000);
 
   return (
-    <div style={{ display: "grid", gap: "0.8rem" }}>
+    <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr)", gap: "0.8rem" }}>
       {!loaded && <p role="status">Reading configured environments…</p>}
       {!!unavailable.length && <p role="status" className="error">Unavailable: {unavailable.join(", ")}. Missing reads are not evidence of availability.</p>}
       {actionError && <p role="alert" className="error">{actionError}</p>}
       <p role="status" className="fine-print" style={{ margin: 0 }}>{notice ?? ""}</p>
       {loaded && !unavailable.includes("Assistant discovery") && assistants.length === 0 && <Card>No assistant environments configured.</Card>}
       {loaded && !unavailable.includes("Capability changes") && <details className="catalog-disclosure"><summary>What changed today</summary><Card>{today.length === 0 ? <p style={{ color: tokens.muted }}>No capability changes observed today.</p> : today.map((c, i) => <p key={i} style={{ fontSize: "0.83rem" }}><strong>{c.assistant_id}</strong>: {c.field} — {c.old_value || "(none)"} → {c.new_value || "(none)"}</p>)}</Card></details>}
-      {assistants.map((a) => {
-        const core = a.manifest?.core;
-        const lifecycle = a.lifecycle;
-        const cooldown = cooldowns.find(
-          (c) => c.assistantId === a.id && Date.parse(c.until) > Date.now(),
-        );
-        const mine = busy?.id === a.id;
-        const operatorDisabled = lifecycle?.enablement.operator === "disabled";
-        const borderColor = cooldown ? `${tokens.warn}66` : lifecycle && !lifecycle.enablement.effective ? `${tokens.danger}55` : undefined;
-        return (
-          <Card key={a.id} style={borderColor ? { borderColor } : undefined}>
-            <section aria-label={`Assistant ${a.id}`}>
-              <div className="runtime-head">
-                <strong style={{ fontSize: "0.95rem" }}>{a.id}</strong>
-                <span style={{ fontSize: "0.8rem", color: tokens.muted }}>
-                  {labels.get(a.provider) ? `${labels.get(a.provider)} (${a.provider})` : a.provider} · {lifecycle ? (lifecycle.enablement.effective ? "Enabled" : "Disabled") : (a.enabled ? "Enabled" : "Disabled")}
-                </span>
-                {core && (
-                  <span style={{ fontSize: "0.78rem", color: core.auth.state === "ok" ? tokens.ok : tokens.danger }}>
-                    auth: {core.auth.state}
-                    {core.auth.account ? ` (${core.auth.account})` : ""}
+      {assistants.length > 0 && (
+        <div className="agent-toolbar">
+          <span className="agent-tally">{agentTally(assistants.map((a) => agentStanding(a.lifecycle, a.enabled).label))}</span>
+          <button type="button" className="agent-link" onClick={() => setOpen(open.size === assistants.length ? new Set() : new Set(assistants.map((a) => a.id)))}>
+            {open.size === assistants.length ? "Collapse all" : "Expand all"}
+          </button>
+        </div>
+      )}
+      {assistants.length > 0 && <p className="fine-print" style={{ margin: 0 }}>Ready covers only checks that do not depend on a task. The router still decides each task.</p>}
+      <div className="agent-list">
+        {assistants.map((a) => {
+          const core = a.manifest?.core;
+          const lifecycle = a.lifecycle;
+          const cooldown = cooldowns.find(
+            (c) => c.assistantId === a.id && Date.parse(c.until) > Date.now(),
+          );
+          const mine = busy?.id === a.id;
+          const operatorDisabled = lifecycle?.enablement.operator === "disabled";
+          const borderColor = cooldown ? `${tokens.warn}66` : lifecycle && !lifecycle.enablement.effective ? `${tokens.danger}55` : undefined;
+          const standing = agentStanding(lifecycle, a.enabled);
+          const expanded = open.has(a.id);
+          const panelId = `agent-details-${a.id}`;
+          return (
+            <Card key={a.id} style={borderColor ? { borderColor } : undefined}>
+              <section aria-label={`Assistant ${a.id}`} className="agent-row">
+                <div className="agent-summary">
+                  <button type="button" className="agent-toggle" aria-expanded={expanded} aria-controls={panelId} onClick={() => toggle(a.id)}>
+                    <span className="agent-chevron" aria-hidden="true">{expanded ? "▾" : "▸"}</span>
+                    <strong>{a.id}</strong>
+                    <span className="agent-sub">{labels.get(a.provider) ? `${labels.get(a.provider)} (${a.provider})` : a.provider}</span>
+                  </button>
+                  <span className="agent-chip" data-tone={standing.tone}>{standing.label}</span>
+                  {core && (
+                    <span className="agent-chip" data-tone={core.auth.state === "ok" ? "ok" : "danger"} title={core.auth.account ? `account ${core.auth.account}` : undefined}>
+                      auth: {core.auth.state}
+                    </span>
+                  )}
+                  <span className="runtime-actions agent-actions">
+                    {lifecycle && (
+                      <>
+                        <Button variant="secondary" onClick={() => void act(a, "test")} disabled={!!busy}>
+                          {mine && busy?.action === "test" ? BUSY_TEXT.test : "Test"}
+                        </Button>
+                        <Button variant={operatorDisabled ? "secondary" : "danger"} onClick={() => void act(a, operatorDisabled ? "enable" : "disable")} disabled={!!busy}>
+                          {mine && (busy?.action === "disable" || busy?.action === "enable") ? BUSY_TEXT[busy.action] : operatorDisabled ? "Re-enable routing" : "Disable routing"}
+                        </Button>
+                      </>
+                    )}
+                    <Button variant="secondary" onClick={() => void act(a, "sync")} disabled={!!busy}>
+                      {mine && busy?.action === "sync" ? BUSY_TEXT.sync : "Sync"}
+                    </Button>
                   </span>
+                </div>
+                {lifecycle && !expanded && (
+                  <p className="agent-digest">
+                    {lifecycle.readiness.ready ? lifecycleDigest(lifecycle) : `${lifecycle.readiness.reasons.join(" · ")} · ${lifecycleDigest(lifecycle)}`}
+                  </p>
                 )}
-                <span className="runtime-actions" style={{ marginLeft: "auto" }}>
-                  {lifecycle && (
-                    <>
-                      <Button variant="secondary" onClick={() => void act(a, "test")} disabled={!!busy}>
-                        {mine && busy?.action === "test" ? BUSY_TEXT.test : "Test"}
-                      </Button>
-                      <Button variant={operatorDisabled ? "secondary" : "danger"} onClick={() => void act(a, operatorDisabled ? "enable" : "disable")} disabled={!!busy}>
-                        {mine && (busy?.action === "disable" || busy?.action === "enable") ? BUSY_TEXT[busy.action] : operatorDisabled ? "Re-enable routing" : "Disable routing"}
-                      </Button>
-                    </>
+                {cooldown && (
+                  <p className="agent-cooldown">
+                    Cooling down: {cooldown.reason} — routing will skip it until{" "}
+                    {new Date(cooldown.until).toLocaleTimeString()}.
+                  </p>
+                )}
+                <div id={panelId} hidden={!expanded} className="agent-details">
+                  {lifecycle ? <Lifecycle lifecycle={lifecycle} /> : (
+                    <p style={{ margin: "0.6rem 0 0", fontSize: "0.85rem", color: tokens.muted }}>
+                      This plane serves no runtime lifecycle (API 2.10 or later), so Test and Disable are not offered.
+                    </p>
                   )}
-                  <Button variant="secondary" onClick={() => void act(a, "sync")} disabled={!!busy}>
-                    {mine && busy?.action === "sync" ? BUSY_TEXT.sync : "Sync"}
-                  </Button>
-                </span>
-              </div>
-              {cooldown && (
-                <p style={{ margin: "0.6rem 0 0", fontSize: "0.85rem", color: tokens.warn }}>
-                  Cooling down: {cooldown.reason} — routing will skip it until{" "}
-                  {new Date(cooldown.until).toLocaleTimeString()}.
-                </p>
-              )}
-              {lifecycle ? <Lifecycle lifecycle={lifecycle} /> : (
-                <p style={{ margin: "0.6rem 0 0", fontSize: "0.85rem", color: tokens.muted }}>
-                  This plane serves no runtime lifecycle (API 2.10 or later), so Test and Disable are not offered.
-                </p>
-              )}
-              {tests[a.id] && <TestReport result={tests[a.id]!} />}
-              {!core && (
-                <p style={{ margin: "0.6rem 0 0", fontSize: "0.85rem", color: tokens.muted }}>
-                  No manifest yet — run a sync to discover capabilities.
-                </p>
-              )}
-              {core && (
-                <details className="catalog-disclosure"><summary>Models & capabilities</summary>
-                  <div style={{ marginTop: "0.6rem", fontSize: "0.83rem", color: tokens.muted }}>
-                    models: {core.models.map((m) => m.id).join(", ") || "—"} · resume:{" "}
-                    {String(core.canResume)} · mcp: {String(core.canMcp)} · reports limits:{" "}
-                    <strong style={{ color: core.reportsLimits ? tokens.ok : tokens.warn }}>
-                      {String(core.reportsLimits)}
-                    </strong>{" "}
-                    · adapter input flag: {String(core.supportsMidRunInput)}
-                  </div>
-                  <p className="fine-print">The input flag can cover approval replies. Free-text session delivery is not available through the task API.</p>
-                  {core.limits?.map((l) => (
-                    <div key={l.window} style={{ marginTop: "0.4rem" }}>
-                      <QuotaBar usedPercent={l.usedPercent} resetsAt={l.resetsAt} />
-                    </div>
-                  ))}
-                  {a.manifestUpdatedAt && (
-                    <div style={{ marginTop: "0.5rem", fontSize: "0.78rem", color: tokens.muted }}>
-                      last sync {new Date(a.manifestUpdatedAt).toLocaleString()}
-                    </div>
+                  {tests[a.id] && <TestReport result={tests[a.id]!} />}
+                  {!core && (
+                    <p style={{ margin: "0.6rem 0 0", fontSize: "0.85rem", color: tokens.muted }}>
+                      No manifest yet — run a sync to discover capabilities.
+                    </p>
                   )}
-                </details>
-              )}
-            </section>
-          </Card>
-        );
-      })}
+                  {core && (
+                    <details className="catalog-disclosure"><summary>Models & capabilities</summary>
+                      <div style={{ marginTop: "0.6rem", fontSize: "0.83rem", color: tokens.muted }}>
+                        {core.auth.account ? `account: ${core.auth.account} · ` : ""}models: {core.models.map((m) => m.id).join(", ") || "—"} · resume:{" "}
+                        {String(core.canResume)} · mcp: {String(core.canMcp)} · reports limits:{" "}
+                        <strong style={{ color: core.reportsLimits ? tokens.ok : tokens.warn }}>
+                          {String(core.reportsLimits)}
+                        </strong>{" "}
+                        · adapter input flag: {String(core.supportsMidRunInput)}
+                      </div>
+                      <p className="fine-print">The input flag can cover approval replies. Free-text session delivery is not available through the task API.</p>
+                      {core.limits?.map((l) => (
+                        <div key={l.window} style={{ marginTop: "0.4rem" }}>
+                          <QuotaBar usedPercent={l.usedPercent} resetsAt={l.resetsAt} />
+                        </div>
+                      ))}
+                      {a.manifestUpdatedAt && (
+                        <div style={{ marginTop: "0.5rem", fontSize: "0.78rem", color: tokens.muted }}>
+                          last sync {new Date(a.manifestUpdatedAt).toLocaleString()}
+                        </div>
+                      )}
+                    </details>
+                  )}
+                </div>
+              </section>
+            </Card>
+          );
+        })}
+      </div>
       {loaded && catalog && !unavailable.includes("Assistant discovery") && (
         <AddRuntime entries={unconfiguredRuntimes(catalog.runtimes, assistants.map((a) => a.provider))} takenIds={assistants.map((a) => a.id)} />
       )}
