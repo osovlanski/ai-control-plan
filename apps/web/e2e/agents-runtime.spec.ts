@@ -3,12 +3,14 @@
  * reaches the router (its reason shows in the routing preview), Test renders the plane's own
  * conformance result, and "Add a runtime" copies a config snippet without writing any config.
  */
-import { expect, test } from "@playwright/test";
+import { expect, test, type Locator } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { A, B, boot, type Harness } from "./harness.js";
 
 let h: Harness;
+/** Rows are collapsed by default: open one by its toggle (named for the assistant id). */
+const toggle = (card: Locator, id: string) => card.getByRole("button", { name: new RegExp(`^${id} `) });
 test.beforeEach(async () => { h = await boot(4247, "agents-runtime", { [A]: { provider: "fake" }, [B]: { provider: "fake" } }); });
 test.afterEach(async () => { await h.close(); });
 
@@ -16,6 +18,8 @@ test("disable reaches routing with its reason, re-enable clears only the overlay
   const page = await h.openApp(context);
   await page.getByRole("navigation", { name: "System" }).getByRole("link", { name: "Agents", exact: true }).click();
   const card = page.getByRole("region", { name: `Assistant ${A}` });
+  await expect(card.getByText("config enabled · no operator override")).toBeHidden();
+  await toggle(card, A).click();
   await expect(card.getByText("config enabled · no operator override")).toBeVisible();
   await expect(card.getByRole("list", { name: "Why not ready" })).toHaveCount(0);
 
@@ -48,6 +52,7 @@ test("Test renders the plane's conformance result and its recorded state", async
   const page = await h.openApp(context);
   await page.goto(`${h.origin}/#/agents`);
   const card = page.getByRole("region", { name: `Assistant ${A}` });
+  await toggle(card, A).click();
   await expect(card.getByText(/^not tested · descriptor v1/)).toBeVisible();
   await expect(card.getByText(/^not probed yet/)).toBeVisible();
   await card.getByRole("button", { name: "Test", exact: true }).click();
@@ -64,6 +69,7 @@ test("Test renders the plane's conformance result and its recorded state", async
   // Once the probe runs (as the plane's boot and periodic sync do), the stored row matches.
   await h.built.registry.syncChanged(A);
   await page.reload();
+  await toggle(card, A).click();
   await expect(card.getByText(/^in-process \(no CLI\)/)).toBeVisible();
   await expect(card.getByText(/^passed · for CLI in-process · descriptor v1 · not required for routing/)).toBeVisible();
   await card.getByRole("button", { name: "Test", exact: true }).click();
