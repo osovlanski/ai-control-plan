@@ -7,7 +7,7 @@ import { loadConfig } from "../../api/src/config.js";
 import { runtimeCatalogProjection } from "../../api/src/modules/runtime-lifecycle.js";
 import { api, type AssistantLifecycle, type RuntimeCatalog } from "../src/api.js";
 import {
-  agentStanding, agentTally, lifecycleDigest, authText, configSnippet, conformanceText, enablementText, installedText, statusTone, suggestedAssistantId, unconfiguredRuntimes,
+  agentStanding, agentTally, lifecycleDigest, authText, configEntry, configSnippet, conformanceText, enablementText, installedText, statusTone, suggestedAssistantId, unconfiguredRuntimes,
 } from "../src/shell/runtime-registry.js";
 
 afterEach(() => vi.unstubAllGlobals());
@@ -54,6 +54,25 @@ describe("Add a runtime", () => {
 
   it("the snippet is a config entry with provider and enabled only", () => {
     expect(configSnippet("cursor", ["cursor"])).toBe("assistants:\n  cursor-2:\n    provider: cursor\n    enabled: true");
+  });
+
+  it("the entry is the snippet without its assistants: line", () => {
+    expect(configSnippet("cursor", [])).toBe(`assistants:\n${configEntry("cursor", [])}`);
+    expect(configEntry("cursor", ["cursor"])).toBe("  cursor-2:\n    provider: cursor\n    enabled: true");
+  });
+
+  it.each(runtimeCatalogProjection().runtimes.map((r) => r.provider))("the plane's own config loader accepts the %s entry pasted under an existing assistants: key", (provider) => {
+    const home = mkdtempSync(join(tmpdir(), "acp-entry-"));
+    try {
+      mkdirSync(join(home, "personal"), { mode: 0o700 });
+      const existing = { personal: { provider: "fake", enabled: true } };
+      writeFileSync(join(home, "personal", "config.yaml"), `assistants:\n  personal:\n    provider: fake\n    enabled: true\n${configEntry(provider, ["personal"])}\n`);
+      const config = loadConfig({ AGENT_PLANE_HOME: home });
+      const id = suggestedAssistantId(provider, ["personal"]);
+      expect(config.assistants).toEqual({ ...existing, [id]: { provider, enabled: true } });
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 
   it.each(runtimeCatalogProjection().runtimes.map((r) => r.provider))("the plane's own config loader accepts the %s snippet as written", (provider) => {

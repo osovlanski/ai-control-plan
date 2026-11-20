@@ -60,6 +60,16 @@
 .runtime-checks th, .runtime-checks td { text-align: left; padding: 4px 10px 4px 0; border-bottom: 1px solid var(--line); vertical-align: top; overflow-wrap: anywhere; }
 .runtime-checks th { color: var(--text-2); font-weight: 500; }
 .runtime-snippet { margin: 0.6rem 0 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; overflow-x: auto; font-family: var(--font-mono); font-size: 0.8rem; white-space: pre; }
+/* Guided Add a runtime: one choice per row, steps open for the chosen one. */
+.add-runtime-list { list-style: none; margin: 0.6rem 0 0; padding: 0; display: grid; gap: 8px; }
+.add-runtime-item { border: 1px solid var(--line); border-radius: 12px; padding: 6px 14px; }
+.add-runtime-choice { width: 100%; flex-wrap: wrap; align-items: center; }
+.add-runtime-panel { padding: 4px 0 10px 22px; }
+.add-steps { margin: 0; padding-left: 1.3rem; display: grid; gap: 12px; font-size: 0.85rem; }
+.add-steps p { margin: 4px 0 0; color: var(--text-2); overflow-wrap: anywhere; }
+.add-steps .runtime-actions { margin-top: 8px; }
+.add-runtime-yaml { margin-left: 0; }
+.add-runtime-yaml:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
 /* Agents: one scannable row per runtime; lifecycle, test report and models open on request. */
 .agent-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; font-size: 0.85rem; }
 .agent-tally { color: var(--text-2); }
