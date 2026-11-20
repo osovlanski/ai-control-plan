@@ -167,7 +167,9 @@ export function deriveLifecycle(facts: LifecycleFacts): AssistantLifecycle {
 
   const operator: OperatorState = row.operator_state === "disabled" ? "disabled" : "none";
   const operatorChangedAt = at(row.operator_state_at);
-  const configEnabled = row.enabled === 1;
+  // A cached row whose assistant is no longer in config (no adapter) is config-disabled, whatever
+  // `enabled` still says: a restart with an empty config does not rewrite rows (see Registry.init).
+  const configEnabled = facts.configured && row.enabled === 1;
   const enablement: AssistantLifecycle["enablement"] = {
     config: configEnabled,
     operator,

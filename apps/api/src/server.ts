@@ -453,8 +453,11 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   for (const [action, state] of [["disable", "disabled"], ["enable", "none"]] as const) {
     app.post<{ Params: { id: string } }>(`/api/assistants/:id/${action}`, assistantWrite, async (req, reply) => {
       const result = registry.setOperatorState(req.params.id, state, now);
-      const row = result && registry.get(req.params.id);
-      if (!result || !row) return reply.status(404).send({ error: `Unknown assistant: ${req.params.id}` });
+      if (!result) return reply.status(404).send({ error: `Unknown assistant: ${req.params.id}` });
+      // Answer from the row the write left, so the lifecycle agrees with `operatorState` even if a
+      // second writer changes the overlay before this handler reads. The manifest parse is for
+      // this row alone, after the commit: nothing the response needs can undo the write.
+      const row = registry.parsed(result.row);
       if (result.changed) app.log.info({ assistantId: row.id, operatorState: state }, "assistant operator state changed");
       const lifecycle = await lifecycles.withInstallation(lifecycles.of(row), row.provider);
       return { schemaVersion: AGENT_RUNTIME_SCHEMA_VERSION, assistantId: row.id, operatorState: state, changed: result.changed, lifecycle };

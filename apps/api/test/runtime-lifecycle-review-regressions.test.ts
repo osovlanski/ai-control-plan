@@ -96,7 +96,7 @@ it("leaves a task RUNNING after the handoff target is disabled during source dra
     .not.toBe("RUNNING");
 });
 
-it.fails("returns contradictory operator state when a second writer enables after disable commits", async () => {
+it("returns contradictory operator state when a second writer enables after disable commits", async () => {
   const { server, config, request } = boot();
   const otherDb = openDb(config.dbPath);
   try {
@@ -122,7 +122,7 @@ it.fails("returns contradictory operator state when a second writer enables afte
   }
 });
 
-it.fails("reports a removed assistant as effectively enabled and ready after an empty-config restart", async () => {
+it("reports a removed assistant as effectively enabled and ready after an empty-config restart", async () => {
   const first = boot();
   await first.server.registry.sync(A);
   const before = await first.request("GET", `/api/assistants/${A}/lifecycle`);
@@ -138,7 +138,7 @@ it.fails("reports a removed assistant as effectively enabled and ready after an 
     .toMatchObject({ configured: false, enablement: { effective: false }, readiness: { ready: false } });
 });
 
-it.fails("returns 500 after disabling a healthy assistant when another cached manifest is malformed", async () => {
+it("returns 500 after disabling a healthy assistant when another cached manifest is malformed", async () => {
   const { server, db, request } = boot();
   await server.registry.sync(A);
   await server.registry.sync(B);
@@ -149,6 +149,29 @@ it.fails("returns 500 after disabling a healthy assistant when another cached ma
     .toEqual({ operator_state: "disabled" });
   expect(response.statusCode, "A durably committed disable must return 200 despite another assistant's malformed manifest")
     .toBe(200);
+});
+
+it("disables cached rows on an empty-config restart so routing and readback agree", async () => {
+  const first = boot();
+  await first.server.registry.sync(A);
+  await stop();
+
+  const { db, request } = boot({});
+  expect(db.prepare("SELECT enabled FROM assistants WHERE id = ?").get(A)).toEqual({ enabled: 0 });
+  const response = await request("GET", `/api/assistants/${A}/lifecycle`);
+  expect(response.json().enablement).toMatchObject({ config: false, effective: false });
+  expect(response.json().readiness.reasons).toContain("disabled in workspace config");
+});
+
+it("reads one assistant's lifecycle without parsing another assistant's malformed manifest", async () => {
+  const { server, db, request } = boot();
+  await server.registry.sync(A);
+  await server.registry.sync(B);
+  db.prepare("UPDATE assistants SET manifest = ? WHERE id = ?").run("{", B);
+
+  const response = await request("GET", `/api/assistants/${A}/lifecycle`);
+  expect(response.statusCode).toBe(200);
+  expect(response.json()).toMatchObject({ configured: true, readiness: { ready: true } });
 });
 
 it.each([
