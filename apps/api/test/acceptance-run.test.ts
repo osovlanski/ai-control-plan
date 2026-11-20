@@ -389,6 +389,11 @@ describe("agent executor", () => {
     // The agent wrapper itself is unchanged: no accept mode there.
     expect(readFileSync(join(__dirname, "../../../setup/run-as-agent"), "utf8")).not.toMatch(/accept\)|unshare/);
   });
+
+  it("the agent session finds node and pnpm: run-as-agent puts the root-owned /opt/aos-tools/bin first (G15 seventh run)", () => {
+    expect(readFileSync(join(__dirname, "../../../setup/run-as-agent"), "utf8"))
+      .toMatch(/^export PATH=\/opt\/aos-tools\/bin:\/usr\/local\/bin:\/usr\/bin:\/bin$/m);
+  });
 });
 
 async function waitFor(cond: () => boolean, ms = 5_000): Promise<void> {

@@ -11,6 +11,7 @@ import {
   VerificationCoordinator,
   type VerificationCoordinatorCheckpoints,
 } from "../../src/modules/verification-coordinator.js";
+import { DEFAULT_VERIFICATION_PROVIDERS } from "../../src/modules/harness/verification-providers.js";
 import { planProjectVerification, snapshotProjectVerification } from "../../src/modules/project-verification.js";
 
 let dir: string;
@@ -206,5 +207,22 @@ describe("VerificationCoordinator", () => {
     const prepared = await coordinator(["src/widget.ts"], undefined, async () => false).prepare(sid, req);
     expect(prepared.outcomes ?? []).toEqual([]);
     expect(prepared.checks.some((c) => c.checkId.startsWith("project:"))).toBe(false);
+  });
+
+  it("an agent task with a project plan, a lockfile and no node_modules runs through the coordinator and the real providers without failing (G15 seventh run)", async () => {
+    writeFileSync(join(worktree, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+    const base = projectRequest("erq_agent_p", "AG-agent-p");
+    const req: ExecutionRequest = { ...base, policy: { ...base.policy, runAs: "agent" } };
+    const sid = createSession(req);
+    for (const unchanged of [async () => false, async () => true]) {
+      const prepared = await coordinator(["src/widget.ts"], undefined, unchanged).prepare(sid, req);
+      // Not blocked, not skipped-unchanged: the plan's project checks reach the verifiers.
+      expect(prepared.outcomes ?? []).toEqual([]);
+      expect(prepared.checks.some((c) => c.checkId.startsWith("project:"))).toBe(true);
+      const run = await DEFAULT_VERIFICATION_PROVIDERS.run(prepared.checks, {
+        authority: {} as never, worktreePath: worktree, repositoryCommands: "refused", remainingMs: () => 1000,
+      });
+      expect(run?.evaluation.passed).toBe(true);
+    }
   });
 });
