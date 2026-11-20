@@ -554,9 +554,9 @@ export class Scheduler {
     const carriedAge = resource !== null && previous?.resource === resource && (previous.units ?? 1) === units ? previous.resourceQueuedAt : undefined;
     // The continuation intent is carried EXPLICITLY, never inherited: it describes
     // a handoff that has not happened yet, so only a path that knows the
-    // continuation is still owed (the deferral itself, or a re-park of a dispatch
-    // that never started) passes it on.
-    const continuation = resource !== null && carry?.continuation ? JSON.stringify(redactValue(carry.continuation)) : null;
+    // continuation is still owed (the deferral itself, a handoff park and its
+    // run-now re-arm, or a re-park of a dispatch that never started) passes it on.
+    const continuation = carry?.continuation ? JSON.stringify(redactValue(carry.continuation)) : null;
     this.d.db.prepare(`INSERT INTO wait_conditions(task_id,generation,state,kind,not_before,created_by,created_at,auto_wakes,history,reason,checkpoint_id,blockers,assistants,depends_on,on_dependency_failure,origin,resource,resource_units,resource_queued_at,continuation)
       VALUES(?,?,'active',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(taskId, generation, input.kind, input.notBefore!, actor, this.iso(), autoWakes, JSON.stringify(history.slice(-10)), redactValue(input.reason ?? 'Scheduled wait'), checkpointId ?? null, JSON.stringify(redactValue(blockers)), JSON.stringify(redactValue(input.kind === 'quota' ? input.assistants ?? [] : [])),
       JSON.stringify(input.kind === 'dependency' ? input.dependsOn : []), input.kind === 'dependency' ? (input.onDependencyFailure ?? DEFAULT_ON_DEPENDENCY_FAILURE) : null, origin ?? null,
@@ -822,13 +822,15 @@ export class Scheduler {
    * task WAITING_INPUT on this row, anchored to the source's checkpoint. It is written `expired`
    * because nothing may wake it on its own; an operator consumes it, either by `/handoff` (which
    * continues from its checkpoint) or by `runNow`, which re-arms it where the pause allows a wait.
+   * The park keeps the handoff's intent (its excluded source and any explicit target, decision D2
+   * on #209), so a run-now routes the continuation the way the handoff would have.
    * Called inside the orchestrator's park transaction.
    */
-  parkHandoff(taskId: string, checkpointId: string | undefined, reason: string): void {
+  parkHandoff(taskId: string, checkpointId: string | undefined, reason: string, intent?: ContinuationIntent): void {
     this.d.db.prepare("UPDATE wait_conditions SET state = 'replaced' WHERE task_id = ? AND state = 'active'").run(taskId);
     const old = this.condition(taskId);
     this.insert(taskId, { kind: 'time', notBefore: this.iso(), reason }, HANDOFF_PARK, 0, old?.history ?? [], checkpointId, [], undefined,
-      { resource: old?.resource, units: old?.units });
+      { resource: old?.resource, units: old?.units, continuation: intent });
     this.d.db.prepare("UPDATE wait_conditions SET state = 'expired' WHERE task_id = ? AND state = 'active'").run(taskId);
   }
 
@@ -874,7 +876,10 @@ export class Scheduler {
     return true;
   }
 
-  /** `runNow` on a handoff park: the same wait `/wait` would attach, from the park's anchor. */
+  /**
+   * `runNow` on a handoff park: the same wait `/wait` would attach, from the park's anchor, carrying
+   * the park's handoff intent so the grant excludes the source and applies the explicit target (D2).
+   */
   private rearmHandoffPark(taskId: string, park: WaitCondition): number | string {
     try {
       return this.d.db.transaction((): number | string => {
@@ -883,7 +888,7 @@ export class Scheduler {
         if (!park.checkpointId) return `Task ${taskId} has no checkpoint to continue from; use handoff`;
         if (this.hasOwner(taskId)) return 'Existing execution prevents a run-now';
         this.insert(taskId, { kind: 'time', notBefore: this.iso(), reason: park.reason }, 'operator', park.autoWakes, park.history, park.checkpointId, [], undefined,
-          { resource: park.resource, units: park.units });
+          { resource: park.resource, units: park.units, continuation: park.continuation });
         this.d.tasks.transition(taskId, 'WAITING_RESOURCE');
         const generation = this.condition(taskId)!.generation;
         this.record(taskId, 'wait.attached', generation, undefined, { rearmed: 'handoff park', from: park.generation });
