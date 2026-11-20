@@ -1,7 +1,7 @@
 import { FakeAdapter } from "@agent-plane/adapters";
 import { writeFileSync } from "node:fs";
 import { test, expect } from "@playwright/test";
-import { boot, A, composerProbe, type Harness } from "./harness.js";
+import { boot, A, composerProbe, type Harness, showDiagnostics } from "./harness.js";
 
 let h: Harness;
 let consoleErrors: string[];
@@ -26,6 +26,7 @@ test.afterEach(async () => {
 
 test("Intake never starts a stale goal or constraints after editing a preview", async ({ context }) => {
   const page = await h.openApp(context);
+  await showDiagnostics(page);
   await page.getByRole("textbox", { name: "What should Agentic OS do?" }).fill("Original goal");
   await page.getByRole("textbox", { name: "What should Agentic OS do?" }).press("Control+Enter");
   await expect(page.getByRole("button", { name: "Run recommended", exact: true })).toBeVisible();
@@ -49,6 +50,7 @@ for (const decision of ["Approve", "Deny"] as const) test(`real Harness approval
   // Attention must remain workspace-wide while an unrelated draft is selected.
   await api.post("/api/tasks", { data: { goal: "Unstarted draft" } });
   const page = await h.openApp(context);
+  await showDiagnostics(page);
   await page.setViewportSize({ width: 1440, height: 1000 });
   await page.getByRole("button", { name: /Select task: Unstarted draft/ }).click();
   await expect(page.locator(".workspace-status .tone-human")).toContainText("1 need you");
@@ -90,6 +92,7 @@ for (const decision of ["Approve", "Deny"] as const) test(`real Harness approval
 
 test("scale, keyboard, responsive detail, and reduced motion review", async ({ context }, info) => {
   const page = await h.openApp(context);
+  await showDiagnostics(page);
   await page.setViewportSize({ width: 1440, height: 1000 });
   await page.screenshot({ path: info.outputPath("scale-0.png") });
   for (const count of [1, 6, 20, 100]) {
@@ -123,6 +126,7 @@ test("runtime geometry and selection remain readable across eight active mission
     await h.built.orchestrator.startTask(id, A);
   }
   const page = await h.openApp(context);
+  await showDiagnostics(page);
   const evidence = [];
   for (const width of [1440, 1100]) {
     await page.setViewportSize({ width, height: 1000 });
@@ -150,6 +154,7 @@ test("legacy execution without durable sessions reports unknown instead of claim
   h.built.tasks.transition(id, "ROUTING");
   await h.built.orchestrator.startTask(id, A);
   const page = await h.openApp(context);
+  await showDiagnostics(page);
   await expect(page.locator(".workspace-status")).toContainText("1 runtime unknown");
   await expect(page.locator(".orbital-body.moving")).toHaveCount(0);
   await expect(page.locator(".inspector .badge")).toHaveText("Runtime unknown");
@@ -165,6 +170,7 @@ test("limit, handoff, and terminal states keep distinct shapes and truthful next
     ids[state] = id;
   }
   const page = await h.openApp(context);
+  await showDiagnostics(page);
   await page.setViewportSize({ width: 1440, height: 1000 });
   for (const state of Object.keys(ids)) {
     await page.getByRole("textbox", { name: "Search tasks" }).fill(ids[state]!);
@@ -187,8 +193,9 @@ test("partial and failed reads are explicit; loading and disabled providers rema
   const gate = new Promise<void>(resolve => { release = resolve; });
   await context.route("**/api/tasks", async route => { await gate; await route.continue(); });
   const page = await h.openApp(context);
+  await showDiagnostics(page);
   await page.setViewportSize({ width: 1440, height: 1000 });
-  await expect(page.getByRole("heading", { name: "Reading your workspace…" })).toBeVisible();
+  await expect(page.getByRole("region", { name: "Selected task inspector" }).getByRole("heading", { name: "Reading your workspace…" })).toBeVisible();
   await expect(page.locator(".system-overview .stat b")).toHaveText(["—", "—", "—"]);
   await page.screenshot({ path: info.outputPath("loading.png") });
   release();

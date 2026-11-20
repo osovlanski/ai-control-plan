@@ -6,7 +6,7 @@
 import { expect, test } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { A, B, boot, type Harness } from "./harness.js";
+import { A, B, boot, type Harness, showDiagnostics } from "./harness.js";
 
 let h: Harness;
 test.beforeEach(async () => { h = await boot(4247, "agents-runtime", { [A]: { provider: "fake" }, [B]: { provider: "fake" } }); });
@@ -14,6 +14,7 @@ test.afterEach(async () => { await h.close(); });
 
 test("disable reaches routing with its reason, re-enable clears only the overlay", async ({ context }, info) => {
   const page = await h.openApp(context);
+  await showDiagnostics(page);
   await page.getByRole("navigation", { name: "System" }).getByRole("link", { name: "Agents", exact: true }).click();
   const card = page.getByRole("region", { name: `Assistant ${A}` });
   await expect(card.getByText("config enabled · no operator override")).toBeVisible();
@@ -46,6 +47,7 @@ test("disable reaches routing with its reason, re-enable clears only the overlay
 
 test("Test renders the plane's conformance result and its recorded state", async ({ context }, info) => {
   const page = await h.openApp(context);
+  await showDiagnostics(page);
   await page.goto(`${h.origin}/#/agents`);
   const card = page.getByRole("region", { name: `Assistant ${A}` });
   await expect(card.getByText(/^not tested · descriptor v1/)).toBeVisible();
@@ -77,6 +79,7 @@ test("Add a runtime copies a config snippet and writes no config", async ({ cont
   const configPath = join(h.home, "personal", "config.yaml");
   const before = readFileSync(configPath, "utf8");
   const page = await h.openApp(context);
+  await showDiagnostics(page);
   await page.goto(`${h.origin}/#/agents`);
   await page.getByText("Add a runtime", { exact: true }).click();
   const cursor = page.getByRole("region", { name: "Add Cursor CLI" });

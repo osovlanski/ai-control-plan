@@ -1,5 +1,8 @@
 import { useCallback, useState } from "react";
 import { useBoard } from "./board/useBoard.js";
+import { CalmOverview } from "./board/CalmOverview.js";
+import { useDiagnostics } from "./board/diagnosticsPref.js";
+import { useMissionSnapshot } from "./board/useMissionSnapshot.js";
 import { actualLifecycle, fieldPulse, modelNodes, type ActualExecution } from "./orbital.js";
 import { MissionActivity, SystemOverview } from "./board/Overview.js";
 import { MissionShell } from "./shell/MissionShell.js";
@@ -24,7 +27,9 @@ export function OrbitalBoard({
   const [selected, setSelected] = useState<string | null>(null);
   const [filter, setFilter] = useState<Filter>("all");
   const [query, setQuery] = useState("");
-  const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
+  const [inspected, setSnapshot] = useState<Snapshot | null>(null);
+  const [diagnostics, setDiagnostics] = useDiagnostics();
+  const [focusRequest, setFocusRequest] = useState(0);
   const onSnapshot = useCallback((s: Snapshot | null) => {
     setSnapshot(s);
   }, []);
@@ -44,6 +49,9 @@ export function OrbitalBoard({
     ? undefined : visible.find((t) => t.id === selected) ?? visible[0];
   const bodies = visible.slice(0, MAX_BODIES);
   if (current && !bodies.some((t) => t.id === current.id)) bodies[bodies.length - 1] = current;
+  // Calm mode reads the selected mission itself; with diagnostics open the Inspector owns that read.
+  const { snapshot: calmSnapshot, error: calmError } = useMissionSnapshot(!diagnostics && active ? current?.id ?? null : null, revision);
+  const snapshot = diagnostics ? inspected : calmError ? null : calmSnapshot;
   const pulse = fieldPulse(tasks);
   const now = Date.now();
   const executing = current?.state === "RUNNING" && snapshot?.detail.id === current.id
@@ -86,13 +94,22 @@ export function OrbitalBoard({
       <div className="board-head">
         <div>
           <span className="eyebrow">Overview</span>
-          <h1>
-            Command the next wave<em>.</em>
-          </h1>
-          <p>One place to direct your AI work.</p>
+          <h1>Overview</h1>
+          <p>What needs you, and what is running.</p>
         </div>
+        <section className="diagnostics-toggle" aria-label="Diagnostics">
+          <button type="button" className="btn" aria-expanded={diagnostics} aria-controls="overview-diagnostics"
+            title="Execution field, routing decision, quota, waits and the full mission register"
+            onClick={() => { if (diagnostics) { setFilter("all"); setQuery(""); } setDiagnostics(!diagnostics); }}>
+            {diagnostics ? "Hide diagnostics" : "Show diagnostics"}
+          </button>
+        </section>
       </div>
-      <MissionShell active={active} selected={current ?? null} snapshot={forCurrent ? snapshot : null}
+      {!diagnostics && <CalmOverview tasks={visible} current={current} snapshot={forCurrent ? snapshot : null} pulse={pulse}
+        loading={loading} error={error} onSelect={id => { setFilter("all"); setQuery(""); setSelected(id); }}
+        onOpen={onOpen} onNewMission={() => setFocusRequest(n => n + 1)}
+        onShowAll={() => setDiagnostics(true)} />}
+      <MissionShell active={active} focusRequest={focusRequest} selected={current ?? null} snapshot={forCurrent ? snapshot : null}
         onOpen={() => current && onOpen(current.id)}
         onChanged={() => setRevision(r => r + 1)}
         onStarted={id => { setPendingSelection(id); setFilter("all"); setQuery(""); setSelected(id); setRevision(r => r + 1); }} />
@@ -102,6 +119,7 @@ export function OrbitalBoard({
         </p>
       )}
       {!!unavailable.length && <p role="status" className="error">Unavailable reads: {unavailable.join(", ")}. Provider and approval visibility may be incomplete.</p>}
+      {diagnostics && <div id="overview-diagnostics" className="overview-diagnostics">
       <div className="orbital-layout">
         <SystemOverview pulse={pulse} loading={loading} error={error} hasSnapshot={tasks.length > 0}
           attentionSelected={filter === "attention"} onAttention={() => setFilter(filter === "attention" ? "all" : "attention")} />
@@ -171,6 +189,7 @@ export function OrbitalBoard({
         query={query}
         onQuery={setQuery}
       />}
+      </div>}
     </div>
   );
 }

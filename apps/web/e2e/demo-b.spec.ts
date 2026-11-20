@@ -42,7 +42,7 @@ import {
   type RoutingProfile,
 } from "@agent-plane/core";
 import type { CatalogObservation, CatalogSource } from "../../api/src/modules/model-catalog.js";
-import { boot, Clock, type Harness } from "./harness.js";
+import { boot, Clock, type Harness, showDiagnostics } from "./harness.js";
 
 const A = "fake-a" as AssistantId; // advertises premium-max + swift-mini
 const B = "fake-b" as AssistantId; // advertises swift-mini only
@@ -325,6 +325,7 @@ async function assertReferenceComposition(page: Page) {
 test("Demo B/1: deterministic SHADOW recommendation, and the provider request proves execution was untouched", async ({ context }, testInfo) => {
   const consoleErrors: string[] = [];
   const page = await h.openApp(context);
+  await showDiagnostics(page);
   page.on("console", (m) => m.type() === "error" && consoleErrors.push(m.text()));
   page.on("pageerror", (e) => consoleErrors.push(String(e)));
   await page.setViewportSize({ width: 1440, height: 900 });
@@ -500,6 +501,7 @@ test("Demo B/1: deterministic SHADOW recommendation, and the provider request pr
 test("Demo B/2: an excellent-scoring candidate that fails a hard filter cannot be recommended", async ({ context }, testInfo) => {
   const consoleErrors: string[] = [];
   const page = await h.openApp(context);
+  await showDiagnostics(page);
   page.on("console", (m) => m.type() === "error" && consoleErrors.push(m.text()));
   page.on("pageerror", (e) => consoleErrors.push(String(e)));
   await page.setViewportSize({ width: 1440, height: 900 });
@@ -569,6 +571,7 @@ test("Demo B/2: an excellent-scoring candidate that fails a hard filter cannot b
 test("Demo B/3: a runtime selector whose benchmark identity is unproven shows priorMissing, and execution still works", async ({ context }, testInfo) => {
   const consoleErrors: string[] = [];
   const page = await h.openApp(context);
+  await showDiagnostics(page);
   page.on("console", (m) => m.type() === "error" && consoleErrors.push(m.text()));
   page.on("pageerror", (e) => consoleErrors.push(String(e)));
   await page.setViewportSize({ width: 1440, height: 900 });
@@ -617,6 +620,7 @@ test("Demo B/3: a runtime selector whose benchmark identity is unproven shows pr
 test("Demo B/4: ACTUAL and SHADOW that share one model stay independently visible", async ({ context }, testInfo) => {
   const consoleErrors: string[] = [];
   const page = await h.openApp(context);
+  await showDiagnostics(page);
   page.on("console", (m) => m.type() === "error" && consoleErrors.push(m.text()));
   page.on("pageerror", (e) => consoleErrors.push(String(e)));
   await page.setViewportSize({ width: 1440, height: 900 });
@@ -694,6 +698,8 @@ test("Demo B/5: a cancelled mission never shows 'will execute' for ACTUAL", asyn
   h.built.tasks.transition(taskId, "CANCELLED");
 
   const page = await h.openApp(context);
+
+  await showDiagnostics(page);
   page.on("console", (m) => m.type() === "error" && consoleErrors.push(m.text()));
   page.on("pageerror", (e) => consoleErrors.push(String(e)));
   await page.setViewportSize({ width: 1440, height: 900 });

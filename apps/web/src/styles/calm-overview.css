@@ -1,0 +1,38 @@
+/* Calm Overview: one current mission and one next action; diagnostics on demand. */
+.board-head { margin-bottom: 14px; }
+.diagnostics-toggle { flex-shrink: 0; }
+.calm-overview, .calm-missions {
+  min-width: 0; margin-bottom: 14px; border: 1px solid var(--line); border-radius: 16px;
+  background: linear-gradient(145deg, #182237a1, #0b1221bf); padding: 20px 24px;
+}
+.calm-overview { border-left: 3px solid var(--tone-neutral); }
+.calm-active { border-left-color: var(--tone-active); }
+.calm-human, .calm-limit { border-left-color: var(--tone-human); background: linear-gradient(145deg, #2a2418a1, #0b1221bf); }
+.calm-failed { border-left-color: var(--tone-failed); }
+.calm-complete { border-left-color: var(--tone-complete); }
+.calm-resource { border-left-color: var(--tone-resource); }
+.calm-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.calm-overview .eyebrow { display: block; }
+.calm-overview h2 { font-size: clamp(20px, 2vw, 26px); font-weight: 500; letter-spacing: -.02em; line-height: 1.25; margin: 8px 0 6px; overflow-wrap: anywhere; }
+.calm-reason { color: var(--text-2); font-size: 14px; max-width: 70ch; }
+.calm-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
+.calm-counts { display: flex; flex-wrap: wrap; gap: 4px 18px; margin-top: 16px; font-size: 12px; color: var(--text-3); }
+.calm-counts b { color: var(--text); font-weight: 600; }
+.calm-missions h2 { font-size: 14px; font-weight: 500; color: var(--text-2); }
+.calm-missions ul { list-style: none; margin: 10px 0 0; padding: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; }
+.calm-missions li { min-width: 0; }
+.calm-missions li button {
+  width: 100%; min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: 16px; text-align: left;
+  background: transparent; border: 1px solid transparent; border-radius: 10px; padding: 10px 12px; color: var(--text);
+}
+.calm-missions li button:hover { background: var(--surface); }
+.calm-missions li button[aria-pressed="true"] { border-color: var(--line-strong); background: var(--surface-2); }
+.calm-missions li strong { font-weight: 500; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.calm-missions li span { font-size: 12px; flex-shrink: 0; }
+.calm-link { background: none; border: 0; color: var(--accent); padding: 10px 12px 0; font-size: 13px; cursor: pointer; text-decoration: underline; }
+@media (max-width: 760px) {
+  .calm-overview, .calm-missions { padding: 16px; }
+  .board-head { flex-direction: column; align-items: stretch; gap: 12px; }
+  .diagnostics-toggle .btn { width: 100%; justify-content: center; min-height: 44px; }
+  .calm-actions .btn { flex: 1 1 100%; justify-content: center; min-height: 44px; }
+}

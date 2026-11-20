@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
 import { fileDigest } from "../../api/src/bundle-contract.js";
 import { computeMemoryBundleDigest, computeMemorySnapshotDigest, type MemoryBundle } from "../../api/src/memory-contract.js";
-import { boot, A, B, composerProbe, type Harness } from "./harness.js";
+import { boot, A, B, composerProbe, type Harness, showDiagnostics } from "./harness.js";
 import { fakeCockpit, FAKE_COCKPIT_TOKEN, type FakeCockpit } from "./fake-cockpit.js";
 
 const SKILL = "claude-skills:ts-review";
@@ -95,6 +95,7 @@ test.describe("Composer on", () => {
 
   test("New Task shows all six stages with their why, the chosen skill with its digest and the method of each number", async ({ context }, info) => {
     const page = await h.openApp(context);
+    await showDiagnostics(page);
     await page.setViewportSize({ width: 1440, height: 1500 });
     await preview(page);
     const proposal = page.getByRole("region", { name: "Composition preview" });
@@ -130,6 +131,7 @@ test.describe("Composer on", () => {
 
   test("Run composed confirms the previewed digest, binds the revision, and the Composition tab shows revision, attempts and budget", async ({ context }, info) => {
     const page = await h.openApp(context);
+    await showDiagnostics(page);
     await page.setViewportSize({ width: 1440, height: 1100 });
     await preview(page);
     const proposal = page.getByRole("region", { name: "Composition preview" });
@@ -178,6 +180,7 @@ test.describe("Composer on", () => {
 
   test("Compare shows both candidate revisions, profiles and equal budget shares in Task Detail and Inspector", async ({ context }, info) => {
     const page = await h.openApp(context);
+    await showDiagnostics(page);
     await preview(page);
     const proposal = page.getByRole("region", { name: "Routing recommendation" });
     await proposal.getByText("Routing evidence & advanced overrides", { exact: true }).click();
@@ -223,6 +226,7 @@ test.describe("Composer on", () => {
 
   test("a composition that changed since the preview starts nothing and shows the new decision", async ({ context }) => {
     const page = await h.openApp(context);
+    await showDiagnostics(page);
     await preview(page);
     const proposal = page.getByRole("region", { name: "Composition preview" });
     const before = await proposal.locator(".comp-outcome .digest").getAttribute("title");
@@ -245,6 +249,7 @@ test.describe("Composer on", () => {
 
   test("composing on another assistant shows that composition and runs it there", async ({ context }) => {
     const page = await h.openApp(context);
+    await showDiagnostics(page);
     await preview(page);
     const proposal = page.getByRole("region", { name: "Composition preview" });
     const harness = proposal.locator('[data-stage="harness_model"]');
@@ -262,6 +267,7 @@ test.describe("Composer on", () => {
 
   test("parallel start without a repository explains routing only", async ({ context }) => {
     const page = await h.openApp(context);
+    await showDiagnostics(page);
     await page.getByRole("textbox", { name: "What should Agentic OS do?" }).fill(GOAL);
     const shell = page.getByLabel("Mission shell");
     await shell.getByRole("button", { name: "Preview routing", exact: true }).click();
@@ -278,6 +284,7 @@ test.describe("Composer on", () => {
     expect(started.ok()).toBe(true);
     await h.waitForState(created.taskId, "COMPLETED");
     const page = await h.openApp(context);
+    await showDiagnostics(page);
     await page.getByRole("button", { name: new RegExp(`Select task: ${GOAL}`) }).click();
     const inspector = page.getByRole("region", { name: "Selected task inspector" });
     await inspector.getByRole("button", { name: "Decision", exact: true }).click();
@@ -312,6 +319,8 @@ test.describe("Memory shadow chips", () => {
     expect(demote.shadow.action).toBe("demote");
 
     const page = await h.openApp(context);
+
+    await showDiagnostics(page);
     await page.setViewportSize({ width: 1280, height: 1000 });
     await page.getByRole("button", { name: new RegExp(`Select task: ${GOAL}`) }).click();
     const inspector = page.getByRole("region", { name: "Selected task inspector" });
@@ -336,6 +345,7 @@ test.describe("Memory shadow chips", () => {
     const api = await h.privileged();
     const created = await (await api.post("/api/tasks", { data: { goal: GOAL, repoPath: repo } })).json();
     const page = await h.openApp(context);
+    await showDiagnostics(page);
     await page.getByRole("button", { name: new RegExp(`Select task: ${GOAL}`) }).click();
     const inspector = page.getByRole("region", { name: "Selected task inspector" });
     await inspector.getByRole("button", { name: "Decision", exact: true }).click();
@@ -357,6 +367,7 @@ test.describe("Composer off", () => {
 
   test("New Task and the Composition tab say the Composer is off, and routing still runs", async ({ context }) => {
     const page = await h.openApp(context);
+    await showDiagnostics(page);
     const compositionRequests: string[] = [];
     page.on("request", (request) => {
       if (/\/compose(?:$|\?)|\/composition(?:\/|$|\?)/.test(new URL(request.url()).pathname)) compositionRequests.push(request.url());

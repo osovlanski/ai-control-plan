@@ -1,6 +1,6 @@
 import { test, expect } from "@playwright/test";
 import type { CatalogModel, TaskContext } from "../src/api.js";
-import { boot, A, type Harness } from "./harness.js";
+import { boot, A, type Harness, showDiagnostics } from "./harness.js";
 
 let h: Harness;
 test.beforeEach(async () => {
@@ -34,6 +34,7 @@ const model: CatalogModel = {
 test("catalog exposes each price's provenance and benchmark dates without granting availability", async ({ context }, info) => {
   await context.route("**/api/models", route => route.fulfill({ json: { models: [model] } }));
   const page = await h.openApp(context);
+  await showDiagnostics(page);
   await page.getByRole("link", { name: "Agents", exact: true }).click();
   await page.getByText("Model catalog & evidence", { exact: true }).click();
   const card = page.locator(".card").filter({ hasText: "Model catalog" });
@@ -55,6 +56,7 @@ test("catalog retains a model with unknown context, capabilities and price", asy
     ...model, contextWindowTokens: undefined, capabilities: undefined, pricing: [], benchmarkPriors: [],
   }] } }));
   const page = await h.openApp(context);
+  await showDiagnostics(page);
   await page.getByRole("link", { name: "Agents", exact: true }).click();
   await page.getByText("Model catalog & evidence", { exact: true }).click();
   const card = page.locator(".card").filter({ hasText: "Model catalog" });
@@ -71,6 +73,7 @@ test("catalog distinguishes pending, empty and failed reads", async ({ context }
     await route.fulfill(failed ? { status: 503, json: { error: "fixture unavailable" } } : { json: { models: [] } });
   });
   const page = await h.openApp(context);
+  await showDiagnostics(page);
   await page.getByRole("link", { name: "Agents", exact: true }).click();
   await page.getByText("Model catalog & evidence", { exact: true }).click();
   const card = page.locator(".card").filter({ hasText: "Model catalog" });
@@ -98,6 +101,7 @@ test("Context tab identifies its session and distinguishes K11 from provider com
   };
   await context.route(`**/api/tasks/${task.taskId}/context`, route => route.fulfill({ json: observation }));
   const page = await h.openApp(context);
+  await showDiagnostics(page);
   await page.getByRole("button", { name: /Select task: Inspect context evidence/ }).click();
   const inspector = page.getByRole("region", { name: "Selected task inspector" });
   await inspector.getByRole("button", { name: "Context", exact: true }).click();
