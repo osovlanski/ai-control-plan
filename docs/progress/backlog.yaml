@@ -346,7 +346,7 @@ items:
     profile: auto
     night: false
     source: "Agentic OS Codex UX modernization proposal"
-    notes: "Model recommendation: GPT-6.1-Terra / High. One clear next action and current mission; preserve diagnostics access. Verify screenshots, keyboard, responsive and task flows."
+    notes: "Model recommendation: Claude Opus 5.5 / high (itay, 2026-11-20: ux items run on Claude). One clear next action and current mission; preserve diagnostics access. Verify screenshots, keyboard, responsive and task flows."
 
   - id: ux-02
     title: "Make Agents scannable with details on demand"
@@ -359,7 +359,7 @@ items:
     profile: auto
     night: false
     source: "Agentic OS Codex UX modernization proposal"
-    notes: "Model recommendation: GPT-6.2-Sol / Medium. Preserve lifecycle truth, controls and CLI parity. Verify enable/disable and routing behavior, keyboard and responsive views."
+    notes: "Model recommendation: Claude Opus 5.5 / medium (itay, 2026-11-20: ux items run on Claude). Preserve lifecycle truth, controls and CLI parity. Verify enable/disable and routing behavior, keyboard and responsive views."
 
   - id: ux-03
     title: "Guide Add Runtime and reveal YAML on request"
@@ -372,7 +372,7 @@ items:
     profile: auto
     night: false
     source: "Agentic OS Codex UX modernization proposal"
-    notes: "Model recommendation: GPT-6.1-Terra / Medium. Preserve manual configuration and verify copied snippets with the real loader."
+    notes: "Model recommendation: Claude Opus 5.5 / medium (itay, 2026-11-20: ux items run on Claude). Preserve manual configuration and verify copied snippets with the real loader."
 
   - id: ux-04
     title: "Simplify navigation and surface the existing standalone shell"
@@ -385,7 +385,20 @@ items:
     profile: auto
     night: false
     source: "Agentic OS Codex UX modernization proposal"
-    notes: "Model recommendation: GPT-6.2-Astra / High. Preserve routes, deep links and shortcuts. Verify accessible navigation at desktop and mobile widths."
+    notes: "Model recommendation: Claude Opus 5.5 / high (itay, 2026-11-20: ux items run on Claude). Preserve routes, deep links and shortcuts. Verify accessible navigation at desktop and mobile widths."
+
+  - id: demo-journey
+    title: "Recorded end-to-end demo: goal to verified outcome in Web and CLI, fakes only"
+    phase: "Agentic OS follow-up"
+    repo: ai-control-plan
+    size: M
+    depends_on: []
+    files: ["apps/web/e2e/demo-journey.spec.ts", "apps/web/playwright.config.ts", "apps/web/package.json", "package.json", "docs/demo/demo-journey.md"]
+    lane: manual-cloud
+    profile: auto
+    night: false
+    source: "Roadmap delta 2026-11-20 addendum, requirement B (itay approved the item 2026-11-20)"
+    notes: "Model recommendation: Claude Opus 5.5 / medium. A `pnpm demo:journey` Playwright project (video, trace, screenshots) on the e2e harness (apps/web/e2e/harness.ts: injected clock, temp workspace) with FakeAdapter assistants and a scratch git repo. Scenes: Agents + `aos runtimes ls`; shell goal with route and composition preview; run; inline approval ([FAKE:APPROVAL]); verification verdict; recovery ([FAKE:LIMIT] -> checkpoint, cooldown, handoff to the second fake); a draft PR through the autopilot publication path against an in-process fake GitHub (buildServer autopilotGitHub/autopilotGit, FAKE-*-not-real tokens); CLI task scenes and chat-publish as roadmap cards until p1-3 ships them. Every scene shows a label (REAL, SIM-PROVIDER, SIM-PR, ROADMAP) and is listed in demo-out/scenes.json. Pass: exits 0 with no provider credentials and only loopback network; no model calls; the same task id appears in Web and CLI captures; two runs give identical scenes.json after masking ids and times; a secret scan of the outputs is clean; docs/demo/demo-journey.md names what is simulated in the on-screen words. CLI scenes become real after p1-3-aos-cli slices 1 and 2, with no dependency on it here."
 
   - id: project-memory-token-check
     title: "Measure startup token savings from the project memory split"
