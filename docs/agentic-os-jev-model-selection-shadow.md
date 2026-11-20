@@ -1,6 +1,6 @@
 # Jev shadow site for model selection: design note
 
-Status: **proposed design, not implemented.** Docs only. Nothing here runs, spends or changes routing until itay approves it (see "Gates before any run").
+Status: **design accepted by itay 2026-11-20, not implemented.** Docs only. Nothing here runs, spends or changes routing until itay approves D-7 spend (see "Gates before any run").
 Extends plan [§D.6](agentic-os-auto-copilot-plan.md) (Jev candidate sites) with a fourth site. §D.6 lists classification, review escalation and prioritisation; model selection is not on that list, so adding it is itay's call. It stays inside §D.6's limits: never the tool gate, never a scheduler, never applied.
 
 ## 1. What it is
@@ -63,7 +63,9 @@ Answered by itay, 2026-11-20:
 - **TypeSafe account:** itay signed up for TypeSafe and uses it on the OCI box. Whether the live config now carries `typesafeApiKeyRef` and `typesafeRoute` (missing at O2, 2026-11-05) is still to be checked on the box before any run.
 - **No-egress workspaces:** the site is skipped and logged as `skipped: egress` (accepted, as proposed in §3).
 
-Still open:
-1. Is model selection allowed as a Jev site at all? It extends §D.6. Recommendation: yes, shadow only, after `p1-8`.
-2. Does D-7's $1 cover this site? Recommendation: one shared $1 cap across `p1-8` and this site, with `p1-8` spending first. D-7 itself needs a fresh yes.
-3. Is the quality bar in §5.4 acceptable, given the pick is never executed? Recommendation: yes. The paid A/B alternative is spend and is out of scope.
+Accepted by itay, 2026-11-20:
+1. Model selection is allowed as a Jev site, shadow only, after `p1-8`.
+2. One shared $1 cap covers `p1-8` and this site, with `p1-8` spending first. This sets the cap's shape; it is not yet a go for any spend, which still needs itay's explicit D-7 approval.
+3. The quality bar in §5.4 stands. No paid A/B.
+
+Status: design accepted. Nothing is built, and nothing runs or spends.
