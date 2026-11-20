@@ -181,6 +181,8 @@ export interface BuiltServer {
   sessionInputRedelivery?: () => Promise<unknown>;
 }
 
+const MAX_ASSISTANT_ID_LENGTH = 128;
+
 export function buildServer(deps: ServerDeps): BuiltServer {
   const { config, db } = deps;
   const now = deps.now ?? (() => new Date());
@@ -195,8 +197,11 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   const telemetry = new TelemetryService(db);
   const retention = new EventRetention(db);
   const repositoryIdentities = new RepositoryIdentityRegistry(db);
+  // find-my-way counts decoded UTF-16 units. Let even the first invalid code-point length
+  // reach the assistant schema (400), including IDs made entirely of surrogate pairs.
+  const routerOptions = { maxParamLength: 2 * (MAX_ASSISTANT_ID_LENGTH + 1) };
   // pino's default `base` adds the machine's hostname to every line; the plane never logs hostnames.
-  const app = Fastify({ logger: { base: { pid: process.pid }, stream: { write: (line) => process.stdout.write(redactSecrets(line)) }, serializers: { req: (r) => ({ method: r.method, url: String(r.url).split("?")[0] }), res: (r) => ({ statusCode: r.statusCode }) }, redact: ["req.headers.authorization", "req.headers.cookie", "res.headers[\"set-cookie\"]"] } });
+  const app = Fastify({ routerOptions, logger: { base: { pid: process.pid }, stream: { write: (line) => process.stdout.write(redactSecrets(line)) }, serializers: { req: (r) => ({ method: r.method, url: String(r.url).split("?")[0] }), res: (r) => ({ statusCode: r.statusCode }) }, redact: ["req.headers.authorization", "req.headers.cookie", "res.headers[\"set-cookie\"]"] } });
   const credentials = new CredentialStore(credentialPath(config.dir), now);
   const authSessions: SessionMap = new Map();
   registerAuth(app, { config, credentials, sessions: authSessions, db, now });
@@ -404,12 +409,21 @@ export function buildServer(deps: ServerDeps): BuiltServer {
 
   // Agent runtime v1 (API 2.10, docs/contracts/agent-runtime-v1.md): read-only projections and the
   // operator disable overlay. Same scopes as the routes beside them, so no credential rotation.
+  const assistantIdSchema = {
+    params: {
+      type: "object",
+      required: ["id"],
+      properties: { id: { type: "string", minLength: 1, maxLength: MAX_ASSISTANT_ID_LENGTH } },
+    },
+  };
+  const assistantRead = { ...read.tasks, schema: assistantIdSchema };
+  const assistantWrite = { ...write, schema: assistantIdSchema };
   const lifecycles = new RuntimeLifecycleReader(db, config);
 
   app.get("/api/runtimes/catalog", read.tasks, () => runtimeCatalogProjection());
 
   app.get("/api/assistants", read.tasks, () =>
-    registry.list().map((a) => {
+    Promise.all(registry.list().map(async (a) => {
       // Effective headroom, not the manifest's copy: a fresh idle probe (K3)
       // supersedes a stale run-stream snapshot and vice versa, by observedAt.
       const projection = new QuotaProjection(db, now).for(a.id, a.manifestParsed);
@@ -422,45 +436,47 @@ export function buildServer(deps: ServerDeps): BuiltServer {
         manifestUpdatedAt: a.manifest_updated_at,
         quota: projection.quota,
         quotaObservations: projection.observations,
-        lifecycle: lifecycles.of(a),
+        lifecycle: await lifecycles.withInstallation(lifecycles.of(a), a.provider),
       };
-    }),
+    })),
   );
 
-  app.get<{ Params: { id: string } }>("/api/assistants/:id/lifecycle", read.tasks, (req, reply) => {
+  app.get<{ Params: { id: string } }>("/api/assistants/:id/lifecycle", assistantRead, (req, reply) => {
     const row = registry.get(req.params.id);
     if (!row) return reply.status(404).send({ error: `Unknown assistant: ${req.params.id}` });
-    return lifecycles.of(row);
+    return lifecycles.withInstallation(lifecycles.of(row), row.provider);
   });
 
   // Overlay only (design §B.3): disable removes the assistant from FUTURE routing decisions; enable
   // clears the overlay and nothing else, so a config-disabled assistant stays disabled. Neither
   // touches a session already running. Idempotent: a repeat reports `changed: false`.
   for (const [action, state] of [["disable", "disabled"], ["enable", "none"]] as const) {
-    app.post<{ Params: { id: string } }>(`/api/assistants/:id/${action}`, write, (req, reply) => {
+    app.post<{ Params: { id: string } }>(`/api/assistants/:id/${action}`, assistantWrite, async (req, reply) => {
       const result = registry.setOperatorState(req.params.id, state, now);
       const row = result && registry.get(req.params.id);
       if (!result || !row) return reply.status(404).send({ error: `Unknown assistant: ${req.params.id}` });
       if (result.changed) app.log.info({ assistantId: row.id, operatorState: state }, "assistant operator state changed");
-      return { schemaVersion: AGENT_RUNTIME_SCHEMA_VERSION, assistantId: row.id, operatorState: state, changed: result.changed, lifecycle: lifecycles.of(row) };
+      const lifecycle = await lifecycles.withInstallation(lifecycles.of(row), row.provider);
+      return { schemaVersion: AGENT_RUNTIME_SCHEMA_VERSION, assistantId: row.id, operatorState: state, changed: result.changed, lifecycle };
     });
   }
 
   // PR 4: the credential-free, quota-free conformance probe. It never calls the registered adapter,
   // starts a generation, installs anything or writes config; it stores one version-bound row.
   const conformance = new RuntimeConformance(db, config, registry, now, deps.conformance);
-  app.post<{ Params: { id: string } }>("/api/assistants/:id/test", write, async (req, reply) => {
+  app.post<{ Params: { id: string } }>("/api/assistants/:id/test", assistantWrite, async (req, reply) => {
     try {
       const result = await conformance.test(req.params.id);
       if (!result) return reply.status(404).send({ error: `Unknown assistant: ${req.params.id}` });
       app.log.info({ assistantId: result.assistantId, status: result.status, recorded: result.recorded }, "runtime conformance tested");
-      return result;
+      const lifecycle = await lifecycles.withInstallation(result.lifecycle, result.provider);
+      return { ...result, lifecycle };
     } catch (err) {
       return reply.status(409).send({ error: err instanceof ConformanceBusyError ? err.message : message(err) });
     }
   });
 
-  app.post<{ Params: { id: string } }>("/api/assistants/:id/sync", write, async (req, reply) => {
+  app.post<{ Params: { id: string } }>("/api/assistants/:id/sync", assistantWrite, async (req, reply) => {
     try {
       return await registry.sync(req.params.id);
     } catch (err) {

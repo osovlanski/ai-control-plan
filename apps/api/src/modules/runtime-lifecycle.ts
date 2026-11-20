@@ -3,7 +3,8 @@
  * §B.3–B.4, PR 3): the runtime catalogue projection and each assistant's lifecycle states.
  *
  * Every state has its own evidence and none implies the next: catalogued (code), configured
- * (config file), installed (`capability_probes`), authenticated (the adapter's own manifest),
+ * (config file), installed (`capability_probes` or OpenRouter's live CLI check), authenticated
+ * (the adapter's own manifest),
  * conformant (`runtime_conformance`, written from PR 4 on) and enabled (config `enabled` plus the
  * operator overlay). `readiness` folds only the request-independent ones, using the router's own
  * failure texts. It is NOT task eligibility: the router decides that per request, against the
@@ -12,10 +13,12 @@
  * Pure reads. Nothing here writes, and nothing here reads `runtime_conformance.checks`, adapter
  * options or an environment value.
  */
+import { codexSdkBinary } from "@agent-plane/adapters";
 import type { CapabilityManifest } from "@agent-plane/core";
 import type { ResolvedConfig } from "../config.js";
 import type { Db } from "../db/index.js";
 import { INLINE_SECRET } from "../registry-contract.js";
+import { runVersion } from "./run-version.js";
 import type { AssistantRow, OperatorState } from "./registry.js";
 import { conformanceRequiredFor, RUNTIME_CATALOG, runtimeFor } from "./runtime-catalog.js";
 
@@ -126,7 +129,8 @@ export function deriveLifecycle(facts: LifecycleFacts): AssistantLifecycle {
   const manifest = row.manifestParsed;
 
   let installed: AssistantLifecycle["installed"] = { state: "unknown" };
-  if (probe) {
+  // OpenRouter capability probes carry no installation evidence.
+  if (probe && row.provider !== "openrouter") {
     const observedAt = at(probe.observedAt);
     const stamp = observedAt ? { observedAt } : {};
     if (probe.version === "unavailable") installed = { state: "missing", ...stamp };
@@ -194,8 +198,29 @@ export function deriveLifecycle(facts: LifecycleFacts): AssistantLifecycle {
   };
 }
 
+const INSTALLATION_TTL_MS = 60_000;
+
+/** The SDK resolver can fail before --version runs if its platform package is absent. */
+async function probeCodexInstallation(): Promise<AssistantLifecycle["installed"]> {
+  let binary: string;
+  try {
+    binary = codexSdkBinary();
+  } catch {
+    // The pinned SDK throws when it cannot select a native CLI on this host.
+    return { state: "missing", observedAt: new Date().toISOString() };
+  }
+  const { kind } = await runVersion(binary, 1500);
+  let state: InstalledState = "unknown";
+  if (kind === "ok" || kind === "empty") state = "present";
+  if (kind === "missing" || kind === "not-runnable") state = "missing";
+  return { state, observedAt: new Date().toISOString() };
+}
+
 /** Reads the facts for registry rows from the database and derives their lifecycles. */
 export class RuntimeLifecycleReader {
+  private codexInstallation: Promise<AssistantLifecycle["installed"]> | undefined;
+  private codexInstallationStartedAt = 0;
+
   constructor(private db: Db, private config: ResolvedConfig) {}
 
   of(row: AssistantRow & { manifestParsed: CapabilityManifest | null }): AssistantLifecycle {
@@ -222,6 +247,19 @@ export class RuntimeLifecycleReader {
       ...(probe ? { probe } : {}),
       conformance,
     });
+  }
+
+  /** Refresh installation evidence for API responses without changing capability or conformance evidence. */
+  async withInstallation(lifecycle: AssistantLifecycle, provider: string): Promise<AssistantLifecycle> {
+    if (provider !== "openrouter" || !lifecycle.configured) return lifecycle;
+
+    // One host check serves concurrent responses (in flight) and every call for 60s after it started.
+    // The probe is bounded at 1.5s, so the window always outlives the flight.
+    if (!this.codexInstallation || Date.now() - this.codexInstallationStartedAt >= INSTALLATION_TTL_MS) {
+      this.codexInstallationStartedAt = Date.now();
+      this.codexInstallation = probeCodexInstallation();
+    }
+    return { ...lifecycle, installed: await this.codexInstallation };
   }
 }
 

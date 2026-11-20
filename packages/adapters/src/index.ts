@@ -1,4 +1,5 @@
 export { ClaudeAdapter, agentLaunch, profileSettings, provisionedOptions, stopAgentUnit, type AgentLauncher, type ClaudeAdapterOptions, type ClaudeLaunchProfile } from "./claude.js";
+export { codexSdkBinary } from "./codex-sdk-binary.js";
 export { CodexAdapter, type CodexAdapterOptions } from "./codex.js";
 export { codexConfigArgs, codexProfileConfig, probeCodexProfile, type CodexProbeOptions, type CodexProbeResult, type CodexProbeRun } from "./codex-probe.js";
 export { OpenRouterCodexAdapter, type OpenRouterOptions } from "./openrouter.js";

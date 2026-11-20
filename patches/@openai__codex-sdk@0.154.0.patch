@@ -1,0 +1,20 @@
+diff --git a/dist/index.d.ts b/dist/index.d.ts
+index 56902250c8c3958d101d2b9c83d7b6dd11f4e45a..f9139c8101f7ecbb2bbb8cb7baa63cd97d8d1717 100644
+--- a/dist/index.d.ts
++++ b/dist/index.d.ts
+@@ -285 +285,3 @@ declare class Codex {
++export declare function findCodexPath(): { executablePath: string; pathDirs: string[] };
++
+ export { type AgentMessageItem, type ApprovalMode, Codex, type CodexOptions, type CommandExecutionItem, type ErrorItem, type FileChangeItem, type Input, type ItemCompletedEvent, type ItemStartedEvent, type ItemUpdatedEvent, type McpToolCallItem, type ModelReasoningEffort, type ReasoningItem, type RunResult, type RunStreamedResult, type SandboxMode, Thread, type ThreadError, type ThreadErrorEvent, type ThreadEvent, type ThreadItem, type ThreadOptions, type ThreadStartedEvent, type TodoListItem, type TurnCompletedEvent, type TurnFailedEvent, type TurnOptions, type TurnStartedEvent, type Usage, type UserInput, type WebSearchItem, type WebSearchMode };
+diff --git a/dist/index.js b/dist/index.js
+index 062039c2610107095bd7a254bdebd6fcf7e15fc6..46be165bba1504b54ee142e4367a82bca0d5676c 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -544,6 +544,7 @@ var Codex = class {
+   }
+ };
+ export {
++  findCodexPath,
+   Codex,
+   Thread
+ };

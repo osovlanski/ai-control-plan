@@ -6,3 +6,5 @@ packages:
 onlyBuiltDependencies:
   - better-sqlite3
   - esbuild
+patchedDependencies:
+  '@openai/codex-sdk@0.154.0': patches/@openai__codex-sdk@0.154.0.patch

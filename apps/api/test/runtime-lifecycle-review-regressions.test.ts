@@ -1,6 +1,9 @@
+import { execFile } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { credentialPath, readCredential } from "../src/auth/credential-file.js";
 import { loadConfig } from "../src/config.js";
@@ -148,29 +151,41 @@ it.fails("returns 500 after disabling a healthy assistant when another cached ma
     .toBe(200);
 });
 
-it.fails("returns 414 when disabling a listed assistant with a 101-character ID", async () => {
-  const id = "a".repeat(101);
+it.each([
+  ["128 ASCII", "a".repeat(128), 200],
+  ["128 mixed code points", "a".repeat(127) + "🚀", 200],
+  ["128 supplementary code points", "🚀".repeat(128), 200],
+  ["128 URL-reserved characters", "/%?#".repeat(32), 200],
+  ["129 ASCII", "a".repeat(129), 400],
+  ["129 code points, 130 UTF-16 units", "a".repeat(128) + "🚀", 400],
+  ["129 code points, 257 UTF-16 units", "a" + "🚀".repeat(128), 400],
+  ["129 code points, 258 UTF-16 units", "🚀".repeat(129), 400],
+] as const)("validates %s on every assistant-ID route", async (_label, id, status) => {
   const { request } = boot({ [id]: { provider: "fake" } });
   const list = await request("GET", "/api/assistants");
-  expect(list.statusCode).toBe(200);
   expect(list.json()).toContainEqual(expect.objectContaining({ id }));
-  const response = await request("POST", `/api/assistants/${id}/disable`);
-  expect(response.statusCode, "A listed assistant with a contract-valid 101-character ID must be disableable")
-    .toBe(200);
-});
-
-it.fails("reports OpenRouter as in-process even though it uses the Codex CLI", async () => {
-  const { server, request } = boot({
-    router: { provider: "openrouter", options: { apiKeyEnv: "FAKE_HO_194_OPENROUTER_KEY" } },
-  });
-  vi.stubEnv("FAKE_HO_194_OPENROUTER_KEY", "");
-  try {
-    await server.registry.syncChanged("router");
-    const response = await request("GET", "/api/assistants/router/lifecycle");
-    expect(response.statusCode).toBe(200);
-    const { installed } = response.json();
-    expect(installed.state, "OpenRouter uses the Codex CLI and must not be reported as in-process").not.toBe("in-process");
-  } finally {
-    vi.unstubAllEnvs();
+  for (const action of ["lifecycle", "disable", "enable", "sync", "test"]) {
+    const response = await request(action === "lifecycle" ? "GET" : "POST", `/api/assistants/${encodeURIComponent(id)}/${action}`);
+    expect(response.statusCode, action).toBe(status);
+    if (status === 400) expect(response.json().error).toContain("128");
   }
 });
+
+it("rejects malformed UTF-8 and oversized decoded parameters at the router", async () => {
+  const { request } = boot();
+  for (const [segment, status] of [["%ED%A0%80", 400], ["%F0%9F", 400], ["a".repeat(259), 414]] as const) {
+    const response = await request("GET", `/api/assistants/${segment}/lifecycle`);
+    expect(response.statusCode, segment).toBe(status);
+  }
+});
+
+it.skipIf(!["linux", "darwin"].includes(process.platform) || !["x64", "arm64"].includes(process.arch))(
+  "agrees with the OpenRouter SDK across packaged and legacy executable layouts", async () => {
+    await promisify(execFile)(process.execPath, ["--import", "tsx", fileURLToPath(new URL("./fixtures/openrouter-installation.mts", import.meta.url)), home], {
+      cwd: fileURLToPath(new URL("..", import.meta.url)),
+      // pnpm can add the real CLI package to Node's global require search paths.
+      env: { ...process.env, NODE_PATH: "" },
+      timeout: 60_000,
+    });
+  }, 65_000,
+);

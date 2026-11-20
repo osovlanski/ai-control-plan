@@ -5,7 +5,8 @@
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import * as adapters from "@agent-plane/adapters";
 import type { AssistantId } from "@agent-plane/core";
 import { loadConfig } from "../src/config.js";
 import { openDb, type Db } from "../src/db/index.js";
@@ -27,6 +28,7 @@ let db: Db | undefined;
 let built: BuiltServer | undefined;
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   await built?.orchestrator.shutdown();
   await built?.app.close();
   db?.close();
@@ -336,6 +338,7 @@ describe("conformance evidence", () => {
 
 describe("credential redaction", () => {
   it("no lifecycle or catalogue field carries an environment value or a credential-shaped version", async () => {
+    vi.spyOn(adapters, "codexSdkBinary").mockReturnValue(process.execPath);
     process.env.FAKE_RUNTIME_LIFECYCLE_KEY = FAKE_ENV_VALUE;
     await boot(`${TWO_FAKES}  router:\n    provider: openrouter\n    options:\n      apiKeyEnv: FAKE_RUNTIME_LIFECYCLE_KEY\n`);
     await built!.registry.syncChanged("router");
@@ -355,6 +358,17 @@ describe("credential redaction", () => {
     expect(change.body).not.toContain(FAKE_ENV_VALUE);
     // The env var's NAME is configuration, not a lifecycle field either.
     expect(JSON.stringify(lifecycle)).not.toContain("FAKE_RUNTIME_LIFECYCLE_KEY");
+  });
+
+  it("two list calls within 60s spawn the installation check once", async () => {
+    await boot(`${TWO_FAKES}  router:\n    provider: openrouter\n    options:\n      apiKeyEnv: FAKE_RUNTIME_LIFECYCLE_KEY\n`);
+    const log = join(home!, "version-spawns.log");
+    const stub = join(home!, "stub-codex.sh");
+    writeFileSync(stub, `#!/bin/sh\necho spawn >> "${log}"\necho codex-stub 1.0\n`, { mode: 0o755 });
+    vi.spyOn(adapters, "codexSdkBinary").mockReturnValue(stub);
+    expect((await inject("GET", "/api/assistants")).statusCode).toBe(200);
+    expect((await inject("GET", "/api/assistants")).statusCode).toBe(200);
+    expect(readFileSync(log, "utf8").trim().split("\n")).toEqual(["spawn"]);
   });
 
   it("deriveLifecycle drops malformed evidence instead of publishing it", () => {
