@@ -1,6 +1,6 @@
 # Agent Guidance
 
-Read `docs/PROJECT_MEMORY.md`, then query the code graph before broad source searches. The graph is git-ignored, so a worktree has none: use `graphify-out/graph.json` in the main checkout, and fall back to normal search if it is missing. This is a local-first TypeScript/pnpm control plane; preserve workspace isolation, explainable routing, approval boundaries, and provider-adapter portability. Run `pnpm typecheck && pnpm lint && pnpm test` after code changes. Do not commit credentials or provider transcripts.
+Read `docs/PROJECT_MEMORY.md` (durable facts, under 16 KB). Its outcome log, `docs/project-memory-log.md`, is large: grep it for the area you touch, and don't read it whole. Then query the code graph before broad source searches. The graph is git-ignored, so a worktree has none: use `graphify-out/graph.json` in the main checkout, and fall back to normal search if it is missing. This is a local-first TypeScript/pnpm control plane; preserve workspace isolation, explainable routing, approval boundaries, and provider-adapter portability. Run `pnpm typecheck && pnpm lint && pnpm test` after code changes. Do not commit credentials or provider transcripts.
 
 Agentic OS material under `docs/` is proposed design unless implementation evidence says otherwise. Start at `docs/agentic-os-plan.md`.
 
@@ -29,4 +29,4 @@ The diff is ground truth. A doc, a PR body or a prior session summary is a claim
 
 ## Project memory
 
-`docs/PROJECT_MEMORY.md` carries durable context between sessions. Its header states when to append to it and what must never be written there.
+`docs/PROJECT_MEMORY.md` carries durable facts between sessions, and `docs/project-memory-log.md` carries the outcome log. The first file's header states when to append to the log and what must never be written in either.

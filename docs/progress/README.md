@@ -80,8 +80,8 @@ and that has not been shown to be free of effects outside the snapshot.
 ## The audit
 
 The first `backlog.yaml` (P0-9) lists only open work, from: the auto copilot plan §F and §H, the
-open findings in both repositories' `docs/PROJECT_MEMORY.md`, and the open PRs in both
-repositories (none on 2026-11-13). Shipped work stays in `PROJECT_MEMORY.md`. Items whose code
+open findings in both repositories' project memory (here `docs/project-memory-log.md`), and the open PRs in both
+repositories (none on 2026-11-13). Shipped work stays in the project memory log. Items whose code
 claim was checked against `main` say so in `source`; the others say "re-check on main first".
 
 ## "% of estimated scope" (P1-2)
