@@ -156,26 +156,6 @@ function aaEffortRow(aaId: string, slug: string, modelId: string, effort: AaEffo
 
 export const AA_MODEL_MAP: AaModelMapEntry[] = [
   {
-    aaId: 'claude-4-1-opus',
-    aaCreatorId: 'anthropic',
-    provider: 'anthropic',
-    modelId: 'claude-opus-4-1',
-    aaSlugHint: 'claude-4-1-opus',
-    evidence:
-      'AA lists Anthropic Claude Opus 4.1 under this id; catalog id is the K7 price-seed identity for the same model. ' +
-      'Base (non-effort) configuration — AA scores an effort variant, if any, under a different id that is not in this table.',
-  },
-  {
-    aaId: 'claude-4-5-sonnet',
-    aaCreatorId: 'anthropic',
-    provider: 'anthropic',
-    modelId: 'claude-sonnet-4-5',
-    aaSlugHint: 'claude-4-5-sonnet',
-    evidence:
-      'AA lists Anthropic Claude Sonnet 4.5 under this id; catalog id is the K7 price-seed identity for the same model. ' +
-      'Base (non-effort) configuration — an AA "…max"/effort variant has its own id and is left unmatched.',
-  },
-  {
     // 4.x has no effort ladder in the list: AA scores 4.5 Sonnet as separate non-reasoning and reasoning rows.
     aaId: '91cb6144-4937-4e4e-aeda-b4341d355c10',
     aaCreatorId: AA_ANTHROPIC_CREATOR_ID,
@@ -206,11 +186,34 @@ export const AA_MODEL_MAP: AaModelMapEntry[] = [
   aaEffortRow('268525e2-f873-4178-bc07-e6a0ee1f002d', 'claude-sonnet-5-5-high', 'claude-sonnet-5-5', 'high'),
   aaEffortRow('042e8a37-fcd0-40f4-8f41-99215fb68eda', 'claude-sonnet-5-5-medium', 'claude-sonnet-5-5', 'medium'),
   aaEffortRow('bbc2ffea-cf6b-43be-8c41-1769347e234d', 'claude-sonnet-5-5-low', 'claude-sonnet-5-5', 'low'),
+  // Grounded 2026-11-20 (refresh row 239): Opus 5.5 and Opus 5 and Sonnet 5.5 medium rows, one per effort.
+  aaEffortRow('ea9e0da6-169f-43c6-92f5-730a10d6ff8d', 'claude-opus-5-5-medium', 'claude-opus-5-5', 'medium'),
+  aaEffortRow('f314eade-2232-44bf-a3ab-9b326bc67de6', 'claude-opus-5-5-high', 'claude-opus-5-5', 'high'),
+  aaEffortRow('df5bf99d-d228-4715-b41b-19ca86118777', 'claude-opus-5-5-xhigh', 'claude-opus-5-5', 'xhigh'),
+  aaEffortRow('ff51be8f-e362-4a7e-9043-687ba15de207', 'claude-opus-5-medium', 'claude-opus-5', 'medium'),
+  aaEffortRow('effcd151-7c31-4437-af3d-e88daeae9385', 'claude-sonnet-5-medium', 'claude-sonnet-5', 'medium'),
   // Claude Sonnet 5: AA scores each effort as its own id.
   aaEffortRow('23c86e4a-c769-43c0-a056-79e3cd15834f', 'claude-sonnet-5', 'claude-sonnet-5', 'max'),
   aaEffortRow('99f376bf-cbcb-4124-bf3e-6b0a4e6e9bea', 'claude-sonnet-5-xhigh', 'claude-sonnet-5', 'xhigh'),
   aaEffortRow('ba0224cf-0351-4f56-8508-b3f1a740ae4a', 'claude-sonnet-5-high', 'claude-sonnet-5', 'high'),
   aaEffortRow('142b93bf-09c4-42dc-9c3a-50b1a222cbd4', 'claude-sonnet-5-low', 'claude-sonnet-5', 'low'),
+  // Non-reasoning base rows of 4.x models (grounded 2026-11-20, row 239); the reasoning rows stay unmatched.
+  {
+    aaId: 'f2f60e3a-e5f5-4471-acd2-9f2f29c76007',
+    aaCreatorId: AA_ANTHROPIC_CREATOR_ID,
+    provider: 'anthropic',
+    modelId: 'claude-opus-4-1',
+    aaSlugHint: 'claude-4-1-opus',
+    evidence: 'AA lists Claude 4.1 Opus (Non-reasoning) under this id and its Anthropic creator id; copied from the 2026-11-20 refresh grounding list. Non-reasoning configuration.',
+  },
+  {
+    aaId: 'c2b1e769-7aee-4669-8076-73918bdebf6c',
+    aaCreatorId: AA_ANTHROPIC_CREATOR_ID,
+    provider: 'anthropic',
+    modelId: 'claude-haiku-4-5',
+    aaSlugHint: 'claude-4-5-haiku',
+    evidence: 'AA lists Claude 4.5 Haiku (Non-reasoning) under this id and its Anthropic creator id; copied from the 2026-11-20 refresh grounding list. Non-reasoning configuration.',
+  },
 ];
 
 /**
