@@ -17,6 +17,8 @@ export interface AssistantRow {
   operator_state_at: string | null;
 }
 
+const ASSISTANT_COLUMNS = "SELECT id, provider, tier, enabled, manifest, manifest_updated_at, operator_state, operator_state_at FROM assistants";
+
 /** The operator overlay as the API names it. There is no operator `enabled`: the overlay can only remove. */
 export type OperatorState = "none" | "disabled";
 
@@ -54,13 +56,9 @@ export class Registry {
     }
     // Config removals: disable rows for assistants no longer configured.
     const known = Object.keys(this.config.assistants);
-    if (known.length > 0) {
-      this.db
-        .prepare(
-          `UPDATE assistants SET enabled = 0 WHERE id NOT IN (${known.map(() => "?").join(",")})`,
-        )
-        .run(...known);
-    }
+    this.db
+      .prepare(`UPDATE assistants SET enabled = 0${known.length > 0 ? ` WHERE id NOT IN (${known.map(() => "?").join(",")})` : ""}`)
+      .run(...known);
   }
 
   adapter(id: string): AgentAdapter {
@@ -70,18 +68,22 @@ export class Registry {
   }
 
   list(): Array<AssistantRow & { manifestParsed: CapabilityManifest | null }> {
-    const rows = this.db
-      .prepare("SELECT id, provider, tier, enabled, manifest, manifest_updated_at, operator_state, operator_state_at FROM assistants ORDER BY id")
-      .all() as AssistantRow[];
-    return rows.map((r) => ({
-      ...r,
-      manifestParsed: r.manifest ? (JSON.parse(r.manifest) as CapabilityManifest) : null,
-    }));
+    const rows = this.db.prepare(`${ASSISTANT_COLUMNS} ORDER BY id`).all() as AssistantRow[];
+    return rows.map((r) => this.parsed(r));
   }
 
-  /** One row as `list()` returns it, or `undefined` for an id the registry has never seen. */
+  /** Attaches the parsed manifest. Throws on an unreadable manifest, so call it only for rows the caller needs. */
+  parsed(r: AssistantRow): AssistantRow & { manifestParsed: CapabilityManifest | null } {
+    return { ...r, manifestParsed: r.manifest ? (JSON.parse(r.manifest) as CapabilityManifest) : null };
+  }
+
+  /**
+   * One row as `list()` returns it, or `undefined` for an id the registry has never seen. Reads
+   * and parses only that row: another assistant's unreadable cached manifest is not this one's.
+   */
   get(id: string): (AssistantRow & { manifestParsed: CapabilityManifest | null }) | undefined {
-    return this.list().find((r) => r.id === id);
+    const row = this.db.prepare(`${ASSISTANT_COLUMNS} WHERE id = ?`).get(id) as AssistantRow | undefined;
+    return row && this.parsed(row);
   }
 
   /**
@@ -91,19 +93,22 @@ export class Registry {
    * `enabled`, options and manifests are untouched, so clearing the overlay can never enable what
    * config disables, and an in-flight session is never touched (the overlay affects routing only).
    * `undefined` for an unknown assistant.
+   *
+   * `row` is the assistant as this transaction left it. A caller that answers from it reports the
+   * state it wrote, not whatever a concurrent writer committed a moment later.
    */
-  setOperatorState(id: string, state: OperatorState, now: () => Date = () => new Date()): { changed: boolean } | undefined {
+  setOperatorState(id: string, state: OperatorState, now: () => Date = () => new Date()): { changed: boolean; row: AssistantRow } | undefined {
     return this.db.transaction(() => {
-      const row = this.db.prepare("SELECT operator_state FROM assistants WHERE id = ?").get(id) as { operator_state: string | null } | undefined;
-      if (!row) return undefined;
-      const current: OperatorState = row.operator_state === "disabled" ? "disabled" : "none";
-      if (current === state) return { changed: false };
+      const before = this.db.prepare(`${ASSISTANT_COLUMNS} WHERE id = ?`).get(id) as AssistantRow | undefined;
+      if (!before) return undefined;
+      const current: OperatorState = before.operator_state === "disabled" ? "disabled" : "none";
+      if (current === state) return { changed: false, row: before };
       const at = now().toISOString();
       this.db.prepare("UPDATE assistants SET operator_state = ?, operator_state_at = ? WHERE id = ?").run(state === "disabled" ? "disabled" : null, at, id);
       this.db
         .prepare("INSERT INTO capability_changes (assistant_id, field, old_value, new_value, source, observed_at) VALUES (?, 'operator.state', ?, ?, 'manual', ?)")
         .run(id, current, state, at);
-      return { changed: true };
+      return { changed: true, row: this.db.prepare(`${ASSISTANT_COLUMNS} WHERE id = ?`).get(id) as AssistantRow };
     })();
   }
 
