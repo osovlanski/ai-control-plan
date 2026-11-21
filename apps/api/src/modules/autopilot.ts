@@ -47,7 +47,7 @@ export type AttemptState = (typeof NON_FINAL_ATTEMPT_STATES)[number] | (typeof F
 const isFinal = (state: string): boolean => (FINAL_ATTEMPT_STATES as readonly string[]).includes(state);
 
 export interface AutopilotAttempt {
-  id: string; itemId: string; attemptNo: number; reservationId: string; reservationSha?: string; taskId?: string;
+  id: string; itemId: string; attemptNo: number; reservationId: string; reservationSha?: string; workBaseSha?: string; taskId?: string;
   state: AttemptState; reason?: string; runtimeBudgetMs: number; runtimeUsedMs: number;
   deadlineAt?: string; deadlineBound?: "budget" | "window"; createdAt: string; updatedAt: string; finalAt?: string;
   /** P0-6: the reservation's provenance (absent on attempts made in-process before P0-6). */
@@ -114,6 +114,7 @@ interface AttemptRow {
   repo: string | null; base_sha: string | null; reservation_date: string | null; item_revision: string | null; backlog_sha: string | null;
   reservation_outcome: "created" | "owned" | "reused" | null;
   requeued_at: string | null; requeued_by: string | null;
+  work_base_sha: string | null;
 }
 interface WindowRow { id: string; opens_at: string; closes_at: string; max_items: number }
 
@@ -310,7 +311,7 @@ export class AutopilotService {
       state: r.state, ...(r.reason ? { reason: r.reason } : {}), runtimeBudgetMs: r.runtime_budget_ms, runtimeUsedMs: this.usedMs(r.id),
       ...(r.deadline_at ? { deadlineAt: r.deadline_at } : {}), ...(r.deadline_bound ? { deadlineBound: r.deadline_bound } : {}),
       createdAt: r.created_at, updatedAt: r.updated_at, ...(r.final_at ? { finalAt: r.final_at } : {}),
-      ...(r.repo ? { repo: r.repo } : {}), ...(r.base_sha ? { baseSha: r.base_sha } : {}), ...(r.reservation_date ? { reservationDate: r.reservation_date } : {}),
+      ...(r.work_base_sha ? { workBaseSha: r.work_base_sha } : {}), ...(r.repo ? { repo: r.repo } : {}), ...(r.base_sha ? { baseSha: r.base_sha } : {}), ...(r.reservation_date ? { reservationDate: r.reservation_date } : {}),
       ...(r.item_revision ? { itemRevision: r.item_revision } : {}), ...(r.backlog_sha ? { backlogSha: r.backlog_sha } : {}),
       ...(r.reservation_outcome ? { reservationOutcome: r.reservation_outcome } : {}),
       ...(r.requeued_at ? { requeuedAt: r.requeued_at } : {}), ...(r.requeued_by ? { requeuedBy: r.requeued_by } : {}),
@@ -450,7 +451,22 @@ export class AutopilotService {
    * orchestrator uses it instead of the composer's base, so a stale local HEAD never matters.
    */
   baseCommitOf(taskId: string): string | undefined {
-    return this.rowOfTask(taskId)?.reservation_sha ?? undefined;
+    const row = this.rowOfTask(taskId);
+    return row?.work_base_sha ?? row?.reservation_sha ?? undefined;
+  }
+
+  /**
+   * A reused reservation can be far behind the base branch. The dispatcher records the merge of the
+   * current base into it here, and the task starts there; `reservation_sha` stays the ref's head.
+   */
+  setWorkBase(attemptId: string, sha: string): AutopilotAttempt {
+    if (!/^[0-9a-f]{40}$/.test(sha)) throw new Error("a work base is a full commit SHA");
+    return this.db.transaction(() => {
+      const row = this.row(attemptId);
+      if (row?.state !== "reserving") throw new Error(`attempt ${attemptId} is ${row?.state ?? "unknown"}, not reserving`);
+      this.db.prepare("UPDATE autopilot_attempts SET work_base_sha = ?, updated_at = ? WHERE id = ?").run(sha, this.iso(), attemptId);
+      return this.toAttempt(this.row(attemptId)!);
+    })();
   }
 
   /** `reserving` → `external`: the ref belongs to another lane. Never re-run. */

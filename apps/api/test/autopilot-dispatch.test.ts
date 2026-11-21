@@ -525,6 +525,31 @@ describe("retries", () => {
     expect(gh.refCreates.map((c) => c.answer)).toEqual(["201", "422"]);
   });
 
+  it("a retry whose reused reservation is behind main works on a merge of the new main, and the lease stays on the reservation (G15 attempt 11)", async () => {
+    // Live: every retry reused a six-day-old reservation, so the agent edited and acceptance tested a stale tree.
+    await boot([{ id: "item-a" }]);
+    let moved = "";
+    const first = await failFirstAttempt(() => { moved = advanceOrigin(); });
+    const second = ap().currentAttempt()!;
+    expect(second).toMatchObject({ attemptNo: 2, reservationOutcome: "reused", reservationSha: first, baseSha: moved });
+    const base = rig!.built.autopilot.baseCommitOf(second.taskId!)!;
+    expect(base).not.toBe(first);
+    expect(second.workBaseSha).toBe(base);
+    const planeClone = rig!.config.repoAllowlist[0]!;
+    const parents = git(planeClone, "rev-list", "--parents", "-n", "1", base).split(" ").slice(1);
+    expect(parents).toEqual([first, moved]);
+    expect(git(planeClone, "rev-parse", `${base}^{tree}`)).toBe(git(planeClone, "rev-parse", `${moved}^{tree}`));
+    // The ref was not touched, so the later push stays a fast-forward from the reservation.
+    expect(bareRef("os/item-a")).toBe(first);
+  });
+
+  it("a reused reservation that is not behind main needs no merge base", async () => {
+    await boot([{ id: "item-a" }]);
+    await failFirstAttempt();
+    expect(ap().currentAttempt()).toMatchObject({ attemptNo: 2, reservationOutcome: "reused" });
+    expect(ap().currentAttempt()!.workBaseSha).toBeUndefined();
+  });
+
   it("a task that fails before any session started ends its attempt instead of holding the slot (first live run)", async () => {
     // Live, the launch was refused ("requires an adapter that can launch as the agent user"): the
     // task went FAILED with no session, so nothing settled and the attempt stayed `admitted`.

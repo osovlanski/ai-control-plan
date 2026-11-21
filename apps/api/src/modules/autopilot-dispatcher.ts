@@ -133,7 +133,7 @@ export interface DispatchGit {
   /** `git show <rev>:<path>`, or null when it does not exist. */
   show(repoPath: string, rev: string, path: string): Promise<string | null>;
   /** `git commit-tree` with the given content, fixed identity and date. Returns the SHA. */
-  commitTree(repoPath: string, input: { tree: string; parent: string; message: string; name: string; email: string; date: string }): Promise<string>;
+  commitTree(repoPath: string, input: { tree: string; parent: string; extraParents?: string[]; message: string; name: string; email: string; date: string }): Promise<string>;
 }
 
 function gitRun(repoPath: string, args: string[], opts: { input?: string; env?: Record<string, string>; timeoutMs?: number } = {}): Promise<{ code: number; stdout: string; stderr: string }> {
@@ -172,7 +172,7 @@ export function dispatchGitCli(): DispatchGit {
     async commitTree(repoPath, input) {
       // The date is git's raw `<epoch> +0000`, the same instant GitHub is sent as ISO 8601 UTC.
       const date = `${Math.floor(Date.parse(input.date) / 1000)} +0000`;
-      const r = await gitRun(repoPath, ["commit-tree", "--no-gpg-sign", input.tree, "-p", input.parent, "-F", "-"], {
+      const r = await gitRun(repoPath, ["commit-tree", "--no-gpg-sign", input.tree, "-p", input.parent, ...(input.extraParents ?? []).flatMap((p) => ["-p", p]), "-F", "-"], {
         input: input.message,
         env: {
           GIT_AUTHOR_NAME: input.name, GIT_AUTHOR_EMAIL: input.email, GIT_AUTHOR_DATE: date,
@@ -434,6 +434,7 @@ export class AutopilotDispatcher {
     await this.git.fetch(repo.path, [`+refs/heads/${branch}:refs/remotes/origin/${branch}`]);
     const local = await this.git.revParse(repo.path, `${attempt.reservationSha}^{commit}`);
     if (local !== attempt.reservationSha) throw new Error(`reservation commit ${attempt.reservationSha} is not in ${repo.path} after the fetch`);
+    if (attempt.reservationOutcome === "reused" && !attempt.workBaseSha) attempt = await this.refreshReusedBase(attempt, repo, branch);
     const item = await this.itemAt(attempt);
     const admitted = this.d.autopilot.admit(attempt.id, {
       goal: taskGoal(attempt.itemId, item),
@@ -443,6 +444,30 @@ export class AutopilotDispatcher {
     });
     this.log("info", `admitted ${attempt.itemId} attempt ${attempt.attemptNo} as task ${admitted.taskId} (${attempt.reservationOutcome ?? "owned"})`);
     return { action: "reserved", attemptId: attempt.id, itemId: attempt.itemId, outcome: attempt.reservationOutcome ?? "owned" };
+  }
+
+  /**
+   * A reused reservation is the ref head of an earlier attempt and can be far behind the base
+   * branch: the agent would edit, and acceptance would test, a stale tree (G15 attempt 11 ran a
+   * tree six days behind main). When the reservation's parent is not the base this attempt was
+   * selected at, the task starts at a merge of that base into the reservation instead. The ref and
+   * the publication lease still name the reservation, and the merge descends from it, so the push
+   * stays a fast-forward. The reservation commit has its parent's tree, so the merge's tree is the
+   * base's tree: nothing to resolve.
+   */
+  private async refreshReusedBase(attempt: AutopilotAttempt, repo: AutopilotRepoConfig, branch: string): Promise<AutopilotAttempt> {
+    const reservation = attempt.reservationSha!;
+    const baseSha = attempt.baseSha!;
+    const parent = await this.git.revParse(repo.path, `${reservation}^`);
+    if (parent === baseSha) return attempt;
+    const tree = await this.git.revParse(repo.path, `${baseSha}^{tree}`);
+    if (!tree) throw new Error(`base ${baseSha} is not in ${repo.path}`);
+    const merge = await this.git.commitTree(repo.path, {
+      tree, parent: reservation, extraParents: [baseSha],
+      message: `Merge ${repo.base} at ${baseSha.slice(0, 12)} into ${branch}\n`, ...RESERVATION_AUTHOR, date: attempt.reservationDate!,
+    });
+    this.log("info", `${branch} reservation ${reservation.slice(0, 12)} is behind ${repo.base}; the task starts at ${merge.slice(0, 12)}`);
+    return this.d.autopilot.setWorkBase(attempt.id, merge);
   }
 
   /** Steps 3–4 of §C.2.2. Bounded: a create whose outcome stays unknown leaves the attempt `reserving` for the next tick. */
