@@ -34,6 +34,7 @@ import { Registry } from "./modules/registry.js";
 import { sessionInputResolver } from "./modules/runtime-catalog.js";
 import { AGENT_RUNTIME_SCHEMA_VERSION, RuntimeLifecycleReader, runtimeCatalogProjection } from "./modules/runtime-lifecycle.js";
 import { ConformanceBusyError, RuntimeConformance, type RuntimeConformanceOptions } from "./modules/runtime-conformance.js";
+import { taskProvenance } from "./modules/provenance.js";
 import { routingHistory } from "./modules/router.js";
 import { TaskEventBus } from "./modules/sse.js";
 import { TaskStageReader } from "./modules/task-stage.js";
@@ -1188,6 +1189,15 @@ export function buildServer(deps: ServerDeps): BuiltServer {
       )
       .all(req.params.id);
     return live;
+  });
+
+  // tlm-02a: the joins between runs, requests, dispatches, routing decisions, checkpoints,
+  // handoff records and Harness envelopes, made once here so no client recomputes them. Each
+  // join names its source; `inferred` ones follow the stated rule in `inferenceRules`.
+  app.get<{ Params: { id: string } }>("/api/tasks/:id/provenance", read.sessions, (req, reply) => {
+    const provenance = taskProvenance(db, req.params.id);
+    if (!provenance) return reply.status(404).send({ error: "not found" });
+    return provenance;
   });
 
   app.get<{ Params: { id: string } }>("/api/tasks/:id/files/handoff.md", read.tasks, (req, reply) => {
