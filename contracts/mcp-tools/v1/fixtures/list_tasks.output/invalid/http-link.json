@@ -1,0 +1,17 @@
+{
+  "tasks": [
+    {
+      "taskId": "AG-mi8x2k1a",
+      "goal": "x",
+      "state": "RUNNING",
+      "stage": {
+        "value": "working",
+        "rule": "live-run"
+      },
+      "repo": "dogfood-cockpit",
+      "webLink": "http://aos.example.invalid/#/missions/AG-mi8x2k1a",
+      "updatedAt": "2026-11-21T14:00:00.000Z"
+    }
+  ],
+  "truncated": false
+}

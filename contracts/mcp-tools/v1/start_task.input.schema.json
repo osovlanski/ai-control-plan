@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-plane.local/contracts/mcp-tools/v1/start_task.input.schema.json",
+  "title": "StartTaskInput",
+  "description": "start_task arguments. Starts the CREATED task once. `confirm` pins what create_task proposed.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "taskId",
+    "idempotencyKey"
+  ],
+  "properties": {
+    "taskId": {
+      "type": "string",
+      "pattern": "^AG-[0-9a-z]{1,32}$",
+      "description": "Plane task id (`newTaskId`, packages/core/src/ids.ts)."
+    },
+    "idempotencyKey": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._:-]{16,128}$",
+      "description": "Client-chosen key. Same key and same input returns the first result; same key and different input is idempotency_conflict."
+    },
+    "confirm": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "description": "Values from create_task's proposal. A start whose fresh route disagrees is refused with route_changed and starts nothing.",
+      "properties": {
+        "assistantId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+        },
+        "compositionDigest": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        }
+      }
+    }
+  }
+}
