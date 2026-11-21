@@ -1,23 +1,34 @@
 #!/usr/bin/env node
 /**
  * `aos`: the operator CLI over the Control Plane's own routes. Run it with `pnpm aos …` from the
- * repository root. Only `aos runtimes` exists so far (Agent Runtime Registry PR 6); the rest of
- * backlog `p1-3-aos-cli` (create, stream, approve, stop) is later work.
+ * repository root. Groups so far: `aos runtimes` (Agent Runtime Registry PR 6) and `aos task
+ * provenance` (tlm-03); the rest of backlog `p1-3-aos-cli` (create, stream, approve, stop) is later work.
  */
 import { connect } from "./client.js";
 import { runRuntimes, USAGE as RUNTIMES_USAGE } from "./runtimes.js";
+import { runTask, USAGE as TASK_USAGE } from "./task.js";
 
 const USAGE = `usage: aos <group> <command> [options]
 
 Groups:
   runtimes    the runtime catalogue, lifecycle, sync, test, disable and enable
+  task        task reads (today: provenance)
 
-${RUNTIMES_USAGE}`;
+${RUNTIMES_USAGE}
+
+${TASK_USAGE}`;
 
 export async function main(argv: string[]): Promise<number> {
   const [group, ...rest] = argv;
   if (group === "runtimes") {
     return runRuntimes(rest, {
+      connect: (capability, options) => connect(capability, options),
+      out: (text) => process.stdout.write(`${text}\n`),
+      err: (text) => process.stderr.write(`${text}\n`),
+    });
+  }
+  if (group === "task") {
+    return runTask(rest, {
       connect: (capability, options) => connect(capability, options),
       out: (text) => process.stdout.write(`${text}\n`),
       err: (text) => process.stderr.write(`${text}\n`),
