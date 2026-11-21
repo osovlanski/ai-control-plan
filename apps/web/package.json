@@ -12,6 +12,7 @@
     "demo:a": "pnpm build && playwright test --project=demo-a",
     "demo:a5": "pnpm build && playwright test --project=demo-a5",
     "demo:b": "pnpm build && playwright test --project=demo-b",
+    "demo:journey": "pnpm build && playwright test --project=demo-journey",
     "visual": "pnpm build && playwright test --project=visual"
   },
   "dependencies": {
