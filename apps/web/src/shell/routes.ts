@@ -11,6 +11,16 @@ export const APPLICATIONS = [
   { screen: "about", label: "About", icon: "M12 8h.01M11 12h1v5m9-5a9 9 0 1 1-18 0 9 9 0 0 1 18 0" },
 ] as const;
 export type Application = typeof APPLICATIONS[number]["screen"];
+
+/** The standalone shell (`#/shell`, alias `#/mission`) as a first-class destination. */
+export const MISSIONS = { screen: "shell", label: "Missions", icon: "M21 12a8 8 0 0 1-11.6 7.1L4 20.5l1.4-5.1A8 8 0 1 1 21 12ZM8.5 10.5h7M8.5 14h4.5" } as const;
+const app = (screen: Application) => APPLICATIONS.find(a => a.screen === screen)!;
+/** Rail grouping: daily work first, system configuration second, About last. Every route keeps its URL. */
+export const NAVIGATION = {
+  primary: [app("overview"), MISSIONS, app("agents")],
+  system: [app("memory"), app("routing"), app("traces"), app("tools"), app("settings"), app("about")],
+} as const;
+export type NavScreen = Application | "shell";
 export type Route = { screen: "shell"; taskId?: string; key: string } | { screen: Application | "unavailable"; key: string } | { screen: "mission"; taskId: string; key: string };
 
 export function readRoute(hash = window.location.hash): Route {
@@ -27,6 +37,12 @@ export function readRoute(hash = window.location.hash): Route {
     } catch { /* malformed route */ }
   }
   return { screen: "unavailable", key: path };
+}
+
+/** The rail destination a route belongs to; a mission's detail and its shell conversation are Missions. */
+export function navigationScreen(route: Route): NavScreen | undefined {
+  if (route.screen === "shell" || route.screen === "mission") return "shell";
+  return route.screen === "unavailable" ? undefined : route.screen;
 }
 
 export function useShellRoute() {

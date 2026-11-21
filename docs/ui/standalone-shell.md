@@ -16,8 +16,9 @@ Sirius is an optional integration described in [its specification](../sirius-int
 Use `#/shell` and `#/shell/:taskId`: the existing router uses hash destinations,
 including `#/missions/:taskId`, so these links work with the same static server,
 authentication bootstrap and browser history without new server rewrite rules.
-Operator has a Shell mode link outside its seven-application navigation. Shell
-has an Operator link and mission evidence links. Mode selection is presentation,
+Since ux-04 the shell is the rail's **Missions** destination, between Overview and
+Agents, and the rail stays on screen there; there is no separate Shell/Operator mode
+switch. Shell keeps its mission evidence links. Mode selection is presentation,
 never a second workspace or API origin.
 
 ## Presentation and truth

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { APPLICATIONS, readRoute } from "./routes.js";
+import { APPLICATIONS, NAVIGATION, navigationScreen, readRoute } from "./routes.js";
 
 describe("application routes", () => {
   it("defaults to Overview and round-trips all eight applications", () => {
@@ -17,5 +17,14 @@ describe("application routes", () => {
     for (const hash of ["#/unknown", "#/missions/%", "#/missions/a%2Fb", "#/missions/.."]) {
       expect(readRoute(hash).screen).toBe("unavailable");
     }
+  });
+  it("groups every application exactly once and files missions under Missions", () => {
+    const screens = [...NAVIGATION.primary, ...NAVIGATION.system].map(n => n.screen);
+    expect(screens).toEqual(["overview", "shell", "agents", "memory", "routing", "traces", "tools", "settings", "about"]);
+    for (const { screen } of APPLICATIONS) expect(screens).toContain(screen);
+    expect(navigationScreen(readRoute("#/shell/AG-123"))).toBe("shell");
+    expect(navigationScreen(readRoute("#/missions/AG-123"))).toBe("shell");
+    expect(navigationScreen(readRoute("#/tools"))).toBe("tools");
+    expect(navigationScreen(readRoute("#/nope"))).toBeUndefined();
   });
 });
