@@ -1,0 +1,16 @@
+{
+  "taskId": "AG-mi8x2k1a",
+  "state": "CREATED",
+  "repo": "dogfood-cockpit",
+  "webLink": "https://aos.example.invalid/#/missions/AG-mi8x2k1a",
+  "proposal": {
+    "eligible": false,
+    "assistantId": null,
+    "ruleFired": "no-eligible",
+    "summary": "Every assistant is over its quota.",
+    "candidates": [],
+    "compositionDigest": null
+  },
+  "replayed": true,
+  "createdAt": "2026-11-21T14:00:00.000Z"
+}

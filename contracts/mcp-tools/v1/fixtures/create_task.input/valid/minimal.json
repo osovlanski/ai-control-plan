@@ -1,0 +1,5 @@
+{
+  "goal": "Fix the flaky teardown test",
+  "repo": "dogfood-cockpit",
+  "idempotencyKey": "c0-fixture-key-0001"
+}

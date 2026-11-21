@@ -1,0 +1,26 @@
+{
+  "code": "route_changed",
+  "message": "The route changed since create_task; nothing started.",
+  "retryable": true,
+  "proposal": {
+    "eligible": true,
+    "assistantId": "claude-code",
+    "ruleFired": "profile:auto quota-headroom",
+    "summary": "claude-code passes all filters and has the most quota headroom.",
+    "candidates": [
+      {
+        "assistantId": "claude-code",
+        "passedFilters": true,
+        "filterFailures": []
+      },
+      {
+        "assistantId": "codex",
+        "passedFilters": false,
+        "filterFailures": [
+          "quota: 96% used"
+        ]
+      }
+    ],
+    "compositionDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  }
+}

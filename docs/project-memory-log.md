@@ -985,6 +985,12 @@ Migration 041 adds `runs.harness_cli_version` (TEXT NULL, forward only, no backf
 - **Decision:** unlink keeps the row (`removed_at`, `removed_by`); one live row per task, repo and number.
 - **Coordination:** chat-publish (roadmap delta §1, not built) should add its publications as one more derived source in `TaskLinkService.derived`, not as stored rows. tlm-03 can render links from `GET /api/tasks/:id/links`; provenance (2.12) is unchanged.
 
+## 2026-11-21 — D-D: aos read-only slice ahead of the replacement drill (PROPOSED)
+
+- **Decision:** split `p1-3-aos-cli`. New item `p1-3a-cli-read` (`depends_on: []`, `apps/cli/**`, `docs/cli/aos-parity.md`) covers parity slice 1: status, task ls/show, events --follow, verdict. `p1-3-aos-cli` keeps create, approve and stop and stays gated on `p0-7-replacement-drill`.
+- **Why:** read-only commands add no write path, call existing routes with the same loopback credential, and do not change restore risk, so the drill gate buys nothing for them. Without the split the daily CLI is blocked behind G15 and the drill.
+- **Status:** itay was not asked in a message of his own; the project coordinator treated his non-objection as approval. This section stays PROPOSED until itay merges the PR that carries it, and is then SHIPPED.
+
 ## 2026-11-21 — qcq-01 advisory run estimates and scheduling recommendations, API 2.14 (SHIPPED on merge)
 
 - **Contract change (additive):** `GET /api/tasks/:id/estimate` (`deadline`, `approval=required`, `assistant` what-if) and `GET /api/estimates/accuracy` (`routing.read`), docs/contracts/run-estimate-v1.md. Config `scheduling` (personal default Asia/Jerusalem, Sun–Thu 09:00–18:00; evenings and weekends recommended only when `allowed: true`). No migration, no new capability.

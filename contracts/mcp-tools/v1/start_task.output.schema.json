@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-plane.local/contracts/mcp-tools/v1/start_task.output.schema.json",
+  "title": "StartTaskOutput",
+  "description": "start_task structuredContent. Returned once the plane has accepted the start; execution continues on the host.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "taskId",
+    "state",
+    "runId",
+    "assistantId",
+    "webLink",
+    "replayed",
+    "startedAt"
+  ],
+  "properties": {
+    "taskId": {
+      "type": "string",
+      "pattern": "^AG-[0-9a-z]{1,32}$",
+      "description": "Plane task id (`newTaskId`, packages/core/src/ids.ts)."
+    },
+    "state": {
+      "enum": [
+        "ROUTING",
+        "RUNNING",
+        "WAITING_RESOURCE",
+        "WAITING_INPUT",
+        "LIMIT_PAUSED",
+        "HANDING_OFF",
+        "COMPLETED",
+        "FAILED",
+        "CANCELLED"
+      ]
+    },
+    "runId": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1,
+      "maxLength": 128,
+      "description": "Null only if the plane accepted the start before a run row existed."
+    },
+    "assistantId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+    },
+    "webLink": {
+      "type": "string",
+      "maxLength": 300,
+      "pattern": "^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?/#/missions/AG-[0-9a-z]{1,32}$",
+      "description": "Private Web link to the task: the configured HTTPS Web origin + `/#/missions/<taskId>`. Reachable only on the private network."
+    },
+    "replayed": {
+      "type": "boolean"
+    },
+    "startedAt": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,6})?Z$"
+    }
+  }
+}
