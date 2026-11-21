@@ -1267,6 +1267,17 @@ export class Orchestrator {
     const attempt = wait?.state === 'consumed' ? wait.autoWakes + 1 : 0;
     this.cooldowns.penalize(assistantId, trigger === "quota" ? "limit" : "failure", reasonText, resetsAt, attempt);
 
+    // An unattended autopilot task can only run on an agent-user-capable assistant, and a quota
+    // yield must not fail over (the source is excluded and nothing else can launch): it waits for
+    // the source's own cooldown and relaunches from the checkpoint inside the window.
+    if (trigger === "quota" && this.unattended(taskId)) {
+      const until = this.cooldowns.list().find((c) => c.assistantId === assistantId)?.until;
+      if (until && this.scheduler?.parkSameAssistant(taskId, checkpoint.id, until, `${reasonText}; resuming on ${assistantId} after its cooldown`)) {
+        this.notice(taskId, "warn", `${reasonText}. Waiting for ${assistantId}'s cooldown (until ${until}), then resuming from the checkpoint.`);
+        return;
+      }
+    }
+
     // K4b, before any routing: a task that still owes the pool a slot re-enters
     // the scheduler here, and routing is re-decided AT THE GRANT. A decision made
     // now would belong to a successor that does not exist yet, and the dispatch
