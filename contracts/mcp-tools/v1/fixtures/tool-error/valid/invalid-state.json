@@ -1,0 +1,7 @@
+{
+  "code": "invalid_state",
+  "message": "Task is RUNNING; only CREATED tasks can start.",
+  "retryable": false,
+  "currentState": "RUNNING",
+  "webLink": "https://aos.example.invalid/#/missions/AG-mi8x2k1a"
+}

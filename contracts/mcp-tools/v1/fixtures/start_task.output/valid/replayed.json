@@ -1,0 +1,9 @@
+{
+  "taskId": "AG-mi8x2k1a",
+  "state": "ROUTING",
+  "runId": null,
+  "assistantId": "claude-code",
+  "webLink": "https://aos.example.invalid/#/missions/AG-mi8x2k1a",
+  "replayed": true,
+  "startedAt": "2026-11-21T14:00:02.000Z"
+}

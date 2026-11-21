@@ -1,0 +1,5 @@
+{
+  "goal": "x",
+  "repo": "dogfood-cockpit",
+  "idempotencyKey": "abc"
+}

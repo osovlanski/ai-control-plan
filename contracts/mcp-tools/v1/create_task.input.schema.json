@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-plane.local/contracts/mcp-tools/v1/create_task.input.schema.json",
+  "title": "CreateTaskInput",
+  "description": "create_task arguments. Creates a task in state CREATED and proposes a route. Never starts a run.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "goal",
+    "repo",
+    "idempotencyKey"
+  ],
+  "properties": {
+    "goal": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4000
+    },
+    "repo": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$",
+      "description": "A repository alias from the MCP service's exposed-repo map. Never a filesystem path."
+    },
+    "constraints": {
+      "type": "array",
+      "maxItems": 10,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 500
+      }
+    },
+    "profile": {
+      "enum": [
+        "auto",
+        "preserve-quota",
+        "fastest",
+        "best-quality",
+        "lowest-tokens"
+      ]
+    },
+    "idempotencyKey": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._:-]{16,128}$",
+      "description": "Client-chosen key. Same key and same input returns the first result; same key and different input is idempotency_conflict."
+    }
+  }
+}

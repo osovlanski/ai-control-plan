@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-plane.local/contracts/mcp-tools/v1/get_task.input.schema.json",
+  "title": "GetTaskInput",
+  "description": "get_task arguments.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "taskId"
+  ],
+  "properties": {
+    "taskId": {
+      "type": "string",
+      "pattern": "^AG-[0-9a-z]{1,32}$",
+      "description": "Plane task id (`newTaskId`, packages/core/src/ids.ts)."
+    }
+  }
+}

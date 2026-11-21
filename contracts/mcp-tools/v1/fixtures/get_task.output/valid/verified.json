@@ -1,0 +1,30 @@
+{
+  "taskId": "AG-mi8x2k1a",
+  "goal": "Fix the flaky teardown test",
+  "state": "COMPLETED",
+  "stage": {
+    "value": "done",
+    "rule": "terminal"
+  },
+  "repo": "dogfood-cockpit",
+  "webLink": "https://aos.example.invalid/#/missions/AG-mi8x2k1a",
+  "createdAt": "2026-11-21T14:00:00.000Z",
+  "updatedAt": "2026-11-21T14:20:00.000Z",
+  "pendingApprovals": 0,
+  "latestRun": {
+    "runId": "run_01",
+    "assistantId": "claude-code",
+    "state": "completed",
+    "startedAt": "2026-11-21T14:00:02.000Z",
+    "endedAt": "2026-11-21T14:18:00.000Z"
+  },
+  "verification": {
+    "runState": "completed",
+    "checks": {
+      "passed": 3,
+      "failed": 0,
+      "skipped": 1,
+      "blocked": 0
+    }
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "taskId": "AG-mi8x2k1a",
+  "idempotencyKey": "c0-fixture-key-0001",
+  "confirm": {
+    "assistantId": "claude-code",
+    "compositionDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  }
+}

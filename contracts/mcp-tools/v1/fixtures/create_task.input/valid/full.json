@@ -1,0 +1,9 @@
+{
+  "goal": "Fix the flaky teardown test",
+  "repo": "dogfood-cockpit",
+  "constraints": [
+    "no new dependencies"
+  ],
+  "profile": "preserve-quota",
+  "idempotencyKey": "c0-fixture-key-0001"
+}
