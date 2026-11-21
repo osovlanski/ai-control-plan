@@ -52,7 +52,16 @@ test("About keeps capability limits readable across desktop and mobile", async (
     await page.setViewportSize({ width, height: 1000 });
     await expect(article.getByRole("heading", { level: 1 })).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    await expect(page.getByRole("navigation", { name: "System", exact: true }).getByRole("link", { name: "About", exact: true })).toBeInViewport();
+    const nav = page.getByRole("navigation", { name: "System", exact: true });
+    // About sits in the system group: always shown on desktop, one More away on narrow screens.
+    if (width <= 760) {
+      await expect(nav.getByRole("button", { name: "More", exact: true })).toHaveClass(/is-current/);
+      const more = nav.getByRole("button", { name: "More", exact: true });
+      if (await more.getAttribute("aria-expanded") === "false") await more.click();
+      await expect(more).toHaveAttribute("aria-expanded", "true");
+    }
+    await expect(nav.getByRole("link", { name: "About", exact: true })).toBeInViewport();
+    await expect(nav.getByRole("link", { name: "About", exact: true })).toHaveAttribute("aria-current", "page");
     await page.screenshot({ path: info.outputPath(`about-${width}.png`), fullPage: true });
   }
   expect(errors).toEqual([]);

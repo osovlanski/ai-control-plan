@@ -10,13 +10,13 @@ test.beforeEach(async () => {
 });
 test.afterEach(async () => { await h.close(); });
 
-test("eight routes, keyboard focus, private draft retention, history and reload", async ({ context }) => {
+test("nine destinations, keyboard focus, private draft retention, history and reload", async ({ context }) => {
   const page = await h.openApp(context);
   const nav = page.getByRole("navigation", { name: "System" });
-  await expect(nav.getByRole("link")).toHaveCount(8);
+  await expect(nav.getByRole("link")).toHaveCount(9);
   await page.keyboard.press("Tab");
   await expect(page.getByRole("link", { name: "Skip to workspace", exact: true })).toBeFocused();
-  for (const label of ["Overview", "Agents", "Memory", "Routing", "Traces", "Tools", "Settings", "About"]) {
+  for (const label of ["Overview", "Missions", "Agents", "Memory", "Routing", "Traces", "Tools", "Settings", "About"]) {
     await page.keyboard.press("Tab");
     await expect(nav.getByRole("link", { name: label, exact: true })).toBeFocused();
   }
@@ -105,7 +105,17 @@ test("responsive empty shell and failed reads stay truthful with reduced motion"
     await page.setViewportSize({ width, height: 900 });
     await expect(page.getByRole("button", { name: "Preview routing", exact: true })).toBeInViewport();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    for (const link of await page.getByRole("navigation", { name: "System" }).getByRole("link").all()) await expect(link).toBeInViewport();
+    const nav = page.getByRole("navigation", { name: "System" });
+    const more = nav.getByRole("button", { name: "More", exact: true });
+    // Narrow screens show the daily row; the system group is one More away.
+    if (width <= 760) {
+      await expect(nav.getByRole("link")).toHaveCount(3);
+      await more.click();
+      await expect(more).toHaveAttribute("aria-expanded", "true");
+    } else await expect(more).toBeHidden();
+    await expect(nav.getByRole("link")).toHaveCount(9);
+    for (const link of await nav.getByRole("link").all()) await expect(link).toBeInViewport();
+    if (width <= 760) { await page.keyboard.press("Escape"); await expect(more).toBeFocused(); await expect(more).toHaveAttribute("aria-expanded", "false"); }
     await page.screenshot({ path: info.outputPath(`empty-${width}.png`), fullPage: true });
   }
   expect(await page.evaluate(() => document.getAnimations().filter(a => a.playState === "running" && a.effect?.getTiming().iterations === Infinity).length)).toBe(0);

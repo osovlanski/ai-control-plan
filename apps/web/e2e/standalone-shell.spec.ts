@@ -25,13 +25,15 @@ test("Shell route creates the same mission, retains draft, and reconciles the tr
   await showDiagnostics(page);
   const errors: string[] = [];
   page.on("pageerror", e => errors.push(e.message));
-  await page.getByRole("link", { name: "Mission mode", exact: true }).click();
+  const nav = page.getByRole("navigation", { name: "System" });
+  await nav.getByRole("link", { name: "Missions", exact: true }).click();
   await expect(page).toHaveURL(/#\/shell$/);
+  await expect(nav.getByRole("link", { name: "Missions", exact: true })).toHaveAttribute("aria-current", "page");
   await expect(page.locator("#main-content")).toBeFocused();
   const goal = page.getByRole("textbox", { name: "What should Agentic OS do?" });
   await goal.fill("Inspect the workspace and summarize the result");
-  await page.getByRole("link", { name: "Operator mode", exact: true }).click();
-  await page.getByRole("link", { name: "Mission mode", exact: true }).click();
+  await nav.getByRole("link", { name: "Overview", exact: true }).click();
+  await nav.getByRole("link", { name: "Missions", exact: true }).click();
   await expect(goal).toHaveValue("Inspect the workspace and summarize the result");
   await page.setViewportSize({ width: 1440, height: 1000 });
   await capture(page, "new-mission-desktop");

@@ -356,9 +356,9 @@ test("repository preview binds a composed run and cap; changing repository inval
   await api.dispose();
 });
 
-test("Mission mode alias retains the legacy shell route", async ({ context }, info) => {
+test("Missions in the rail keeps the legacy shell route and its alias", async ({ context }, info) => {
   const page = await h.openApp(context);
-  await page.getByRole("banner").getByRole("link", { name: "Mission mode", exact: true }).click();
+  await page.getByRole("navigation", { name: "System" }).getByRole("link", { name: "Missions", exact: true }).click();
   await expect(page).toHaveURL(/#\/shell$/);
   await page.evaluate(() => { location.hash = "/mission"; });
   await expect(page).toHaveURL(/#\/mission$/);
@@ -366,5 +366,5 @@ test("Mission mode alias retains the legacy shell route", async ({ context }, in
   await page.screenshot({ path: info.outputPath("mission-mode.png"), fullPage: true });
   await page.evaluate(() => { location.hash = "/shell"; });
   await expect(page.getByRole("region", { name: "Mission workspace" })).toBeVisible();
-  await expect(page).toHaveTitle("Mission · Agentic OS");
+  await expect(page).toHaveTitle("Missions · Agentic OS");
 });

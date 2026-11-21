@@ -1,7 +1,7 @@
 import "../styles/about.css";
 
 const COMPONENTS = [
-  ["Shell / desktop", "Operator UI", "Describe a goal, preview its route, answer approvals and inspect the work in Overview or Mission mode."],
+  ["Shell / desktop", "Operator UI", "Describe a goal, preview its route, answer approvals and inspect the work in Overview or Missions."],
   ["Kernel / scheduler", "Control plane", "Owns task and run state, durable waits, resource admission, checkpoints and recovery. The router records why an assistant is eligible and why it was chosen."],
   ["Processes", "Tasks and runs", "A task holds the goal; a run is an execution attempt by an assistant. Repository work uses isolated worktrees. Compare and race can run alternative attempts."],
   ["Device drivers", "Provider adapters", "A shared execution interface connects Claude Code, Codex and other configured environments. Each adapter declares its capabilities; support differs by provider."],

@@ -1,6 +1,3 @@
-.os-shell.is-shell-mode { grid-template-columns: minmax(0, 1fr); }
-.is-shell-mode .os-rail { display: none; }
-.is-shell-mode .os-main { margin-left: 0; }
 .os-rail-foot .btn { display: block; margin-bottom: 18px; }
 .standalone-shell { display: grid; grid-template-columns: 250px minmax(0, 1fr); max-width: 1500px; margin: 0 auto; min-height: calc(100dvh - 120px); }
 .shell-history { padding: 24px 18px; border-right: 1px solid var(--line); min-width: 0; }
