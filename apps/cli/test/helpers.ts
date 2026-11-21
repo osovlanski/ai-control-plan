@@ -8,6 +8,7 @@ import { openDb, type Db } from "../../api/src/db/index.js";
 import { buildServer, type BuiltServer } from "../../api/src/server.js";
 import { connect } from "../src/client.js";
 import { runRuntimes } from "../src/runtimes.js";
+import { runTask } from "../src/task.js";
 
 export const TWO_FAKES = "assistants:\n  fake-a:\n    provider: fake\n  fake-b:\n    provider: fake\n";
 
@@ -37,12 +38,12 @@ export async function bootPlane(yaml = TWO_FAKES): Promise<Plane> {
 
 export interface Run { code: number; out: string; err: string }
 
-/** `aos runtimes …` in-process, with the workspace env of `plane` and an optional fetch seam. */
-export async function aos(plane: Pick<Plane, "home" | "origin">, argv: string[], opts: { fetchImpl?: typeof fetch; env?: NodeJS.ProcessEnv } = {}): Promise<Run> {
+/** `aos runtimes …` (or, with `group: "task"`, `aos task …`) in-process, with the workspace env of `plane` and an optional fetch seam. */
+export async function aos(plane: Pick<Plane, "home" | "origin">, argv: string[], opts: { fetchImpl?: typeof fetch; env?: NodeJS.ProcessEnv; group?: "runtimes" | "task" } = {}): Promise<Run> {
   const out: string[] = [];
   const err: string[] = [];
   const env = opts.env ?? { AGENT_PLANE_HOME: plane.home, AOS_API_URL: plane.origin };
-  const code = await runRuntimes(argv, {
+  const code = await (opts.group === "task" ? runTask : runRuntimes)(argv, {
     connect: (capability, options) => connect(capability, { ...options, env, fetchImpl: opts.fetchImpl }),
     out: (t) => out.push(t),
     err: (t) => err.push(t),

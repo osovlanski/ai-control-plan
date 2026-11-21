@@ -1,6 +1,6 @@
 # `aos` CLI parity inventory
 
-Status: inventory for `p1-3-aos-cli`. It lists what the Web UI does, which API route each action uses, and which `aos` command covers it, or should. It is a plan, not shipped behavior: today `apps/cli` has one group, `runtimes`, with nine commands (`apps/cli/src/runtimes.ts`, entry point `apps/cli/src/main.ts`). Everything marked "Proposed" is unbuilt.
+Status: inventory for `p1-3-aos-cli`. It lists what the Web UI does, which API route each action uses, and which `aos` command covers it, or should. It is a plan, not shipped behavior: today `apps/cli` has two groups: `runtimes`, with nine commands (`apps/cli/src/runtimes.ts`), and `task`, with one, `provenance` (tlm-03, `apps/cli/src/task.ts`); the entry point is `apps/cli/src/main.ts`. Everything marked "Proposed" is unbuilt.
 
 Source: the roadmap delta of 2026-11-20 (section A.2 drive against 170e627, matrix A.3, findings F1 to F7). It was not re-driven for this document. Where code and this file disagree, the code wins and this file needs a fix.
 
@@ -40,6 +40,7 @@ Columns:
 | Compare / race (`NewTask`) | `POST /api/tasks/:id/parallel` | — | `aos task compare\|race <id> <a> <b>` | P1 |
 | Mission list / attention (`useBoard`, `Overview.tsx:29`) | `GET /api/tasks` | — | `aos task ls [--attention] [--state]` | P0 |
 | Mission detail (`TaskDetail`, `Inspector`) | `GET /api/tasks/:id`, `/context`, `/wait` | — | `aos task show <id>` (provenance section reserved for tlm-03) | P0 |
+| Run and handoff provenance (web view not built yet; tlm-03 web half) | `GET /api/tasks/:id/provenance` (API 2.12) | **`aos task provenance <id> [--json]`** (tlm-03) | `aos task show` can embed it as its provenance block | P1 |
 | Live activity (`TaskDetail.tsx:50`, SSE) | `GET /api/tasks/:id/events`, `/events/stream` | — | `aos task events <id> [--follow] [--json]` (NDJSON when following) | P0 |
 | Routing evidence (`TaskRouting`, `TaskDetail`) | `GET /api/tasks/:id/routing` | — | `aos task routing <id>` | P1 |
 | Sessions, verification (`TaskDetail`, `reads.ts`) | `GET /api/tasks/:id/sessions`, `/api/sessions/:id`, `/verification`, `?groupId`, `?parentTaskId` | — | `aos session show <id>`, `aos task verdict <id>` | P0 |
@@ -72,14 +73,14 @@ Columns:
 3. `aos task events <id> --follow --json` as NDJSON, for `jq`, `grep` and log capture.
 4. `aos status`, a one-shot health readout (meta, scheduler, cooldowns, unresolved inputs) with a non-zero exit when degraded. The heartbeat and Doctor could reuse it.
 5. `aos autopilot report [--scope]`, replacing `morning-report.mjs` with the same output and one way to find credentials (F4).
-6. `aos task show <id> --json | jq .provenance`, once tlm-02a and tlm-03 add provenance.
+6. `aos task provenance <id> --json | jq …` (shipped by tlm-03); `aos task show <id> --json | jq .provenance` once p1-3 slice 1 embeds it.
 
 ## Planned slices
 
 - Slice 1, read-only inspection and hygiene: `aos status`, `aos task ls|show|events [--follow]|routing|verdict`, `aos session show`, plus fixes for F1, F2, F3 and F7 and parity-test rows for the task reads. Files: `apps/cli/**` only.
 - Slice 2, act: `task new|route|start|approve|deny|stop|restart|handoff`, `aos approvals`, and `--watch` with verdict exits.
 - Later: `schedule`, `models`, `inputs`, read-only `autopilot` and `telemetry`, absorbing `scripts/morning-report.mjs`.
-- `tlm-03` and `p1-3` both write `apps/cli/**`, so they must not run in parallel. Slice 1 defines `aos task show` with an empty, reserved `provenance` block; the telemetry work fills it.
+- `tlm-03` and `p1-3` both write `apps/cli/**`, so they must not run in parallel. tlm-03 shipped `aos task provenance` first; slice 1's `aos task show` should embed that same read (and `provenanceText`) as its provenance block rather than add another.
 
 ## Acceptance for the inventory (from the roadmap delta, A.6)
 
