@@ -984,3 +984,9 @@ Migration 041 adds `runs.harness_cli_version` (TEXT NULL, forward only, no backf
 - **Decision:** each link is keyed by `repo#number` (GitHub numbers issues and PRs in one sequence; repo lower-cased) and lists its evidence by source. `operator` is a recorded claim, never checked against GitHub. `autopilot_publication` / `autopilot_duplicate` are derived at read time from the P0-5 records of the task's attempt (only rows with a PR number) and never copied into `task_links`. An operator link to the published PR merges into the same entry; calling it an issue is a 409.
 - **Decision:** unlink keeps the row (`removed_at`, `removed_by`); one live row per task, repo and number.
 - **Coordination:** chat-publish (roadmap delta §1, not built) should add its publications as one more derived source in `TaskLinkService.derived`, not as stored rows. tlm-03 can render links from `GET /api/tasks/:id/links`; provenance (2.12) is unchanged.
+
+## 2026-11-21 — D-D: aos read-only slice ahead of the replacement drill (PROPOSED)
+
+- **Decision:** split `p1-3-aos-cli`. New item `p1-3a-cli-read` (`depends_on: []`, `apps/cli/**`, `docs/cli/aos-parity.md`) covers parity slice 1: status, task ls/show, events --follow, verdict. `p1-3-aos-cli` keeps create, approve and stop and stays gated on `p0-7-replacement-drill`.
+- **Why:** read-only commands add no write path, call existing routes with the same loopback credential, and do not change restore risk, so the drill gate buys nothing for them. Without the split the daily CLI is blocked behind G15 and the drill.
+- **Status:** itay was not asked in a message of his own; the project coordinator treated his non-objection as approval. This section stays PROPOSED until itay merges the PR that carries it, and is then SHIPPED.

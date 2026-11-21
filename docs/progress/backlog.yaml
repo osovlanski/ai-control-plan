@@ -10,7 +10,7 @@
 # - lane owner: only itay can do it (a host step, a secret, a login or a decision).
 # - Acceptance commands come from this file at origin/main, never from the task worktree.
 #
-# Reconciled ai-control-plan on 2026-11-20 at a52ad16; Cockpit items retain their prior scope.
+# Reconciled ai-control-plan on 2026-11-21 at 8a10689; Cockpit items retain their prior scope.
 version: 1
 items:
   # ── Stage 3: the first autonomous loop ──────────────────────────────────────────────
@@ -53,18 +53,6 @@ items:
     source: "plan §F stage 3 P0-4; PROJECT_MEMORY 2026-11-12 finding (uncommitted checkpoint)"
     notes: "Implementation shipped. Capture live acceptance on the isolated snapshot with the deployed wrapper during G15. Existing tests cover G10, G25 and G28."
 
-  - id: p0-8-k3-egress
-    title: "K3 quota probe egress: fixed Anthropic endpoint, redirect error, off for the autopilot lane"
-    phase: "auto-copilot stage 3 (P0-8)"
-    repo: ai-control-plan
-    size: S
-    depends_on: []
-    files: ["apps/api/src/modules/quota-probe.ts"]
-    lane: manual-cloud
-    profile: auto
-    night: false
-    source: "plan §F stage 3 P0-8; review-3 finding 14; thread started 2026-11-13"
-
   - id: g15-first-loop-live
     title: "G15: one real item end to end on OCI to a draft PR with no human step"
     phase: "auto-copilot stage 3 exit"
@@ -76,7 +64,7 @@ items:
     profile: auto
     night: false
     source: "plan §F stage 3 exit (G15, then G3, G12, G29)"
-    notes: "Attempt 8 reached acceptance. Confirm #211 host setup is applied and #212 is deployed, then allow attempt 9 for legacy-run-cli-version in an owner-operated window. Capture acceptance and one draft PR. Exclude the retired D3/D5 reservation items from the window. Record P0-4 acceptance evidence during this drive."
+    notes: "Verified 2026-11-21: attempt 10 passed offline install, typecheck and lint, then failed the Codex probe with EACCES (test fixed by #227, merged). Attempt 11 ran a six-day-old reused reservation tree, so #227 never applied (fixed by #234, migration 053, merged 2026-11-21). All 11 attempts per item are used. Next: deploy main with #234 to the box, set autopilot.attemptsPerItem to 12 and run attempt 12 in an owner-operated window (live Autopilot window needs itay's approval). Acceptance: completed verification (P0-4 acceptance evidence) and one linked draft PR. Exclude the retired D3/D5 reservation items from the window."
 
   # ── Owner steps and decisions carried from P0-A ─────────────────────────────────────
   - id: p0-a2-host-drive
@@ -145,8 +133,21 @@ items:
     source: "plan §F stage 5; decisions D-2, D-13"
     notes: "Starts with a re-read of OpenAI's Codex-with-ChatGPT terms; the spike runs on OCI."
 
+  - id: p1-3a-cli-read
+    title: "aos read-only daily workflow: status, task ls/show, events --follow, verdict"
+    phase: "auto-copilot stage 5 (P1-3/4)"
+    repo: ai-control-plan
+    size: M
+    depends_on: []
+    files: ["apps/cli/**", "docs/cli/aos-parity.md"]
+    lane: manual-cloud
+    profile: auto
+    night: false
+    source: "Milestone preflight 2026-11-21, slice E1; docs/cli/aos-parity.md slice 1 (F1, F2, F3, F7)"
+    notes: "Model recommendation: Claude Opus 5.5 / medium. Read-only commands on existing routes with the same loopback credential, and `aos task provenance` (#231) is already shipped. Split from p1-3-aos-cli per D-D (see project-memory-log 2026-11-21). Drive against a live plane: every command's JSON parses, `pnpm -s aos` output is clean, a missing credential gives a readable error."
+
   - id: p1-3-aos-cli
-    title: "Extend aos from runtime commands to task and Harness operations"
+    title: "aos act commands: task create, approve and stop"
     phase: "auto-copilot stage 5 (P1-3/4)"
     repo: ai-control-plan
     size: L
@@ -156,7 +157,7 @@ items:
     profile: best-quality
     night: false
     source: "plan §F stage 5"
-    notes: "Runtime CLI and Agents parity already ship (#199). Inventory UI actions against CLI and API, then add read-only task and Harness inspection before create, stream, approve and stop. A Harness tab and provenance readout should use the same read APIs."
+    notes: "Runtime CLI and Agents parity already ship (#199). Inventory UI actions against CLI and API, then add read-only task and Harness inspection before create, stream, approve and stop. A Harness tab and provenance readout should use the same read APIs. The read-only slice moved ahead as p1-3a-cli-read (D-D); this item now covers create, approve and stop, and stays gated on the replacement drill."
 
   - id: p1-6-scorecard
     title: "OS-vs-solo scorecard runs as autopilot items; Phase 8 close"
@@ -296,96 +297,18 @@ items:
 
   # Runtime correctness, traceability, and UX
 
-  - id: tlm-02a
-    title: "Expose missing cross-record task provenance"
-    phase: "Agentic OS follow-up"
-    repo: ai-control-plan
-    size: M
-    depends_on: []
-    files: ["apps/api/src/server.ts", "apps/api/test/**"]
-    lane: manual-cloud
-    profile: auto
-    night: false
-    source: "Traceability review after #201 and #206"
-    notes: "Reuse routing, session, request, checkpoint and handoff reads. Define and test the missing joins for ownership and handoff provenance across execution paths; preserve existing response contracts."
-
-  - id: tlm-02b
-    title: "Link tasks to GitHub issues and pull requests"
-    phase: "Agentic OS follow-up"
-    repo: ai-control-plan
-    size: M
-    depends_on: []
-    files: ["apps/api/src/**", "apps/api/test/**"]
-    lane: manual-cloud
-    profile: auto
-    night: false
-    source: "Traceability review; Autopilot publication mapping already exists"
-    notes: "Support general task linkage and reuse existing publication evidence where available."
-
   - id: tlm-03
-    title: "Expose new provenance fields in the CLI and UI"
+    title: "Show task provenance in the Web task detail"
     phase: "Agentic OS follow-up"
     repo: ai-control-plan
-    size: M
-    depends_on: ["tlm-02a"]
-    files: ["apps/cli/**", "apps/web/src/**"]
+    size: S
+    depends_on: ["mobile-web-reconnect"]
+    files: ["apps/web/src/**"]
     lane: manual-cloud
     profile: auto
     night: false
     source: "Traceability review"
-    notes: "Consume TLM-02A through the shared read APIs and add parity coverage. Coordinate task and Harness inspection work through p1-3-aos-cli."
-
-  - id: ux-01
-    title: "Simplify the default Overview and reveal diagnostics on demand"
-    phase: "Agentic OS follow-up"
-    repo: ai-control-plan
-    size: M
-    depends_on: []
-    files: ["apps/web/src/OrbitalBoard.tsx", "apps/web/src/shell/MissionShell.tsx", "apps/web/src/styles/**"]
-    lane: manual-cloud
-    profile: auto
-    night: false
-    source: "Agentic OS Codex UX modernization proposal"
-    notes: "Model recommendation: Claude Opus 5.5 / high (itay, 2026-11-20: ux items run on Claude). One clear next action and current mission; preserve diagnostics access. Verify screenshots, keyboard, responsive and task flows."
-
-  - id: ux-02
-    title: "Make Agents scannable with details on demand"
-    phase: "Agentic OS follow-up"
-    repo: ai-control-plan
-    size: M
-    depends_on: []
-    files: ["apps/web/src/shell/Agents.tsx", "apps/web/src/styles/**"]
-    lane: manual-cloud
-    profile: auto
-    night: false
-    source: "Agentic OS Codex UX modernization proposal"
-    notes: "Model recommendation: Claude Opus 5.5 / medium (itay, 2026-11-20: ux items run on Claude). Preserve lifecycle truth, controls and CLI parity. Verify enable/disable and routing behavior, keyboard and responsive views."
-
-  - id: ux-03
-    title: "Guide Add Runtime and reveal YAML on request"
-    phase: "Agentic OS follow-up"
-    repo: ai-control-plan
-    size: M
-    depends_on: ["ux-02"]
-    files: ["apps/web/src/shell/Agents.tsx", "apps/web/src/styles/**"]
-    lane: manual-cloud
-    profile: auto
-    night: false
-    source: "Agentic OS Codex UX modernization proposal"
-    notes: "Model recommendation: Claude Opus 5.5 / medium (itay, 2026-11-20: ux items run on Claude). Preserve manual configuration and verify copied snippets with the real loader."
-
-  - id: ux-04
-    title: "Simplify navigation and surface the existing standalone shell"
-    phase: "Agentic OS follow-up"
-    repo: ai-control-plan
-    size: L
-    depends_on: ["ux-01", "ux-02"]
-    files: ["apps/web/src/App.tsx", "apps/web/src/shell/routes.ts", "apps/web/src/styles/**"]
-    lane: manual-cloud
-    profile: auto
-    night: false
-    source: "Agentic OS Codex UX modernization proposal"
-    notes: "Model recommendation: Claude Opus 5.5 / high (itay, 2026-11-20: ux items run on Claude). Preserve routes, deep links and shortcuts. Verify accessible navigation at desktop and mobile widths."
+    notes: "Web half only. `aos task provenance` shipped in #231 on the provenance API from #230 (API 2.12). Queues after mobile-web-reconnect because both edit apps/web/src/TaskDetail.tsx. Consume GET provenance through the shared read API; add a web test."
 
   - id: demo-journey
     title: "Recorded end-to-end demo: goal to verified outcome in Web and CLI, fakes only"
@@ -398,7 +321,7 @@ items:
     profile: auto
     night: false
     source: "Roadmap delta 2026-11-20 addendum, requirement B (itay approved the item 2026-11-20)"
-    notes: "Model recommendation: Claude Opus 5.5 / medium. A `pnpm demo:journey` Playwright project (video, trace, screenshots) on the e2e harness (apps/web/e2e/harness.ts: injected clock, temp workspace) with FakeAdapter assistants and a scratch git repo. Scenes: Agents + `aos runtimes ls`; shell goal with route and composition preview; run; inline approval ([FAKE:APPROVAL]); verification verdict; recovery ([FAKE:LIMIT] -> checkpoint, cooldown, handoff to the second fake); a draft PR through the autopilot publication path against an in-process fake GitHub (buildServer autopilotGitHub/autopilotGit, FAKE-*-not-real tokens); CLI task scenes and chat-publish as roadmap cards until p1-3 ships them. Every scene shows a label (REAL, SIM-PROVIDER, SIM-PR, ROADMAP) and is listed in demo-out/scenes.json. Pass: exits 0 with no provider credentials and only loopback network; no model calls; the same task id appears in Web and CLI captures; two runs give identical scenes.json after masking ids and times; a secret scan of the outputs is clean; docs/demo/demo-journey.md names what is simulated in the on-screen words. CLI scenes become real after p1-3-aos-cli slices 1 and 2, with no dependency on it here."
+    notes: "D1 shipped in #232 (`pnpm demo:journey`: video, trace, scenes.json). Remaining: D2, the mobile reconnect scene (after mobile-web-reconnect) and real CLI scenes on the same task id (after p1-3-aos-cli slices). Model recommendation: Claude Opus 5.5 / medium. A `pnpm demo:journey` Playwright project (video, trace, screenshots) on the e2e harness (apps/web/e2e/harness.ts: injected clock, temp workspace) with FakeAdapter assistants and a scratch git repo. Scenes: Agents + `aos runtimes ls`; shell goal with route and composition preview; run; inline approval ([FAKE:APPROVAL]); verification verdict; recovery ([FAKE:LIMIT] -> checkpoint, cooldown, handoff to the second fake); a draft PR through the autopilot publication path against an in-process fake GitHub (buildServer autopilotGitHub/autopilotGit, FAKE-*-not-real tokens); CLI task scenes and chat-publish as roadmap cards until p1-3 ships them. Every scene shows a label (REAL, SIM-PROVIDER, SIM-PR, ROADMAP) and is listed in demo-out/scenes.json. Pass: exits 0 with no provider credentials and only loopback network; no model calls; the same task id appears in Web and CLI captures; two runs give identical scenes.json after masking ids and times; a secret scan of the outputs is clean; docs/demo/demo-journey.md names what is simulated in the on-screen words. CLI scenes become real after p1-3-aos-cli slices 1 and 2, with no dependency on it here."
 
   - id: project-memory-token-check
     title: "Measure startup token savings from the project memory split"
@@ -412,3 +335,95 @@ items:
     night: false
     source: "#213 post-merge verification"
     notes: "Compare first-turn input tokens on three comparable OCI sessions before and after the split, using the health-check script. Report the model, effort, configuration and token counts."
+
+  # ── Mobile, MCP and OCI milestone (2026-11-21) ──────────────────────────────────────
+  - id: mobile-web-reconnect
+    title: "Task detail survives phone lock, background and network change; approve once"
+    phase: "Mobile, MCP and OCI"
+    repo: ai-control-plan
+    size: M
+    depends_on: []
+    files: ["apps/web/src/TaskDetail.tsx", "apps/web/src/task-reconcile.ts", "apps/web/src/api.ts", "apps/web/e2e/reconnect.spec.ts", "apps/api/src/modules/harness/approval-service.ts"]
+    lane: manual-cloud
+    profile: auto
+    night: false
+    source: "Milestone preflight 2026-11-21, slice B1"
+    notes: "Model recommendation: Claude Opus 5.5 / high. On visibilitychange, online and stream error: refetch task detail, /events and pending approvals; reopen the stream; merge events by stable id; replace stale approval state with the server's. Approve disables on first press, sends once, treats an idempotent re-answer as success and a conflict as already answered. Check the legacy/input approval path for idempotency. approval-service.ts only if a server gap exists. Decision D-E: durable reads, no event journal or Last-Event-ID. Verify with Playwright at a phone viewport on FakeAdapter ([FAKE:APPROVAL]): offline or hidden page, double-tap approve, second tab approving, exactly one approval applied."
+
+  - id: remote-auth-one-origin
+    title: "Remote auth stage 2 for one private origin behind Tailscale Serve"
+    phase: "Mobile, MCP and OCI"
+    repo: ai-control-plan
+    size: L
+    depends_on: ["mcp-api-grants"]
+    files: ["apps/api/src/auth/**", "apps/api/src/config.ts", "apps/api/src/index.ts", "apps/api/src/db/migrations/055_*", "apps/web/src/auth/**", "docs/adr/remote-auth-design.md"]
+    lane: manual-cloud
+    profile: best-quality
+    night: false
+    source: "Milestone preflight 2026-11-21, slice B2; docs/adr/remote-auth-design.md"
+    notes: "Model recommendation: Fable 5.2 / high (security). Starts only after itay decides D-A (owner identity) and D-B (two loopback listeners: local unchanged, remote-only second listener that never mints sessions from bootstrap); both amend the ADR. Trusted proxy with the peer pinned to loopback. Does not edit task handlers in server.ts (mcp-api-grants owns them). Migration 055 (053 is #234, 054 is mcp-api-grants); the later PR renumbers if the order changes. Verify on loopback with a fake OIDC issuer, a loopback TLS proxy and real browser contexts; local bootstrap, aos CLI and read-only tests unchanged. No deployment, no tailscale commands."
+
+  - id: mcp-contract
+    title: "MCP connector contract and access ADR"
+    phase: "Mobile, MCP and OCI"
+    repo: ai-control-plan
+    size: M
+    depends_on: []
+    files: ["docs/adr/mcp-connector.md", "contracts/mcp-tools-v1/**"]
+    lane: manual-cloud
+    profile: auto
+    night: false
+    source: "Milestone preflight 2026-11-21, slice C0"
+    notes: "Model recommendation: Claude Opus 5.5 / high. Docs and JSON Schemas only. Tools list_tasks, get_task, create_task, start_task over Streamable HTTP; create returns the proposed repo and route without starting; idempotencyKey on create and start; results carry the task id and the private Web link. Repos limited to an allowlist subset. Approvals and Autopilot admin are not exposed. Access model (proposed D-A/D-C): separate apps/mcp process behind Cloudflare Tunnel with owner-only OAuth and a narrow plane credential. Includes a threat list and the acceptance cases for mcp-api-grants and mcp-service. Check what Claude custom connectors and Codex CLI actually support; record ChatGPT plan and client limits as a note only."
+
+  - id: mcp-api-grants
+    title: "Narrow tasks.create and tasks.start grants with idempotent create and start"
+    phase: "Mobile, MCP and OCI"
+    repo: ai-control-plan
+    size: M
+    depends_on: ["mcp-contract"]
+    files: ["apps/api/src/server.ts", "packages/core/src/contracts.ts", "apps/api/src/db/migrations/054_*", "apps/api/test/**"]
+    lane: manual-cloud
+    profile: auto
+    night: false
+    source: "Milestone preflight 2026-11-21, slice C1"
+    notes: "Model recommendation: Claude Opus 5.5 / high. Capabilities tasks.create and tasks.start (commands.write still implies both); optional idempotencyKey on POST /api/tasks and POST /api/tasks/:id/start stored with a request fingerprint (migration 054): same key and input returns the first response, different input is 409. webLink on create and start responses when a private origin is configured. API 2.14. Owns only the task create/start handlers in server.ts; does not change auth flows. Drive on pnpm dev with a credential holding only tasks.read, tasks.create, tasks.start: two creates give one task, two starts one run, approve and autopilot routes give 403."
+
+  - id: mcp-service
+    title: "apps/mcp: Streamable HTTP MCP server for list, get, create and start"
+    phase: "Mobile, MCP and OCI"
+    repo: ai-control-plan
+    size: L
+    depends_on: ["mcp-api-grants"]
+    files: ["apps/mcp/**", "pnpm-workspace.yaml", "package.json"]
+    lane: manual-cloud
+    profile: best-quality
+    night: false
+    source: "Milestone preflight 2026-11-21, slice C2"
+    notes: "Model recommendation: Claude Opus 5.5 / high, with a Fable 5.2 review of the OAuth code. Loopback-bound service using the official TypeScript SDK at a pinned version, calling the plane over loopback with the narrow credential; repo allowlist enforced before any plane call. Phase 1 static FAKE-*-not-real dev bearer; phase 2 (may be a second PR) OAuth authorization server with a fake OIDC issuer in tests. Verify with a real MCP client against pnpm dev and FakeAdapter: retries safe, disallowed repo refused, task id and Web link in under 2 s while the run continues. No tunnel, no public exposure."
+
+  - id: mobile-web-rollout
+    title: "Roll out the private HTTPS origin through Tailscale Serve on OCI"
+    phase: "Mobile, MCP and OCI"
+    repo: ai-control-plan
+    size: M
+    depends_on: ["mobile-web-reconnect", "remote-auth-one-origin"]
+    files: ["docs/autopilot/mobile-web-rollout.md"]
+    lane: owner
+    profile: auto
+    night: false
+    source: "Milestone preflight 2026-11-21, slice B3"
+    notes: "Live OCI change: needs itay's explicit approval. itay with Codex on OCI. Serve target is the remote listener; the service stays loopback-bound. Pass: the phone reaches the origin over mobile data after login, and a non-owner is refused. Record exact rollout and rollback steps in the doc before applying."
+
+  - id: mcp-rollout
+    title: "Expose the MCP service through Cloudflare Tunnel and connect Claude mobile and Codex CLI"
+    phase: "Mobile, MCP and OCI"
+    repo: ai-control-plan
+    size: M
+    depends_on: ["mcp-service", "mobile-web-rollout"]
+    files: ["docs/autopilot/mcp-rollout.md"]
+    lane: owner
+    profile: auto
+    night: false
+    source: "Milestone preflight 2026-11-21, slice C3"
+    notes: "Public MCP exposure: needs itay's explicit approval. Narrow tunnel route to the MCP service only; Web UI and core API stay private. Validate owner-only login and a refused non-owner in Claude mobile, then Codex CLI. Milestone acceptance: create and start a task from a real phone, lock it, reopen the Web link over mobile data, approve once, see the verification result."
