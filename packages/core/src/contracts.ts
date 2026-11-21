@@ -48,7 +48,12 @@
 // joins of a task's runs, routing decisions, dispatches, checkpoints, handoff records and Harness
 // envelopes, each naming its source (`inferred` joins follow the rules the response states).
 // No earlier response changes; no new capability.
-export const CONTROL_PLANE_API_VERSION = "2.12";
+// 2.13 (additive, tlm-02b): task links to GitHub issues and pull requests. `GET /api/tasks/:id/links`
+// and `GET /api/task-links?repo=&number=` (`tasks.read`); `POST /api/tasks/:id/links` and
+// `DELETE /api/tasks/:id/links/:linkId` (`commands.write`). Each link lists its evidence by source:
+// `operator` (a recorded claim, not checked against GitHub), or `autopilot_publication` /
+// `autopilot_duplicate` derived from the P0-5 records. No earlier response changes; no new capability.
+export const CONTROL_PLANE_API_VERSION = "2.13";
 export const NORMALIZED_EVENT_VERSION = "1.0";
 
 export const OBSERVABILITY_CAPABILITIES = [

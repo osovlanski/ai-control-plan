@@ -35,6 +35,7 @@ import { sessionInputResolver } from "./modules/runtime-catalog.js";
 import { AGENT_RUNTIME_SCHEMA_VERSION, RuntimeLifecycleReader, runtimeCatalogProjection } from "./modules/runtime-lifecycle.js";
 import { ConformanceBusyError, RuntimeConformance, type RuntimeConformanceOptions } from "./modules/runtime-conformance.js";
 import { taskProvenance } from "./modules/provenance.js";
+import { TaskLinkError, TaskLinkService } from "./modules/task-links.js";
 import { routingHistory } from "./modules/router.js";
 import { TaskEventBus } from "./modules/sse.js";
 import { TaskStageReader } from "./modules/task-stage.js";
@@ -1198,6 +1199,28 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     const provenance = taskProvenance(db, req.params.id);
     if (!provenance) return reply.status(404).send({ error: "not found" });
     return provenance;
+  });
+
+  // tlm-02b: GitHub issues and PRs a task belongs to. Operator links are claims (not checked
+  // against GitHub); autopilot publications are derived from their P0-5 records at read time.
+  const taskLinks = new TaskLinkService(db, now);
+  const linkError = (reply: FastifyReply, err: unknown) => {
+    if (err instanceof TaskLinkError) return reply.status(err.status).send({ error: err.code, detail: err.message });
+    throw err;
+  };
+  app.get<{ Params: { id: string } }>("/api/tasks/:id/links", read.tasks, (req, reply) => {
+    const links = taskLinks.forTask(req.params.id);
+    if (!links) return reply.status(404).send({ error: "not found" });
+    return links;
+  });
+  app.post<{ Params: { id: string }; Body: unknown }>("/api/tasks/:id/links", write, (req, reply) => {
+    try { return reply.status(201).send(taskLinks.add(req.params.id, req.body, req.cred?.kid ?? null)); } catch (err) { return linkError(reply, err); }
+  });
+  app.delete<{ Params: { id: string; linkId: string } }>("/api/tasks/:id/links/:linkId", write, (req, reply) => {
+    try { taskLinks.remove(req.params.id, req.params.linkId, req.cred?.kid ?? null); return reply.status(204).send(); } catch (err) { return linkError(reply, err); }
+  });
+  app.get<{ Querystring: { repo?: string; number?: string } }>("/api/task-links", read.tasks, (req, reply) => {
+    try { return taskLinks.forTarget(req.query.repo, req.query.number); } catch (err) { return linkError(reply, err); }
   });
 
   app.get<{ Params: { id: string } }>("/api/tasks/:id/files/handoff.md", read.tasks, (req, reply) => {
