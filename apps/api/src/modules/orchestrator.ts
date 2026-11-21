@@ -2085,19 +2085,43 @@ export class Orchestrator {
       }
       throw new Error(`No session of task ${taskId} is waiting on approval ${requestId}`);
     }
-    const runs = this.runsOfTask(taskId);
-    if (runs.length === 0) throw new Error(`No active run for task ${taskId}`);
-    for (const run of runs) {
-      if (!run.adapter.send) continue;
-      try {
-        await run.adapter.send(run.handle, { kind: "approval", requestId, approved });
-        return;
-      } catch {
-        // Not this run's pending approval; try the next competitor.
+    // Legacy runs keep no approval row, so the same answer sent twice (a double tap, a second
+    // tab, a retry after a dropped response) reached the adapter twice and the second got a 409.
+    // Remember each answer the moment it is claimed, before the first await, so the repeat is an
+    // idempotent no-op and a different decision is a conflict, as on the Harness path.
+    const key = `${taskId}\u0000${requestId}`;
+    const prior = this.legacyAnswers.get(key);
+    if (prior) {
+      if (prior.approved !== approved) {
+        throw new Error(`approval ${requestId} already ${prior.approved ? "approved" : "denied"}; a ${approved ? "approved" : "denied"} answer conflicts`);
       }
+      return prior.delivery; // the same answer: wait on the one delivery, never send a second
     }
-    throw new Error(`No run of task ${taskId} is waiting on approval ${requestId}`);
+    const runs = this.runsOfTask(taskId);
+    if (runs.length === 0) {
+      for (const k of this.legacyAnswers.keys()) if (k.startsWith(`${taskId}\u0000`)) this.legacyAnswers.delete(k);
+      throw new Error(`No active run for task ${taskId}`);
+    }
+    const delivery = (async () => {
+      for (const run of runs) {
+        if (!run.adapter.send) continue;
+        try {
+          await run.adapter.send(run.handle, { kind: "approval", requestId, approved });
+          return;
+        } catch {
+          // Not this run's pending approval; try the next competitor.
+        }
+      }
+      throw new Error(`No run of task ${taskId} is waiting on approval ${requestId}`);
+    })();
+    this.legacyAnswers.set(key, { approved, delivery });
+    // A failed delivery is forgotten, so the owner can answer again once the run asks again.
+    delivery.catch(() => this.legacyAnswers.delete(key));
+    return delivery;
   }
+
+  /** Answers delivered to legacy runs, by task and request id (see respondApproval). In memory, like the runs. */
+  private readonly legacyAnswers = new Map<string, { approved: boolean; delivery: Promise<void> }>();
 
   async cancelTask(taskId: string): Promise<void> {
     this.assertNoMixedOwnership(taskId);
