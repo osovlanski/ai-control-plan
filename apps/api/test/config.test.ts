@@ -216,3 +216,34 @@ describe("workspace config", () => {
     expect(() => loadConfig(env())).toThrow(/execution must be a mapping/);
   });
 });
+
+describe("scheduling (qcq-01, advisory)", () => {
+  const write = (workspace: string, yaml: string) => {
+    mkdirSync(join(home, workspace), { recursive: true, mode: 0o700 });
+    writeFileSync(join(home, workspace, "config.yaml"), yaml);
+  };
+
+  it("defaults by workspace: personal is Asia/Jerusalem Sun–Thu with evenings and weekends off", () => {
+    expect(loadConfig(env()).scheduling).toMatchObject({
+      timezone: "Asia/Jerusalem", workDays: [0, 1, 2, 3, 4], workHours: { start: "09:00", end: "18:00" },
+      evening: { allowed: false }, weekend: { allowed: false, days: [5, 6] }, accountConcurrency: null,
+    });
+    expect(loadConfig(env({ AGENT_PLANE_WORKSPACE: "work" })).scheduling).toMatchObject({ timezone: "UTC", workDays: [1, 2, 3, 4, 5] });
+  });
+
+  it("merges a partial block over the defaults", () => {
+    write("personal", "scheduling:\n  evening: { allowed: true, end: '22:30' }\n  weekend: { allowed: true }\n  accountConcurrency: 2\n");
+    expect(loadConfig(env()).scheduling).toMatchObject({
+      timezone: "Asia/Jerusalem", evening: { allowed: true, start: "19:00", end: "22:30" }, weekend: { allowed: true, days: [5, 6] }, accountConcurrency: 2,
+    });
+  });
+
+  it("refuses unknown keys, a bad zone and an inverted window", () => {
+    write("personal", "scheduling:\n  quietHours: 1\n");
+    expect(() => loadConfig(env())).toThrow(/scheduling has unknown key\(s\): quietHours/);
+    write("personal", "scheduling:\n  evening: { allow: true }\n");
+    expect(() => loadConfig(env())).toThrow(/scheduling\.evening has unknown key\(s\): allow/);
+    write("personal", "scheduling:\n  timezone: Mars/Olympus\n  workHours: { start: '18:00', end: '09:00' }\n");
+    expect(() => loadConfig(env())).toThrow(/not an IANA zone.*workHours must be HH:MM start before end/);
+  });
+});

@@ -35,6 +35,7 @@ import { sessionInputResolver } from "./modules/runtime-catalog.js";
 import { AGENT_RUNTIME_SCHEMA_VERSION, RuntimeLifecycleReader, runtimeCatalogProjection } from "./modules/runtime-lifecycle.js";
 import { ConformanceBusyError, RuntimeConformance, type RuntimeConformanceOptions } from "./modules/runtime-conformance.js";
 import { taskProvenance } from "./modules/provenance.js";
+import { RunEstimates } from "./modules/run-estimate.js";
 import { TaskLinkError, TaskLinkService } from "./modules/task-links.js";
 import { routingHistory } from "./modules/router.js";
 import { TaskEventBus } from "./modules/sse.js";
@@ -1199,6 +1200,30 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     const provenance = taskProvenance(db, req.params.id);
     if (!provenance) return reply.status(404).send({ error: "not found" });
     return provenance;
+  });
+
+  // qcq-01 (API 2.14): ADVISORY run estimate and scheduling recommendation, before dispatch. Routes the
+  // task with the router's pure inputs (nothing persisted) and reads history; it never dispatches,
+  // reserves, schedules or enforces. `deadline` (ISO), `approval=required` and `assistant` (what-if) are optional.
+  const runEstimates = new RunEstimates({ db, config, tasks, registry, cooldowns, now, ...(modelCatalog ? { catalog: modelCatalog } : {}) });
+  app.get<{ Params: { id: string }; Querystring: { deadline?: string; approval?: string; assistant?: string } }>("/api/tasks/:id/estimate", read.routing, (req, reply) => {
+    const { deadline, approval, assistant } = req.query;
+    if (deadline !== undefined && !Number.isFinite(Date.parse(deadline))) return reply.status(400).send({ error: "deadline must be an ISO instant" });
+    if (approval !== undefined && approval !== "required") return reply.status(400).send({ error: "approval must be 'required' when given" });
+    if (assistant !== undefined && !registry.get(assistant)) return reply.status(400).send({ error: `unknown assistant ${assistant}` });
+    const estimate = runEstimates.forTask(req.params.id, {
+      ...(deadline !== undefined ? { deadline: new Date(deadline).toISOString() } : {}),
+      ...(approval === "required" ? { approvalRequired: true } : {}),
+      ...(assistant !== undefined ? { assistantId: assistant } : {}),
+    });
+    if (!estimate) return reply.status(404).send({ error: "not found" });
+    return estimate;
+  });
+  // qcq-01: estimate accuracy, by replaying the versioned estimator over recorded actuals.
+  app.get<{ Querystring: { limit?: string } }>("/api/estimates/accuracy", read.routing, (req, reply) => {
+    const limit = req.query.limit === undefined ? 50 : Number(req.query.limit);
+    if (!Number.isInteger(limit) || limit < 1 || limit > 500) return reply.status(400).send({ error: "limit must be an integer 1..500" });
+    return runEstimates.accuracy(limit);
   });
 
   // tlm-02b: GitHub issues and PRs a task belongs to. Operator links are claims (not checked

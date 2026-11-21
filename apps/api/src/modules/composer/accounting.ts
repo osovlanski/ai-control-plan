@@ -17,8 +17,8 @@
  * Nothing here writes except `recordOverruns`, which only appends events.
  */
 import {
-  accumulateInRun, accumulateInRunExtras, lateOverrun, remainingBudget, roundUsd, settleSession, taskConsumption,
-  type AgentSpec, type BudgetCaps, type BudgetOverrunPayload, type SessionSettlement, type SessionUsageRecord, type SettlementPrice, type UsageObservation, type TaskConsumption, type UsageAccountingMode,
+  accumulateInRun, accumulateInRunExtras, combineUsageRecords, lateOverrun, remainingBudget, roundUsd, settleSession, taskConsumption,
+  type AgentSpec, type BudgetCaps, type BudgetOverrunPayload, type SessionSettlement, type SessionUsageRecord, type SettlementPrice, type TokenPair, type UsageObservation, type TaskConsumption, type UsageAccountingMode,
 } from "@agent-plane/core";
 import type { ResolvedConfig } from "../../config.js";
 import type { Db } from "../../db/index.js";
@@ -42,6 +42,8 @@ export interface RunSettlement extends SessionSettlement {
   compositionRevisionId: string | null;
   model: string | null;
   accounting: UsageAccountingMode;
+  /** The settled tokens split into input and output, from the side `source` names (qcq-01 estimates). */
+  split: TokenPair;
 }
 
 type CapKey = BudgetOverrunPayload["cap"];
@@ -69,6 +71,17 @@ export class TaskAccounting {
          FROM runs r LEFT JOIN execution_results er ON er.session_id = r.id
         WHERE r.task_id = ? ORDER BY r.started_at, r.rowid`,
     ).all(taskId) as RunRow[]);
+  }
+
+  /** Named runs, settled, in the order given (qcq-01 estimates). Unknown ids are skipped. */
+  settleRunIds(runIds: readonly string[]): RunSettlement[] {
+    const row = this.d.db.prepare(
+      `SELECT r.id, r.assistant_id, r.composition_revision_id, r.model_requested, r.model_resolved,
+              json_extract(er.result, '$.usage') AS result_usage
+         FROM runs r LEFT JOIN execution_results er ON er.session_id = r.id
+        WHERE r.id = ?`,
+    );
+    return this.settle(runIds.flatMap((id) => (row.all(id) as RunRow[])));
   }
 
   /** The runs bound to one revision, settled. */
@@ -288,7 +301,8 @@ export class TaskAccounting {
       const model = r.model_resolved ?? r.model_requested ?? assistant?.manifestParsed?.core.models[0]?.id ?? null;
       const price = model && assistant ? this.price(r.assistant_id, assistant.provider, model) : undefined;
       const settled = settleSession({ inRun: { ...inRun, ...extras }, records: sessionRecords, ...(price ? { price } : {}) });
-      return { runId: r.id, assistantId: r.assistant_id, compositionRevisionId: r.composition_revision_id, model, accounting, ...settled };
+      const split = settled.source === "records" ? combineUsageRecords(sessionRecords).tokens : { input: Math.max(0, inRun.input), output: Math.max(0, inRun.output) };
+      return { runId: r.id, assistantId: r.assistant_id, compositionRevisionId: r.composition_revision_id, model, accounting, ...settled, split };
     });
   }
 }

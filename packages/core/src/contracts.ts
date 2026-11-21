@@ -53,7 +53,12 @@
 // `DELETE /api/tasks/:id/links/:linkId` (`commands.write`). Each link lists its evidence by source:
 // `operator` (a recorded claim, not checked against GitHub), or `autopilot_publication` /
 // `autopilot_duplicate` derived from the P0-5 records. No earlier response changes; no new capability.
-export const CONTROL_PLANE_API_VERSION = "2.13";
+// 2.14 (additive, qcq-01, docs/contracts/run-estimate-v1.md): `GET /api/tasks/:id/estimate` and
+// `GET /api/estimates/accuracy` (`routing.read`). ADVISORY: a run estimate (runtime, model, effort,
+// token ranges, duration, wait until start, approval wait, API spend vs API-equivalent vs subscription
+// quota, confidence, evidence) and a scheduling recommendation over the workspace's `scheduling` hours.
+// No dispatch, budget or schedule reads them. No earlier response changes; no new capability.
+export const CONTROL_PLANE_API_VERSION = "2.14";
 export const NORMALIZED_EVENT_VERSION = "1.0";
 
 export const OBSERVABILITY_CAPABILITIES = [

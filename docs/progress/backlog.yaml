@@ -412,3 +412,102 @@ items:
     night: false
     source: "#213 post-merge verification"
     notes: "Compare first-turn input tokens on three comparable OCI sessions before and after the split, using the health-check script. Report the model, effort, configuration and token counts."
+
+  # ── Quality, Cost & Quota milestone (itay 2026-11-21) ───────────────────────────────
+  # Goal: a verified result at the required quality while managing tokens, API spend,
+  # subscription quota and time to completion, with a recommendation of when to run.
+  # Already on main and reused, not rebuilt: router + K13 model recommendation (shadow), Composer
+  # stage-5 budgets and settlement (composer/accounting.ts), usage v1 ledger, QuotaProjection and
+  # cooldowns, K4b resource pools, cron schedules with timezones, the autopilot window.
+  # Kept under their existing ids: p1-5-effort-cohorts (effort in the execution identity),
+  # p1-8-jev-shadow (Jev shadow evaluation), p1-6-scorecard (OS-vs-solo comparison).
+  - id: qcq-01-estimates-advisory
+    title: "Advisory run estimate and scheduling recommendation before dispatch (API 2.14)"
+    phase: "Quality, Cost & Quota"
+    repo: ai-control-plan
+    size: M
+    depends_on: []
+    files: ["packages/core/src/run-estimate.ts", "apps/api/src/modules/run-estimate.ts", "docs/contracts/run-estimate-v1.md"]
+    lane: manual-cloud
+    profile: best-quality
+    night: false
+    source: "itay 2026-11-21 Quality, Cost & Quota spec, items 2, 3 and 5"
+    notes: "In review as the first slice. GET /api/tasks/:id/estimate and GET /api/estimates/accuracy, read-only; config `scheduling` (personal default Asia/Jerusalem, Sun–Thu 09:00–18:00, evenings and weekends off until allowed). Accuracy is a replay of the versioned estimator over recorded runs."
+
+  - id: qcq-02-estimate-snapshot
+    title: "Record the estimate shown at dispatch beside the run's actual outcome"
+    phase: "Quality, Cost & Quota"
+    repo: ai-control-plan
+    size: M
+    depends_on: [qcq-01-estimates-advisory]
+    files: ["apps/api/src/db/migrations/**", "apps/api/src/modules/run-estimate.ts"]
+    lane: manual-cloud
+    profile: best-quality
+    night: false
+    source: "itay 2026-11-21 spec item 2 (record actual outcomes)"
+    notes: "Append-only estimate rows keyed by dispatch or start, joined to the run at settle, so accuracy covers what was shown, not only a replay. Record-only: it must not change what the dispatch does."
+
+  - id: qcq-03-estimate-surfaces
+    title: "Show the estimate and recommendation in Web task detail, `aos task estimate` and Cockpit"
+    phase: "Quality, Cost & Quota"
+    repo: ai-control-plan
+    size: M
+    depends_on: [qcq-01-estimates-advisory]
+    files: ["apps/web/src/**", "apps/cli/src/**"]
+    lane: manual-cloud
+    profile: auto
+    night: false
+    source: "itay 2026-11-21 spec item 2 (shown before dispatch)"
+    notes: "Read the plane's answer; never recompute it. Label API spend, API-equivalent and subscription quota apart. Cockpit vendors run-estimate v1 after it lands."
+
+  - id: qcq-04-account-concurrency
+    title: "Shared per-account concurrency limit across tasks, compare/race, autopilot and retries"
+    phase: "Quality, Cost & Quota"
+    repo: ai-control-plan
+    size: L
+    depends_on: [qcq-01-estimates-advisory]
+    files: ["apps/api/src/modules/scheduler.ts", "apps/api/src/modules/orchestrator.ts"]
+    lane: manual-cloud
+    profile: best-quality
+    night: false
+    source: "itay 2026-11-21 spec item 4"
+    notes: "Changes dispatch: needs the review packet (docs/agentic-os-qcq-review-packet.md) and one reviewer on Opus High before merge. Today `scheduling.accountConcurrency` is advisory only (wait estimate). Reuse K4b claims keyed by account."
+
+  - id: qcq-05-act-on-recommendation
+    title: "Opt-in: defer a task to its recommended window as a scheduler time wait"
+    phase: "Quality, Cost & Quota"
+    repo: ai-control-plan
+    size: M
+    depends_on: [qcq-02-estimate-snapshot]
+    files: ["apps/api/src/modules/scheduler.ts", "apps/api/src/modules/run-estimate.ts"]
+    lane: owner
+    profile: best-quality
+    night: false
+    source: "itay 2026-11-21 spec items 3 and 6"
+    notes: "Live scheduling change: pending itay's rollout approval after the review packet. Acceptance, permissions and spend limits stay in force; an approval wait is never auto-approved."
+
+  - id: qcq-06-decomposition-overhead
+    title: "Decompose a task into subtasks and estimate planning, handoff, retry and verification overhead"
+    phase: "Quality, Cost & Quota"
+    repo: ai-control-plan
+    size: L
+    depends_on: [qcq-02-estimate-snapshot]
+    files: ["packages/core/src/run-estimate.ts", "apps/api/src/modules/tasks.ts"]
+    lane: manual-cloud
+    profile: best-quality
+    night: false
+    source: "itay 2026-11-21 spec item 4; vNext 10–13 subtasks (parent_task_id has no producer)"
+    notes: "An estimate of a parent is the sum over its subtasks plus measured overhead, each with its own evidence."
+
+  - id: qcq-07-provider-qualification
+    title: "Qualify a new provider: conformance, fake acceptance suite, then one budgeted paid run"
+    phase: "Quality, Cost & Quota"
+    repo: ai-control-plan
+    size: M
+    depends_on: []
+    files: ["apps/api/src/modules/runtime-conformance.ts", "eval/**"]
+    lane: owner
+    profile: best-quality
+    night: false
+    source: "itay 2026-11-21 spec item 4"
+    notes: "Paid verification runs stay pending budget approval. Compare verified pass rate and total usage against the current workflow on the same acceptance checks (with p1-6-scorecard)."

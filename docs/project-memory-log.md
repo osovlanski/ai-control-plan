@@ -984,3 +984,11 @@ Migration 041 adds `runs.harness_cli_version` (TEXT NULL, forward only, no backf
 - **Decision:** each link is keyed by `repo#number` (GitHub numbers issues and PRs in one sequence; repo lower-cased) and lists its evidence by source. `operator` is a recorded claim, never checked against GitHub. `autopilot_publication` / `autopilot_duplicate` are derived at read time from the P0-5 records of the task's attempt (only rows with a PR number) and never copied into `task_links`. An operator link to the published PR merges into the same entry; calling it an issue is a 409.
 - **Decision:** unlink keeps the row (`removed_at`, `removed_by`); one live row per task, repo and number.
 - **Coordination:** chat-publish (roadmap delta §1, not built) should add its publications as one more derived source in `TaskLinkService.derived`, not as stored rows. tlm-03 can render links from `GET /api/tasks/:id/links`; provenance (2.12) is unchanged.
+
+## 2026-11-21 — qcq-01 advisory run estimates and scheduling recommendations, API 2.14 (SHIPPED on merge)
+
+- **Contract change (additive):** `GET /api/tasks/:id/estimate` (`deadline`, `approval=required`, `assistant` what-if) and `GET /api/estimates/accuracy` (`routing.read`), docs/contracts/run-estimate-v1.md. Config `scheduling` (personal default Asia/Jerusalem, Sun–Thu 09:00–18:00; evenings and weekends recommended only when `allowed: true`). No migration, no new capability.
+- **Decision:** advisory only. The estimate routes with the router's pure inputs and persists nothing; no dispatch, budget or schedule reads it. Changes that would (qcq-04 shared per-account limit, qcq-05 acting on a recommendation) go through docs/agentic-os-qcq-review-packet.md with one Opus High reviewer.
+- **Decision:** accuracy is a replay of the versioned estimator (`run-estimate/1`) over recorded runs, each estimated only from runs that ended before it started. Persisting the estimate shown at dispatch is qcq-02.
+- **Decision:** API spend, API-equivalent and subscription quota stay separate; billing kind is the provider default because manifests do not carry the plan. Effort is `null` until p1-5 records it in the execution identity.
+- **Coordination:** the Mobile/MCP plan reserved API 2.14 for C1 (idempotent create/start); whichever merges second takes the next minor.
