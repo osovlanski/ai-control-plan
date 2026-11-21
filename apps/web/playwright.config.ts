@@ -11,7 +11,7 @@ export default defineConfig({
   projects: [
     {
       name: "chromium",
-      testIgnore: /(demo-a|demo-a5|demo-b|visual)\.spec\.ts/,
+      testIgnore: /(demo-a|demo-a5|demo-b|demo-journey|visual)\.spec\.ts/,
       use: { browserName: "chromium" },
     },
     {
@@ -57,6 +57,19 @@ export default defineConfig({
         trace: "on",
         video: "on",
         screenshot: "on",
+      },
+    },
+    {
+      // Demo journey (D1): goal to verified outcome in the Web and the aos CLI, fakes only.
+      // Everything it writes lands in the repo-root demo-out/ (docs/demo/demo-journey.md §6).
+      name: "demo-journey",
+      testMatch: /demo-journey\.spec\.ts/,
+      outputDir: "../../demo-out/playwright",
+      use: {
+        browserName: "chromium",
+        viewport: { width: 1440, height: 900 },
+        trace: "on",
+        video: "on",
       },
     },
   ],

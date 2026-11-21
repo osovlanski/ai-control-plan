@@ -1,9 +1,8 @@
 # Demo journey — goal to verified outcome, in Web and CLI, with fakes only
 
-Status: **script and scenario only (D0).** The recording spec (`pnpm demo:journey`,
-backlog item `demo-journey`, slice D1) does not exist yet. Nothing in this file
-claims a command that runs today. When D1 ships, it must implement the scenes
-below and keep this page in step with them.
+Status: **recorded (D1).** `pnpm demo:journey` runs this script as
+`apps/web/e2e/demo-journey.spec.ts` (Playwright project `demo-journey`) and writes
+`demo-out/`. Scenes 4 (its `aos task show` half), 8 and 9 stay `ROADMAP`.
 
 The journey runs about 4 minutes in 9 scenes. It uses the real Web UI, the real
 `aos` CLI and a real control plane, with deterministic fake providers and
@@ -41,7 +40,7 @@ Scenes that mix labels show both (for example `REAL + SIM-PROVIDER`).
 | 1 | `REAL` | Agents app next to `aos runtimes ls`. | "Two agents are ready." The same lifecycle shows in the Web and in the terminal. |
 | 2 | `REAL` | Shell: type the goal for task 1. A route preview shows the chosen agent (`fake-a`), the 2 candidates and the reason, plus a composition preview. | "The route is explained before anything runs." |
 | 3 | `REAL + SIM-PROVIDER` | Run: the mission streams planning, tool and file events. | "Agent output is scripted by the fake provider." |
-| 4 | `REAL + SIM-PROVIDER` | Approval: an inline approval card appears and the user approves it in the Web. The same task id appears in the CLI via `aos runtimes show fake-a`. | "Approval is a boundary the plane enforces." The `aos task show <id>` half of this scene is `ROADMAP` until p1-3 slice 1 ships. |
+| 4 | `REAL + SIM-PROVIDER` | Approval: an inline approval card appears and the user approves it in the Web, next to the real `aos runtimes show fake-a` transcript. `aos runtimes show` prints no task id, so the task id beside it is the one selected in the Web, on a `ROADMAP` line for `aos task show <id>`. | "Approval is a boundary the plane enforces." The `aos task show <id>` half of this scene is `ROADMAP` until p1-3 slice 1 ships. |
 | 5 | `REAL + SIM-PROVIDER` | Verification: the verdict panel shows `test.result` and `verification.result`, then COMPLETED. | "Done means verified, not claimed." |
 | 6 | `REAL + SIM-PROVIDER` | Recovery: task 2 hits the fake quota, checkpoints, `fake-a` goes into cooldown and the task is handed off to `fake-b` and completes. The routing history shows both decisions. | "A quota hit becomes a handoff, not a failure." |
 | 7 | `SIM-PR` | Publication through the autopilot lane only: one draft PR carrying the `aos-publication` marker, against a fake GitHub and a bare repo with `FAKE-*-not-real` tokens. | "Autopilot publication against a fake GitHub. Interactive tasks don't open PRs yet." |
@@ -67,12 +66,27 @@ message so the recording is understandable muted.
 
 ## 5. Reproducing it
 
-D0 adds no runnable command. The scenario above can be prepared by hand with the
-existing harness and fakes:
+```
+pnpm install --frozen-lockfile
+pnpm demo:journey            # builds the web app, then runs the demo-journey Playwright project
+DEMO_DWELL_MS=20000 pnpm demo:journey   # holds each scene on screen, for a paced recording
+```
 
-- Web scenes: `pnpm demo:a`-style Playwright projects show how the e2e harness (`apps/web/e2e/harness.ts`) starts an in-process plane with an injected clock, a temporary workspace and the `FakeAdapter`. Shell, approval and restart journeys are in `apps/web/e2e/shell-view.spec.ts` and `restart.spec.ts`.
-- CLI scenes: `pnpm -s aos runtimes ls` against the same plane. Use `pnpm -s` (silent) so the pnpm banner stays out of `--json` output.
-- Live `pnpm dev` with fakes: `dev-fake-preload.mjs` scripts the fake, but it sets quota reset times from wall-clock `Date.now()`, so mask times when recording.
+It writes, under the repository root:
+
+- `demo-out/scenes.json`: each scene's id, label, caption, task id and the routes or commands behind it.
+- `demo-out/scenes/<id>.png`: one screenshot per scene, label and caption on screen.
+- `demo-out/cli/*.txt`: the `aos runtimes ls` / `show fake-a` transcripts, run against the same plane.
+- `demo-out/playwright/…/video.webm` and `trace.zip`.
+
+A second test in the same file runs after the journey: it replaces the run's session cookie,
+bootstrap token and bearer in the trace (Playwright records request headers; all three die with
+the run's temporary plane) and then scans `demo-out/` for credential values, bearer values and any
+`FAKE-*` token that is not `-not-real`.
+
+The plane runs on the harness's injected clock, but the fake adapter stamps its events and its
+quota reset time with wall-clock time, so `scenes.json` holds no timestamps and the spec compares
+it to the expected script with task ids masked.
 
 ## 6. Acceptance for the recording (D1)
 
