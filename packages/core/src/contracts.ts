@@ -44,7 +44,11 @@
 // `runtime_conformance` row; `core.auth.state` gains `unknown` (installed, sign-in not verified;
 // ineligible like every state but `ok`); a runtime that requires conformance is routed only with a
 // passing row for the observed CLI and descriptor version (no shipped runtime requires it).
-export const CONTROL_PLANE_API_VERSION = "2.11";
+// 2.12 (additive, tlm-02a): `GET /api/tasks/:id/provenance` (`sessions.read`), the cross-record
+// joins of a task's runs, routing decisions, dispatches, checkpoints, handoff records and Harness
+// envelopes, each naming its source (`inferred` joins follow the rules the response states).
+// No earlier response changes; no new capability.
+export const CONTROL_PLANE_API_VERSION = "2.12";
 export const NORMALIZED_EVENT_VERSION = "1.0";
 
 export const OBSERVABILITY_CAPABILITIES = [
