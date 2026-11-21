@@ -990,3 +990,11 @@ Migration 041 adds `runs.harness_cli_version` (TEXT NULL, forward only, no backf
 - **Decision:** split `p1-3-aos-cli`. New item `p1-3a-cli-read` (`depends_on: []`, `apps/cli/**`, `docs/cli/aos-parity.md`) covers parity slice 1: status, task ls/show, events --follow, verdict. `p1-3-aos-cli` keeps create, approve and stop and stays gated on `p0-7-replacement-drill`.
 - **Why:** read-only commands add no write path, call existing routes with the same loopback credential, and do not change restore risk, so the drill gate buys nothing for them. Without the split the daily CLI is blocked behind G15 and the drill.
 - **Status:** itay was not asked in a message of his own; the project coordinator treated his non-objection as approval. This section stays PROPOSED until itay merges the PR that carries it, and is then SHIPPED.
+
+## 2026-11-21 — mcp-api-grants (C1): narrow task grants, idempotent create/start, API 2.14 — SHIPPED
+
+- `tasks.create` / `tasks.start` gate `POST /api/tasks` and `POST /api/tasks/:id/start`; `commands.write` implies both (`capabilityGranted`, core). A caller without `commands.write` is "narrow": repo by `mcp.repos` alias only, `idempotencyKey` required, no other knobs; start only in an aliased repo.
+- Named credentials live in `api-credential.<name>.json` (`pnpm --filter @agent-plane/api rotate --name mcp`, default caps `tasks.read,tasks.create,tasks.start`). Rotating the main file never expires them; bootstrap resolves main-file kids only, so a named secret cannot mint a browser session.
+- `mcp.repos` aliases must equal an allowlist entry exactly (config load refuses prefix matches). `mcp.webOrigin` (https origin only) adds `webLink: <origin>/#/missions/<id>` to create/start answers. `mcp.runAs: agent` is opt-in; owner Q1 still open.
+- Idempotency: migration 054 `idempotency_records`, keyed (kid, operation, key) with a jcs/sha256 fingerprint, written in the effect's transaction; only starts that took effect are recorded, so refusals (`route_changed`, `invalid_state`, `no_eligible_assistant`) leave the key free. In-flight duplicates get 409 `idempotency_in_progress` (in-memory, one plane process). Kept 7 days.
+- Not done here (file ownership): `webLink` on `GET /api/tasks/:id` reads; the MCP service maps plane reasons to `tool-error` codes (C2).

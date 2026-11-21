@@ -1,6 +1,6 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import type { FastifyInstance, FastifyRequest } from "fastify";
-import { AUTOPILOT_OPERATE_CAPABILITY, CONTROL_PLANE_API_VERSION, redactSecrets, registerSecret } from "@agent-plane/core";
+import { AUTOPILOT_OPERATE_CAPABILITY, CONTROL_PLANE_API_VERSION, capabilityGranted, redactSecrets, registerSecret } from "@agent-plane/core";
 import { matchOperateSecret, operateSecretPath } from "./operate-secret.js";
 import type { ResolvedConfig } from "../config.js";
 import type { Db } from "../db/index.js";
@@ -21,7 +21,8 @@ export function registerAuth(app:FastifyInstance, deps:{config:ResolvedConfig;cr
     const cred=await authenticate(req,credentials,sessions,now,operateSecretPath(config.dir));
     if(!cred){ reply.header("X-Control-Plane-Api-Version",CONTROL_PLANE_API_VERSION).header("WWW-Authenticate","Bearer"); return reply.code(401).send({error:"unauthenticated"}); }
     if(rule===undefined) return;
-    if(!cred.capabilities.includes(rule.require)) return reply.code(403).send({error:`${rule.require} required`});
+    // 2.14: `commands.write` implies `tasks.create` and `tasks.start`.
+    if(!capabilityGranted(cred.capabilities,rule.require)) return reply.code(403).send({error:`${rule.require} required`});
     if(cred.kind==="cookie"){const site=req.headers["sec-fetch-site"]; const o=req.headers.origin; if(!(site==="same-origin"||site==="none"||o===origin)) return reply.code(403).send({error:"cross-origin"});}
     req.cred=cred;
   });
@@ -29,7 +30,7 @@ export function registerAuth(app:FastifyInstance, deps:{config:ResolvedConfig;cr
     const token=req.body?.token; if(!token) return reply.code(400).send({error:"bootstrap rejected"}); registerSecret(token); const parsed=parseBootstrapToken(token); if(!parsed) return reply.code(400).send({error:"bootstrap rejected"});
     if(req.headers.origin!==parsed.payload.lo || req.headers["sec-fetch-site"]==="cross-site") return reply.code(403).send({error:"bootstrap rejected"});
     if(parsed.payload.aud!==origin || parsed.payload.exp<=Math.floor(now().getTime()/1000)) return reply.code(401).send({error:"bootstrap rejected"});
-    let secret=credentials.byKid(parsed.payload.kid); if(!secret){await credentials.reloadOnMiss();secret=credentials.byKid(parsed.payload.kid);} if(!secret||!verifyBootstrapSignature(parsed,secret)) return reply.code(401).send({error:"bootstrap rejected"});
+    let secret=credentials.mainByKid(parsed.payload.kid); if(!secret){await credentials.reloadOnMiss();secret=credentials.mainByKid(parsed.payload.kid);} if(!secret||!verifyBootstrapSignature(parsed,secret)) return reply.code(401).send({error:"bootstrap rejected"});
     try { db.prepare("INSERT INTO bootstrap_jti (jti, expires_at) VALUES (?, ?)").run(parsed.payload.jti,parsed.payload.exp); } catch(e){ if((e as {code?:string}).code?.startsWith("SQLITE_CONSTRAINT")) return reply.code(401).send({error:"bootstrap rejected"}); throw e; }
     const sid=randomBytes(32).toString("base64url");registerSecret(sid);sessions.set(sid,{kid:secret.kid,capabilities:parsed.payload.cap.filter(c=>secret!.capabilities.includes(c)),expiresAt:now().getTime()+config.api.auth.sessionTtlSeconds*1000});
     return reply.code(303).header("location",`${origin}/`).header("set-cookie",`__Host-acp_session=${sid}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=${config.api.auth.sessionTtlSeconds}`).header("referrer-policy","no-referrer").header("cache-control","no-store").send();
