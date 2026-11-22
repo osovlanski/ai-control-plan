@@ -142,13 +142,13 @@ function localExecutor(): AcceptanceExecutor {
   };
 }
 
-interface Item { id: string; depends_on?: string[]; lane?: string; night?: boolean; run?: string }
+interface Item { id: string; depends_on?: string[]; lane?: string; night?: boolean; run?: string; notes?: string }
 const backlogYaml = (items: Item[]) => [
   "version: 1", "items:",
   ...items.flatMap((i) => [
     `  - id: ${i.id}`, `    title: "Do ${i.id}"`, `    phase: "test"`, `    repo: ai-control-plan`, `    size: S`,
     `    depends_on: [${(i.depends_on ?? []).join(", ")}]`, `    files: ["${i.id}.txt"]`, `    lane: ${i.lane ?? "oci-loop"}`, `    profile: auto`, `    night: ${i.night ?? true}`,
-    `    notes: "Write ${i.id}.txt."`,
+    `    notes: "${i.notes ?? `Write ${i.id}.txt.`}"`,
     `    acceptance:`, `      commands:`, `        - { run: "${i.run ?? `test -f ${i.id}.txt`}", replaySafe: true }`, `      writable: ["out"]`,
   ]),
 ].join("\n") + "\n";
@@ -548,6 +548,29 @@ describe("retries", () => {
     await failFirstAttempt();
     expect(ap().currentAttempt()).toMatchObject({ attemptNo: 2, reservationOutcome: "reused" });
     expect(ap().currentAttempt()!.workBaseSha).toBeUndefined();
+  });
+
+  it("a quota yield on an unattended task waits for the same assistant's cooldown and resumes, instead of dead-ending (G15 attempt 12)", async () => {
+    // Live: Claude hit its limit 4 s into the session; the failover excluded the source, nothing else
+    // could launch as the agent user, and the task sat in WAITING_INPUT/no_candidate for ever.
+    await boot([{ id: "item-a", notes: "Write item-a.txt. [FAKE:LIMIT]" }]);
+    open();
+    await dispatcher().tick();
+    const a = ap().currentAttempt()!;
+    await rig!.built.scheduler.tick(); // the pool grants the slot and the fake hits its limit
+    const deadline = Date.now() + 10_000;
+    while (!rig!.db.prepare("SELECT 1 FROM cooldowns WHERE assistant_id = 'fake-claude'").get() && Date.now() < deadline) await new Promise((r) => setTimeout(r, 25));
+    while (rig!.db.prepare("SELECT state FROM tasks WHERE id = ?").get(a.taskId) && ["RUNNING", "LIMIT_PAUSED"].includes((rig!.db.prepare("SELECT state FROM tasks WHERE id = ?").get(a.taskId) as { state: string }).state) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 25));
+    expect(rig!.db.prepare("SELECT state, pause_kind FROM tasks WHERE id = ?").get(a.taskId)).toMatchObject({ state: "WAITING_RESOURCE" });
+    const until = (rig!.db.prepare("SELECT until FROM cooldowns WHERE assistant_id = 'fake-claude'").get() as { until: string }).until;
+    expect(rig!.built.scheduler.condition(a.taskId!)).toMatchObject({ kind: "time", notBefore: until });
+    // Before the cooldown ends nothing starts; after it, the same assistant resumes from the checkpoint and completes.
+    await rig!.built.scheduler.tick();
+    expect(rig!.db.prepare("SELECT state FROM tasks WHERE id = ?").get(a.taskId)).toMatchObject({ state: "WAITING_RESOURCE" });
+    instant = Date.parse(until) + 1000;
+    const done = reaches(rig!.built, a.taskId!, ["COMPLETED", "WAITING_INPUT", "FAILED", "CANCELLED"]);
+    await rig!.built.scheduler.tick();
+    expect(await done).toBe("COMPLETED");
   });
 
   it("a task that fails before any session started ends its attempt instead of holding the slot (first live run)", async () => {

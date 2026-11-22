@@ -615,6 +615,30 @@ export class Scheduler {
   }
 
   /**
+   * An unattended autopilot task that hit its assistant's quota has nowhere else to go (the other
+   * adapters cannot launch as the agent user), so it waits for the SAME assistant's cooldown and
+   * relaunches from the yield checkpoint. A time wait carries no handoff intent, so the grant
+   * routes without excluding the source. Bounded by the same auto-wake budget as a quota park.
+   */
+  parkSameAssistant(taskId: string, checkpointId: string, notBefore: string, reason: string): boolean {
+    const parked = this.d.db.transaction(() => {
+      if (!this.enabled || this.hasOwner(taskId) || !['LIMIT_PAUSED', 'WAITING_INPUT'].includes(this.d.tasks.get(taskId)?.state ?? '')) return false;
+      const old = this.condition(taskId);
+      const count = (old?.autoWakes ?? 0) + (old?.state === 'consumed' ? 1 : 0);
+      const history = [...(old?.history ?? []), { at: this.iso(), actor: 'failover', outcome: 'reparked', reason: 'same-assistant quota resume' }].slice(-10);
+      if (count >= (this.d.config.scheduler?.maxAutoWakes ?? DEFAULT_MAX_AUTO_WAKES)) return false;
+      this.d.db.prepare("UPDATE wait_conditions SET state = 'replaced' WHERE task_id = ? AND state = 'active'").run(taskId);
+      this.insert(taskId, { kind: 'time', notBefore, reason }, 'failover', count, history, checkpointId, [], undefined,
+        { resource: old?.resource, units: old?.units });
+      this.d.tasks.transition(taskId, 'WAITING_RESOURCE');
+      this.record(taskId, 'wait.attached', this.condition(taskId)!.generation, undefined, { origin: 'same-assistant-resume', checkpointId, reason });
+      return true;
+    })();
+    if (parked) { this.publish(taskId); this.arm(); this.releaseSoon(taskId, 'parked on same-assistant quota resume'); }
+    return parked;
+  }
+
+  /**
    * K11: a settled `YIELDED(context)` parks the task on an immediately-due wait
    * anchored to the yield checkpoint, so the ORDINARY K1 dispatch path owns the
    * successor — same reservation, same routing entry point, same crash
