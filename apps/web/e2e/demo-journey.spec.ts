@@ -1,5 +1,5 @@
 /**
- * Demo journey (backlog `demo-journey`, slice D1): goal to verified outcome in the Web UI and the
+ * Demo journey (backlog `demo-journey`, slices D1 and D2): goal to verified outcome in the Web UI and the
  * `aos` CLI, against a real in-process plane with deterministic fake providers and synthetic data.
  * No provider credentials, no model calls, no GitHub call. Every scene carries one on-screen label
  * (`REAL`, `SIM-PROVIDER`, `SIM-PR`, `ROADMAP`) in the words of docs/demo/demo-journey.md.
@@ -10,7 +10,7 @@
  * DEMO_DWELL_MS (default 0) holds each scene on screen that long, for a paced recording. It is the
  * only wall-clock wait, and it only waits: the plane runs on the harness's injected clock.
  */
-import { expect, test, type Page } from "@playwright/test";
+import { devices, expect, test, type Page, type Request } from "@playwright/test";
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import { createServer, type IncomingMessage, type Server } from "node:http";
@@ -41,12 +41,13 @@ const EXPECTED_MASKED: Array<Omit<Scene, "taskId"> & { taskId: string | null }> 
   { id: "1-agents", label: "REAL", caption: "Two agents are ready.", taskId: null, behind: ["GET /api/assistants", "aos runtimes ls"] },
   { id: "2-route-preview", label: "REAL", caption: "The route is explained before anything runs.", taskId: "<task-1>", behind: ["POST /api/tasks", "POST /api/tasks/<task-1>/route", "POST /api/tasks/<task-1>/compose"] },
   { id: "3-run", label: "REAL + SIM-PROVIDER", caption: "Agent output is scripted by the fake provider.", taskId: "<task-1>", behind: ["POST /api/tasks/<task-1>/start", "GET /api/tasks/<task-1>/events"] },
-  { id: "4-approval", label: "REAL + SIM-PROVIDER", caption: "Approval is a boundary the plane enforces.", taskId: "<task-1>", behind: ["POST /api/tasks/<task-1>/input (approval)", "aos runtimes show fake-a", "ROADMAP: aos task show <task-1>"] },
+  { id: "4-approval", label: "REAL + SIM-PROVIDER", caption: "Approval is a boundary the plane enforces.", taskId: "<task-1>", behind: ["POST /api/tasks/<task-1>/input (approval)", "aos runtimes show fake-a", "aos task show <task-1>"] },
   { id: "5-verification", label: "REAL + SIM-PROVIDER", caption: "Done means verified, not claimed.", taskId: "<task-1>", behind: ["GET /api/sessions/<run>/verification", "event test.result", "event verification.result"] },
   { id: "6-recovery", label: "REAL + SIM-PROVIDER", caption: "A quota hit becomes a handoff, not a failure.", taskId: "<task-2>", behind: ["POST /api/tasks/<task-2>/start", "handoff trigger quota fake-a -> fake-b", "aos runtimes show fake-a"] },
-  { id: "7-publication", label: "SIM-PR", caption: "Autopilot publication against a fake GitHub. Interactive tasks don't open PRs yet.", taskId: null, behind: ["publications.publish (autopilot lane)", "GET /api/autopilot/publications"] },
-  { id: "8-cli-task", label: "ROADMAP", caption: "Not built yet. Becomes a real scene after p1-3 slices 1 and 2.", taskId: null, behind: ["none: text card"] },
-  { id: "9-not-built", label: "ROADMAP", caption: "What is not built yet.", taskId: null, behind: ["none: text card"] },
+  { id: "7-phone-reconnect", label: "REAL + SIM-PROVIDER", caption: "Lock the phone and come back: the events and the approval are still there. One tap approves once.", taskId: "<task-3>", behind: ["GET /api/tasks/<task-3>/events (after reconnect)", "POST /api/tasks/<task-3>/input (approval, sent once)"] },
+  { id: "8-publication", label: "SIM-PR", caption: "Autopilot publication against a fake GitHub. Interactive tasks don't open PRs yet.", taskId: null, behind: ["publications.publish (autopilot lane)", "GET /api/autopilot/publications"] },
+  { id: "9-cli-task", label: "REAL + ROADMAP", caption: "The same task from the terminal. Creating and approving from the CLI is not built yet.", taskId: "<task-1>", behind: ["aos task ls", "aos task events <task-1>", "aos task verdict <task-1>", "ROADMAP: aos task new --watch", "ROADMAP: aos approvals"] },
+  { id: "10-not-built", label: "ROADMAP", caption: "What is not built yet.", taskId: null, behind: ["none: text card"] },
 ];
 
 const scenes: Scene[] = [];
@@ -111,6 +112,9 @@ async function aos(name: string, ...args: string[]): Promise<string> {
   writeFileSync(join(OUT, "cli", `${name}.txt`), transcript);
   return transcript;
 }
+
+/** The first `n` lines of a transcript, for the on-screen terminal. The full text is kept in demo-out/cli. */
+const top = (text: string, n: number) => text.split("\n").slice(0, n).join("\n");
 
 /** The on-screen label: a fixed overlay the spec owns, so it survives route changes inside the SPA. */
 async function label(page: Page, sceneLabel: string, caption: string, extra: { terminal?: string; card?: string[] } = {}) {
@@ -206,6 +210,33 @@ test.afterAll(async () => {
   rmSync(root, { recursive: true, force: true });
 });
 
+/** Phone lock simulation (as in reconnect.spec.ts): installed before the app so it can drop live stream frames. */
+interface PhoneWindow { __dropFrames: boolean; __hidden: boolean; __dropped: number }
+const LOSSY_STREAM = () => {
+  const w = window as unknown as PhoneWindow;
+  w.__dropFrames = false;
+  w.__hidden = false;
+  w.__dropped = 0;
+  Object.defineProperty(document, "visibilityState", { configurable: true, get: () => (w.__hidden ? "hidden" : "visible") });
+  Object.defineProperty(document, "hidden", { configurable: true, get: () => w.__hidden });
+  const Native = window.EventSource;
+  class Lossy extends Native {
+    constructor(url: string | URL, init?: EventSourceInit) {
+      super(url, init);
+      let handler: ((m: MessageEvent<string>) => void) | null = null;
+      Object.defineProperty(this, "onmessage", {
+        configurable: true,
+        get: () => handler,
+        set: (fn: ((m: MessageEvent<string>) => void) | null) => {
+          handler = fn;
+          super.onmessage = fn && ((m: MessageEvent<string>) => { if (w.__dropFrames) w.__dropped += 1; else fn.call(this, m); });
+        },
+      });
+    }
+  }
+  window.EventSource = Lossy as unknown as typeof EventSource;
+};
+
 const openShell = async (page: Page) => {
   const toggle = page.getByRole("group", { name: "Overview view" });
   await toggle.getByRole("button", { name: "Shell", exact: true }).click();
@@ -271,8 +302,10 @@ test("demo journey: goal to verified outcome, Web and CLI, fakes only", async ({
   expect(show).toContain(A);
   const pid = shell.getByRole("region", { name: "Process list" }).locator('[aria-selected="true"]');
   await expect(pid).toContainText(task1);
+  const taskShow = await aos("4-task-show", "task", "show", task1);
+  expect(taskShow).toContain(task1);
   await label(page, "REAL + SIM-PROVIDER", caption("4-approval").caption, {
-    terminal: `${show}\n# ROADMAP until p1-3 slice 1: aos task show ${task1}\n# (no such command yet; the id above is the one selected in the Web)`,
+    terminal: `${top(show, 8)}\n${top(taskShow, 14)}`,
   });
   await capture(page, scene("4-approval", task1, caption("4-approval").behind.map(b => b.replaceAll("<task-1>", task1))));
   await page.keyboard.press("a");
@@ -314,7 +347,52 @@ test("demo journey: goal to verified outcome, Web and CLI, fakes only", async ({
   await label(page, "REAL + SIM-PROVIDER", caption("6-recovery").caption, { terminal: cooldown });
   await capture(page, scene("6-recovery", task2, caption("6-recovery").behind.map(b => b.replaceAll("<task-2>", task2))));
 
-  // 7 · SIM-PR — one draft PR through the autopilot lane, against the fake GitHub and a bare repo.
+  // 7 · REAL + SIM-PROVIDER — phone: lock mid-run, come back, recover, approve once (milestone B1).
+  const goal3 = "Update the release notes [FAKE:APPROVAL]";
+  await cmd.fill(goal3);
+  await cmd.press("Tab");
+  await expect(preview.locator("b")).toHaveText(B); // fake-a is cooling down after scene 6
+  const task3 = h.built.tasks.list().find(t => t.goal === goal3)!.id;
+  await expect(shell.getByRole("region", { name: "Composition preview" })).toContainText("Composed.");
+  const phone = devices["iPhone 13"].viewport;
+  await context.addInitScript(LOSSY_STREAM);
+  await page.setViewportSize(phone);
+  await page.goto(`${h.origin}/#/missions/${task3}`);
+  await page.reload();
+  await expect(page.getByRole("heading", { name: task3, exact: true })).toBeVisible();
+  await expect(page.getByText("No events yet.")).toBeVisible();
+  // The lock: the tab goes hidden, the network drops, and every live frame is lost before the page sees it.
+  await page.evaluate(() => { const w = window as unknown as PhoneWindow; w.__dropFrames = true; w.__hidden = true; document.dispatchEvent(new Event("visibilitychange")); });
+  await context.setOffline(true);
+  await api.post(`/api/tasks/${task3}/start`, { data: { assistantId: B } });
+  const durable = async () => (await (await api.get(`/api/tasks/${task3}/events`)).json()) as Array<{ run_id: string; seq: number; type: string }>;
+  await expect.poll(async () => (await durable()).some(e => e.type === "approval.requested")).toBe(true);
+  await expect.poll(() => page.evaluate(() => (window as unknown as PhoneWindow).__dropped)).toBeGreaterThan(0);
+  await expect(page.getByRole("group", { name: "Approval requested" })).toHaveCount(0);
+  // Back from the lock screen on a new network: the durable events and the pending approval return.
+  await context.setOffline(false);
+  await page.evaluate(() => { const w = window as unknown as PhoneWindow; w.__dropFrames = false; w.__hidden = false; document.dispatchEvent(new Event("visibilitychange")); });
+  const card = page.getByRole("group", { name: "Approval requested" });
+  await expect(card).toBeVisible();
+  const expectedKeys = (await durable()).map(e => `${e.run_id}:${e.seq}`);
+  const rows = page.locator("[data-event-key]");
+  await expect(rows).toHaveCount(expectedKeys.length);
+  expect(await rows.evaluateAll(els => els.map(e => e.getAttribute("data-event-key")))).toEqual(expectedKeys);
+  await label(page, "REAL + SIM-PROVIDER", caption("7-phone-reconnect").caption, {
+    terminal: "# The lock is simulated: tab hidden, network offline, live frames dropped.\n# The plane, its events and the approval are real.",
+  });
+  await capture(page, scene("7-phone-reconnect", task3, caption("7-phone-reconnect").behind.map(b => b.replaceAll("<task-3>", task3))));
+  // One tap, even doubled inside a frame, sends one answer.
+  await page.evaluate(() => document.getElementById("demo-scene")?.remove());
+  const answers: Request[] = [];
+  page.on("request", r => { if (r.method() === "POST" && r.url().endsWith(`/api/tasks/${task3}/input`)) answers.push(r); });
+  await card.getByRole("button", { name: "Approve", exact: true }).evaluate((b: HTMLButtonElement) => { b.click(); b.click(); });
+  await expect(card).toHaveCount(0);
+  await h.waitForState(task3, "COMPLETED");
+  expect(answers).toHaveLength(1);
+  await page.setViewportSize({ width: 1440, height: 900 });
+
+  // 8 · SIM-PR — one draft PR through the autopilot lane, against the fake GitHub and a bare repo.
   const bare = join(root, "origin.git");
   const work = join(root, "autopilot-work");
   git(root, "clone", "-q", bare, work);
@@ -343,34 +421,44 @@ test("demo journey: goal to verified outcome, Web and CLI, fakes only", async ({
   const listed = await (await api.get("/api/autopilot/publications")).json() as { publications: Array<{ id: string; state: string; prNumber?: number }> };
   const row = listed.publications.find(p => p.id === intended.id)!;
   expect(row.state).toBe("published");
-  await label(page, "SIM-PR", caption("7-publication").caption, { card: [
+  await label(page, "SIM-PR", caption("8-publication").caption, { card: [
     "GET /api/autopilot/publications",
     `publication ${row.id} · ${row.state} · draft PR #${row.prNumber} on demo/demo-notes (fake GitHub)`,
     `head os/demo-changelog at the verified commit · body carries "aos-publication: ${row.id}"`,
     "Git push went to a local bare repo. The GitHub token is a FAKE-*-not-real value. No GitHub call was made.",
   ] });
-  await capture(page, scene("7-publication", null, caption("7-publication").behind));
+  await capture(page, scene("8-publication", null, caption("8-publication").behind));
 
-  // 8 · ROADMAP — the same task in the CLI. Text only: these commands do not exist yet.
-  await label(page, "ROADMAP", caption("8-cli-task").caption, { card: [
-    "$ aos task new \"Add a changelog entry for the retry fix\" --watch   (exits on the verdict)",
-    "$ aos approvals",
-    "Neither command exists in this build. This card calls no route.",
-  ] });
-  await capture(page, scene("8-cli-task", null, caption("8-cli-task").behind));
+  // 9 · REAL + ROADMAP — the same task 1 in the terminal: read-only today. `task new` and `approvals` are not built.
+  const list = await aos("9-task-ls", "task", "ls");
+  expect(list).toContain(task1);
+  const events = await aos("9-task-events", "task", "events", task1);
+  expect(events).toContain("approval.requested");
+  const verdict = await aos("9-task-verdict", "task", "verdict", task1);
+  expect(verdict).toContain(task1);
+  await label(page, "REAL + ROADMAP", caption("9-cli-task").caption, {
+    terminal: `${top(list, 8)}\n${top(verdict, 14)}`,
+    card: [
+      "ROADMAP (not built, no route called):",
+      "$ aos task new \"Add a changelog entry for the retry fix\" --watch",
+      "$ aos approvals",
+    ],
+  });
+  await capture(page, scene("9-cli-task", task1, caption("9-cli-task").behind.map(b => b.replaceAll("<task-1>", task1))));
 
-  // 9 · ROADMAP — what is not built.
-  await label(page, "ROADMAP", caption("9-not-built").caption, { card: [
+  // 10 · ROADMAP — what is not built.
+  await label(page, "ROADMAP", caption("10-not-built").caption, { card: [
     "Chat-publish: \"Draft PR #N opened · PASS\" from an interactive task.",
     "Subtasks (vNext 10–13).",
-    "Mobile approvals (U4).",
+    "Approving from Claude on the phone through MCP (apps/mcp is a draft; the phone Web page in scene 7 is real).",
+    "Creating and approving a task from the CLI (aos task new, aos approvals).",
   ] });
-  await capture(page, scene("9-not-built", null, caption("9-not-built").behind));
+  await capture(page, scene("10-not-built", null, caption("10-not-built").behind));
   await api.dispose();
 
   // scenes.json, and the masked form every run must match (acceptance 2 and 5).
   writeFileSync(join(OUT, "scenes.json"), `${JSON.stringify(scenes, null, 2)}\n`);
-  expect(mask(scenes, { [task1]: "<task-1>", [task2]: "<task-2>" })).toEqual(EXPECTED_MASKED);
+  expect(mask(scenes, { [task1]: "<task-1>", [task2]: "<task-2>", [task3]: "<task-3>" })).toEqual(EXPECTED_MASKED);
 });
 
 /** Replaces task ids by role, then any remaining id or timestamp, so two runs compare equal. */
@@ -467,7 +555,7 @@ test("demo journey: demo-out holds only FAKE-*-not-real tokens", async () => {
   const files = walk(OUT);
   expect(files.some(f => f.endsWith("scenes.json"))).toBe(true);
   expect(files.filter(f => f.startsWith(join(OUT, "scenes")) && f.endsWith(".png"))).toHaveLength(EXPECTED_MASKED.length);
-  expect(files.filter(f => f.startsWith(join(OUT, "cli")))).toHaveLength(3);
+  expect(files.filter(f => f.startsWith(join(OUT, "cli")))).toHaveLength(7);
   const traces = files.filter(f => f.endsWith("trace.zip"));
   expect(traces.length).toBeGreaterThanOrEqual(1);
   expect(files.some(f => f.endsWith(".webm"))).toBe(true);
