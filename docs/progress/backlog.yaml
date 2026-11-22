@@ -234,6 +234,8 @@ items:
         - "apps/web/node_modules"
         - "packages/core/node_modules"
         - "packages/adapters/node_modules"
+        - "apps/cli/node_modules"
+        - "apps/mcp/node_modules"
         - "eval/node_modules"
       drive: "A legacy-path (harnessModes.single false) fake-provider run whose run.started carries a CLI version leaves runs.harness_cli_version set."
 
