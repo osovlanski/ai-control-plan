@@ -999,6 +999,14 @@ Migration 041 adds `runs.harness_cli_version` (TEXT NULL, forward only, no backf
 - Idempotency: migration 054 `idempotency_records`, keyed (kid, operation, key) with a jcs/sha256 fingerprint, written in the effect's transaction; only starts that took effect are recorded, so refusals (`route_changed`, `invalid_state`, `no_eligible_assistant`) leave the key free. In-flight duplicates get 409 `idempotency_in_progress` (in-memory, one plane process). Kept 7 days.
 - Not done here (file ownership): `webLink` on `GET /api/tasks/:id` reads; the MCP service maps plane reasons to `tool-error` codes (C2).
 
+## 2026-11-21 — qcq-01 advisory run estimates and scheduling recommendations, API 2.15 (SHIPPED on merge)
+
+- **Contract change (additive):** `GET /api/tasks/:id/estimate` (`deadline`, `approval=required`, `assistant` what-if) and `GET /api/estimates/accuracy` (`routing.read`), docs/contracts/run-estimate-v1.md. Config `scheduling` (personal default Asia/Jerusalem, Sun–Thu 09:00–18:00; evenings and weekends recommended only when `allowed: true`). No migration, no new capability.
+- **Decision:** advisory only. The estimate routes with the router's pure inputs and persists nothing; no dispatch, budget or schedule reads it. Changes that would (qcq-04 shared per-account limit, qcq-05 acting on a recommendation) go through docs/agentic-os-qcq-review-packet.md with one Opus High reviewer.
+- **Decision:** accuracy is a replay of the versioned estimator (`run-estimate/1`) over recorded runs, each estimated only from runs that ended before it started. Persisting the estimate shown at dispatch is qcq-02.
+- **Decision:** API spend, API-equivalent and subscription quota stay separate; billing kind is the provider default because manifests do not carry the plan. Effort is `null` until p1-5 records it in the execution identity.
+- **Coordination:** mcp-api-grants (C1) merged first and took API 2.14, so this contract is 2.15.
+
 ## 2026-11-22 — mcp-service (C2): apps/mcp, owner-only OAuth, four tools — SHIPPED
 
 - `apps/mcp` (`@agent-plane/mcp`, MCP TypeScript SDK pinned 1.32.2) serves Streamable HTTP `/mcp` plus a co-hosted OAuth 2.1 server (code + PKCE S256, DCR and CIMD, RFC 9728/8414/8707/9207) on 127.0.0.1 only. Owner login is the service's own OIDC client with an exact `(iss, sub)` pin; email never authorizes. OAuth state lives in its own SQLite file (`stateDb`), never the plane DB. `revoke --all` ends every grant and client.

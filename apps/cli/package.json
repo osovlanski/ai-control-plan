@@ -4,6 +4,9 @@
   "private": true,
   "type": "module",
   "description": "aos: the operator CLI over the Control Plane's own routes (read-only catalogue, lifecycle, test/disable/enable)",
+  "bin": {
+    "aos": "./bin/aos.mjs"
+  },
   "scripts": {
     "aos": "tsx src/main.ts",
     "typecheck": "tsc --noEmit",
