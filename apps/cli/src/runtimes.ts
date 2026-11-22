@@ -38,7 +38,8 @@ export const USAGE = `usage: aos runtimes <command> [options]
 Read (tasks.read):
   ls                           configured assistants and their lifecycle
   show <id>                    one assistant: states, readiness reasons, cooldown, install/sign-in links
-  catalog [<provider>]         runtimes this build supports
+  catalog [<provider>]         runtimes this build supports; <provider> is a provider id
+                               (anthropic, openai, ...) or its harness name (claude-code, codex)
   catalog <provider> --snippet the workspace-config entry to paste (aos writes no config)
   changes                      recent capability changes
 
@@ -53,7 +54,24 @@ Options:
   --api <origin>               plane origin on loopback (default: workspace config, or AOS_API_URL)
   --credential <path>          bearer credential file (default: the workspace's, or AOS_CREDENTIAL_FILE)
 
-The plane never installs a runtime or signs in; aos prints the official links and leaves that to you.`;
+The plane never installs a runtime or signs in; aos prints the official links and leaves that to you.
+
+Exit codes: 0 ok, 1 failure (including an unknown assistant or provider, and a test that does not
+pass), 2 usage.`;
+
+/**
+ * F3: a catalogue entry by provider id, or by harness name when exactly one entry has it. A miss
+ * lists every id with its harness name, so "claude" points at "anthropic (harness claude-code)".
+ */
+export function findRuntime(runtimes: readonly RuntimeCatalogEntry[], name: string): RuntimeCatalogEntry {
+  const exact = runtimes.find((r) => r.provider === name);
+  if (exact) return exact;
+  const byHarness = runtimes.filter((r) => r.harness === name);
+  if (byHarness.length === 1) return byHarness[0]!;
+  const ids = runtimes.map((r) => `${r.provider}${r.harness ? ` (harness ${r.harness})` : ""}`).join(", ");
+  const why = byHarness.length > 1 ? `${name} is the harness of ${byHarness.map((r) => r.provider).join(" and ")}; name one` : `${name} is not in this build's runtime catalogue`;
+  throw new PlaneError(`${why}. Provider ids: ${ids}`);
+}
 
 const enc = encodeURIComponent;
 
@@ -207,8 +225,7 @@ export async function runRuntimes(argv: string[], deps: RuntimesDeps): Promise<n
           print(`\ndescriptor v${cat.descriptorVersion} · agent-runtime ${cat.schemaVersion} · being listed grants nothing`);
           return 0;
         }
-        const entry = cat.runtimes.find((r) => r.provider === arg);
-        if (!entry) throw new PlaneError(`${arg} is not in this build's runtime catalogue (${cat.runtimes.map((r) => r.provider).join(", ")})`);
+        const entry = findRuntime(cat.runtimes, arg);
         if (values.snippet) {
           const taken = (await assistants(client)).map((a) => a.id);
           print(configSnippet(entry.provider, taken));

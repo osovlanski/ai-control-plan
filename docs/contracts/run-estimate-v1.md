@@ -1,6 +1,6 @@
 # Run estimate contract v1
 
-Status: normative for run estimate v1 (API 2.14, backlog `qcq-01-estimates-advisory`, Quality, Cost
+Status: normative for run estimate v1 (API 2.15, backlog `qcq-01-estimates-advisory`, Quality, Cost
 & Quota milestone, 2026-11-21). `packages/core/src/run-estimate.ts` is the only implementation; the
 api module `apps/api/src/modules/run-estimate.ts` only gathers inputs. No JSON Schema is published
 yet: one lands with the first consumer (Cockpit vendoring, `qcq-03-estimate-surfaces`).

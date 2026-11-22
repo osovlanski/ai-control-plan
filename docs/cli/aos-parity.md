@@ -1,6 +1,6 @@
 # `aos` CLI parity inventory
 
-Status: inventory for `p1-3-aos-cli`. It lists what the Web UI does, which API route each action uses, and which `aos` command covers it, or should. It is a plan, not shipped behavior: today `apps/cli` has two groups: `runtimes`, with nine commands (`apps/cli/src/runtimes.ts`), and `task`, with one, `provenance` (tlm-03, `apps/cli/src/task.ts`); the entry point is `apps/cli/src/main.ts`. Everything marked "Proposed" is unbuilt.
+Status: inventory for `p1-3-aos-cli`. It lists what the Web UI does, which API route each action uses, and which `aos` command covers it, or should. Slice 1 (read-only) has shipped: `apps/cli` has three groups: `status` (`apps/cli/src/status.ts`), `task` with `ls`, `show`, `events [--follow]`, `verdict` and tlm-03's `provenance` (`apps/cli/src/task.ts`), and `runtimes` with nine commands (`apps/cli/src/runtimes.ts`); the entry point is `apps/cli/src/main.ts` and the package `bin` is `apps/cli/bin/aos.mjs`. Rows whose "Today" column is "—" are unbuilt; the "Proposed" column is a plan for them.
 
 Source: the roadmap delta of 2026-11-20 (section A.2 drive against 170e627, matrix A.3, findings F1 to F7). It was not re-driven for this document. Where code and this file disagree, the code wins and this file needs a fix.
 
@@ -9,17 +9,19 @@ Scope rules:
 - `aos` talks to the plane only through routes, on loopback, with the workspace credential. It never opens the database and never calls `loadConfig`.
 - The CLI reuses the plane's own pure helpers (as `runtimes` does with `apps/web/src/shell/runtime-registry.ts`). It does not recompute routing, approval or verification state.
 - Autopilot write routes need the `autopilot.operate` secret, which only the owner holds. They are out of p1-3.
-- This inventory changes no `apps/cli/**` file. `p1-3-aos-cli` still depends on `p0-7-replacement-drill`.
+- Read-only commands (slice 1) shipped ahead of `p0-7-replacement-drill` (decision D-D, 2026-11-21: they add no write path). The act half (slice 2) still depends on the drill.
+
+How to run it: `pnpm -s aos …` from the repository root, or `apps/cli/bin/aos.mjs …` (the package `bin`). Both print only the command's output, so `--json` pipes into `jq`. Plain `pnpm aos …` also prints pnpm's script banner on stdout, which breaks a JSON parser (F1).
 
 ## Findings F1 to F7
 
-- **F1**: the documented `pnpm aos … --json` is not machine-readable. Fix it with a `bin: { aos }` in `apps/cli/package.json` (so `pnpm exec aos` works), or document `pnpm -s aos`. Add a test that pipes the output to a JSON parser.
-- **F2**: a missing credential surfaces as a raw `ENOENT … lstat`. It should say that no workspace credential was found at `<path>`, that you start the plane once (`pnpm dev`) or pass `--credential` or `AOS_CREDENTIAL_FILE`, and it should exit 1.
-- **F3**: provider aliases. "claude" fails while "anthropic" works. Either accept the harness name (`claude-code`, `codex`) as an alias, or list the valid ids with their harness names in the error.
+- **F1** (fixed in slice 1): the documented `pnpm aos … --json` is not machine-readable, because pnpm prints its script banner on stdout. `apps/cli/package.json` now has `bin: { aos: ./bin/aos.mjs }`, and this file documents `pnpm -s aos`. `test/cli-hygiene.test.ts` runs the bin in a child process and pipes `--json` into a JSON parser. `pnpm exec aos` from the root still needs the root to depend on the package, which slice 1 does not change (root `package.json` is outside `apps/cli/**`).
+- **F2** (fixed in slice 1): a missing credential surfaced as a raw `ENOENT … lstat`. It now says that no workspace credential was found at `<path>`, that you start the plane once (`pnpm dev`) or pass `--credential` or `AOS_CREDENTIAL_FILE`, and exits 1.
+- **F3** (fixed in slice 1): provider aliases. `aos runtimes catalog <provider>` now accepts a harness name (`claude-code`, `codex`) when exactly one entry has it, and a miss lists every provider id with its harness name, so "claude" points at `anthropic (harness claude-code)`.
 - **F4**: two ways to find credentials. `aos` uses the credential file; `morning-report.mjs` uses `--token-file` or `AGENT_PLANE_TOKEN`. One `connect()` should serve both, which happens when the report moves under `aos autopilot report`.
 - **F5**: no read route lists pending approvals. The web derives them from task detail, sessions and events. A CLI `aos approvals` should either import the same pure helper (`execution.ts`), as `runtimes` does, or wait for a plane read. It should not recompute the logic separately.
 - **F6**: routes that no web client calls: `POST /api/tasks/:id/composition/opt-ins`, `POST /api/schedules`, `DELETE /api/schedules/:id`, `GET /api/scores`, `GET /api/decisions*`, `GET /api/memory/proposals`, `GET /api/registry/*`, `GET /api/composition/{shadow,asset-usage,asset-scores}`, all of `/api/autopilot/*`, and `/api/sessions/:id/input-{capability,enablement}`. These are natural CLI-first rows.
-- **F7**: exit codes are stable in code, but `--help` never states them.
+- **F7** (fixed in slice 1): exit codes were stable in code, but `--help` never stated them. The top-level usage and each group's usage now list them.
 
 ## Web action, API route and CLI command matrix
 
@@ -31,19 +33,19 @@ Columns:
 | Web action (component) | API route | Today | Proposed | Tier |
 |---|---|---|---|---|
 | Sign in from the launcher (`auth.ts`) | `POST /api/auth/bootstrap` | `pnpm --filter api open` | — (stays a browser flow) | V |
-| Workspace header (`App.tsx`, `NewTask.tsx`) | `GET /api/workspace`, `/api/meta`, `/api/health` | — | `aos status` | P0 |
-| Scheduler readout (`App.tsx`, `readouts.tsx`) | `GET /api/scheduler/status` | — | `aos status` | P0 |
+| Workspace header (`App.tsx`, `NewTask.tsx`) | `GET /api/workspace`, `/api/meta`, `/api/health` | **`aos status`** | — | P0 |
+| Scheduler readout (`App.tsx`, `readouts.tsx`) | `GET /api/scheduler/status` | **`aos status`** | — | P0 |
 | New mission / shell goal (`NewTask.tsx`, `ShellView.tsx:141`) | `POST /api/tasks` | — | `aos task new "<goal>" [--repo] [--profile] [--constraint] [--at <iso>]` | P0 |
 | Route preview (`NewTask`, `ShellView`) | `POST /api/tasks/:id/route` | — | `aos task route <id> [--assistant]` | P0 |
 | Composition preview (`NewTask`) | `POST /api/tasks/:id/compose` | — | `aos task compose <id>` | P1 |
 | Run (`NewTask`, `ShellView`) | `POST /api/tasks/:id/start` | — | `aos task start <id> [--assistant] [--digest]` | P0 |
 | Compare / race (`NewTask`) | `POST /api/tasks/:id/parallel` | — | `aos task compare\|race <id> <a> <b>` | P1 |
-| Mission list / attention (`useBoard`, `Overview.tsx:29`) | `GET /api/tasks` | — | `aos task ls [--attention] [--state]` | P0 |
-| Mission detail (`TaskDetail`, `Inspector`) | `GET /api/tasks/:id`, `/context`, `/wait` | — | `aos task show <id>` (provenance section reserved for tlm-03) | P0 |
-| Run and handoff provenance (web view not built yet; tlm-03 web half) | `GET /api/tasks/:id/provenance` (API 2.12) | **`aos task provenance <id> [--json]`** (tlm-03) | `aos task show` can embed it as its provenance block | P1 |
-| Live activity (`TaskDetail.tsx:50`, SSE) | `GET /api/tasks/:id/events`, `/events/stream` | — | `aos task events <id> [--follow] [--json]` (NDJSON when following) | P0 |
+| Mission list / attention (`useBoard`, `Overview.tsx:29`) | `GET /api/tasks` | **`aos task ls [--attention] [--state] [--stage]`** (`--attention` = the plane's stage `needs-you`) | — | P0 |
+| Mission detail (`TaskDetail`, `Inspector`) | `GET /api/tasks/:id`, `/context`, `/wait` | **`aos task show <id>`** (detail, stage from `GET /api/tasks`, and the provenance block) | `/context` and `/wait` are not read yet | P0 |
+| Run and handoff provenance (web view not built yet; tlm-03 web half) | `GET /api/tasks/:id/provenance` (API 2.12) | **`aos task provenance <id> [--json]`** (tlm-03); embedded by `aos task show` (same read, same `provenanceText`) | — | P1 |
+| Live activity (`TaskDetail.tsx:50`, SSE) | `GET /api/tasks/:id/events`, `/events/stream` | **`aos task events <id> [--follow] [--json]`** (NDJSON when following; exits when the stage is `done`) | — | P0 |
 | Routing evidence (`TaskRouting`, `TaskDetail`) | `GET /api/tasks/:id/routing` | — | `aos task routing <id>` | P1 |
-| Sessions, verification (`TaskDetail`, `reads.ts`) | `GET /api/tasks/:id/sessions`, `/api/sessions/:id`, `/verification`, `?groupId`, `?parentTaskId` | — | `aos session show <id>`, `aos task verdict <id>` | P0 |
+| Sessions, verification (`TaskDetail`, `reads.ts`) | `GET /api/tasks/:id/sessions`, `/api/sessions/:id`, `/verification`, `?groupId`, `?parentTaskId` | **`aos task verdict <id>`** (last ended run: `GET /api/sessions/:id` for a Harness run, else its `verification.result` event; label from the web's `verificationVerdict`) | `aos session show <id>` (not built) | P0 |
 | Progress and handoff notes (`TaskDetail.tsx:364,485`) | `GET /api/tasks/:id/files/{progress,handoff}.md` | — | `aos task notes <id>` | P1 |
 | Composition history, budget, memory shadow (`Composition.tsx`) | `GET …/composition`, `…/composition/budget`, `/api/composition/memory-shadow` | — | `aos task composition <id>` | P1 |
 | Approve / deny (`TaskDetail`, `ShellView`, `MissionShell`) | `POST /api/tasks/:id/input` | — | `aos task approve\|deny <id> [--request <rid>]`, `aos approvals` (F5) | P0 |
@@ -73,11 +75,11 @@ Columns:
 3. `aos task events <id> --follow --json` as NDJSON, for `jq`, `grep` and log capture.
 4. `aos status`, a one-shot health readout (meta, scheduler, cooldowns, unresolved inputs) with a non-zero exit when degraded. The heartbeat and Doctor could reuse it.
 5. `aos autopilot report [--scope]`, replacing `morning-report.mjs` with the same output and one way to find credentials (F4).
-6. `aos task provenance <id> --json | jq …` (shipped by tlm-03); `aos task show <id> --json | jq .provenance` once p1-3 slice 1 embeds it.
+6. `aos task provenance <id> --json | jq …` (shipped by tlm-03); `aos task show <id> --json | jq .provenance` (shipped by slice 1).
 
 ## Planned slices
 
-- Slice 1, read-only inspection and hygiene: `aos status`, `aos task ls|show|events [--follow]|routing|verdict`, `aos session show`, plus fixes for F1, F2, F3 and F7 and parity-test rows for the task reads. Files: `apps/cli/**` only.
+- Slice 1, read-only inspection and hygiene (**shipped**): `aos status`, `aos task ls|show|events [--follow]|verdict`, fixes for F1, F2, F3 and F7, and observed-call parity rows for the P0 reads (`apps/cli/test/task-parity.test.ts`). Files: `apps/cli/**` only. `aos task routing` and `aos session show` were listed for this slice and are not built; they move to slice 2's read list.
 - Slice 2, act: `task new|route|start|approve|deny|stop|restart|handoff`, `aos approvals`, and `--watch` with verdict exits.
 - Later: `schedule`, `models`, `inputs`, read-only `autopilot` and `telemetry`, absorbing `scripts/morning-report.mjs`.
 - `tlm-03` and `p1-3` both write `apps/cli/**`, so they must not run in parallel. tlm-03 shipped `aos task provenance` first; slice 1's `aos task show` should embed that same read (and `provenanceText`) as its provenance block rather than add another.

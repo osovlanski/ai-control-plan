@@ -437,7 +437,7 @@ items:
   # Kept under their existing ids: p1-5-effort-cohorts (effort in the execution identity),
   # p1-8-jev-shadow (Jev shadow evaluation), p1-6-scorecard (OS-vs-solo comparison).
   - id: qcq-01-estimates-advisory
-    title: "Advisory run estimate and scheduling recommendation before dispatch (API 2.14)"
+    title: "Advisory run estimate and scheduling recommendation before dispatch (API 2.15)"
     phase: "Quality, Cost & Quota"
     repo: ai-control-plan
     size: M

@@ -53,12 +53,22 @@
 // `DELETE /api/tasks/:id/links/:linkId` (`commands.write`). Each link lists its evidence by source:
 // `operator` (a recorded claim, not checked against GitHub), or `autopilot_publication` /
 // `autopilot_duplicate` derived from the P0-5 records. No earlier response changes; no new capability.
-// 2.14 (additive, qcq-01, docs/contracts/run-estimate-v1.md): `GET /api/tasks/:id/estimate` and
+// 2.14 (additive, mcp-api-grants, docs/adr/mcp-connector.md): capabilities `tasks.create` and
+// `tasks.start` gate `POST /api/tasks` and `POST /api/tasks/:id/start`; `commands.write` implies
+// both, so every existing credential and browser session keeps working. Both routes take an
+// optional `idempotencyKey` (same key + same input replays the first response with `replayed: true`,
+// different input is 409 `idempotency_conflict`). Create takes `repo` (an `mcp.repos` alias mapped to
+// an exact allowlisted path) and `propose: true` (returns the route the plane would take); start
+// takes `confirm: { assistantId?, compositionDigest? }` and refuses with 409 `route_changed` when the
+// fresh route disagrees. Both answer `webLink` when `mcp.webOrigin` is configured. A credential
+// without `commands.write` must use `repo` and `idempotencyKey` and may send no other knobs. Named
+// credentials (`api-credential.<name>.json`) rotate on their own; rotating the main one leaves them.
+// 2.15 (additive, qcq-01, docs/contracts/run-estimate-v1.md): `GET /api/tasks/:id/estimate` and
 // `GET /api/estimates/accuracy` (`routing.read`). ADVISORY: a run estimate (runtime, model, effort,
 // token ranges, duration, wait until start, approval wait, API spend vs API-equivalent vs subscription
 // quota, confidence, evidence) and a scheduling recommendation over the workspace's `scheduling` hours.
 // No dispatch, budget or schedule reads them. No earlier response changes; no new capability.
-export const CONTROL_PLANE_API_VERSION = "2.14";
+export const CONTROL_PLANE_API_VERSION = "2.15";
 export const NORMALIZED_EVENT_VERSION = "1.0";
 
 export const OBSERVABILITY_CAPABILITIES = [
@@ -90,6 +100,20 @@ export const OBSERVABILITY_CAPABILITIES = [
 export const BROWSER_OPTIONAL_CAPABILITIES = ["telemetry.read", "memory.read"] as const;
 
 export const COMMAND_CAPABILITIES = ["commands.write"] as const;
+
+// 2.14 (mcp-api-grants): narrow task commands. `commands.write` implies each of them (see
+// `capabilityGranted`), so they are only ever listed on a credential that lacks `commands.write`.
+export const TASK_COMMAND_CAPABILITIES = ["tasks.create", "tasks.start"] as const;
+export type TaskCommandCapability = (typeof TASK_COMMAND_CAPABILITIES)[number];
+
+/** The credential the MCP service holds (docs/adr/mcp-connector.md D-C): read, create, start. Nothing else. */
+export const MCP_CREDENTIAL_CAPABILITIES = ["tasks.read", ...TASK_COMMAND_CAPABILITIES] as const;
+
+/** True when `held` grants `required`. `commands.write` implies the narrow task commands. */
+export function capabilityGranted(held: readonly string[], required: string): boolean {
+  if (held.includes(required)) return true;
+  return (TASK_COMMAND_CAPABILITIES as readonly string[]).includes(required) && held.includes("commands.write");
+}
 
 // M1: `usage.write` is its own set so an importer (Cockpit M11) can post usage
 // without driving tasks, and so a browser session (which requests only

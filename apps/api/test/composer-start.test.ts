@@ -276,7 +276,7 @@ describe("POST /api/tasks/:id/start with composer.enabled false", () => {
     // The S5 body fields mean nothing with the composer off; they are ignored, as any unknown key always was.
     const res = await start(id, { compositionDigest: `sha256:${"a".repeat(64)}`, overrides: { policy: { permission: "read-only" } } });
     expect(res.status).toBe(200);
-    expect(Object.keys(res.body).sort()).toEqual(["assistantId", "explanation", "runId"]);
+    expect(Object.keys(res.body).sort()).toEqual(["assistantId", "explanation", "runId", "startedAt", "state", "taskId"]);
     expect(await built!.orchestrator.waitForSettled(id)).toBe("COMPLETED");
     expect(cockpit.requests.filter((r) => r.url === "/api/v1/registry/bundle")).toEqual([]);
     expect(count("composition_attempts")).toBe(0);
@@ -288,8 +288,10 @@ describe("POST /api/tasks/:id/start with composer.enabled false", () => {
       budget: { enforcement: "advisory" }, timeout: { hardMs: 30 * 60 * 1000 }, approval: { mode: "auto-approve" },
       tools: { mode: "audit" }, checkpoint: { onSoftLimit: true }, isolation: { required: "ambient" },
     });
-    // The serialized body is the pre-S5 shape: route explanation, chosen assistant, run.
-    expect(res.raw).toBe(JSON.stringify({ runId: res.body.runId, assistantId: "fake-claude", explanation: res.body.explanation }));
+    // The serialized body is the pre-S5 shape (route explanation, chosen assistant, run) plus the
+    // additive 2.14 fields (task id, state, start time). No `composition` key.
+    const b = res.body as Record<string, unknown>;
+    expect(res.raw).toBe(JSON.stringify({ runId: b.runId, assistantId: "fake-claude", explanation: b.explanation, taskId: id, state: b.state, startedAt: b.startedAt }));
   });
 });
 

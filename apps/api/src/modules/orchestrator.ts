@@ -1267,6 +1267,17 @@ export class Orchestrator {
     const attempt = wait?.state === 'consumed' ? wait.autoWakes + 1 : 0;
     this.cooldowns.penalize(assistantId, trigger === "quota" ? "limit" : "failure", reasonText, resetsAt, attempt);
 
+    // An unattended autopilot task can only run on an agent-user-capable assistant, and a quota
+    // yield must not fail over (the source is excluded and nothing else can launch): it waits for
+    // the source's own cooldown and relaunches from the checkpoint inside the window.
+    if (trigger === "quota" && this.unattended(taskId)) {
+      const until = this.cooldowns.list().find((c) => c.assistantId === assistantId)?.until;
+      if (until && this.scheduler?.parkSameAssistant(taskId, checkpoint.id, until, `${reasonText}; resuming on ${assistantId} after its cooldown`)) {
+        this.notice(taskId, "warn", `${reasonText}. Waiting for ${assistantId}'s cooldown (until ${until}), then resuming from the checkpoint.`);
+        return;
+      }
+    }
+
     // K4b, before any routing: a task that still owes the pool a slot re-enters
     // the scheduler here, and routing is re-decided AT THE GRANT. A decision made
     // now would belong to a successor that does not exist yet, and the dispatch
@@ -2085,19 +2096,43 @@ export class Orchestrator {
       }
       throw new Error(`No session of task ${taskId} is waiting on approval ${requestId}`);
     }
-    const runs = this.runsOfTask(taskId);
-    if (runs.length === 0) throw new Error(`No active run for task ${taskId}`);
-    for (const run of runs) {
-      if (!run.adapter.send) continue;
-      try {
-        await run.adapter.send(run.handle, { kind: "approval", requestId, approved });
-        return;
-      } catch {
-        // Not this run's pending approval; try the next competitor.
+    // Legacy runs keep no approval row, so the same answer sent twice (a double tap, a second
+    // tab, a retry after a dropped response) reached the adapter twice and the second got a 409.
+    // Remember each answer the moment it is claimed, before the first await, so the repeat is an
+    // idempotent no-op and a different decision is a conflict, as on the Harness path.
+    const key = `${taskId}\u0000${requestId}`;
+    const prior = this.legacyAnswers.get(key);
+    if (prior) {
+      if (prior.approved !== approved) {
+        throw new Error(`approval ${requestId} already ${prior.approved ? "approved" : "denied"}; a ${approved ? "approved" : "denied"} answer conflicts`);
       }
+      return prior.delivery; // the same answer: wait on the one delivery, never send a second
     }
-    throw new Error(`No run of task ${taskId} is waiting on approval ${requestId}`);
+    const runs = this.runsOfTask(taskId);
+    if (runs.length === 0) {
+      for (const k of this.legacyAnswers.keys()) if (k.startsWith(`${taskId}\u0000`)) this.legacyAnswers.delete(k);
+      throw new Error(`No active run for task ${taskId}`);
+    }
+    const delivery = (async () => {
+      for (const run of runs) {
+        if (!run.adapter.send) continue;
+        try {
+          await run.adapter.send(run.handle, { kind: "approval", requestId, approved });
+          return;
+        } catch {
+          // Not this run's pending approval; try the next competitor.
+        }
+      }
+      throw new Error(`No run of task ${taskId} is waiting on approval ${requestId}`);
+    })();
+    this.legacyAnswers.set(key, { approved, delivery });
+    // A failed delivery is forgotten, so the owner can answer again once the run asks again.
+    delivery.catch(() => this.legacyAnswers.delete(key));
+    return delivery;
   }
+
+  /** Answers delivered to legacy runs, by task and request id (see respondApproval). In memory, like the runs. */
+  private readonly legacyAnswers = new Map<string, { approved: boolean; delivery: Promise<void> }>();
 
   async cancelTask(taskId: string): Promise<void> {
     this.assertNoMixedOwnership(taskId);

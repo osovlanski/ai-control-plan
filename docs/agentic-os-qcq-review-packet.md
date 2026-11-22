@@ -1,7 +1,7 @@
 # Quality, Cost & Quota: review packet for dispatch-changing follow-ups
 
 Status: PROPOSED, 2026-11-21. Applies to `qcq-04-account-concurrency` and
-`qcq-05-act-on-recommendation` only. `qcq-01` (advisory estimate, API 2.14) changes no dispatch,
+`qcq-05-act-on-recommendation` only. `qcq-01` (advisory estimate, API 2.15) changes no dispatch,
 budget or schedule and needs none of this. One reviewer, Opus High (or GPT-6.2-Astra High), reads
 this packet with the implementation PR. Paid verification runs stay pending itay's budget approval;
 any live scheduling change stays pending his rollout approval.
