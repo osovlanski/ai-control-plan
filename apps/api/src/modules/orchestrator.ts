@@ -266,6 +266,8 @@ export class Orchestrator {
   assetTelemetry?: { project(sessionId: string): unknown; backfill(): unknown };
   /** O6 S5: settled composed sessions propose memory from their last message; boot backfills. */
   memoryProposals?: { propose(sessionId: string): unknown; backfill(): unknown };
+  /** qcq-02: stores the advisory estimate as it stood when a run started. Record-only; never throws. */
+  estimateSnapshots?: { recordAtStart(runId: string, taskId: string, assistantId: string): unknown };
   /** K11 thresholds and task-level bounds; injectable for deterministic tests. */
   contextPolicy?: ContextPolicy;
   /**
@@ -854,6 +856,7 @@ export class Orchestrator {
       // A continuation that deferred for a pool slot recorded its handoff row
       // before parking; this start is the one that closes it.
       if (options.handoffTrigger) this.closeHandoffRecord(taskId, runId, options.handoffTrigger, options.continuation);
+      this.recordEstimate(runId, taskId, assistantId);
       return { runId };
     }
 
@@ -923,6 +926,7 @@ export class Orchestrator {
     this.closeHandoffRecord(taskId, handle.runId, options.handoffTrigger ?? 'wake', options.continuation);
     this.active.set(handle.runId, run);
     void this.consume(run);
+    this.recordEstimate(handle.runId, taskId, assistantId);
     return { runId: handle.runId };
   }
 
@@ -1005,6 +1009,7 @@ export class Orchestrator {
       const result = this.harnessBridge!.startRequest(request, (result, sid) => this.settleFromResult(taskId, request.assistantId, sid, result));
       if (this.tasks.get(taskId)?.state === 'ROUTING') this.tasks.transition(taskId, 'RUNNING');
       this.closeHandoffRecord(taskId, result.runId, trigger, options.continuation);
+      this.recordEstimate(result.runId, taskId, request.assistantId);
       return result;
     }
     const adapter = this.registry.adapter(request.assistantId);
@@ -1019,6 +1024,7 @@ export class Orchestrator {
     this.closeHandoffRecord(taskId, handle.runId, trigger, options.continuation);
     this.active.set(handle.runId, run);
     void this.consume(run);
+    this.recordEstimate(handle.runId, taskId, request.assistantId);
     return { runId: handle.runId };
   }
 
@@ -1027,6 +1033,14 @@ export class Orchestrator {
    * checkpoint continuation, its anchor. A record a refused continuation left open (or one of
    * another continuation) is never filled with this run's id (#209 M5).
    */
+  /**
+   * qcq-02: record-only. Runs after the start committed its run row; whatever happens here, the
+   * start's result is already decided, so a defect is swallowed instead of surfacing.
+   */
+  private recordEstimate(runId: string, taskId: string, assistantId: string): void {
+    try { this.estimateSnapshots?.recordAtStart(runId, taskId, assistantId); } catch { /* advisory record only */ }
+  }
+
   private closeHandoffRecord(taskId: string, runId: string, trigger: string, continuation: Continuation | undefined): void {
     const checkpointId = continuation?.kind === "checkpoint" ? continuation.checkpointId : undefined;
     this.db.prepare(`UPDATE handoffs SET to_run_id = ? WHERE task_id = ? AND trigger = ? AND to_run_id IS NULL${checkpointId ? " AND checkpoint_id = ?" : ""}`)

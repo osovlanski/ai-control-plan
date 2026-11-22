@@ -11,7 +11,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { api } from "../../web/src/api.js";
 import { aos, bearer, bootPlane, type Plane } from "./helpers.js";
 
-type WebFn = "tasks" | "task" | "events" | "session" | "workspace" | "schedulerStatus" | "cooldowns";
+type WebFn = "tasks" | "task" | "events" | "session" | "workspace" | "schedulerStatus" | "cooldowns" | "estimate" | "recordedEstimates";
 interface Row { route: string; web: WebFn | { source: string; pattern: RegExp }; cli: { group: "task" | "status"; argv: string[] } }
 
 const ROWS: readonly Row[] = [
@@ -20,6 +20,8 @@ const ROWS: readonly Row[] = [
   { route: "GET /api/tasks/:id/events", web: "events", cli: { group: "task", argv: ["events", "T"] } },
   { route: "GET /api/tasks/:id/events/stream", web: { source: "../../web/src", pattern: /EventSource\([^)]*\/api\/tasks\/\$\{[^}]+\}\/events\/stream/ }, cli: { group: "task", argv: ["events", "T", "--follow"] } },
   { route: "GET /api/sessions/:id", web: "session", cli: { group: "task", argv: ["verdict", "T"] } },
+  { route: "GET /api/tasks/:id/estimate", web: "estimate", cli: { group: "task", argv: ["estimate", "T"] } },
+  { route: "GET /api/tasks/:id/estimates/recorded", web: "recordedEstimates", cli: { group: "task", argv: ["estimate", "T", "--recorded"] } },
   { route: "GET /api/workspace", web: "workspace", cli: { group: "status", argv: [] } },
   { route: "GET /api/scheduler/status", web: "schedulerStatus", cli: { group: "status", argv: [] } },
   { route: "GET /api/cooldowns", web: "cooldowns", cli: { group: "status", argv: [] } },

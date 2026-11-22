@@ -1,6 +1,6 @@
 # `aos` CLI parity inventory
 
-Status: inventory for `p1-3-aos-cli`. It lists what the Web UI does, which API route each action uses, and which `aos` command covers it, or should. Slice 1 (read-only) has shipped: `apps/cli` has three groups: `status` (`apps/cli/src/status.ts`), `task` with `ls`, `show`, `events [--follow]`, `verdict` and tlm-03's `provenance` (`apps/cli/src/task.ts`), and `runtimes` with nine commands (`apps/cli/src/runtimes.ts`); the entry point is `apps/cli/src/main.ts` and the package `bin` is `apps/cli/bin/aos.mjs`. Rows whose "Today" column is "—" are unbuilt; the "Proposed" column is a plan for them.
+Status: inventory for `p1-3-aos-cli`. It lists what the Web UI does, which API route each action uses, and which `aos` command covers it, or should. Slice 1 (read-only) has shipped: `apps/cli` has three groups: `status` (`apps/cli/src/status.ts`), `task` with `ls`, `show`, `events [--follow]`, `verdict`, tlm-03's `provenance` and qcq-03's `estimate` (`apps/cli/src/task.ts`), and `runtimes` with nine commands (`apps/cli/src/runtimes.ts`); the entry point is `apps/cli/src/main.ts` and the package `bin` is `apps/cli/bin/aos.mjs`. Rows whose "Today" column is "—" are unbuilt; the "Proposed" column is a plan for them.
 
 Source: the roadmap delta of 2026-11-20 (section A.2 drive against 170e627, matrix A.3, findings F1 to F7). It was not re-driven for this document. Where code and this file disagree, the code wins and this file needs a fix.
 
@@ -43,6 +43,7 @@ Columns:
 | Mission list / attention (`useBoard`, `Overview.tsx:29`) | `GET /api/tasks` | **`aos task ls [--attention] [--state] [--stage]`** (`--attention` = the plane's stage `needs-you`) | — | P0 |
 | Mission detail (`TaskDetail`, `Inspector`) | `GET /api/tasks/:id`, `/context`, `/wait` | **`aos task show <id>`** (detail, stage from `GET /api/tasks`, and the provenance block) | `/context` and `/wait` are not read yet | P0 |
 | Run and handoff provenance (web view not built yet; tlm-03 web half) | `GET /api/tasks/:id/provenance` (API 2.12) | **`aos task provenance <id> [--json]`** (tlm-03); embedded by `aos task show` (same read, same `provenanceText`) | — | P1 |
+| Run estimate and recommendation (`TaskDetail` Usage tab, qcq-03) | `GET /api/tasks/:id/estimate` (API 2.15), `GET /api/tasks/:id/estimates/recorded` (API 2.16) | **`aos task estimate <id> [--deadline] [--approval-required] [--assistant]`**, **`aos task estimate <id> --recorded`** (qcq-03) | — | P1 |
 | Live activity (`TaskDetail.tsx:50`, SSE) | `GET /api/tasks/:id/events`, `/events/stream` | **`aos task events <id> [--follow] [--json]`** (NDJSON when following; exits when the stage is `done`) | — | P0 |
 | Routing evidence (`TaskRouting`, `TaskDetail`) | `GET /api/tasks/:id/routing` | — | `aos task routing <id>` | P1 |
 | Sessions, verification (`TaskDetail`, `reads.ts`) | `GET /api/tasks/:id/sessions`, `/api/sessions/:id`, `/verification`, `?groupId`, `?parentTaskId` | **`aos task verdict <id>`** (last ended run: `GET /api/sessions/:id` for a Harness run, else its `verification.result` event; label from the web's `verificationVerdict`) | `aos session show <id>` (not built) | P0 |

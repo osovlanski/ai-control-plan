@@ -506,6 +506,8 @@ export interface MetricAccuracy {
 }
 export interface AccuracyRow {
   runId: string;
+  /** Recorded reports only (qcq-02): the version of the estimator that produced the stored estimate. */
+  estimatorVersion?: string;
   cohort: CohortLevel;
   sampleSize: number;
   confidence: EstimateConfidence;
@@ -515,7 +517,8 @@ export interface AccuracyRow {
 }
 export interface AccuracyReport {
   estimatorVersion: string;
-  method: "replay: each ended run is estimated from runs that ended before it started";
+  method: "replay: each ended run is estimated from runs that ended before it started"
+    | "recorded: the estimate stored when each run started, against what the run recorded";
   runs: number;
   noEstimate: number;
   duration: MetricAccuracy;
@@ -536,36 +539,70 @@ function metric(pairs: Array<{ actual: number; estimate: EstimateRange }>): Metr
   };
 }
 
-/** Replays the estimator over recorded actuals: each run's subject is what it recorded (assistant, model, kind). */
-export function backtestEstimates(history: readonly HistoricalRun[], limit: number): AccuracyReport {
-  const targets = history.filter((r) => r.state !== "CANCELLED" && Number.isFinite(Date.parse(r.endedAt)))
-    .sort((a, b) => Date.parse(b.endedAt) - Date.parse(a.endedAt)).slice(0, limit);
-  const rows: AccuracyRow[] = [];
+const REPLAY_METHOD = "replay: each ended run is estimated from runs that ended before it started";
+const RECORDED_METHOD = "recorded: the estimate stored when each run started, against what the run recorded";
+
+function accuracyReport(method: AccuracyReport["method"], rows: AccuracyRow[], noEstimate: number): AccuracyReport {
   const byConfidence: Record<EstimateConfidence, number> = { unknown: 0, low: 0, medium: 0, high: 0 };
-  let noEstimate = 0;
-  for (const r of targets) {
-    const subject: EstimateSubject = { assistantId: r.assistantId, provider: r.provider, model: r.model, modelSource: "recorded", effort: null, effortSource: "not recorded", taskKind: r.taskKind };
-    // Strictly earlier evidence: runs that ended before this one started, never itself.
-    const prior = history.filter((h) => h.runId !== r.runId && Date.parse(h.endedAt) < Date.parse(r.startedAt));
-    const e = estimateRun(subject, prior, { now: r.startedAt, quota: { blockers: [], current: null }, capacity: { account: null, activeRuns: 0, limit: null }, waitCondition: null, pendingApprovals: 0, approvalRequired: false });
-    byConfidence[e.confidence] += 1;
-    if (!e.durationMs.range) noEstimate += 1;
-    rows.push({
-      runId: r.runId, cohort: e.evidence.cohort, sampleSize: e.evidence.sampleSize, confidence: e.confidence,
-      durationMs: { actual: Date.parse(r.endedAt) - Date.parse(r.startedAt), estimate: e.durationMs.range },
-      tokensIn: { actual: r.tokens?.input ?? null, estimate: e.tokens.input },
-      tokensOut: { actual: r.tokens?.output ?? null, estimate: e.tokens.output },
-    });
-  }
+  for (const row of rows) byConfidence[row.confidence] += 1;
   const pairs = (pick: (row: AccuracyRow) => { actual: number | null; estimate: EstimateRange | null }) =>
     rows.map(pick).filter((p): p is { actual: number; estimate: EstimateRange } => p.actual !== null && p.estimate !== null);
   return {
     estimatorVersion: RUN_ESTIMATOR_VERSION,
-    method: "replay: each ended run is estimated from runs that ended before it started",
+    method,
     runs: rows.length, noEstimate,
     duration: metric(pairs((x) => x.durationMs)),
     tokensIn: metric(pairs((x) => x.tokensIn)),
     tokensOut: metric(pairs((x) => x.tokensOut)),
     byConfidence, rows,
   };
+}
+
+const endedTargets = (history: readonly HistoricalRun[], limit: number) =>
+  history.filter((r) => r.state !== "CANCELLED" && Number.isFinite(Date.parse(r.endedAt)))
+    .sort((a, b) => Date.parse(b.endedAt) - Date.parse(a.endedAt)).slice(0, limit);
+
+/** Replays the estimator over recorded actuals: each run's subject is what it recorded (assistant, model, kind). */
+export function backtestEstimates(history: readonly HistoricalRun[], limit: number): AccuracyReport {
+  const rows: AccuracyRow[] = [];
+  let noEstimate = 0;
+  for (const r of endedTargets(history, limit)) {
+    const subject: EstimateSubject = { assistantId: r.assistantId, provider: r.provider, model: r.model, modelSource: "recorded", effort: null, effortSource: "not recorded", taskKind: r.taskKind };
+    // Strictly earlier evidence: runs that ended before this one started, never itself.
+    const prior = history.filter((h) => h.runId !== r.runId && Date.parse(h.endedAt) < Date.parse(r.startedAt));
+    const e = estimateRun(subject, prior, { now: r.startedAt, quota: { blockers: [], current: null }, capacity: { account: null, activeRuns: 0, limit: null }, waitCondition: null, pendingApprovals: 0, approvalRequired: false });
+    if (!e.durationMs.range) noEstimate += 1;
+    rows.push(accuracyRow(r, e));
+  }
+  return accuracyReport(REPLAY_METHOD, rows, noEstimate);
+}
+
+function accuracyRow(r: HistoricalRun, e: RunEstimate, estimatorVersion?: string): AccuracyRow {
+  return {
+    runId: r.runId, cohort: e.evidence.cohort, sampleSize: e.evidence.sampleSize, confidence: e.confidence,
+    ...(estimatorVersion !== undefined ? { estimatorVersion } : {}),
+    durationMs: { actual: Date.parse(r.endedAt) - Date.parse(r.startedAt), estimate: e.durationMs.range },
+    tokensIn: { actual: r.tokens?.input ?? null, estimate: e.tokens.input },
+    tokensOut: { actual: r.tokens?.output ?? null, estimate: e.tokens.output },
+  };
+}
+
+/**
+ * qcq-02: the estimate that was stored when a run started (`run_estimates`), scored against what
+ * that run recorded once it ended. Unlike the replay, nothing is re-estimated: the stored ranges
+ * are compared as they were. A recorded estimate of another estimator version is scored as stored
+ * and its row names that version.
+ */
+export interface RecordedRunEstimate { runId: string; estimatorVersion: string; recordedAt: string; estimate: RunEstimate }
+
+export function scoreRecordedEstimates(recorded: readonly RecordedRunEstimate[], history: readonly HistoricalRun[], limit: number): AccuracyReport {
+  const byRun = new Map(recorded.map((r) => [r.runId, r]));
+  const rows: AccuracyRow[] = [];
+  let noEstimate = 0;
+  for (const r of endedTargets(history.filter((h) => byRun.has(h.runId)), limit)) {
+    const stored = byRun.get(r.runId)!;
+    if (!stored.estimate.durationMs.range) noEstimate += 1;
+    rows.push(accuracyRow(r, stored.estimate, stored.estimatorVersion));
+  }
+  return accuracyReport(RECORDED_METHOD, rows, noEstimate);
 }

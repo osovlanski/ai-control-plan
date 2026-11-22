@@ -68,7 +68,11 @@
 // token ranges, duration, wait until start, approval wait, API spend vs API-equivalent vs subscription
 // quota, confidence, evidence) and a scheduling recommendation over the workspace's `scheduling` hours.
 // No dispatch, budget or schedule reads them. No earlier response changes; no new capability.
-export const CONTROL_PLANE_API_VERSION = "2.15";
+// 2.16 (additive, qcq-02, run-estimate v1 §Recorded): each run start stores the estimate as it stood
+// then (migration 056 `run_estimates`, append-only, record-only). `GET /api/tasks/:id/estimates/recorded`
+// serves them joined to each run's actual, and `GET /api/estimates/accuracy?source=recorded` scores
+// them (default `source=replay` is unchanged). No dispatch reads the stored rows; no new capability.
+export const CONTROL_PLANE_API_VERSION = "2.16";
 export const NORMALIZED_EVENT_VERSION = "1.0";
 
 export const OBSERVABILITY_CAPABILITIES = [

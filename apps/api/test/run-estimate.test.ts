@@ -6,7 +6,7 @@
  */
 import { afterEach, describe, expect, it } from "vitest";
 import type { AccuracyReport } from "@agent-plane/core";
-import type { TaskEstimate } from "../src/modules/run-estimate.js";
+import type { TaskEstimate, TaskRecordedEstimates as Recorded } from "../src/modules/run-estimate.js";
 import { bootRig, reaches, type Rig } from "./helpers/composer-cockpit.js";
 
 let rig: Rig | undefined;
@@ -103,5 +103,66 @@ describe("GET /api/tasks/:id/estimate", () => {
     expect(soon.recommendation).toMatchObject({ action: "run-now", speedWeight: 1, deadline: "2030-01-06T09:00:00.000Z", meetsDeadline: true });
     expect(soon.recommendation.reasons[0]).toMatch(/^due soon/);
     expect(soon.policy.eveningsAllowed).toBe(true);
+  });
+});
+
+/**
+ * qcq-02: the estimate shown at start is stored beside the run (migration 056, append-only) and
+ * joined to the run's actual once it ends. Record-only: a start never depends on it.
+ */
+describe("recorded estimates (qcq-02)", () => {
+  const stored = () => rig!.db.prepare("SELECT run_id, task_id, assistant_id, estimator_version FROM run_estimates ORDER BY rowid").all() as Array<{ run_id: string; task_id: string; assistant_id: string; estimator_version: string }>;
+
+  it("stores one estimate per start, for the assistant the run started on, and joins the actual once it ends", async () => {
+    await boot();
+    const first = await completeOne("Add a typed helper to the parser", "fake-a");
+    expect(stored()).toEqual([{ run_id: first.runId, task_id: first.taskId, assistant_id: "fake-a", estimator_version: "run-estimate/1" }]);
+    const one = await get<Recorded>(`/api/tasks/${first.taskId}/estimates/recorded`);
+    expect(one.advisory).toBe(true);
+    expect(one.records).toHaveLength(1);
+    // No earlier run: the first estimate had no evidence, and says so.
+    expect(one.records[0]!.estimate).toMatchObject({ confidence: "unknown", evidence: { cohort: "none", sampleSize: 0 } });
+    expect(one.records[0]!.recommendation.advisory).toBe(true);
+    expect(one.records[0]!.actual).toMatchObject({ state: "ENDED_OK" });
+    expect(one.records[0]!.actual!.durationMs).toBeGreaterThanOrEqual(0);
+
+    await completeOne("Add a typed helper to the lexer", "fake-a");
+    await completeOne("Add a typed helper to the printer", "fake-a");
+    const fourth = await completeOne("Add a typed helper to the formatter", "fake-a");
+    const later = await get<Recorded>(`/api/tasks/${fourth.taskId}/estimates/recorded`);
+    // Shown at start: the three runs that had ended by then, not a replay formed afterwards.
+    expect(later.records[0]!.estimate.evidence.sampleSize).toBe(3);
+    expect(later.records[0]!.estimate.durationMs.range).not.toBeNull();
+
+    const report = await get<AccuracyReport>("/api/estimates/accuracy?source=recorded");
+    expect(report.method).toMatch(/^recorded:/);
+    // Only the first start had no evidence; the later three were estimated from 1, 2 and 3 runs.
+    expect(report).toMatchObject({ runs: 4, noEstimate: 1 });
+    expect(report.duration.evaluated).toBe(3);
+    expect(report.rows.every((r) => r.estimatorVersion === "run-estimate/1")).toBe(true);
+    // The default is still the replay.
+    expect((await get<AccuracyReport>("/api/estimates/accuracy")).method).toMatch(/^replay:/);
+  });
+
+  it("is append-only, needs routing.read, 404s an unknown task and refuses an unknown source", async () => {
+    await boot();
+    const r = await completeOne("Add a typed helper to the parser", "fake-a");
+    expect(() => rig!.db.prepare("UPDATE run_estimates SET estimate_json = '{}' WHERE run_id = ?").run(r.runId)).toThrow(/append-only/);
+    expect(() => rig!.db.prepare("DELETE FROM run_estimates WHERE run_id = ?").run(r.runId)).toThrow(/append-only/);
+    expect((await rig!.built.app.inject({ method: "GET", url: `/api/tasks/${r.taskId}/estimates/recorded`, headers: rig!.usageAuth() })).statusCode).toBe(403);
+    await get("/api/tasks/nope/estimates/recorded", 404);
+    await get("/api/estimates/accuracy?source=guess", 400);
+    // A second record for the same run is a no-op, not a rewrite.
+    expect(rig!.built.runEstimates.recordAtStart(r.runId, r.taskId, "fake-a")).toBe(false);
+    expect(stored()).toHaveLength(1);
+  });
+
+  it("is record-only: a failing recorder never stops or changes a start", async () => {
+    await boot();
+    rig!.built.orchestrator.estimateSnapshots = { recordAtStart() { throw new Error("recorder defect"); } };
+    const r = await completeOne("Add a typed helper to the parser", "fake-a");
+    expect(r.runId).toBeTruthy();
+    expect(stored()).toEqual([]);
+    expect((await get<Recorded>(`/api/tasks/${r.taskId}/estimates/recorded`)).records).toEqual([]);
   });
 });

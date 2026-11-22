@@ -1023,6 +1023,12 @@ Migration 041 adds `runs.harness_cli_version` (TEXT NULL, forward only, no backf
 - Deviation kept on purpose: remote grants reuse the existing capability vocabulary, so the owner may hold `commands.write` remotely until the per-command grant inventory lands. `autopilot.operate` and `usage.write` are never remote.
 - Migration 055 (`remote_sessions`, `remote_login_transactions`, `remote_auth_limits`). Every boot revokes all remote sessions; login budget survives restart.
 
+## 2026-11-22 — qcq-02 recorded run estimates + qcq-03 Web/CLI estimate surfaces, API 2.16 (SHIPPED on merge)
+
+- **Contract change (additive):** every run start stores the estimate as it stood then (migration 056 `run_estimates`, append-only by trigger). `GET /api/tasks/:id/estimates/recorded` joins each to its run's actual; `GET /api/estimates/accuracy?source=recorded` scores them (default `replay` unchanged). docs/contracts/run-estimate-v1.md §Recorded estimates. No new capability.
+- **Decision:** record-only. The orchestrator calls an optional `estimateSnapshots` recorder on all four start paths after the run row exists and swallows any failure; no dispatch path reads the rows. The actual is never copied into `run_estimates`: it is read from the run's own records at read time.
+- **Known skew:** the stored estimate is taken after the run row exists, so its `capacity.activeRuns` counts the run itself.
+- **Surfaces:** Web task detail Usage tab (`TaskEstimate.tsx`) and `aos task estimate <id> [--deadline] [--approval-required] [--assistant] | --recorded` print the served answer; API spend, API-equivalent (never spend) and subscription quota stay on separate labelled lines. Effort is still `unknown` until p1-5. Cockpit vendoring (with the run-estimate JSON Schema) is still open.
 ## 2026-11-22 — Task stage: legacy approvals read needs-you
 
 - Closes the E1 finding (#238): a legacy (non-Harness) run waiting on an approval read `working/live-run`, so `aos task ls --attention` and the MCP `pendingApprovals` count missed it.

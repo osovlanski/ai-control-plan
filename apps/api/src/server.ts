@@ -185,6 +185,8 @@ export interface BuiltServer {
    * true; it exists so a caller can await the pump instead of racing it.
    */
   sessionInputRedelivery?: () => Promise<unknown>;
+  /** qcq-02: stored run estimates (record-only). */
+  runEstimates: RunEstimates;
 }
 
 const MAX_ASSISTANT_ID_LENGTH = 128;
@@ -1404,11 +1406,23 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     if (!estimate) return reply.status(404).send({ error: "not found" });
     return estimate;
   });
+  // qcq-02 (API 2.16): every run start stores the estimate as it stood then (record-only; nothing
+  // in dispatch reads it back). The orchestrator calls it after the run row exists and swallows failures.
+  orchestrator.estimateSnapshots = runEstimates;
+  // qcq-02: the task's stored estimates, oldest first, each joined to its run's actual once it ended.
+  app.get<{ Params: { id: string } }>("/api/tasks/:id/estimates/recorded", read.routing, (req, reply) => {
+    const recorded = runEstimates.recordedForTask(req.params.id);
+    if (!recorded) return reply.status(404).send({ error: "not found" });
+    return recorded;
+  });
   // qcq-01: estimate accuracy, by replaying the versioned estimator over recorded actuals.
-  app.get<{ Querystring: { limit?: string } }>("/api/estimates/accuracy", read.routing, (req, reply) => {
+  // qcq-02: `source=recorded` scores the estimates stored at start instead of a replay.
+  app.get<{ Querystring: { limit?: string; source?: string } }>("/api/estimates/accuracy", read.routing, (req, reply) => {
     const limit = req.query.limit === undefined ? 50 : Number(req.query.limit);
     if (!Number.isInteger(limit) || limit < 1 || limit > 500) return reply.status(400).send({ error: "limit must be an integer 1..500" });
-    return runEstimates.accuracy(limit);
+    const source = req.query.source ?? "replay";
+    if (source !== "replay" && source !== "recorded") return reply.status(400).send({ error: "source must be 'replay' or 'recorded'" });
+    return source === "recorded" ? runEstimates.recordedAccuracy(limit) : runEstimates.accuracy(limit);
   });
 
   // tlm-02b: GitHub issues and PRs a task belongs to. Operator links are claims (not checked
@@ -2001,7 +2015,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     });
   }
 
-  return { app, registry, orchestrator, tasks, bus, checkpoints, cooldowns, telemetry, scheduler, autopilot, publications, ...(acceptance ? { acceptance } : {}), dispatcher, ...(heartbeat ? { heartbeat } : {}), restore, quotaProbes: probes, modelCatalog, registryFederation, memoryFederation, sessionInputs, sessionInputRedelivery };
+  return { app, registry, orchestrator, tasks, bus, checkpoints, cooldowns, telemetry, scheduler, autopilot, publications, ...(acceptance ? { acceptance } : {}), dispatcher, ...(heartbeat ? { heartbeat } : {}), restore, quotaProbes: probes, modelCatalog, registryFederation, memoryFederation, sessionInputs, sessionInputRedelivery, runEstimates };
 }
 
 function sseHeaders(reply: FastifyReply): void {

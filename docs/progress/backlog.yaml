@@ -462,7 +462,7 @@ items:
     profile: best-quality
     night: false
     source: "itay 2026-11-21 spec item 2 (record actual outcomes)"
-    notes: "Append-only estimate rows keyed by dispatch or start, joined to the run at settle, so accuracy covers what was shown, not only a replay. Record-only: it must not change what the dispatch does."
+    notes: "In review (API 2.16, migration 056). Append-only estimate rows keyed by run start, joined to the run's own records at read, so accuracy covers what was shown, not only a replay. Record-only: it must not change what the dispatch does."
 
   - id: qcq-03-estimate-surfaces
     title: "Show the estimate and recommendation in Web task detail, `aos task estimate` and Cockpit"
@@ -475,7 +475,7 @@ items:
     profile: auto
     night: false
     source: "itay 2026-11-21 spec item 2 (shown before dispatch)"
-    notes: "Read the plane's answer; never recompute it. Label API spend, API-equivalent and subscription quota apart. Cockpit vendors run-estimate v1 after it lands."
+    notes: "In review with qcq-02: Web task detail (Usage tab) and `aos task estimate [--recorded]`. Read the plane's answer; never recompute it. Label API spend, API-equivalent and subscription quota apart. Cockpit vendoring of run-estimate v1 (with its JSON Schema) is still open."
 
   - id: qcq-04-account-concurrency
     title: "Shared per-account concurrency limit across tasks, compare/race, autopilot and retries"

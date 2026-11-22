@@ -1,6 +1,7 @@
 import { Restart, namesRestartRoute, useRestartOffered } from "./Restart.js";
 import { WaitingSummary } from "./WaitingSummary.js";
 import { TaskRouting } from "./TaskRouting.js";
+import { TaskEstimate } from "./TaskEstimate.js";
 import { useEffect, useRef, useState, type ComponentProps } from "react";
 import { answerFailure, eventKey, fromStream, liveSessions, mergeEvents, pendingApproval, type PendingApproval, type StreamEvent } from "./task-reconcile.js";
 import {
@@ -448,6 +449,12 @@ export function TaskDetail({ taskId, onBack }: { taskId: string; onBack: () => v
               Estimated cost: ${usage.costUsd.toFixed(4)}
             </p>
           )}
+        </Card>
+      )}
+
+      {tab === "usage" && (
+        <Card>
+          <TaskEstimate taskId={taskId} refreshKey={`${state}:${detail.runs.length}`} />
         </Card>
       )}
 

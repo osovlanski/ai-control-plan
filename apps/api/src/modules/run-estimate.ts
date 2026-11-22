@@ -7,9 +7,14 @@
  * approval records; the quota view is the same `QuotaProjection` routing reads. Core's pure
  * `estimateRun` / `recommendSchedule` / `backtestEstimates` do the arithmetic. Nothing here writes,
  * reserves, enforces or schedules, and no dispatch path reads it.
+ *
+ * qcq-02: `recordAtStart` stores the estimate as it stood when a run started (`run_estimates`,
+ * migration 056, append-only), and `recordedForTask` / `recordedAccuracy` join it to what the run
+ * recorded once it ended. Record-only: the orchestrator calls it after the run row exists, a failure
+ * is swallowed, and nothing reads the stored row back into dispatch.
  */
 import {
-  backtestEstimates, estimateRun, recommendSchedule,
+  backtestEstimates, estimateRun, recommendSchedule, scoreRecordedEstimates,
   type AccuracyReport, type EstimateContext, type EstimateSubject, type HistoricalRun, type RunEstimate, type ScheduleRecommendation,
 } from "@agent-plane/core";
 import type { ResolvedConfig } from "../config.js";
@@ -38,6 +43,28 @@ export interface EstimateOptions {
   assistantId?: string;
 }
 
+/** One stored estimate (qcq-02) and, once the run ended, what the run recorded. */
+export interface RecordedEstimate {
+  runId: string;
+  assistantId: string;
+  estimatorVersion: string;
+  recordedAt: string;
+  estimate: RunEstimate;
+  recommendation: ScheduleRecommendation;
+  /** Null while the run has not ended. Read from the run's own records, never copied. */
+  actual: {
+    state: string; endedAt: string; durationMs: number;
+    tokens: { input: number; output: number } | null;
+    costUsd: number | null; costMethod: "measured" | "estimated" | "unknown";
+  } | null;
+}
+
+export interface TaskRecordedEstimates {
+  taskId: string;
+  advisory: true;
+  records: RecordedEstimate[];
+}
+
 export interface TaskEstimate {
   taskId: string;
   advisory: true;
@@ -57,13 +84,15 @@ export class RunEstimates {
   private policy() { return this.d.config.scheduling ?? defaultSchedulingPolicy(this.d.config.workspace); }
 
   /** Ended runs, newest first, with settled usage and answered approval waits. */
-  history(limit = HISTORY_LIMIT): HistoricalRun[] {
+  history(limit = HISTORY_LIMIT, runIds?: readonly string[]): HistoricalRun[] {
+    if (runIds && runIds.length === 0) return [];
+    const only = runIds ? `AND r.id IN (${runIds.map(() => "?").join(",")})` : "";
     const rows = this.d.db.prepare(
       `SELECT r.id, r.task_id, r.assistant_id, r.state, r.started_at, r.ended_at, r.model_requested, r.model_resolved,
               t.goal, t.task_kind, t.classifier_version, a.provider
          FROM runs r JOIN tasks t ON t.id = r.task_id LEFT JOIN assistants a ON a.id = r.assistant_id
-        WHERE r.ended_at IS NOT NULL ORDER BY r.ended_at DESC, r.rowid DESC LIMIT ?`,
-    ).all(limit) as Array<{
+        WHERE r.ended_at IS NOT NULL ${only} ORDER BY r.ended_at DESC, r.rowid DESC LIMIT ?`,
+    ).all(...(runIds ?? []), limit) as Array<{
       id: string; task_id: string; assistant_id: string; state: string; started_at: string; ended_at: string;
       model_requested: string | null; model_resolved: string | null; goal: string; task_kind: string | null; classifier_version: number | null; provider: string | null;
     }>;
@@ -163,5 +192,65 @@ export class RunEstimates {
 
   accuracy(limit: number): AccuracyReport {
     return backtestEstimates(this.history(), limit);
+  }
+
+  /**
+   * qcq-02: stores the estimate for the assistant this run started on, as `GET /api/tasks/:id/estimate`
+   * would have served it at this instant (the same what-if the operator can ask for). Written once
+   * per run; a second call for the same run is a no-op. Never throws: a defect here must not touch
+   * the start that called it, so it returns false instead.
+   */
+  recordAtStart(runId: string, taskId: string, assistantId: string): boolean {
+    try {
+      if (!this.d.registry.get(assistantId)) return false;
+      const e = this.forTask(taskId, { assistantId });
+      if (!e) return false;
+      const res = this.d.db.prepare(
+        `INSERT OR IGNORE INTO run_estimates (run_id, task_id, assistant_id, estimator_version, recorded_at, estimate_json, recommendation_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      ).run(runId, taskId, assistantId, e.estimate.estimatorVersion, e.estimate.asOf, JSON.stringify(e.estimate), JSON.stringify(e.recommendation));
+      return res.changes === 1;
+    } catch {
+      return false;
+    }
+  }
+
+  private storedRows(where: string, ...args: unknown[]) {
+    return (this.d.db.prepare(
+      `SELECT run_id, assistant_id, estimator_version, recorded_at, estimate_json, recommendation_json
+         FROM run_estimates ${where}`,
+    ).all(...args) as Array<{ run_id: string; assistant_id: string; estimator_version: string; recorded_at: string; estimate_json: string; recommendation_json: string }>)
+      .map((r) => ({
+        runId: r.run_id, assistantId: r.assistant_id, estimatorVersion: r.estimator_version, recordedAt: r.recorded_at,
+        estimate: JSON.parse(r.estimate_json) as RunEstimate, recommendation: JSON.parse(r.recommendation_json) as ScheduleRecommendation,
+      }));
+  }
+
+  /** qcq-02: the task's stored estimates, oldest first, each with its run's actual once it ended. Undefined for an unknown task. */
+  recordedForTask(taskId: string): TaskRecordedEstimates | undefined {
+    if (!this.d.tasks.get(taskId)) return undefined;
+    const stored = this.storedRows("WHERE task_id = ? ORDER BY recorded_at, rowid", taskId);
+    const ended = new Map(this.history(Math.max(stored.length, 1), stored.map((s) => s.runId)).map((h) => [h.runId, h]));
+    return {
+      taskId, advisory: true,
+      records: stored.map((s) => {
+        const h = ended.get(s.runId);
+        return {
+          ...s,
+          actual: h ? {
+            state: h.state, endedAt: h.endedAt, durationMs: Date.parse(h.endedAt) - Date.parse(h.startedAt),
+            tokens: h.tokens, costUsd: h.costUsd, costMethod: h.costMethod,
+          } : null,
+        };
+      }),
+    };
+  }
+
+  /** qcq-02: accuracy of what was shown: stored estimates of ended runs against their actuals. */
+  recordedAccuracy(limit: number): AccuracyReport {
+    const stored = this.storedRows(
+      `WHERE run_id IN (SELECT r.id FROM runs r JOIN run_estimates e ON e.run_id = r.id
+                         WHERE r.ended_at IS NOT NULL AND r.state <> 'CANCELLED' ORDER BY r.ended_at DESC, r.rowid DESC LIMIT ?)`, limit);
+    return scoreRecordedEstimates(stored, this.history(limit, stored.map((s) => s.runId)), limit);
   }
 }
