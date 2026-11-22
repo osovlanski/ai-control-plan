@@ -53,12 +53,16 @@ effective state (`session_state` for Harness rows, the legacy `runs.state` mappe
 a new state fails the plane's build until it is given a rule.
 
 **Legacy runs.** A run on the legacy (non-Harness) path never records `AWAITING_APPROVAL` or
-`VERIFYING`: its pending approval lives in the adapter, not in a durable row, and it has no verify
-stage. Such a run reads `working/live-run` while it waits on an approval. That is the plane telling
-the truth about what it knows, not a rule to work around in a client; it closes when
-`execution.harnessModes.single` is on (the default is off).
+`VERIFYING` itself: its pending approval lives in the adapter, not in a durable row, and it has no
+verify stage. The legacy adapters block on the answer, so the plane reads a live legacy run (`runs.state`
+`STARTING` or `ACTIVE`) whose newest durable event is `approval.requested` as `AWAITING_APPROVAL`;
+any later event of that run means it was answered. Such a run reads `needs-you/awaiting-approval`
+while it waits, and the plane publishes a `state` frame when it enters or leaves that wait, as for
+a Harness session. Before this, it read `working/live-run`. A legacy run still never reads
+`verifying/verification-running`.
 
-Inputs are exactly three facts: the task state, the effective states of the task's runs, and
+Inputs are exactly three facts: the task state, the effective states of the task's runs (for a
+legacy run, including its newest event as above), and
 whether the task's latest wait condition is `active`. Nothing else (phase, usage, cost, the
 verification verdict) moves a stage.
 

@@ -8,6 +8,21 @@ import { deriveStage, type ExecutionSessionState, type TaskStage, type TaskState
 import type { Db } from "../db/index.js";
 import { effectiveStateSql } from "./harness/state-vocab.js";
 
+/**
+ * The run's effective state, plus the one fact a legacy run cannot record itself: a legacy
+ * (non-Harness) run keeps no approval row, because its pending approval lives in the adapter.
+ * The adapter blocks on the answer, so a live legacy run whose newest durable event is
+ * `approval.requested` is waiting on the owner; any later event means it was answered. Such a
+ * run reads `AWAITING_APPROVAL` here (the same rule the web's legacy `pendingApproval` uses).
+ * Harness rows are unchanged: their `session_state` already says so.
+ */
+const STAGE_STATE_SQL = `CASE
+    WHEN runs.execution_request_id IS NULL
+     AND runs.state IN ('STARTING', 'ACTIVE')
+     AND (SELECT e.type FROM events e WHERE e.run_id = runs.id ORDER BY e.seq DESC LIMIT 1) = 'approval.requested'
+    THEN 'AWAITING_APPROVAL'
+    ELSE ${effectiveStateSql("runs")} END`;
+
 export class TaskStageReader {
   constructor(private db: Db) {}
 
@@ -16,7 +31,7 @@ export class TaskStageReader {
     const task = this.db.prepare("SELECT state FROM tasks WHERE id = ?").get(taskId) as { state: string } | undefined;
     if (!task) return undefined;
     const runs = this.db
-      .prepare(`SELECT ${effectiveStateSql()} AS state FROM runs WHERE task_id = ?`)
+      .prepare(`SELECT ${STAGE_STATE_SQL} AS state FROM runs WHERE task_id = ?`)
       .all(taskId) as Array<{ state: string }>;
     const wait = this.db
       .prepare("SELECT state FROM wait_conditions WHERE task_id = ? ORDER BY generation DESC LIMIT 1")
@@ -31,7 +46,7 @@ export class TaskStageReader {
   /** Every task's stage in three queries, for the task list. */
   all(): Map<string, TaskStage> {
     const sessions = new Map<string, ExecutionSessionState[]>();
-    for (const r of this.db.prepare(`SELECT task_id, ${effectiveStateSql()} AS state FROM runs`).all() as Array<{ task_id: string; state: string }>) {
+    for (const r of this.db.prepare(`SELECT task_id, ${STAGE_STATE_SQL} AS state FROM runs`).all() as Array<{ task_id: string; state: string }>) {
       const list = sessions.get(r.task_id) ?? [];
       list.push(r.state as ExecutionSessionState);
       sessions.set(r.task_id, list);
