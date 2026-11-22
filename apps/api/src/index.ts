@@ -3,10 +3,11 @@ import { openDb } from "./db/index.js";
 import { buildServer } from "./server.js";
 import { EventRetention } from "./modules/retention.js";
 import { scheduleDailyJobs } from "./modules/jobs.js";
+import { startRemoteListener } from "./auth/remote-listener.js";
 
 const config = loadConfig();
 const db = openDb(config.dbPath);
-const { app, registry, orchestrator, scheduler, modelCatalog, registryFederation, memoryFederation, acceptance, dispatcher, restore } = buildServer({ config, db });
+const { app, remoteAuth, registry, orchestrator, scheduler, modelCatalog, registryFederation, memoryFederation, acceptance, dispatcher, restore } = buildServer({ config, db });
 
 registry.init();
 const reconciled = await orchestrator.reconcileOnBoot();
@@ -47,6 +48,9 @@ app.log.info(
 
 try {
   await app.listen({ host: config.api.host, port: config.api.port });
+  // B2 (D-B): the remote-only listener, after the local one is up. A failure here stops the process
+  // rather than leaving a half-configured remote mode running.
+  if (remoteAuth) await startRemoteListener(app, remoteAuth);
 } catch (err) {
   app.log.error(err);
   process.exit(1);

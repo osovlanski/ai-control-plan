@@ -76,6 +76,7 @@ import { RepositoryIdentityRegistry } from "./repo/identity-registry.js";
 import { renderHandoffMd } from "./render/handoff.js";
 import { renderProgressMd } from "./render/progress.js";
 import { registerAuth, type SessionMap } from "./auth/index.js";
+import type { RemoteAuth } from "./auth/remote.js";
 import { CodexAdapter } from "@agent-plane/adapters";
 import { CredentialStore, credentialPath } from "./auth/credential-file.js";
 import { onRunSessionRef, UsageLedger, validateUsageRecord } from "./modules/usage.js";
@@ -155,6 +156,8 @@ export interface ServerDeps {
 
 export interface BuiltServer {
   app: FastifyInstance;
+  /** B2: present only with `api.remote`; `index.ts` starts its listener after the local one. */
+  remoteAuth?: RemoteAuth;
   registry: Registry;
   orchestrator: Orchestrator;
   tasks: TaskStore;
@@ -210,7 +213,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   const app = Fastify({ routerOptions, logger: { base: { pid: process.pid }, stream: { write: (line) => process.stdout.write(redactSecrets(line)) }, serializers: { req: (r) => ({ method: r.method, url: String(r.url).split("?")[0] }), res: (r) => ({ statusCode: r.statusCode }) }, redact: ["req.headers.authorization", "req.headers.cookie", "res.headers[\"set-cookie\"]"] } });
   const credentials = new CredentialStore(credentialPath(config.dir), now, config.dir);
   const authSessions: SessionMap = new Map();
-  registerAuth(app, { config, credentials, sessions: authSessions, db, now });
+  const remoteAuth = registerAuth(app, { config, credentials, sessions: authSessions, db, now });
   for (const warning of config.warnings ?? []) app.log.warn(warning);
   const read = {
     tasks: { config: { auth: { require: "tasks.read" } } }, events: { config: { auth: { require: "events.read" } } },
@@ -2001,7 +2004,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     });
   }
 
-  return { app, registry, orchestrator, tasks, bus, checkpoints, cooldowns, telemetry, scheduler, autopilot, publications, ...(acceptance ? { acceptance } : {}), dispatcher, ...(heartbeat ? { heartbeat } : {}), restore, quotaProbes: probes, modelCatalog, registryFederation, memoryFederation, sessionInputs, sessionInputRedelivery };
+  return { app, ...(remoteAuth ? { remoteAuth } : {}), registry, orchestrator, tasks, bus, checkpoints, cooldowns, telemetry, scheduler, autopilot, publications, ...(acceptance ? { acceptance } : {}), dispatcher, ...(heartbeat ? { heartbeat } : {}), restore, quotaProbes: probes, modelCatalog, registryFederation, memoryFederation, sessionInputs, sessionInputRedelivery };
 }
 
 function sseHeaders(reply: FastifyReply): void {

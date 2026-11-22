@@ -1,9 +1,9 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { ensureCredential } from "./auth/credential-file.js";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { parse, stringify } from "yaml";
-import { PERSONAL_SCHEDULING_POLICY, WORK_SCHEDULING_POLICY, runtimeConfigProblems, schedulingPolicyProblems, type McpToolAccess, type McpToolPolicy, type SchedulingPolicy } from "@agent-plane/core";
+import { COMMAND_CAPABILITIES, OBSERVABILITY_CAPABILITIES, PERSONAL_SCHEDULING_POLICY, TASK_COMMAND_CAPABILITIES, WORK_SCHEDULING_POLICY, runtimeConfigProblems, schedulingPolicyProblems, type McpToolAccess, type McpToolPolicy, type SchedulingPolicy } from "@agent-plane/core";
 
 /**
  * Workspace instance configuration (revised architecture §1).
@@ -31,6 +31,42 @@ export interface AssistantConfig {
   options?: Record<string, unknown>;
 }
 
+/**
+ * B2 remote mode. Every field that is an owner answer (origin, Tailscale login, Google client and
+ * subject, grants) is required with no default; session and limit numbers default to the ADR's proposal.
+ */
+export interface RemoteAuthConfig {
+  /** Loopback only: Tailscale Serve proxies to it. Never the local port. */
+  listen: { host: "127.0.0.1" | "::1"; port: number };
+  /** The one browser and API origin (https, no path), e.g. the box's tailnet name. Never derived from Host. */
+  canonicalOrigin: string;
+  /** Trusted proxy on the same host: the socket peer must be one of `peers` (loopback only) and Tailscale's identity header must be `tailscaleLogin`. */
+  transport: { kind: "trusted-proxy"; peers: string[]; tailscaleLogin: string };
+  /** D-A: Google OIDC, exact (issuer, subject). This Web login has its own client, separate from the MCP service's. */
+  identity: { issuer: string; clientId: string; clientSecretFile: string; subject: string; grants: string[] };
+  session: { absoluteTtlSeconds: number; idleTtlSeconds: number };
+  limits: RemoteAuthLimits;
+}
+
+export interface RemoteAuthLimits {
+  loginPerMinutePerAddress: number;
+  loginPerMinutePerInstance: number;
+  maxPendingLogins: number;
+  commandsPerMinute: number;
+  commandsPerMinutePerInstance: number;
+  readsPerMinute: number;
+  streamsPerSession: number;
+  streamsPerInstance: number;
+}
+
+export const REMOTE_SESSION_DEFAULTS = { absoluteTtlSeconds: 12 * 3600, idleTtlSeconds: 30 * 60 } as const;
+export const REMOTE_LIMIT_DEFAULTS: RemoteAuthLimits = {
+  loginPerMinutePerAddress: 10, loginPerMinutePerInstance: 30, maxPendingLogins: 100,
+  commandsPerMinute: 30, commandsPerMinutePerInstance: 60, readsPerMinute: 600, streamsPerSession: 3, streamsPerInstance: 10,
+};
+/** Grants a remote session may hold. Never `usage.write` (importers) or `autopilot.operate` (operator secret only). */
+export const REMOTE_GRANTABLE: readonly string[] = [...OBSERVABILITY_CAPABILITIES, ...COMMAND_CAPABILITIES, ...TASK_COMMAND_CAPABILITIES];
+
 /** How far an assistant may act before it must ask (arch §12.7). */
 export type ApprovalMode = "auto-approve" | "prompt-on-escalation" | "read-only";
 
@@ -41,6 +77,11 @@ export interface WorkspaceConfig {
     host: string;
     port: number;
     auth: { bootstrapTtlSeconds: number; sessionTtlSeconds: number; rotationGraceSeconds: number };
+    /**
+     * B2 (remote-auth ADR amendments D-A/D-B): a second, remote-only loopback listener for the
+     * Tailscale Serve target. Absent means local only. The local listener above is unchanged either way.
+     */
+    remote?: RemoteAuthConfig;
   };
   /** Assistant environments this workspace instance may route to. */
   assistants: Record<string, AssistantConfig>;
@@ -754,7 +795,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ResolvedConfig
 
   const config: WorkspaceConfig = {
     workspace: file.workspace ?? workspace,
-    api: { ...defaults.api, ...file.api, auth: { ...defaults.api.auth, ...file.api?.auth } },
+    api: { host: file.api?.host ?? defaults.api.host, port: file.api?.port ?? defaults.api.port, auth: { ...defaults.api.auth, ...file.api?.auth } },
     assistants: file.assistants ?? defaults.assistants,
     repoAllowlist: file.repoAllowlist ?? defaults.repoAllowlist,
     policy: { ...defaults.policy, ...file.policy },
@@ -765,6 +806,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ResolvedConfig
   };
 
   validate(config, configPath);
+  const remote = resolveRemote((file.api as { remote?: unknown } | undefined)?.remote, config.api.port, configPath);
+  if (remote) config.api.remote = remote;
   const mcp = resolveMcp(file.mcp, config.repoAllowlist, execution.agentUser !== undefined, configPath);
   validateModels(models, configPath);
   validateDecisions(decisions, configPath, workspace);
@@ -778,6 +821,96 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ResolvedConfig
   ensureCredential(dir);
 
   return { ...config, execution, models, decisions, sessionInput, registry, composer, autopilot, mcp, scheduling, dir, dbPath: join(dir, "agent-plane.db"), warnings };
+}
+
+const LOOPBACK_PEERS = new Set(["127.0.0.1", "::1"]);
+
+/**
+ * B2: the remote block is all-or-nothing. Unknown keys at any level, a missing owner answer, an
+ * http origin, a non-loopback peer or listener, or an unsafe secret file fail before listen.
+ */
+export function resolveRemote(file: unknown, localPort: number, configPath: string): RemoteAuthConfig | undefined {
+  if (file === undefined) return undefined;
+  const at = (path: string, msg: string): never => { throw new Error(`${configPath}: api.remote${path} ${msg}`); };
+  const map = (v: unknown, path: string, keys: readonly string[]): Record<string, unknown> => {
+    if (!isRecord(v)) return at(path, "must be a mapping");
+    const unknown = Object.keys(v).filter((k) => !keys.includes(k));
+    if (unknown.length > 0) at(path, `has unknown key(s): ${unknown.join(", ")}`);
+    return v;
+  };
+  const str = (v: unknown, path: string): string => (typeof v === "string" && v.trim() === v && v.length > 0 && v.length <= 512 ? v : at(path, "must be a non-empty string"));
+  const int = (v: unknown, path: string, min: number, max: number): number => (Number.isInteger(v) && (v as number) >= min && (v as number) <= max ? v as number : at(path, `must be an integer from ${min} to ${max}`));
+
+  const r = map(file, "", ["listen", "canonicalOrigin", "transport", "identity", "session", "limits"]);
+  const listen = map(r.listen, ".listen", ["host", "port"]);
+  if (listen.host !== "127.0.0.1" && listen.host !== "::1") at(".listen.host", "must be 127.0.0.1 or ::1: the remote listener is a loopback target for the trusted proxy");
+  const port = int(listen.port, ".listen.port", 1, 65535);
+  if (port === localPort) at(".listen.port", "must differ from api.port: the local listener stays as it is");
+
+  const canonicalOrigin = httpsOrigin(r.canonicalOrigin, ".canonicalOrigin", at, false);
+
+  const t = map(r.transport, ".transport", ["kind", "peers", "tailscaleLogin"]);
+  if (t.kind !== "trusted-proxy") at(".transport.kind", "must be trusted-proxy (direct TLS is not built)");
+  if (!Array.isArray(t.peers) || t.peers.length === 0 || !t.peers.every((p) => typeof p === "string" && LOOPBACK_PEERS.has(p))) at(".transport.peers", "must list the proxy's loopback address(es): 127.0.0.1 and/or ::1");
+  const tailscaleLogin = str(t.tailscaleLogin, ".transport.tailscaleLogin");
+
+  const id = map(r.identity, ".identity", ["issuer", "clientId", "clientSecretFile", "subject", "grants"]);
+  const issuer = issuerUrl(id.issuer, at);
+  const clientId = str(id.clientId, ".identity.clientId");
+  const subject = str(id.subject, ".identity.subject");
+  const clientSecretFile = str(id.clientSecretFile, ".identity.clientSecretFile");
+  if (!isAbsolute(clientSecretFile)) at(".identity.clientSecretFile", "must be an absolute path");
+  privateFileProblem(clientSecretFile, at);
+  if (!Array.isArray(id.grants) || id.grants.length === 0 || !id.grants.every((g) => typeof g === "string")) at(".identity.grants", "must list at least one grant");
+  const grants = [...new Set(id.grants as string[])];
+  const bad = grants.filter((g) => !REMOTE_GRANTABLE.includes(g));
+  if (bad.length > 0) at(".identity.grants", `has grant(s) a remote session may not hold: ${bad.join(", ")}`);
+
+  const sessionFile = r.session === undefined ? {} : map(r.session, ".session", ["absoluteTtlSeconds", "idleTtlSeconds"]);
+  const absoluteTtlSeconds = sessionFile.absoluteTtlSeconds === undefined ? REMOTE_SESSION_DEFAULTS.absoluteTtlSeconds : int(sessionFile.absoluteTtlSeconds, ".session.absoluteTtlSeconds", 60, 7 * 24 * 3600);
+  const idleTtlSeconds = sessionFile.idleTtlSeconds === undefined ? REMOTE_SESSION_DEFAULTS.idleTtlSeconds : int(sessionFile.idleTtlSeconds, ".session.idleTtlSeconds", 60, 7 * 24 * 3600);
+  if (idleTtlSeconds > absoluteTtlSeconds) at(".session.idleTtlSeconds", "must not exceed absoluteTtlSeconds");
+
+  const limitsFile = r.limits === undefined ? {} : map(r.limits, ".limits", Object.keys(REMOTE_LIMIT_DEFAULTS));
+  const limits = { ...REMOTE_LIMIT_DEFAULTS };
+  for (const [k, v] of Object.entries(limitsFile)) (limits as Record<string, number>)[k] = int(v, `.limits.${k}`, 1, 100_000);
+
+  return {
+    listen: { host: listen.host as "127.0.0.1" | "::1", port },
+    canonicalOrigin,
+    transport: { kind: "trusted-proxy", peers: [...new Set(t.peers as string[])], tailscaleLogin },
+    identity: { issuer, clientId, clientSecretFile, subject, grants },
+    session: { absoluteTtlSeconds, idleTtlSeconds },
+    limits,
+  };
+}
+
+function httpsOrigin(value: unknown, path: string, at: (p: string, m: string) => never, allowLoopbackHttp: boolean): string {
+  if (typeof value !== "string") return at(path, "must be an https origin");
+  let url: URL;
+  try { url = new URL(value); } catch { return at(path, "must be an https origin"); }
+  const loopback = ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname);
+  if (url.protocol !== "https:" && !(allowLoopbackHttp && loopback && url.protocol === "http:")) at(path, "must be https");
+  if (url.username || url.password || url.search || url.hash || (url.pathname !== "/" && url.pathname !== "")) at(path, "must be an origin with no path, query, fragment or credentials");
+  if (value.replace(/\/$/, "") !== url.origin) at(path, `must be written in normalized form (${url.origin})`);
+  return url.origin;
+}
+
+/** An issuer identifier (Google: https://accounts.google.com); loopback http only for the test fake issuer. */
+function issuerUrl(value: unknown, at: (p: string, m: string) => never): string {
+  if (typeof value !== "string") return at(".identity.issuer", "must be an https URL");
+  let url: URL;
+  try { url = new URL(value); } catch { return at(".identity.issuer", "must be an https URL"); }
+  const loopback = ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname);
+  if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) at(".identity.issuer", "must be https");
+  if (url.search || url.hash || url.username || url.password || value.endsWith("/")) at(".identity.issuer", "must be the exact issuer identifier, with no trailing slash, query or fragment");
+  return value;
+}
+
+function privateFileProblem(path: string, at: (p: string, m: string) => never): void {
+  let s;
+  try { s = lstatSync(path); } catch { return at(".identity.clientSecretFile", "does not exist"); }
+  if (!s.isFile() || s.isSymbolicLink() || s.uid !== process.getuid?.() || (s.mode & 0o077) !== 0) at(".identity.clientSecretFile", "must be a regular file owned by this user with mode 0600");
 }
 
 /** The workspace default advisory scheduling policy (qcq-01). */

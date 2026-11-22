@@ -68,6 +68,9 @@ importers:
       '@types/node':
         specifier: ^22.15.0
         version: 22.20.1
+      jose:
+        specifier: 6.2.9
+        version: 6.2.9
       tsx:
         specifier: ^4.20.0
         version: 4.23.12
@@ -102,6 +105,9 @@ importers:
 
   apps/mcp:
     dependencies:
+      '@agent-plane/core':
+        specifier: workspace:*
+        version: link:../../packages/core
       '@modelcontextprotocol/sdk':
         specifier: 1.32.2
         version: 1.32.2(zod@4.4.3)
@@ -124,9 +130,6 @@ importers:
       '@agent-plane/api':
         specifier: workspace:*
         version: link:../api
-      '@agent-plane/core':
-        specifier: workspace:*
-        version: link:../../packages/core
       '@types/better-sqlite3':
         specifier: ^7.6.13
         version: 7.6.13
@@ -234,7 +237,14 @@ importers:
         version: 3.2.7(@types/node@22.20.1)(tsx@4.23.12)(yaml@2.9.0)
 
   packages/core:
+    dependencies:
+      jose:
+        specifier: 6.2.9
+        version: 6.2.9
     devDependencies:
+      '@types/node':
+        specifier: ^22.15.0
+        version: 22.20.1
       typescript:
         specifier: ^5.9.2
         version: 5.9.3

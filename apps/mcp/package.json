@@ -16,11 +16,11 @@
     "yaml": "^2.8.0",
     "ajv": "^8.20.0",
     "jose": "6.2.9",
-    "zod": "^4.4.3"
+    "zod": "^4.4.3",
+    "@agent-plane/core": "workspace:*"
   },
   "devDependencies": {
     "@agent-plane/api": "workspace:*",
-    "@agent-plane/core": "workspace:*",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.15.0",
     "tsx": "^4.20.0",
