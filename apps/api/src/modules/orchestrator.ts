@@ -1077,6 +1077,7 @@ export class Orchestrator {
     );
     let seq = 0;
     let endedOk: boolean | undefined;
+    let awaitingApproval = false;
     try {
       for await (const event of run.adapter.events(run.handle)) {
         const safeEvent = redactEvent(event, DEFAULT_REDACTION_RULES);
@@ -1093,6 +1094,12 @@ export class Orchestrator {
         );
         await this.applyEvent(run, safeEvent);
         this.bus.publish(run.taskId, { kind: "event", event: { ...safeEvent, seq } });
+        // Task stage v1: a legacy run asking for approval, or moving on once answered, changes
+        // the stage (needs-you/awaiting-approval) with no task-state change to announce it.
+        if (event.type === "approval.requested" || awaitingApproval) {
+          awaitingApproval = event.type === "approval.requested";
+          this.publishStageIfChanged(run);
+        }
         if (quotaOf(safeEvent)) this.scheduler?.quotaObserved();
         if (event.type === "error") run.sawError = true;
         if (event.type === "run.ended") {
@@ -2188,6 +2195,13 @@ export class Orchestrator {
 
   private notice(taskId: string, level: "info" | "warn", text: string): void {
     this.bus.publish(taskId, { kind: "notice", notice: { level, text } });
+  }
+
+  private publishStageIfChanged(run: ActiveRun): void {
+    this.bus.publishIfStageChanged(run.taskId, () => {
+      const status = this.tasks.envelope(run.taskId).status;
+      return { state: status.state, phase: status.phase, assistantId: run.assistantId };
+    });
   }
 
   private publishState(taskId: string, envelope: TaskEnvelope, assistantId?: string): void {

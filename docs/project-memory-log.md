@@ -1029,3 +1029,9 @@ Migration 041 adds `runs.harness_cli_version` (TEXT NULL, forward only, no backf
 - **Decision:** record-only. The orchestrator calls an optional `estimateSnapshots` recorder on all four start paths after the run row exists and swallows any failure; no dispatch path reads the rows. The actual is never copied into `run_estimates`: it is read from the run's own records at read time.
 - **Known skew:** the stored estimate is taken after the run row exists, so its `capacity.activeRuns` counts the run itself.
 - **Surfaces:** Web task detail Usage tab (`TaskEstimate.tsx`) and `aos task estimate <id> [--deadline] [--approval-required] [--assistant] | --recorded` print the served answer; API spend, API-equivalent (never spend) and subscription quota stay on separate labelled lines. Effort is still `unknown` until p1-5. Cockpit vendoring (with the run-estimate JSON Schema) is still open.
+## 2026-11-22 — Task stage: legacy approvals read needs-you
+
+- Closes the E1 finding (#238): a legacy (non-Harness) run waiting on an approval read `working/live-run`, so `aos task ls --attention` and the MCP `pendingApprovals` count missed it.
+- `TaskStageReader` now reads a live legacy run (`runs.state` `STARTING`/`ACTIVE`) whose newest event is `approval.requested` as `AWAITING_APPROVAL`, the same rule the web's legacy `pendingApproval` already used. Core `deriveStage` is unchanged; no new value or rule, so no API bump. `effectiveStateSql` is unchanged for every other read path.
+- The legacy event loop publishes a stage-only `state` frame when a run enters or leaves the wait, as the Harness session store does.
+- Known imprecision: between the answer and the adapter's next event the run still reads `needs-you`.
