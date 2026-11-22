@@ -1,7 +1,7 @@
 # MCP connector for Claude mobile and Codex CLI
 
-2026-11-21 · **ACCEPTED design, not implemented.** No MCP code exists on `main` at `8a10689`.
-Slices C1 (plane API), C2 (`apps/mcp`) and C3 (rollout) implement it. Public exposure in C3 needs
+2026-11-21 · **ACCEPTED design.** C1 (plane grants, #241) and C2 (`apps/mcp`) implement it; C3 (rollout) is not done.
+Public exposure in C3 needs
 itay's explicit approval; nothing in this document authorizes a tunnel, DNS record or deployment.
 
 Contract: [`contracts/mcp-tools/v1/`](../../contracts/mcp-tools/v1/README.md) (tool definitions,
@@ -73,7 +73,9 @@ Owner's phone browser (OAuth login only) ────────┘
 
 All four tools return `structuredContent` that matches the tool's `outputSchema`, plus a short
 text block for clients that ignore structured output. Domain failures return `isError: true` with
-`structuredContent` matching `tool-error.schema.json`. Authentication failures are HTTP 401/403 at
+no `structuredContent` and two text blocks: a sentence, then the JSON object matching
+`tool-error.schema.json` (amended in C2: SDK clients validate an error's `structuredContent`
+against the success `outputSchema` and reject it). Authentication failures are HTTP 401/403 at
 the transport, never tool results.
 
 | Tool | Scope | Plane calls (C1 shapes) | Notes |
