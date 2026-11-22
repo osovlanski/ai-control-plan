@@ -69,7 +69,7 @@ describe("aos task provenance against a real plane", () => {
     expect(missing.code).toBe(1);
     expect(missing.err).toMatch(/aos task provenance: no task nope/);
     expect((await task(["provenance"])).code).toBe(2);
-    expect((await task(["show", "x"])).code).toBe(2);
+    expect((await task(["frobnicate", "x"])).code).toBe(2);
     expect((await task(["provenance", "a", "b"])).code).toBe(2);
     const help = await task(["--help"]);
     expect(help.code).toBe(0);
