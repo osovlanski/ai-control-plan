@@ -49,7 +49,7 @@ describe("migrations", () => {
         (site, provider, question_set_hash, answers_json, latency_ms, mode, created_at)
         VALUES ('tool-gate', 'rules', 'test-hash', '{}', 0, 'shadow', '2026-09-24')`).run();
       const record = baseline.prepare("SELECT * FROM decision_records").get();
-      expect(migrate(baseline)).toEqual(["028_session_input.sql", "029_session_input_commands.sql", "030_approval_settled_reason.sql", "031_task_classifier.sql", "032_registry_federation.sql", "033_composition.sql", "034_composition_attempts.sql", "035_run_model_requested_source.sql", "036_usage_run_link.sql", "037_asset_usage.sql", "038_asset_shadow_log.sql", "039_memory_proposals.sql", "040_memory_shadow.sql", "041_run_harness_cli_version.sql", "042_task_run_as.sql", "043_autopilot_core.sql", "044_acceptance_runs.sql", "045_autopilot_publications.sql", "046_autopilot_reservations.sql", "047_autopilot_requeue.sql", "048_autopilot_heartbeats.sql", "049_autopilot_restores.sql", "050_autopilot_external_resolutions.sql", "051_runtime_lifecycle.sql", "052_task_links.sql", "053_autopilot_work_base.sql", "054_idempotency_records.sql", "055_remote_auth.sql"]);
+      expect(migrate(baseline)).toEqual(["028_session_input.sql", "029_session_input_commands.sql", "030_approval_settled_reason.sql", "031_task_classifier.sql", "032_registry_federation.sql", "033_composition.sql", "034_composition_attempts.sql", "035_run_model_requested_source.sql", "036_usage_run_link.sql", "037_asset_usage.sql", "038_asset_shadow_log.sql", "039_memory_proposals.sql", "040_memory_shadow.sql", "041_run_harness_cli_version.sql", "042_task_run_as.sql", "043_autopilot_core.sql", "044_acceptance_runs.sql", "045_autopilot_publications.sql", "046_autopilot_reservations.sql", "047_autopilot_requeue.sql", "048_autopilot_heartbeats.sql", "049_autopilot_restores.sql", "050_autopilot_external_resolutions.sql", "051_runtime_lifecycle.sql", "052_task_links.sql", "053_autopilot_work_base.sql", "054_idempotency_records.sql", "055_remote_auth.sql", "056_run_estimates.sql"]);
       // 031 adds `rules_json`; an existing record gets NULL, never a backfilled rule.
       expect(baseline.prepare("SELECT * FROM decision_records").get()).toEqual({ ...(record as object), rules_json: null });
       expect(baseline.prepare("SELECT COUNT(*) AS n FROM session_inputs").get()).toEqual({ n: 0 });
@@ -174,6 +174,7 @@ describe("migrations", () => {
       "repository_identity_observations",
       "resource_claims",
       "routing_decisions",
+      "run_estimates",
       "runs",
       "runtime_conformance",
       "schedule_occurrences",

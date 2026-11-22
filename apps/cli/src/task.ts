@@ -20,8 +20,9 @@ import type { SessionDetail, TaskDetail, TaskEvent, TaskSummary, VerificationVie
 // Pure, type-only-importing helpers of the web UI: the same verdict and check wording.
 import { verificationCheckView, verificationFromEvent, verificationVerdict } from "../../web/src/orbital.js";
 import { PlaneError, type PlaneClient } from "./client.js";
+import { checkEstimate, checkRecorded, estimateText, recordedText } from "./estimate.js";
 
-export type TaskCapability = "tasks.read" | "sessions.read" | "events.read" | "events.stream";
+export type TaskCapability = "tasks.read" | "sessions.read" | "events.read" | "events.stream" | "routing.read";
 
 export interface TaskDeps {
   /** A client whose credential holds `capability`; resolved lazily so `--help` reads no file. */
@@ -55,6 +56,15 @@ Read (every command is read-only):
                                scheduler dispatch, handoff, compare/race), the run it continues,
                                and every handoff, each join labelled with its source
                                (GET /api/tasks/:id/provenance, API 2.12; sessions.read)
+  estimate <id> [--deadline <iso>] [--approval-required] [--assistant <id>]
+                               the plane's ADVISORY run estimate and scheduling recommendation:
+                               runtime, model, effort, duration and token ranges, wait until
+                               start, approval wait, and API spend, API-equivalent and
+                               subscription quota on separate lines (GET /api/tasks/:id/estimate,
+                               API 2.15; routing.read). --assistant asks a what-if.
+  estimate <id> --recorded     the estimate stored at each run's start beside what the run then
+                               recorded (GET /api/tasks/:id/estimates/recorded, API 2.16;
+                               routing.read)
 
 Options:
   --json                       print the plane's response body as served (show and verdict: the
@@ -80,6 +90,8 @@ export const COMMAND_ROUTES: Readonly<Record<string, readonly string[]>> = Objec
   "events --follow": ["GET /api/tasks/:id/events/stream", "GET /api/tasks/:id/events"],
   verdict: ["GET /api/tasks/:id", "GET /api/tasks", "GET /api/sessions/:id", "GET /api/tasks/:id/events"],
   provenance: ["GET /api/tasks/:id/provenance"],
+  estimate: ["GET /api/tasks/:id/estimate"],
+  "estimate --recorded": ["GET /api/tasks/:id/estimates/recorded"],
 });
 
 const SOURCES: readonly JoinSource[] = ["execution_request", "dispatch", "handoff_record", "handoff_envelope", "checkpoint", "inferred", "unrecorded"];
@@ -272,13 +284,15 @@ export async function runTask(argv: string[], deps: TaskDeps): Promise<number> {
   if (values.help || command === "help") { deps.out(USAGE); return 0; }
   if (command === undefined) { deps.err(USAGE); return 2; }
   const usage = (text: string) => { deps.err(`${text}\n\n${USAGE}`); return 2; };
-  const needsId = ["show", "events", "verdict", "provenance"].includes(command);
+  const needsId = ["show", "events", "verdict", "provenance", "estimate"].includes(command);
   if (!needsId && command !== "ls") return usage(`Unknown command: ${command}`);
   if (needsId && !arg) return usage(`aos task ${command} needs a task id`);
   if (!needsId && arg) return usage(`aos task ${command} takes no argument`);
   if (extra.length) return usage(`Unexpected argument: ${extra[0]}`);
   if (values.follow && command !== "events") return usage("--follow goes with: aos task events <id> --follow");
   if ((values.attention || values.state || values.stage) && command !== "ls") return usage("--attention, --state and --stage go with: aos task ls");
+  if ((values.deadline || values["approval-required"] || values.assistant || values.recorded) && command !== "estimate") return usage("--deadline, --approval-required, --assistant and --recorded go with: aos task estimate <id>");
+  if (values.recorded && (values.deadline || values["approval-required"] || values.assistant)) return usage("--recorded shows what was stored; it takes no --deadline, --approval-required or --assistant");
   const print = (text: string) => deps.out(redactSecrets(text));
   const opts = { api: values.api, credential: values.credential };
   const id = arg ? encodeURIComponent(arg) : "";
@@ -323,6 +337,25 @@ export async function runTask(argv: string[], deps: TaskDeps): Promise<number> {
       case "verdict": {
         const v = await readVerdict(arg!, id, deps, opts, missing);
         print(values.json ? json(v) : verdictText(v));
+        return 0;
+      }
+      case "estimate": {
+        const client = deps.connect("routing.read", opts);
+        if (values.recorded) {
+          let body: unknown;
+          try { body = await client.request<unknown>("GET", `/api/tasks/${id}/estimates/recorded`); } catch (e) { throw missing(e, " (or the plane predates API 2.16, which added recorded estimates)"); }
+          const r = checkRecorded(body, arg!);
+          print(values.json ? json(r) : recordedText(r));
+          return 0;
+        }
+        const q = new URLSearchParams();
+        if (values.deadline) q.set("deadline", values.deadline);
+        if (values["approval-required"]) q.set("approval", "required");
+        if (values.assistant) q.set("assistant", values.assistant);
+        let body: unknown;
+        try { body = await client.request<unknown>("GET", `/api/tasks/${id}/estimate${q.size ? `?${q}` : ""}`); } catch (e) { throw missing(e, " (or the plane predates API 2.15, which added the estimate read)"); }
+        const e = checkEstimate(body, arg!);
+        print(values.json ? json(e) : estimateText(e));
         return 0;
       }
       case "provenance": {
@@ -447,6 +480,10 @@ function parse(argv: string[]) {
       attention: { type: "boolean" },
       state: { type: "string" },
       stage: { type: "string" },
+      deadline: { type: "string" },
+      "approval-required": { type: "boolean" },
+      assistant: { type: "string" },
+      recorded: { type: "boolean" },
       api: { type: "string" },
       credential: { type: "string" },
       help: { type: "boolean", short: "h" },

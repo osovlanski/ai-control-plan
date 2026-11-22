@@ -15,7 +15,7 @@ export const USAGE = `usage: aos <group> [<command>] [options]
 
 Groups:
   status      one read-only health readout of the plane
-  task        task reads: ls, show, events [--follow], verdict, provenance
+  task        task reads: ls, show, events [--follow], verdict, provenance, estimate
   runtimes    the runtime catalogue, lifecycle, sync, test, disable and enable
 
 Exit codes (every command): 0 ok, 1 failure, 2 usage. Each group's help says what 1 covers.

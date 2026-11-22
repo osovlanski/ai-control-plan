@@ -3,7 +3,8 @@
 Status: normative for run estimate v1 (API 2.15, backlog `qcq-01-estimates-advisory`, Quality, Cost
 & Quota milestone, 2026-11-21). `packages/core/src/run-estimate.ts` is the only implementation; the
 api module `apps/api/src/modules/run-estimate.ts` only gathers inputs. No JSON Schema is published
-yet: one lands with the first consumer (Cockpit vendoring, `qcq-03-estimate-surfaces`).
+yet: one lands with the first consumer (Cockpit vendoring, `qcq-03-estimate-surfaces`). The Web task
+detail (Usage tab) and `aos task estimate` read both routes as served (qcq-03, API 2.16).
 
 The key words MUST, MUST NOT, SHOULD and MAY are used as in RFC 2119.
 
@@ -93,6 +94,42 @@ each ended run is estimated from the runs that ended before it started, never fr
 compared with what it recorded. Per metric (`duration`, `tokensIn`, `tokensOut`): `evaluated`,
 `withinRange` (actual in `[low, high]`), `withinRangeRate`, `medianAbsPctError` (|actual - typical|
 / actual). Also `noEstimate`, `byConfidence` and the per-run `rows`.
+
+## Recorded estimates (qcq-02, API 2.16)
+
+Every run start stores the estimate as it stood at that instant: `GET /api/tasks/:id/estimate`
+with `assistant` set to the assistant the run started on (the same what-if an operator can ask
+for), written to `run_estimates` (migration 056) right after the run row exists. One row per run;
+the table is append-only (update and delete triggers abort). The orchestrator calls the recorder on
+all four start paths (legacy and Harness, operator start and scheduler dispatch, parallel
+candidates included) and swallows any failure: recording MUST NOT change, delay past the run row,
+or fail a start, and no dispatch, budget, schedule or approval path reads the stored rows.
+
+The stored estimate is taken after the run row exists, so `capacity.activeRuns` (and so an account
+at its advisory limit) counts the run itself. The actual outcome is not copied: it is read from the
+run's own records (`ended_at`, settled usage) when a read joins the two.
+
+### `GET /api/tasks/:id/estimates/recorded`
+
+Capability `routing.read`. Unknown task: 404.
+
+```text
+{ taskId, advisory: true,
+  records: [{ runId, assistantId, estimatorVersion, recordedAt,
+              estimate: RunEstimate, recommendation: ScheduleRecommendation,
+              actual: { state, endedAt, durationMs, tokens: { input, output } | null,
+                        costUsd, costMethod } | null }] }
+```
+
+Oldest first. `actual` is `null` until the run ends. `tokens` is `null` when the run has no usage
+evidence, by the same rule as the estimator.
+
+### `GET /api/estimates/accuracy?source=recorded`
+
+`source` is `replay` (default, unchanged) or `recorded`; anything else is 400. `recorded` scores
+the stored estimates of the `limit` most recently ended, non-cancelled runs that have one, against
+what each run recorded, with nothing re-estimated. `method` names which; each recorded row carries
+`estimatorVersion`, the version that produced the stored estimate.
 
 ## Config: `scheduling`
 

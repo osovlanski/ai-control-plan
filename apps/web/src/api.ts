@@ -1,6 +1,6 @@
 import type {
   AgentSpec, AgentSpecDraft, BudgetCaps, BudgetOverrunPayload, ComposerOutcome, CompositionDecision, CompositionDecisionDraft,
-  ModelRecommendation, Schedule, ScheduleOccurrence, ScheduleOverlap, SessionSettlement, TaskConsumption, UsageAccountingMode,
+  ModelRecommendation, RunEstimate, Schedule, ScheduleRecommendation, ScheduleOccurrence, ScheduleOverlap, SessionSettlement, TaskConsumption, UsageAccountingMode,
   VerificationCheckStatus,
 } from "@agent-plane/core";
 export interface Workspace {
@@ -367,6 +367,34 @@ export interface CatalogModel {
   }>;
 }
 
+// ---- Run estimate (qcq-01 API 2.15, qcq-02 API 2.16; docs/contracts/run-estimate-v1.md) ------------
+// ADVISORY reads. The web shows them as served and never recomputes a range, a confidence or a window.
+
+/** `GET /api/tasks/:id/estimate` (routing.read). */
+export interface TaskEstimate {
+  taskId: string;
+  advisory: true;
+  routing: { chosen: string | null; ruleFired: string; whatIf: boolean };
+  estimate: RunEstimate;
+  recommendation: ScheduleRecommendation;
+  policy: { timezone: string; eveningsAllowed: boolean; weekendsAllowed: boolean };
+}
+
+/** `GET /api/tasks/:id/estimates/recorded` (routing.read): what was shown at each start, beside the actual. */
+export interface RecordedEstimates {
+  taskId: string;
+  advisory: true;
+  records: Array<{
+    runId: string; assistantId: string; estimatorVersion: string; recordedAt: string;
+    estimate: RunEstimate; recommendation: ScheduleRecommendation;
+    actual: {
+      state: string; endedAt: string; durationMs: number;
+      tokens: { input: number; output: number } | null;
+      costUsd: number | null; costMethod: "measured" | "estimated" | "unknown";
+    } | null;
+  }>;
+}
+
 /** A non-2xx answer. `reason` and `body` carry what the plane said beyond the message (M2: `composer_disabled`, `composition_drift`). */
 export class ApiError extends Error {
   constructor(message: string, readonly status: number, readonly reason: string | undefined, readonly body: unknown) {
@@ -558,6 +586,8 @@ export const api = {
       body: JSON.stringify(assistantId ? { overrides: { harness_model: { assistantId } } } : {}),
     }),
   composition: (id: string) => req<CompositionHistory>(`/api/tasks/${id}/composition`),
+  estimate: (id: string) => req<TaskEstimate>(`/api/tasks/${id}/estimate`),
+  recordedEstimates: (id: string) => req<RecordedEstimates>(`/api/tasks/${id}/estimates/recorded`),
   memoryShadow: (id: string) => req<MemoryShadowRead>(`/api/composition/memory-shadow?taskId=${encodeURIComponent(id)}`),
   compositionBudget: (id: string) => req<CompositionBudget>(`/api/tasks/${id}/composition/budget`),
   events: (id: string) => req<TaskEvent[]>(`/api/tasks/${id}/events`),
