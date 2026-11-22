@@ -1022,3 +1022,10 @@ Migration 041 adds `runs.harness_cli_version` (TEXT NULL, forward only, no backf
 - The remote listener trusts only the Tailscale Serve header set (one Host/X-Forwarded-Host/-Proto/-For, `Tailscale-User-Login` equal to config, no Funnel, loopback peer). The login header is a path check, not identity. B3 must confirm the headers on the box.
 - Deviation kept on purpose: remote grants reuse the existing capability vocabulary, so the owner may hold `commands.write` remotely until the per-command grant inventory lands. `autopilot.operate` and `usage.write` are never remote.
 - Migration 055 (`remote_sessions`, `remote_login_transactions`, `remote_auth_limits`). Every boot revokes all remote sessions; login budget survives restart.
+
+## 2026-11-22 — Task stage: legacy approvals read needs-you
+
+- Closes the E1 finding (#238): a legacy (non-Harness) run waiting on an approval read `working/live-run`, so `aos task ls --attention` and the MCP `pendingApprovals` count missed it.
+- `TaskStageReader` now reads a live legacy run (`runs.state` `STARTING`/`ACTIVE`) whose newest event is `approval.requested` as `AWAITING_APPROVAL`, the same rule the web's legacy `pendingApproval` already used. Core `deriveStage` is unchanged; no new value or rule, so no API bump. `effectiveStateSql` is unchanged for every other read path.
+- The legacy event loop publishes a stage-only `state` frame when a run enters or leaves the wait, as the Harness session store does.
+- Known imprecision: between the answer and the adapter's next event the run still reads `needs-you`.
