@@ -2,7 +2,7 @@
  * qcq-01: `GET /api/tasks/:id/estimate` and `GET /api/estimates/accuracy` over real routes, fake
  * assistants and FAKE usage records. Advisory: the estimate routes the task with the router's pure
  * inputs and persists nothing, so a read leaves no routing decision, dispatch or wait behind.
- * The clock runs from Sunday 2026-11-22 10:00 Asia/Jerusalem (working hours).
+ * The clock runs from Sunday 2030-01-06 10:00 Asia/Jerusalem (working hours).
  */
 import { afterEach, describe, expect, it } from "vitest";
 import type { AccuracyReport } from "@agent-plane/core";
@@ -15,7 +15,8 @@ afterEach(async () => {
   rig = undefined;
 });
 
-const SUN_1000 = Date.parse("2026-11-22T08:00:00.000Z");
+// Fixed Sunday far enough ahead that wall-clock run timestamps always precede it.
+const SUN_1000 = Date.parse("2030-01-06T08:00:00.000Z");
 const ASSISTANTS = { "fake-a": { provider: "fake" }, "fake-b": { provider: "fake" } } as const;
 
 async function boot(configure?: (c: Rig["config"]) => void) {
@@ -98,8 +99,8 @@ describe("GET /api/tasks/:id/estimate", () => {
     const blocked = await get<TaskEstimate>(`/api/tasks/${id}/estimate?approval=required`);
     expect(blocked.recommendation).toMatchObject({ action: "wait-for-approval", startAt: null });
     expect(blocked.estimate.approvalWait).toMatchObject({ required: true, pending: 0 });
-    const soon = await get<TaskEstimate>(`/api/tasks/${id}/estimate?deadline=2026-11-22T09:00:00Z`);
-    expect(soon.recommendation).toMatchObject({ action: "run-now", speedWeight: 1, deadline: "2026-11-22T09:00:00.000Z", meetsDeadline: true });
+    const soon = await get<TaskEstimate>(`/api/tasks/${id}/estimate?deadline=2030-01-06T09:00:00Z`);
+    expect(soon.recommendation).toMatchObject({ action: "run-now", speedWeight: 1, deadline: "2030-01-06T09:00:00.000Z", meetsDeadline: true });
     expect(soon.recommendation.reasons[0]).toMatch(/^due soon/);
     expect(soon.policy.eveningsAllowed).toBe(true);
   });
