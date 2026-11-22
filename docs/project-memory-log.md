@@ -1006,3 +1006,11 @@ Migration 041 adds `runs.harness_cli_version` (TEXT NULL, forward only, no backf
 - **Decision:** accuracy is a replay of the versioned estimator (`run-estimate/1`) over recorded runs, each estimated only from runs that ended before it started. Persisting the estimate shown at dispatch is qcq-02.
 - **Decision:** API spend, API-equivalent and subscription quota stay separate; billing kind is the provider default because manifests do not carry the plan. Effort is `null` until p1-5 records it in the execution identity.
 - **Coordination:** mcp-api-grants (C1) merged first and took API 2.14, so this contract is 2.15.
+
+## 2026-11-22 — mcp-service (C2): apps/mcp, owner-only OAuth, four tools — SHIPPED
+
+- `apps/mcp` (`@agent-plane/mcp`, MCP TypeScript SDK pinned 1.32.2) serves Streamable HTTP `/mcp` plus a co-hosted OAuth 2.1 server (code + PKCE S256, DCR and CIMD, RFC 9728/8414/8707/9207) on 127.0.0.1 only. Owner login is the service's own OIDC client with an exact `(iss, sub)` pin; email never authorizes. OAuth state lives in its own SQLite file (`stateDb`), never the plane DB. `revoke --all` ends every grant and client.
+- It boots only when the plane credential holds exactly `tasks.read`/`tasks.create`/`tasks.start`, the plane publishes `mcp.webOrigin`, and every MCP alias is in the plane's `mcp.repos` with its path exactly in `repoAllowlist`. The alias→path map is held on both sides (plane config and MCP config) because `GET /api/workspace` publishes alias names only.
+- Contract amendment (mcp-tools/v1 README, ADR): a tool error's `tool-error` object travels as JSON in `content[1].text`, not `structuredContent`. The SDK client validates any `structuredContent` against the success `outputSchema` even when `isError` is true, and rejects it.
+- Known gap: no `tasks.read` route publishes the pending-approval count or the verification summary, so `get_task` returns `pendingApprovals` as the stage's `awaiting-approval` lower bound (0 or 1) and `verification: null`. Closing it needs those fields on `GET /api/tasks/:id` (plane-owned).
+- Owner questions still open and left configurable: MCP-created tasks as the agent user (plane `mcp.runAs`), first exposed repos (`repos`), public hostname (`publicUrl`).

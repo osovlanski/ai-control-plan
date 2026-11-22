@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://agent-plane.local/contracts/mcp-tools/v1/tool-error.schema.json",
   "title": "ToolError",
-  "description": "structuredContent of a tool result with isError true. Transport and auth failures are HTTP errors, not tool errors.",
+  "description": "The object a tool result with isError true carries as JSON in content[1].text (not as structuredContent, which clients validate against the success outputSchema). Transport and auth failures are HTTP errors, not tool errors.",
   "type": "object",
   "additionalProperties": false,
   "required": [

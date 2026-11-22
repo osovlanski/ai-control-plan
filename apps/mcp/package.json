@@ -1,0 +1,30 @@
+{
+  "name": "@agent-plane/mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Owner-only MCP connector: list/get/create/start tasks over the plane API with a narrow credential (docs/adr/mcp-connector.md)",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "revoke": "tsx src/bin/revoke.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "better-sqlite3": "^12.2.0",
+    "yaml": "^2.8.0",
+    "ajv": "^8.20.0",
+    "jose": "6.2.9",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@agent-plane/api": "workspace:*",
+    "@agent-plane/core": "workspace:*",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.15.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.0"
+  }
+}
