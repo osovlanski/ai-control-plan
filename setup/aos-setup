@@ -59,14 +59,17 @@ if [ ! -x "$L/claude" ]; then
 fi
 # Acceptance (§C.2.7) runs `pnpm` as aos-agent, which cannot see the plane user's home. node and
 # pnpm go in /opt/aos-tools, root-owned. Copied from the plane user's node, so versions match.
-if [ ! -x /opt/aos-tools/bin/pnpm ] || [ ! -x /opt/aos-tools/bin/node ]; then
+# npm goes in too (G15 attempt 14): the plane's own npm-project verification and its tests run `npm test`.
+if [ ! -x /opt/aos-tools/bin/pnpm ] || [ ! -x /opt/aos-tools/bin/node ] || [ ! -x /opt/aos-tools/bin/npm ]; then
   nodebin="$(readlink -f "/home/$PLANE_USER/.local/bin/node")"; npm="/home/$PLANE_USER/.local/bin/npm"
   [ -x "$nodebin" ] && [ -x "$npm" ] || { echo "aos-setup: need node and npm at /home/$PLANE_USER/.local/bin to install /opt/aos-tools" >&2; exit 1; }
   install -d -o root -g root -m 0755 /opt/aos-tools /opt/aos-tools/bin
   install -o root -g root -m 0755 "$nodebin" /opt/aos-tools/bin/node
-  env HOME=/root PATH="/opt/aos-tools/bin:/usr/bin:/bin" "$nodebin" "$(readlink -f "$npm")" install -g --prefix /opt/aos-tools "pnpm@$PNPM_VERSION" --no-audit --no-fund --loglevel=error
+  npmver="$("$nodebin" "$(readlink -f "$npm")" --version)"
+  [[ "$npmver" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "aos-setup: unexpected npm version '$npmver'" >&2; exit 1; }
+  env HOME=/root PATH="/opt/aos-tools/bin:/usr/bin:/bin" "$nodebin" "$(readlink -f "$npm")" install -g --prefix /opt/aos-tools "pnpm@$PNPM_VERSION" "npm@$npmver" --no-audit --no-fund --loglevel=error
   chown -R root:root /opt/aos-tools; chmod -R a+rX,go-w /opt/aos-tools
-  say "node + pnpm $PNPM_VERSION installed in /opt/aos-tools"
+  say "node + pnpm $PNPM_VERSION + npm $npmver installed in /opt/aos-tools"
 fi
 # P0-3: the close timer (§C.2.5) in aos-agent's own user manager. Root-owned unit files in
 # /etc/systemd/user, enabled globally; ConditionUser keeps every other user's manager out of it.
