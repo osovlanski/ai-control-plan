@@ -11,6 +11,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@agent-plane/oidc": "workspace:*",
     "@modelcontextprotocol/sdk": "1.32.2",
     "better-sqlite3": "^12.2.0",
     "yaml": "^2.8.0",

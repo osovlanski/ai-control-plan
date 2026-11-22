@@ -23,6 +23,7 @@
   "dependencies": {
     "@agent-plane/adapters": "workspace:*",
     "@agent-plane/core": "workspace:*",
+    "@agent-plane/oidc": "workspace:*",
     "@anthropic-ai/sdk": "^0.128.0",
     "@fastify/static": "^8.2.0",
     "ajv": "^8.20.0",

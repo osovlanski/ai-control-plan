@@ -1014,3 +1014,11 @@ Migration 041 adds `runs.harness_cli_version` (TEXT NULL, forward only, no backf
 - Contract amendment (mcp-tools/v1 README, ADR): a tool error's `tool-error` object travels as JSON in `content[1].text`, not `structuredContent`. The SDK client validates any `structuredContent` against the success `outputSchema` even when `isError` is true, and rejects it.
 - Known gap: no `tasks.read` route publishes the pending-approval count or the verification summary, so `get_task` returns `pendingApprovals` as the stage's `awaiting-approval` lower bound (0 or 1) and `verification: null`. Closing it needs those fields on `GET /api/tasks/:id` (plane-owned).
 - Owner questions still open and left configurable: MCP-created tasks as the agent user (plane `mcp.runAs`), first exposed repos (`repos`), public hostname (`publicUrl`).
+
+## 2026-11-22 — remote-auth (B2): private Web link, second loopback listener, Google OIDC owner — SHIPPED on merge
+
+- D-B amends the remote-auth ADR: one process, two loopback listeners. The local listener (bootstrap, bearer CLI, local cookie) is unchanged; `api.remote.port` accepts only remote sessions and never mints one from bootstrap. Routes scope themselves with `config.listener`. Do not re-propose "remote disables local".
+- D-A: the ID token check and the exact `(iss, sub)` pin are one shared package, `packages/oidc`, used by the Web login and `apps/mcp`. Each keeps its own Google client.
+- The remote listener trusts only the Tailscale Serve header set (one Host/X-Forwarded-Host/-Proto/-For, `Tailscale-User-Login` equal to config, no Funnel, loopback peer). The login header is a path check, not identity. B3 must confirm the headers on the box.
+- Deviation kept on purpose: remote grants reuse the existing capability vocabulary, so the owner may hold `commands.write` remotely until the per-command grant inventory lands. `autopilot.operate` and `usage.write` are never remote.
+- Migration 055 (`remote_sessions`, `remote_login_transactions`, `remote_auth_limits`). Every boot revokes all remote sessions; login budget survives restart.

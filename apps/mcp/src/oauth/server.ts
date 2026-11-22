@@ -4,7 +4,7 @@ import { SCOPES, type Scope } from "../contract.js";
 import { cookies, escapeHtml, readBody, redirect, sendHtml, sendJson } from "../http-util.js";
 import type { RateLimiter } from "../ratelimit.js";
 import { hash, safeEqual, token, type ClientRow, type OAuthStore } from "./store.js";
-import { s256, type OidcClient } from "./oidc.js";
+import { ownerPinMatches, s256, type OidcClient } from "./oidc.js";
 
 /**
  * OAuth 2.1 authorization server for MCP clients (docs/adr/mcp-connector.md, "Access model"):
@@ -251,7 +251,7 @@ export class AuthServer {
       return sendHtml(res, 403, "Sign-in failed", "<p>The identity provider's answer could not be verified.</p>");
     }
     // D-A: exact (iss, sub). Email, domain or name never authorize.
-    if (claims.iss !== this.o.owner.issuer || claims.sub !== this.o.owner.subject) {
+    if (!ownerPinMatches(claims, this.o.owner)) {
       this.o.store.dropPending(pending.id);
       this.o.log({ event: "oauth.login", outcome: "not_owner" });
       return sendHtml(res, 403, "Not allowed", "<p>This account is not the owner of this Agent OS. Nothing was granted.</p>");

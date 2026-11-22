@@ -52,9 +52,27 @@ try {
   process.exit(1);
 }
 
+// B2 (D-B): the remote-only listener for the private Web link, on its own loopback port. The local
+// listener above is already serving and stays unchanged. Remote listens only after the pinned OIDC
+// issuer is ready; until then nothing answers on its port (fail closed) and a retry runs each minute.
+let remoteRetry: NodeJS.Timeout | undefined;
+const listenRemote = app.listenRemote;
+if (listenRemote) {
+  const attempt = async (): Promise<void> => {
+    try { await listenRemote(); }
+    catch (err) {
+      app.log.error({ event: "remote_auth", action: "listen", outcome: "refused", reason: err instanceof Error ? err.message : String(err) }, "remote listener not started; retrying in 60 s");
+      remoteRetry = setTimeout(() => void attempt(), 60_000);
+      remoteRetry.unref();
+    }
+  };
+  await attempt();
+}
+
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.once(signal, () => {
     stopJobs();
+    if (remoteRetry) clearTimeout(remoteRetry);
     void app.close().then(() => {
       db.close();
       process.exit(0);

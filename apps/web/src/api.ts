@@ -379,7 +379,8 @@ async function req<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, {
     ...init,
     credentials: "include",
-    headers: init?.body ? { "content-type": "application/json" } : undefined,
+    // B2: unsafe requests on the private Web link carry the remote session's CSRF token (empty locally).
+    headers: { ...(init?.body ? { "content-type": "application/json" } : {}), ...csrfHeaders(init?.method) },
   });
   if (!res.ok) {
     if (res.status === 401) { emitAuthExpired(); throw new AuthExpiredError(); }
@@ -483,7 +484,7 @@ async function submitSessionInput(sessionId: string, body: { clientMessageId: st
   const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/inputs`, {
     method: "POST",
     credentials: "include",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...csrfHeaders("POST") },
     body: JSON.stringify(body),
   });
   if (res.status === 401) { emitAuthExpired(); throw new AuthExpiredError(); }
@@ -808,3 +809,4 @@ export interface AssistantScore {
   errors: number;
 }
 import { AuthExpiredError, emitAuthExpired } from "./auth.js";
+import { csrfHeaders } from "./auth/remote.js";

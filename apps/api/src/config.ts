@@ -1,5 +1,6 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { ensureCredential } from "./auth/credential-file.js";
+import { resolveRemoteAuth, type RemoteAuthConfig } from "./auth/remote/config.js";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { parse, stringify } from "yaml";
@@ -41,6 +42,11 @@ export interface WorkspaceConfig {
     host: string;
     port: number;
     auth: { bootstrapTtlSeconds: number; sessionTtlSeconds: number; rotationGraceSeconds: number };
+    /**
+     * B2: the second loopback listener for the private Web link (Tailscale Serve target). Absent = no
+     * remote listener. The local listener above is unchanged either way (D-B). See auth/remote/config.ts.
+     */
+    remote?: RemoteAuthConfig;
   };
   /** Assistant environments this workspace instance may route to. */
   assistants: Record<string, AssistantConfig>;
@@ -752,9 +758,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ResolvedConfig
   const resources = pools(file.scheduler?.resources);
   const admission = resolveAdmission(file.scheduler?.admission, resources, execution.agentUser?.worktreesRoot ?? dir, configPath);
 
+  // `api.remote` is parsed strictly on its own; it never rides the permissive `...file.api` spread.
+  const { remote: rawRemote, ...fileApi } = (file.api ?? {}) as Partial<WorkspaceConfig["api"]> & { remote?: unknown };
+  const remoteProblems: string[] = [];
+  const remote = resolveRemoteAuth(rawRemote, { localPort: fileApi.port ?? defaults.api.port, configDir: dir, workspace, fileWorkspace: file.workspace }, remoteProblems);
+  if (remoteProblems.length) throw new Error(`Invalid config at ${configPath}:\n  - ${remoteProblems.join("\n  - ")}`);
+
   const config: WorkspaceConfig = {
     workspace: file.workspace ?? workspace,
-    api: { ...defaults.api, ...file.api, auth: { ...defaults.api.auth, ...file.api?.auth } },
+    api: { ...defaults.api, ...fileApi, auth: { ...defaults.api.auth, ...file.api?.auth }, ...(remote ? { remote } : {}) },
     assistants: file.assistants ?? defaults.assistants,
     repoAllowlist: file.repoAllowlist ?? defaults.repoAllowlist,
     policy: { ...defaults.policy, ...file.policy },

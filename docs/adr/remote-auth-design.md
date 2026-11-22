@@ -2,6 +2,10 @@
 
 2026-10-04 · **PROPOSED — design only; no remote auth is implemented here.**
 
+**2026-11-22 · B2: the one-origin topology is implemented, with the amendments in
+[B2 amendments](#b2-amendments-2026-11-22) below. Where this document and those
+amendments disagree, the amendments win. Everything they do not name stays PROPOSED.**
+
 The governing decision is [agentic-os-deployment.md](agentic-os-deployment.md),
 especially “Remote security model required before deployment” and migration stage 2.
 A remains current; B remains an isolated protected fixture preview until remote
@@ -394,3 +398,137 @@ These remain undecided; the numbers and mechanisms above are proposals.
 8. Who performs the out-of-band enrollment and emergency revoke/config recovery,
    and what stage 2 evidence will they review before the ADR's separate deployment
    approval? Stage 3 worker identity/dispatch questions remain out of scope.
+
+## B2 amendments (2026-11-22)
+
+**SHIPPED for the one-origin topology behind Tailscale Serve.** Decisions: D-A and D-B from
+the "Plan Mobile, MCP and OCI milestone" preflight, D-E (reconnect from durable reads, B1).
+Source: `apps/api/src/auth/remote/**`, `packages/oidc`, migration `055_remote_auth.sql`,
+`apps/web/src/auth/**`. Acceptance: `apps/api/test/remote-auth.test.ts` (real sockets) and
+`apps/web/e2e/remote-auth.spec.ts` (real browser, phone viewport).
+
+### A1. Identity (D-A)
+
+Google OIDC, authorization code + PKCE S256, `openid` scope only. Authorization is the exact
+`(iss, sub)` pair in configuration; email, domain and name never authorize. The ID token check
+(signature, `iss`, `aud`, `azp`, `exp`, nonce) and the pin are one shared package,
+`packages/oidc`, used by both this login and the MCP OAuth server (`apps/mcp`), so the two can
+not drift. Each keeps its own OAuth client at Google. Provider tokens are discarded. The owner
+gets the `sub` out of band before enabling remote mode; there is no first-login enrollment.
+
+### A2. Two loopback listeners (D-B) — replaces "remote mode disables local"
+
+One process, one kernel, one SQLite writer, two listeners:
+
+| Listener | Accepts | Never accepts |
+| --- | --- | --- |
+| Local (`api.host`/`api.port`, unchanged) | Bootstrap, local bearer (CLI, Cockpit, MCP), local cookie, operator secret | A remote session cookie; the remote login/session routes answer 404 |
+| Remote (`api.remote.port`, always `127.0.0.1`; the Tailscale Serve target) | Only requests inside the proxy contract (A3), then only a remote session cookie | A bearer of any kind, a local cookie, bootstrap (404) |
+
+Routes declare `config.listener` when they belong to one side; the other side answers 404
+before any authentication. `POST /api/auth/remote/revoke-all` (local listener, `commands.write`)
+is the operator recovery: it revokes every remote session and closes their streams in the single
+writer. Without `api.remote` nothing changes and no remote route exists. The non-loopback bind
+refusal stays: the remote listener is loopback too, and Tailscale Serve is the only way in.
+
+### A3. Transport: trusted proxy = Tailscale Serve
+
+`transport.kind: trusted-proxy` is the only transport implemented (`direct-tls` is refused by
+config). Tailscale Serve proxies with Go's `ReverseProxy.Rewrite`: it drops client `Forwarded`
+and `X-Forwarded-*`, sets one `X-Forwarded-Host`, `X-Forwarded-Proto: https` and
+`X-Forwarded-For`, clears client `Tailscale-User-*` and sets `Tailscale-User-Login` only for a
+user-owned tailnet node (not Funnel, not tagged nodes). Every request on the remote listener,
+including the SPA shell and the login routes, must have: a configured loopback socket peer;
+exactly one `Host` and one `X-Forwarded-Host`, both the canonical authority; exactly one
+`X-Forwarded-Proto: https`; exactly one `X-Forwarded-For` holding one IP (the limiter address);
+no `Forwarded`; no `Tailscale-Funnel-Request`; exactly one `Tailscale-User-Login` equal to
+`transport.tailscaleUserLogin`. Anything else is 403 before cookies, login, data or streams. The
+login header is a network-path check, not identity: a local process could forge it, so the OIDC
+session is always required as well. B3 confirms these headers on the box before rollout.
+
+### A4. Configuration: `api.remote`, not `api.auth.mode`
+
+`api.auth` stays the local listener's numeric block. The remote block is parsed strictly on its
+own (unknown keys anywhere are errors) and never rides the permissive `api` merge:
+
+```yaml
+api:
+  remote:
+    port: <loopback port, not api.port>
+    canonicalOrigin: https://<box>.<tailnet>.ts.net   # browser + API origin, no path
+    transport: { kind: trusted-proxy, peers: ["127.0.0.1"], tailscaleUserLogin: <owner's tailnet login> }
+    identity:
+      issuer: https://accounts.google.com
+      clientId: <Web OAuth client id>
+      clientSecretFile: <file, mode 600, owned by the plane user>
+      owner: { issuer: https://accounts.google.com, subject: <owner's Google sub> }
+    grants: [<capabilities>]                          # explicit, no implicit *
+    session: { absoluteTtlSeconds: 43200, idleTtlSeconds: 1800 }   # defaults
+    limits: { ... }                                   # optional; defaults below
+```
+
+The redirect URI is fixed: `<canonicalOrigin>/api/auth/callback`. A YAML `workspace` label that
+contradicts the boot-selected workspace is refused. The listener starts only after OIDC
+discovery and the key set answer; until then nothing listens on its port, the local listener
+serves as usual, and the readiness check retries every minute. A runtime IdP failure denies new
+logins and never falls back.
+
+### A5. Grants — existing capability vocabulary for now
+
+The per-command grant families in "Command and workspace authorization" are deferred. A remote
+session holds exactly `api.remote.grants`, drawn from the observability reads, `commands.write`
+and the 2.14 narrow `tasks.create`/`tasks.start`. `autopilot.operate` and `usage.write` are never
+grantable remotely. **Deviation:** `commands.write` may be granted to the one owner, because
+approving from the phone needs it today; the ADR's "commands.write alone is insufficient for
+remote callers" applies once the grant inventory lands. A grant set without `commands.write`
+is held to the 2.14 narrow-credential rules (idempotency key, `mcp.repos` alias) by the existing
+handlers. Grants are read from configuration on every request.
+
+### A6. Sessions, CSRF and streams
+
+As designed above, with: 256-bit handle in `__Host-acp_remote_session` (Strict); only hashes
+stored; every request re-checks revocation, absolute and idle deadlines, workspace id and the
+current owner pseudonym. Idle time moves only on CSRF-checked unsafe requests (including
+`POST /api/auth/activity`, which the Web client sends on real pointer/key input at most once a
+minute); reads, polling and SSE never move it. A login started from the app carries the old
+session, which the callback revokes (re-login rotation). Every boot revokes all remote sessions.
+Origin is checked before authentication on every API request; without Origin, reads need
+`Sec-Fetch-Site: same-origin` and unsafe methods are refused.
+
+D-E: no stream journal, cursor or Last-Event-ID in this slice; the Web client reconciles from
+durable reads (B1). Open streams are tracked per session, capped (3 per session, 10 per
+instance), and closed within a second of revocation, logout, revoke-all or either deadline.
+Heartbeats and the stream status probe remain PROPOSED with the journal.
+
+### A7. Limits and audit
+
+Login start and callback share a persistent budget (SQLite, survives restart; store failure
+answers 503). Command, start, read and stream-open budgets are in memory: a restart revokes
+every session, and a new one needs a login, which is persistently budgeted, so a restart is no
+free bypass. Auth events are structured log lines (`event: "remote_auth"`) with a principal
+pseudonym and reason codes; no cookie, code, state, CSRF value, login URL or client secret is
+logged (login and callback routes log nothing themselves). A durable auth-audit table waits for
+the owner's retention decision (question 7).
+
+### A8. Acceptance cases run
+
+| Case | Ran | Where |
+| --- | --- | --- |
+| Hostile origin / CSRF | yes | test "hostile origin and CSRF" ×2; e2e hostile page |
+| OIDC owner / transaction | yes | test "OIDC owner login and transaction" ×5; e2e owner + non-owner |
+| Expiry / revocation / logout | yes | test ×4; e2e idle expiry + sign-out |
+| Workspace escape / child membership | W1 cookie on W2 and W2 ids through W1 | test "workspace escape" ×2; nested-resource membership is the existing handlers' |
+| Command-level denial | yes, with the existing vocabulary (A5) | test "command-level denial" ×2 |
+| SSE resume, races and retention | not applicable: no journal (D-E) | — |
+| SSE cursor/auth abuse | auth parts only (no cursor exists) | hostile-origin SSE, expired/revoked SSE |
+| Canonical proxy | yes | test "canonical proxy contract" ×2 |
+| Limits / secrecy | yes | test "limits and secrecy" ×2 |
+| Local / remote configuration | yes | test "local and remote coexistence" ×2; existing `auth.test.ts`, `auth.spec.ts` unchanged |
+| Two-origin B browser matrix | not applicable: topology C (one origin) chosen | — |
+
+### A9. Left for B3 (owner, on the box)
+
+Create the Google Web OAuth client with the fixed redirect URI, obtain the owner `sub` out of
+band, write the secret file (mode 600), add `api.remote`, set `mcp.webOrigin` to the same
+canonical origin so MCP Web links open the private link, restart, then point Tailscale Serve
+(HTTPS, tailnet only, never Funnel) at the remote port. None of that is done by B2.
