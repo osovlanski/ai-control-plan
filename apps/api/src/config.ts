@@ -264,6 +264,8 @@ export interface WorkspaceConfig {
   };
   /** P0-2 (auto-copilot plan §C.2): the autopilot's bounds. Every key has a default. */
   autopilot?: Partial<ResolvedAutopilotConfig>;
+  /** 2.14 (mcp-api-grants): what the MCP connector may reach. Absent = no aliases, no Web link. */
+  mcp?: { webOrigin?: string; repos?: Record<string, string>; runAs?: "agent" };
 }
 
 /** The resolved autopilot block: always present. It bounds the autopilot; it never starts it. */
@@ -321,6 +323,51 @@ export interface ResolvedAutopilotConfig {
   backup?: { localDir?: string; keepDays: number; destination?: string };
 }
 export interface AutopilotRepoConfig { github: string; path: string; base: string }
+
+/**
+ * 2.14 (mcp-api-grants, docs/adr/mcp-connector.md). `repos` maps a short alias to a path that must
+ * be EXACTLY an entry of `repoAllowlist` (the allowlist matches by prefix; an alias never does).
+ * A credential without `commands.write` creates tasks only through an alias. `webOrigin` is the
+ * private HTTPS Web origin; create/start answer `webLink: <webOrigin>/#/missions/<taskId>` only when
+ * it is set. `runAs: agent` makes every task a narrow credential creates run as the agent user;
+ * unset (the default, pending the owner's answer) keeps today's behaviour.
+ */
+export interface ResolvedMcpConfig { webOrigin?: string; repos: Record<string, string>; runAs?: "agent" }
+export const MCP_REPO_ALIAS = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+
+function resolveMcp(file: unknown, repoAllowlist: readonly string[], hasAgentUser: boolean, configPath: string): ResolvedMcpConfig {
+  const repos: Record<string, string> = Object.create(null) as Record<string, string>;
+  if (file === undefined) return { repos };
+  if (!isRecord(file)) throw new Error(`${configPath}: mcp must be a mapping`);
+  const unknown = Object.keys(file).filter((k) => !["webOrigin", "repos", "runAs"].includes(k));
+  if (unknown.length > 0) throw new Error(`${configPath}: mcp has unknown key(s): ${unknown.join(", ")}`);
+  const out: ResolvedMcpConfig = { repos };
+  if (file.webOrigin !== undefined) {
+    let url: URL;
+    try { url = new URL(String(file.webOrigin)); } catch { throw new Error(`${configPath}: mcp.webOrigin must be an https origin`); }
+    const origin = url.origin;
+    if (typeof file.webOrigin !== "string" || url.protocol !== "https:" || url.username || url.password || (file.webOrigin !== origin && file.webOrigin !== `${origin}/`)) {
+      throw new Error(`${configPath}: mcp.webOrigin must be an https origin with no path, query, fragment or credentials`);
+    }
+    out.webOrigin = origin;
+  }
+  if (file.repos !== undefined) {
+    if (!isRecord(file.repos)) throw new Error(`${configPath}: mcp.repos must be a mapping of alias to absolute path`);
+    for (const alias of Object.getOwnPropertyNames(file.repos)) {
+      const path = file.repos[alias];
+      if (!MCP_REPO_ALIAS.test(alias)) throw new Error(`${configPath}: mcp.repos alias ${JSON.stringify(alias)} must match ${MCP_REPO_ALIAS.source}`);
+      if (typeof path !== "string" || !isAbsolute(path) || resolve(path) !== path) throw new Error(`${configPath}: mcp.repos.${alias} must be an absolute, normalized path`);
+      if (!repoAllowlist.includes(path)) throw new Error(`${configPath}: mcp.repos.${alias} must be exactly an entry of repoAllowlist (prefix matches are not accepted)`);
+      repos[alias] = path;
+    }
+  }
+  if (file.runAs !== undefined) {
+    if (file.runAs !== "agent") throw new Error(`${configPath}: mcp.runAs accepts only "agent"`);
+    if (!hasAgentUser) throw new Error(`${configPath}: mcp.runAs "agent" needs execution.agentUser`);
+    out.runAs = "agent";
+  }
+  return out;
+}
 export const AUTOPILOT_DEFAULTS: Omit<ResolvedAutopilotConfig, "repos"> & { repos: Readonly<Record<string, AutopilotRepoConfig>> } = {
   pool: "oci-heavy", runtimeBudgetMs: 90 * 60_000, attemptsPerItem: 2, itemsPerWindow: 3,
   minSliceMs: 10 * 60_000, graceMs: 2 * 60_000, hostRetryMs: 2 * 60_000, attestationMaxAgeDays: 30,
@@ -528,8 +575,10 @@ export interface ResolvedComposerConfig {
   };
 }
 
-export interface ResolvedConfig extends Omit<WorkspaceConfig, "execution" | "models" | "decisions" | "sessionInput" | "registry" | "composer" | "autopilot"> {
+export interface ResolvedConfig extends Omit<WorkspaceConfig, "execution" | "models" | "decisions" | "sessionInput" | "registry" | "composer" | "autopilot" | "mcp"> {
   registry: ResolvedRegistryConfig;
+  /** Always present; empty aliases and no Web origin unless the workspace sets `mcp`. */
+  mcp: ResolvedMcpConfig;
   /** Always present: the autopilot's bounds (it is started by an operator call, never by config). */
   autopilot: ResolvedAutopilotConfig;
   /** Always present; `enabled` is false unless the workspace turns it on. */
@@ -702,6 +751,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ResolvedConfig
   };
 
   validate(config, configPath);
+  const mcp = resolveMcp(file.mcp, config.repoAllowlist, execution.agentUser !== undefined, configPath);
   validateModels(models, configPath);
   validateDecisions(decisions, configPath, workspace);
 
@@ -713,7 +763,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ResolvedConfig
   }
   ensureCredential(dir);
 
-  return { ...config, execution, models, decisions, sessionInput, registry, composer, autopilot, dir, dbPath: join(dir, "agent-plane.db"), warnings };
+  return { ...config, execution, models, decisions, sessionInput, registry, composer, autopilot, mcp, dir, dbPath: join(dir, "agent-plane.db"), warnings };
 }
 
 /**

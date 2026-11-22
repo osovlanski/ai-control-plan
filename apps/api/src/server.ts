@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import {
   AUTOPILOT_OPERATE_CAPABILITY,
   COMMAND_CAPABILITIES,
+  TASK_COMMAND_CAPABILITIES,
   INGEST_CAPABILITIES,
   CONTROL_PLANE_API_VERSION,
   NORMALIZED_EVENT_VERSION,
@@ -18,6 +19,7 @@ import {
   type RoutingProfile,
   type ScheduleInput,
   type TaskIntent,
+  type TaskEnvelope,
   type WaitInput,
 } from "@agent-plane/core";
 import type { ResolvedConfig } from "./config.js";
@@ -77,6 +79,7 @@ import { CodexAdapter } from "@agent-plane/adapters";
 import { CredentialStore, credentialPath } from "./auth/credential-file.js";
 import { onRunSessionRef, UsageLedger, validateUsageRecord } from "./modules/usage.js";
 import { AssetTelemetry } from "./modules/asset-telemetry.js";
+import { IDEMPOTENCY_KEY, IdempotencyStore, fingerprint } from "./modules/idempotency.js";
 import { AssetShadow, parseScoresQuery, parseShadowQuery, type ShadowScorer } from "./modules/asset-shadow.js";
 import { MemoryProposals, parseMemoryFeedQuery, readMemoryProposalPage } from "./modules/memory-proposals.js";
 import { MemoryFederation, MemoryShadowLog, memoryShadowResponse, parseMemoryShadowQuery, type MemorySnapshotSource, type MemoryShadowScorer } from "./modules/memory-federation.js";
@@ -204,7 +207,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   const routerOptions = { maxParamLength: 2 * (MAX_ASSISTANT_ID_LENGTH + 1) };
   // pino's default `base` adds the machine's hostname to every line; the plane never logs hostnames.
   const app = Fastify({ routerOptions, logger: { base: { pid: process.pid }, stream: { write: (line) => process.stdout.write(redactSecrets(line)) }, serializers: { req: (r) => ({ method: r.method, url: String(r.url).split("?")[0] }), res: (r) => ({ statusCode: r.statusCode }) }, redact: ["req.headers.authorization", "req.headers.cookie", "res.headers[\"set-cookie\"]"] } });
-  const credentials = new CredentialStore(credentialPath(config.dir), now);
+  const credentials = new CredentialStore(credentialPath(config.dir), now, config.dir);
   const authSessions: SessionMap = new Map();
   registerAuth(app, { config, credentials, sessions: authSessions, db, now });
   for (const warning of config.warnings ?? []) app.log.warn(warning);
@@ -384,7 +387,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     apiVersion: CONTROL_PLANE_API_VERSION,
     eventVersion: NORMALIZED_EVENT_VERSION,
     authRequired: true,
-    capabilities: [...OBSERVABILITY_CAPABILITIES, ...COMMAND_CAPABILITIES, ...INGEST_CAPABILITIES],
+    capabilities: [...OBSERVABILITY_CAPABILITIES, ...COMMAND_CAPABILITIES, ...TASK_COMMAND_CAPABILITIES, ...INGEST_CAPABILITIES],
   }));
 
   app.get("/api/health", read.tasks, () => ({
@@ -405,6 +408,8 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     // without probing a route that does not exist.
     sessionInput: { enabled: config.sessionInput.enabled },
     composer: { enabled: config.composer.enabled, requireRevision: config.composer.requireRevision },
+    // 2.14: the repository aliases a narrow credential may create in, and whether tasks get a Web link.
+    mcp: { repos: Object.keys(config.mcp.repos), webOrigin: config.mcp.webOrigin ?? null },
   }));
 
   // ---- Assistants / registry ----
@@ -709,41 +714,135 @@ export function buildServer(deps: ServerDeps): BuiltServer {
 
   // ---- Tasks ----
 
+  // ---- 2.14 (mcp-api-grants): narrow grants, idempotent create/start, Web link ----
+  // `commands.write` implies both capabilities (core `capabilityGranted`), so every existing caller
+  // passes. A caller WITHOUT `commands.write` (the MCP credential) is "narrow": it must name a repo by
+  // `mcp.repos` alias, must send an idempotency key, and may send none of the operator knobs.
+  const taskCreate = { config: { auth: { require: "tasks.create" } } } as const;
+  const taskStart = { config: { auth: { require: "tasks.start" } } } as const;
+  const idempotency = new IdempotencyStore(db, now);
+  try { idempotency.sweep(); } catch (err) { app.log.warn({ err: message(err) }, "idempotency sweep failed"); }
+  const idempotencySweep = setInterval(() => { try { idempotency.sweep(); } catch { /* next hour */ } }, 3_600_000);
+  idempotencySweep.unref();
+  app.addHook("onClose", () => clearInterval(idempotencySweep));
+  const isNarrow = (req: FastifyRequest) => !req.cred || !req.cred.capabilities.includes("commands.write");
+  const webLinkFor = (taskId: string) => (config.mcp.webOrigin ? { webLink: `${config.mcp.webOrigin}/#/missions/${taskId}` } : {});
+  const aliasFor = (repoPath: string | null | undefined) =>
+    repoPath ? Object.keys(config.mcp.repos).find((alias) => config.mcp.repos[alias] === repoPath) : undefined;
+  const refuse = (reply: FastifyReply, status: number, reason: string, error: string, extra: Record<string, unknown> = {}) =>
+    reply.status(status).send({ error, reason, ...extra });
+  const badKey = (key: unknown) => key !== undefined && (typeof key !== "string" || !IDEMPOTENCY_KEY.test(key));
+
+  /** The route the plane would take if the task started now (docs/adr/mcp-connector.md, proposal). Advisory. */
+  const buildProposal = async (taskId: string) => {
+    const routed = computeRoute(taskId);
+    const ex = routed?.explanation;
+    let compositionDigest: string | null = null;
+    if (composer) {
+      const preview = await composer.preview(taskId);
+      if (preview.ok) compositionDigest = preview.preview.compositionDigest;
+    }
+    const chosen = ex?.chosen ?? null;
+    const cut = (text: string, max: number) => (text.length > max ? `${text.slice(0, max - 1)}…` : text);
+    const ruleFired = cut(ex?.ruleFired || "no_route", 200);
+    const passed = ex?.candidates.filter((c) => c.passedFilters).length ?? 0;
+    return {
+      eligible: chosen !== null,
+      assistantId: chosen,
+      ruleFired,
+      summary: cut(redactSecrets(chosen
+        ? `Routes to ${chosen} by rule ${ruleFired}; ${passed} of ${ex!.candidates.length} assistants passed the filters.`
+        : `No eligible assistant: none of ${ex?.candidates.length ?? 0} assistants passed the filters (rule ${ruleFired}).`), 500),
+      candidates: (ex?.candidates ?? []).slice(0, 20).map((c) => ({
+        assistantId: c.assistantId, passedFilters: c.passedFilters, filterFailures: c.filterFailures.slice(0, 20).map((f) => cut(f, 200)),
+      })),
+      compositionDigest,
+    };
+  };
+
   app.post<{
-    Body: { goal?: string; constraints?: string[]; repoPath?: string; profile?: RoutingProfile; wait?: WaitInput; overrides?: TaskIntent["overrides"]; mode?: string; runAs?: string };
-  }>("/api/tasks", write, async (req, reply) => {
-    const { goal, constraints, repoPath, profile, wait, overrides, mode, runAs } = req.body ?? {};
+    Body: { goal?: string; constraints?: string[]; repoPath?: string; repo?: string; profile?: RoutingProfile; wait?: WaitInput; overrides?: TaskIntent["overrides"]; mode?: string; runAs?: string; idempotencyKey?: string; propose?: boolean };
+  }>("/api/tasks", taskCreate, async (req, reply) => {
+    const body = req.body ?? {};
+    const { goal, constraints, profile, wait, overrides, mode, idempotencyKey, propose } = body;
+    let { repoPath, runAs } = body;
+    const narrow = isNarrow(req);
+    if (narrow) {
+      const extra = Object.keys(body).filter((k) => !["goal", "constraints", "repo", "profile", "idempotencyKey", "propose"].includes(k));
+      if (extra.length > 0) return refuse(reply, 403, "narrow_credential", `this credential may not send ${extra.join(", ")}`);
+      if (idempotencyKey === undefined) return refuse(reply, 400, "invalid_input", "idempotencyKey is required for this credential");
+      if (body.repo === undefined) return refuse(reply, 400, "invalid_input", "repo (an mcp.repos alias) is required for this credential");
+    }
     if (typeof goal !== "string" || !goal.trim()) return reply.status(400).send({ error: "goal is required" });
+    if (badKey(idempotencyKey)) return refuse(reply, 400, "invalid_input", "idempotencyKey must match ^[A-Za-z0-9._:-]{16,128}$");
+    if (propose !== undefined && typeof propose !== "boolean") return refuse(reply, 400, "invalid_input", "propose must be a boolean");
+    if (body.repo !== undefined) {
+      if (repoPath !== undefined) return refuse(reply, 400, "invalid_input", "send repo or repoPath, not both");
+      if (typeof body.repo !== "string" || !Object.hasOwn(config.mcp.repos, body.repo)) {
+        return refuse(reply, 403, "repo_not_allowed", "repo is not an exposed repository alias");
+      }
+      repoPath = config.mcp.repos[body.repo];
+    }
     if (repoPath !== undefined && typeof repoPath !== "string") return reply.status(400).send({ error: "repoPath must be a string" });
     if (repoPath && !repoAllowed(repoPath)) {
       return reply.status(403).send({ error: `Repository ${repoPath} is not in this workspace's allowlist` });
     }
+    // Owner question Q1 (ADR): unset keeps today's behaviour; `mcp.runAs: agent` runs narrow creates as the agent user.
+    if (narrow && config.mcp.runAs) runAs = config.mcp.runAs;
+    const extras = () => ({ ...(aliasFor(repoPath) ? { repo: aliasFor(repoPath) } : {}), ...(idempotencyKey !== undefined ? { replayed: false } : {}) });
+    const kid = req.cred?.kid ?? "anonymous";
+    const print = fingerprint({ goal: goal.trim(), constraints, repoPath, profile, wait, overrides, mode, runAs, propose: propose === true });
+    const release = idempotencyKey !== undefined ? idempotency.claim(kid, "task.create", idempotencyKey) : () => {};
+    if (!release) return refuse(reply, 409, "idempotency_in_progress", "a request with this idempotencyKey is still being handled", { retryable: true });
     try {
-      if (wait && mode && mode !== 'single') throw new Error('K1 waits require single mode');
-      // K7 widens overrides by exactly one field: `model`, the requested
-      // SELECTOR. It is recorded as intent and never resolved here.
-      if (overrides && (typeof overrides !== 'object' || Object.keys(overrides).some(k => k !== 'assistantId' && k !== 'model') ||
-          (overrides.assistantId !== undefined && typeof overrides.assistantId !== 'string') ||
-          (overrides.model !== undefined && (typeof overrides.model !== 'string' || !overrides.model.trim())))) throw new Error('overrides accept only assistantId and model');
-      if (constraints && (!Array.isArray(constraints) || constraints.some(c => typeof c !== 'string'))) throw new Error('constraints must be strings');
-      if (profile && !['auto','preserve-quota','fastest','best-quality','lowest-tokens'].includes(profile)) throw new Error('Invalid routing profile');
-      if (wait) scheduler.validate(wait);
-      // P0-A2: an agent task is refused here, not at launch, when the host cannot keep its code
-      // away from the plane user. It needs a repository: the agent cannot reach the workspace dir.
-      if (runAs !== undefined) {
-        if (runAs !== 'agent') throw new Error('runAs accepts only "agent"');
-        if (!config.execution.agentUser) throw new Error('runAs "agent" needs execution.agentUser, which this workspace does not configure');
-        if (!repoPath) throw new Error('runAs "agent" needs a repository');
-        if (mode && mode !== 'single') throw new Error('runAs "agent" requires single mode');
+      if (idempotencyKey !== undefined) {
+        const seen = idempotency.lookup(kid, "task.create", idempotencyKey, print);
+        if (seen.kind === "conflict") return refuse(reply, 409, "idempotency_conflict", "this idempotencyKey was used with different input");
+        if (seen.kind === "replay") {
+          // A NULL answer means the process stopped after the task was created: rebuild it.
+          const first = seen.record.response ?? {
+            ...tasks.envelope(seen.record.taskId), ...extras(), ...webLinkFor(seen.record.taskId),
+            ...(propose === true ? { proposal: await buildProposal(seen.record.taskId) } : {}),
+          };
+          if (!seen.record.response) idempotency.complete(kid, "task.create", idempotencyKey, 201, first);
+          return reply.status(seen.record.statusCode ?? 201).send({ ...first, replayed: true });
+        }
       }
-      const envelope = db.transaction(() => {
-        const task = tasks.create(redactValue({ goal: goal.trim(), constraints, repoPath, profile, overrides, ...(runAs === 'agent' ? { runAs: 'agent' as const } : {}) }));
-        if (wait) scheduler.attach(task.taskId, wait);
-        return tasks.envelope(task.taskId);
-      })();
+      let envelope: TaskEnvelope;
+      try {
+        if (wait && mode && mode !== 'single') throw new Error('K1 waits require single mode');
+        // K7 widens overrides by exactly one field: `model`, the requested
+        // SELECTOR. It is recorded as intent and never resolved here.
+        if (overrides && (typeof overrides !== 'object' || Object.keys(overrides).some(k => k !== 'assistantId' && k !== 'model') ||
+            (overrides.assistantId !== undefined && typeof overrides.assistantId !== 'string') ||
+            (overrides.model !== undefined && (typeof overrides.model !== 'string' || !overrides.model.trim())))) throw new Error('overrides accept only assistantId and model');
+        if (constraints && (!Array.isArray(constraints) || constraints.some(c => typeof c !== 'string'))) throw new Error('constraints must be strings');
+        if (profile && !['auto','preserve-quota','fastest','best-quality','lowest-tokens'].includes(profile)) throw new Error('Invalid routing profile');
+        if (wait) scheduler.validate(wait);
+        // P0-A2: an agent task is refused here, not at launch, when the host cannot keep its code
+        // away from the plane user. It needs a repository: the agent cannot reach the workspace dir.
+        if (runAs !== undefined) {
+          if (runAs !== 'agent') throw new Error('runAs accepts only "agent"');
+          if (!config.execution.agentUser) throw new Error('runAs "agent" needs execution.agentUser, which this workspace does not configure');
+          if (!repoPath) throw new Error('runAs "agent" needs a repository');
+          if (mode && mode !== 'single') throw new Error('runAs "agent" requires single mode');
+        }
+        // The key record and the task row commit together: never a key without its task, or a task without its key.
+        envelope = db.transaction(() => {
+          const task = tasks.create(redactValue({ goal: goal.trim(), constraints, repoPath, profile, overrides, ...(runAs === 'agent' ? { runAs: 'agent' as const } : {}) }));
+          if (wait) scheduler.attach(task.taskId, wait);
+          if (idempotencyKey !== undefined) idempotency.record(kid, "task.create", idempotencyKey, print, task.taskId);
+          return tasks.envelope(task.taskId);
+        })();
+      } catch (err) { return reply.status(400).send({ error: message(err) }); }
       if (wait) scheduler.publish(envelope.taskId);
-      return reply.status(201).send(envelope);
-    } catch (err) { return reply.status(400).send({ error: message(err) }); }
+      const response: Record<string, unknown> = {
+        ...envelope, ...extras(), ...webLinkFor(envelope.taskId),
+        ...(propose === true ? { proposal: await buildProposal(envelope.taskId) } : {}),
+      };
+      if (idempotencyKey !== undefined) idempotency.complete(kid, "task.create", idempotencyKey, 201, response);
+      return reply.status(201).send(response);
+    } finally { release(); }
   });
 
   app.get("/api/tasks", read.tasks, () => {
@@ -974,80 +1073,176 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     return reply.status(result.created ? 201 : 200).send(result.optIn);
   });
 
-  app.post<{ Params: { id: string }; Body: { assistantId?: AssistantId; compositionDigest?: unknown; overrides?: unknown } }>(
-    "/api/tasks/:id/start", write,
+  // ---- start (2.14: `tasks.start`, idempotencyKey, confirm, webLink) ----
+  type StartOutcome = { status: number; body: Record<string, unknown> };
+  interface StartConfirm { assistantId?: string; compositionDigest?: string | null }
+  /** What the handler threads through both start paths: the confirm check and the key record. */
+  interface StartGuard { confirm?: StartConfirm; record?: () => void; recorded: boolean; startedAt?: string }
+  const DIGEST = /^sha256:[0-9a-f]{64}$/;
+  const ASSISTANT_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+  const parseConfirm = (value: unknown): { ok: true; confirm?: StartConfirm } | { ok: false; error: string } => {
+    if (value === undefined) return { ok: true };
+    if (!value || typeof value !== "object" || Array.isArray(value)) return { ok: false, error: "confirm must be { assistantId?, compositionDigest? }" };
+    const v = value as Record<string, unknown>;
+    const keys = Object.keys(v);
+    if (keys.length === 0 || keys.some((k) => k !== "assistantId" && k !== "compositionDigest")) return { ok: false, error: "confirm must be { assistantId?, compositionDigest? } with at least one field" };
+    if (v.assistantId !== undefined && (typeof v.assistantId !== "string" || !ASSISTANT_ID.test(v.assistantId))) return { ok: false, error: "confirm.assistantId must be an assistant id" };
+    if (v.compositionDigest !== undefined && v.compositionDigest !== null && (typeof v.compositionDigest !== "string" || !DIGEST.test(v.compositionDigest))) {
+      return { ok: false, error: "confirm.compositionDigest must be null or sha256:<64 lowercase hex>" };
+    }
+    return { ok: true, confirm: v as StartConfirm };
+  };
+  const confirmMatches = (confirm: StartConfirm | undefined, chosen: string, digest: string | null) =>
+    !confirm || ((confirm.assistantId === undefined || confirm.assistantId === chosen) &&
+      (!Object.hasOwn(confirm, "compositionDigest") || (confirm.compositionDigest ?? null) === digest));
+  const routeChanged = async (taskId: string): Promise<StartOutcome> => ({
+    status: 409, body: { error: "the route changed since it was proposed; nothing started", reason: "route_changed", proposal: await buildProposal(taskId) },
+  });
+  /**
+   * The one place a start takes effect: CREATED -> ROUTING and the idempotency record commit together,
+   * then the orchestrator starts the run. A task that left CREATED meanwhile is `invalid_state`.
+   */
+  const launch = async (taskId: string, chosen: AssistantId, routingDecisionId: number, extra: () => Record<string, unknown>, guard: StartGuard,
+    composition?: StartBinding): Promise<StartOutcome> => {
+    try {
+      db.transaction(() => { tasks.transition(taskId, "ROUTING"); guard.record?.(); })();
+      guard.recorded = guard.record !== undefined;
+      guard.startedAt = now().toISOString();
+    } catch (err) {
+      const state = tasks.get(taskId)?.state;
+      return { status: 409, body: { error: message(err), reason: "invalid_state", ...(state ? { currentState: state } : {}) } };
+    }
+    try {
+      const { runId } = await orchestrator.startTask(taskId, chosen, {
+        routingDecisionRef: String(routingDecisionId),
+        ...(composition ? { composition } : {}),
+      });
+      // `extra` is read after the start: a composed binding records its attempt while the run starts.
+      return { status: 200, body: { runId, assistantId: chosen, ...extra() } };
+    } catch (err) {
+      // Worktree/adapter startup failure: park the task as FAILED with the reason.
+      const current = tasks.get(taskId);
+      if (current && current.state !== "FAILED") {
+        try { tasks.transition(taskId, "FAILED"); } catch { /* already terminal */ }
+      }
+      return { status: 500, body: { error: message(err) } };
+    }
+  };
+
+  app.post<{ Params: { id: string }; Body: unknown }>(
+    "/api/tasks/:id/start", taskStart,
     async (req, reply) => {
       const taskId = req.params.id;
       const row = tasks.get(taskId);
       if (!row) return reply.status(404).send({ error: "not found" });
-      if (row.state !== "CREATED") {
-        return reply.status(409).send({ error: `Task is ${row.state}; only CREATED tasks can start` });
+      const raw = req.body ?? {};
+      if (typeof raw !== "object" || Array.isArray(raw)) return refuse(reply, 400, "invalid_input", "body must be an object");
+      const { idempotencyKey, confirm: rawConfirm, ...rest } = raw as Record<string, unknown>;
+      if (isNarrow(req)) {
+        const extra = Object.keys(rest);
+        if (extra.length > 0) return refuse(reply, 403, "narrow_credential", `this credential may not send ${extra.join(", ")}`);
+        if (idempotencyKey === undefined) return refuse(reply, 400, "invalid_input", "idempotencyKey is required for this credential");
+        // T4/T7: the narrow credential starts only tasks in an exposed repository.
+        if (!aliasFor(row.repo_path)) return refuse(reply, 403, "repo_not_allowed", "this task is not in an exposed repository");
       }
-      // M2 S5: with the composer on, start confirms a composition. Off, nothing below it runs.
-      if (composer) return startComposed(taskId, req.body, reply);
-      const routed = computeRoute(taskId, req.body?.assistantId);
-      const chosen = routed?.explanation.chosen;
-      if (!routed || !chosen) {
-        return reply.status(422).send({ error: "No eligible assistant", explanation: routed?.explanation });
-      }
-      const { explanation, routingDecisionId } = routed;
+      if (badKey(idempotencyKey)) return refuse(reply, 400, "invalid_input", "idempotencyKey must match ^[A-Za-z0-9._:-]{16,128}$");
+      const parsedConfirm = parseConfirm(rawConfirm);
+      if (!parsedConfirm.ok) return refuse(reply, 400, "invalid_input", parsedConfirm.error);
+      const key = idempotencyKey as string | undefined;
+      const kid = req.cred?.kid ?? "anonymous";
+      const print = fingerprint({ taskId, confirm: parsedConfirm.confirm, ...rest });
+      const release = key !== undefined ? idempotency.claim(kid, "task.start", key) : () => {};
+      if (!release) return refuse(reply, 409, "idempotency_in_progress", "a request with this idempotencyKey is still being handled", { retryable: true });
       try {
-        tasks.transition(taskId, "ROUTING");
-        const { runId } = await orchestrator.startTask(taskId, chosen, {
-          routingDecisionRef: String(routingDecisionId),
-        });
-        return { runId, assistantId: chosen, explanation };
-      } catch (err) {
-        // Worktree/adapter startup failure: park the task as FAILED with the reason.
-        const current = tasks.get(taskId);
-        if (current && current.state !== "FAILED") {
-          try {
-            tasks.transition(taskId, "FAILED");
-          } catch {
-            /* already terminal */
+        if (key !== undefined) {
+          const seen = idempotency.lookup(kid, "task.start", key, print);
+          if (seen.kind === "conflict") return refuse(reply, 409, "idempotency_conflict", "this idempotencyKey was used with different input");
+          if (seen.kind === "replay") {
+            // A NULL answer means the process stopped after the transition: rebuild it from the task.
+            let first = seen.record.response;
+            if (!first) {
+              const run = db.prepare("SELECT id, assistant_id FROM runs WHERE task_id = ? ORDER BY started_at DESC LIMIT 1").get(taskId) as { id: string; assistant_id: string } | undefined;
+              first = { runId: run?.id ?? null, assistantId: run?.assistant_id ?? null, taskId, state: tasks.get(taskId)!.state, ...webLinkFor(taskId), startedAt: seen.record.createdAt };
+              idempotency.complete(kid, "task.start", key, 200, first);
+            }
+            return reply.status(seen.record.statusCode ?? 200).send({ ...first, replayed: true });
           }
         }
-        return reply.status(500).send({ error: message(err) });
-      }
+        if (row.state !== "CREATED") {
+          return refuse(reply, 409, "invalid_state", `Task is ${row.state}; only CREATED tasks can start`, { currentState: row.state, ...webLinkFor(taskId) });
+        }
+        const guard: StartGuard = {
+          ...(parsedConfirm.confirm ? { confirm: parsedConfirm.confirm } : {}),
+          ...(key !== undefined ? { record: () => idempotency.record(kid, "task.start", key, print, taskId) } : {}),
+          recorded: false,
+        };
+        // M2 S5: with the composer on, start confirms a composition. Off, nothing below it runs.
+        const out = composer ? await startComposed(taskId, rest, guard) : await startRouted(taskId, rest, guard);
+        if (out.status === 200) {
+          out.body = { ...out.body, taskId, state: tasks.get(taskId)?.state ?? "ROUTING", ...webLinkFor(taskId),
+            startedAt: guard.startedAt, ...(key !== undefined ? { replayed: false } : {}) };
+        }
+        // Only a start that took effect is recorded; a refusal changed nothing and may be retried with the key.
+        if (guard.recorded && key !== undefined) idempotency.complete(kid, "task.start", key, out.status, out.body);
+        return reply.status(out.status).send(out.body);
+      } finally { release(); }
     },
   );
+
+  /** `POST /api/tasks/:id/start` with the composer off: route, confirm, launch. */
+  const startRouted = async (taskId: string, body: Record<string, unknown>, guard: StartGuard): Promise<StartOutcome> => {
+    const routed = computeRoute(taskId, body.assistantId as AssistantId | undefined);
+    const chosen = routed?.explanation.chosen;
+    if (!routed || !chosen) {
+      return { status: 422, body: { error: "No eligible assistant", reason: "no_eligible_assistant", explanation: routed?.explanation } };
+    }
+    if (!confirmMatches(guard.confirm, chosen, null)) return routeChanged(taskId);
+    const { explanation, routingDecisionId } = routed;
+    return launch(taskId, chosen, routingDecisionId, () => ({ explanation }), guard);
+  };
 
   /**
    * `POST /api/tasks/:id/start` with the composer on (plans/m2-composer.md §2 stage 6, API 2.6).
    * Body `{ assistantId?, compositionDigest?, overrides? }`; `assistantId` is the stage-2 override.
+   * 2.14: `confirm` and `idempotencyKey` are handled by the route and arrive here as `guard`.
    *
    * - The pipeline re-runs with the same overrides. A refused override is a 400 and writes nothing.
    * - A sent `compositionDigest` that the re-run does not reproduce (or no composition at all) is
-   *   drift: 409 with the new preview. No revision and no run.
+   *   drift: 409 with the new preview. No revision and no run. With `confirm`, the same refusal is
+   *   `route_changed` with a fresh proposal.
    * - Composed: the run starts on the Harness path and the revision is persisted once the
    *   worktree identity exists, then bound to the run.
    * - No revision possible: route-only with an attempt row saying why (Q3), or 422 when
    *   `composer.requireRevision` is on. A start with a digest or overrides that the execution path
    *   cannot bind (legacy path, no repository) is refused with 422 rather than run without them.
    */
-  const startComposed = async (taskId: string, rawBody: unknown, reply: FastifyReply) => {
+  const startComposed = async (taskId: string, body: Record<string, unknown>, guard: StartGuard): Promise<StartOutcome> => {
     const c = composer!;
-    const body = (rawBody ?? {}) as Record<string, unknown>;
-    if (typeof body !== "object" || Array.isArray(body) || Object.keys(body).some((k) => !["assistantId", "compositionDigest", "overrides"].includes(k))) {
-      return reply.status(400).send({ error: "body must be { assistantId?, compositionDigest?, overrides? }" });
+    const fail = (status: number, payload: Record<string, unknown>): StartOutcome => ({ status, body: payload });
+    if (Object.keys(body).some((k) => !["assistantId", "compositionDigest", "overrides"].includes(k))) {
+      return fail(400, { error: "body must be { assistantId?, compositionDigest?, overrides?, confirm?, idempotencyKey? }" });
     }
     const { assistantId, compositionDigest } = body;
-    if (compositionDigest !== undefined && compositionDigest !== null && (typeof compositionDigest !== "string" || !/^sha256:[0-9a-f]{64}$/.test(compositionDigest))) {
-      return reply.status(400).send({ error: "compositionDigest must be sha256:<64 lowercase hex>" });
+    if (compositionDigest !== undefined && compositionDigest !== null && (typeof compositionDigest !== "string" || !DIGEST.test(compositionDigest))) {
+      return fail(400, { error: "compositionDigest must be sha256:<64 lowercase hex>" });
     }
-    if (assistantId !== undefined && typeof assistantId !== "string") return reply.status(400).send({ error: "assistantId must be a string" });
+    const confirmedDigest = typeof guard.confirm?.compositionDigest === "string" ? guard.confirm.compositionDigest : undefined;
+    if (typeof compositionDigest === "string" && confirmedDigest !== undefined && compositionDigest !== confirmedDigest) {
+      return fail(400, { error: "compositionDigest and confirm.compositionDigest disagree" });
+    }
+    if (assistantId !== undefined && typeof assistantId !== "string") return fail(400, { error: "assistantId must be a string" });
     const parsed = parseOverrides(body.overrides, registry.list().map((a) => a.id));
-    if (!parsed.ok) return reply.status(400).send({ error: parsed.error });
+    if (!parsed.ok) return fail(400, { error: parsed.error });
     let overrides = parsed.overrides;
     if (assistantId !== undefined) {
       const named = overrides?.harness_model?.assistantId;
-      if (named !== undefined && named !== assistantId) return reply.status(400).send({ error: "assistantId and overrides.harness_model.assistantId disagree" });
-      if (!registry.list().some((a) => a.id === assistantId)) return reply.status(400).send({ error: `assistantId ${assistantId} is not a configured assistant` });
+      if (named !== undefined && named !== assistantId) return fail(400, { error: "assistantId and overrides.harness_model.assistantId disagree" });
+      if (!registry.list().some((a) => a.id === assistantId)) return fail(400, { error: `assistantId ${assistantId} is not a configured assistant` });
       overrides = { ...overrides, harness_model: { ...overrides?.harness_model, assistantId } };
     }
-    const digest = typeof compositionDigest === "string" ? compositionDigest : undefined;
+    const digest = typeof compositionDigest === "string" ? compositionDigest : confirmedDigest;
     const required = config.composer.requireRevision;
-    const noRevision = (attempt: object, reason: string, extra: object = {}) => reply.status(422).send({
+    const noRevision = (attempt: object, reason: string, extra: object = {}) => fail(422, {
       error: "no composition revision for this start", reason, composition: attempt, ...extra,
     });
 
@@ -1067,7 +1262,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
       }
       const routed = computeRoute(taskId, assistantId as AssistantId | undefined);
       if (!routed?.explanation.chosen) {
-        return reply.status(422).send({ error: "No eligible assistant", explanation: routed?.explanation, composition: c.recordSkippedStart(taskId, unbindable, routed?.routingDecisionId ?? null) });
+        return fail(422, { error: "No eligible assistant", reason: "no_eligible_assistant", explanation: routed?.explanation, composition: c.recordSkippedStart(taskId, unbindable, routed?.routingDecisionId ?? null) });
       }
       chosen = routed.explanation.chosen;
       routingDecisionId = routed.routingDecisionId;
@@ -1075,11 +1270,12 @@ export function buildServer(deps: ServerDeps): BuiltServer {
       attempt = c.recordSkippedStart(taskId, unbindable, routingDecisionId);
     } else {
       const started = await c.start(taskId, overrides, digest);
-      if (started.kind === "refused") return reply.status(400).send({ error: started.error, reason: started.reason });
+      if (started.kind === "refused") return fail(400, { error: started.error, reason: started.reason });
       if (started.kind === "drift") {
-        return reply.status(409).send({ error: "the composition changed since it was previewed", reason: "composition_drift", preview: started.preview });
+        if (guard.confirm) return routeChanged(taskId);
+        return fail(409, { error: "the composition changed since it was previewed", reason: "composition_drift", preview: started.preview });
       }
-      if (started.kind === "no_candidate") return reply.status(422).send({ error: "No eligible assistant", explanation: started.explanation, composition: started.attempt });
+      if (started.kind === "no_candidate") return fail(422, { error: "No eligible assistant", reason: "no_eligible_assistant", explanation: started.explanation, composition: started.attempt });
       if (started.kind === "route_only" && required) return noRevision(started.attempt, started.attempt.reason ?? "no_revision", { explanation: started.explanation });
       chosen = started.assistantId;
       routingDecisionId = started.routingDecisionId;
@@ -1087,20 +1283,9 @@ export function buildServer(deps: ServerDeps): BuiltServer {
       if (started.kind === "composed") binding = started.binding;
       else attempt = started.attempt;
     }
-    try {
-      tasks.transition(taskId, "ROUTING");
-      const { runId } = await orchestrator.startTask(taskId, chosen as AssistantId, {
-        routingDecisionRef: String(routingDecisionId),
-        ...(binding ? { composition: binding } : {}),
-      });
-      return { runId, assistantId: chosen, explanation, composition: binding?.attempt ?? attempt ?? null };
-    } catch (err) {
-      const current = tasks.get(taskId);
-      if (current && current.state !== "FAILED") {
-        try { tasks.transition(taskId, "FAILED"); } catch { /* already terminal */ }
-      }
-      return reply.status(500).send({ error: message(err) });
-    }
+    const actualDigest = binding ? binding.compositionDigest : null;
+    if (!confirmMatches(guard.confirm, chosen, actualDigest)) return routeChanged(taskId);
+    return launch(taskId, chosen as AssistantId, routingDecisionId, () => ({ explanation, composition: binding?.attempt ?? attempt ?? null }), guard, binding);
   };
 
   app.post<{
