@@ -63,7 +63,12 @@
 // fresh route disagrees. Both answer `webLink` when `mcp.webOrigin` is configured. A credential
 // without `commands.write` must use `repo` and `idempotencyKey` and may send no other knobs. Named
 // credentials (`api-credential.<name>.json`) rotate on their own; rotating the main one leaves them.
-export const CONTROL_PLANE_API_VERSION = "2.14";
+// 2.15 (additive, qcq-01, docs/contracts/run-estimate-v1.md): `GET /api/tasks/:id/estimate` and
+// `GET /api/estimates/accuracy` (`routing.read`). ADVISORY: a run estimate (runtime, model, effort,
+// token ranges, duration, wait until start, approval wait, API spend vs API-equivalent vs subscription
+// quota, confidence, evidence) and a scheduling recommendation over the workspace's `scheduling` hours.
+// No dispatch, budget or schedule reads them. No earlier response changes; no new capability.
+export const CONTROL_PLANE_API_VERSION = "2.15";
 export const NORMALIZED_EVENT_VERSION = "1.0";
 
 export const OBSERVABILITY_CAPABILITIES = [

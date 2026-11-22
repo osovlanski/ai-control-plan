@@ -3,7 +3,7 @@ import { ensureCredential } from "./auth/credential-file.js";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { parse, stringify } from "yaml";
-import { runtimeConfigProblems, type McpToolAccess, type McpToolPolicy } from "@agent-plane/core";
+import { PERSONAL_SCHEDULING_POLICY, WORK_SCHEDULING_POLICY, runtimeConfigProblems, schedulingPolicyProblems, type McpToolAccess, type McpToolPolicy, type SchedulingPolicy } from "@agent-plane/core";
 
 /**
  * Workspace instance configuration (revised architecture §1).
@@ -266,6 +266,17 @@ export interface WorkspaceConfig {
   autopilot?: Partial<ResolvedAutopilotConfig>;
   /** 2.14 (mcp-api-grants): what the MCP connector may reach. Absent = no aliases, no Web link. */
   mcp?: { webOrigin?: string; repos?: Record<string, string>; runAs?: "agent" };
+  /**
+   * qcq-01: the operator's hours for ADVISORY run estimates and scheduling recommendations
+   * (`GET /api/tasks/:id/estimate`). It changes no dispatch, schedule or limit. Every key has the
+   * workspace default (personal: Asia/Jerusalem, Sun–Thu 09:00–18:00, evenings and weekends not
+   * allowed until set); unknown keys are a config error.
+   */
+  scheduling?: Partial<Omit<SchedulingPolicy, "workHours" | "evening" | "weekend">> & {
+    workHours?: Partial<SchedulingPolicy["workHours"]>;
+    evening?: Partial<SchedulingPolicy["evening"]>;
+    weekend?: Partial<SchedulingPolicy["weekend"]>;
+  };
 }
 
 /** The resolved autopilot block: always present. It bounds the autopilot; it never starts it. */
@@ -575,7 +586,9 @@ export interface ResolvedComposerConfig {
   };
 }
 
-export interface ResolvedConfig extends Omit<WorkspaceConfig, "execution" | "models" | "decisions" | "sessionInput" | "registry" | "composer" | "autopilot" | "mcp"> {
+export interface ResolvedConfig extends Omit<WorkspaceConfig, "execution" | "models" | "decisions" | "sessionInput" | "registry" | "composer" | "autopilot" | "mcp" | "scheduling"> {
+  /** qcq-01: resolved advisory scheduling policy. `loadConfig` always sets it; absent means the workspace default. */
+  scheduling?: SchedulingPolicy;
   registry: ResolvedRegistryConfig;
   /** Always present; empty aliases and no Web origin unless the workspace sets `mcp`. */
   mcp: ResolvedMcpConfig;
@@ -735,6 +748,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ResolvedConfig
   const registry = resolveRegistry(file.registry, configPath);
   const composer = resolveComposer(file.composer, configPath);
   const autopilot = resolveAutopilot(file.autopilot, configPath);
+  const scheduling = resolveScheduling(file.scheduling, file.workspace ?? workspace, configPath);
   const resources = pools(file.scheduler?.resources);
   const admission = resolveAdmission(file.scheduler?.admission, resources, execution.agentUser?.worktreesRoot ?? dir, configPath);
 
@@ -763,7 +777,46 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ResolvedConfig
   }
   ensureCredential(dir);
 
-  return { ...config, execution, models, decisions, sessionInput, registry, composer, autopilot, mcp, dir, dbPath: join(dir, "agent-plane.db"), warnings };
+  return { ...config, execution, models, decisions, sessionInput, registry, composer, autopilot, mcp, scheduling, dir, dbPath: join(dir, "agent-plane.db"), warnings };
+}
+
+/** The workspace default advisory scheduling policy (qcq-01). */
+export function defaultSchedulingPolicy(workspace: string): SchedulingPolicy {
+  return workspace === "personal" ? PERSONAL_SCHEDULING_POLICY : WORK_SCHEDULING_POLICY;
+}
+
+const SCHEDULING_KEYS = ["timezone", "workDays", "workHours", "evening", "weekend", "dueSoonMs", "offHoursMinDurationMs", "accountConcurrency"];
+const WINDOW_KEYS: Record<string, string[]> = { workHours: ["start", "end"], evening: ["start", "end", "allowed"], weekend: ["start", "end", "allowed", "days"] };
+
+function resolveScheduling(file: unknown, workspace: string, configPath: string): SchedulingPolicy {
+  const d = defaultSchedulingPolicy(workspace);
+  if (file === undefined || file === null) return d;
+  if (typeof file !== "object" || Array.isArray(file)) throw new Error(`${configPath}: scheduling must be a mapping`);
+  const f = file as Record<string, unknown>;
+  const unknown = Object.keys(f).filter((k) => !SCHEDULING_KEYS.includes(k));
+  if (unknown.length > 0) throw new Error(`${configPath}: scheduling has unknown key(s): ${unknown.join(", ")}`);
+  for (const [k, keys] of Object.entries(WINDOW_KEYS)) {
+    const v = f[k];
+    if (v === undefined) continue;
+    if (typeof v !== "object" || v === null || Array.isArray(v)) throw new Error(`${configPath}: scheduling.${k} must be a mapping`);
+    const extra = Object.keys(v).filter((x) => !keys.includes(x));
+    if (extra.length > 0) throw new Error(`${configPath}: scheduling.${k} has unknown key(s): ${extra.join(", ")}`);
+  }
+  const p = file as NonNullable<WorkspaceConfig["scheduling"]>;
+  const resolved: SchedulingPolicy = {
+    ...d,
+    ...(p.timezone !== undefined ? { timezone: p.timezone } : {}),
+    ...(p.workDays !== undefined ? { workDays: p.workDays } : {}),
+    ...(p.dueSoonMs !== undefined ? { dueSoonMs: p.dueSoonMs } : {}),
+    ...(p.offHoursMinDurationMs !== undefined ? { offHoursMinDurationMs: p.offHoursMinDurationMs } : {}),
+    ...(p.accountConcurrency !== undefined ? { accountConcurrency: p.accountConcurrency } : {}),
+    workHours: { ...d.workHours, ...p.workHours },
+    evening: { ...d.evening, ...p.evening },
+    weekend: { ...d.weekend, ...p.weekend },
+  };
+  const problems = schedulingPolicyProblems(resolved);
+  if (problems.length > 0) throw new Error(`${configPath}: scheduling: ${problems.join("; ")}`);
+  return resolved;
 }
 
 /**
