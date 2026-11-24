@@ -78,7 +78,14 @@
 // `verification` (`{ sessionId, verificationRunId, runState, passed, checks: { passed, failed,
 // skipped, blocked } }` for the latest verification run of the latest Harness session, or null) and
 // `webLink` when `mcp.webOrigin` is configured. No earlier field changes; no new capability.
-export const CONTROL_PLANE_API_VERSION = "2.17";
+// 2.18 (additive, P1-5 effort cohorts): each run in `GET /api/tasks/:id` carries
+// `modelIdentity.reportedEffort` (the effort the provider reported on `run.started`, or null) and
+// `modelIdentity.reportedEffortSource` (`run.started` | `unknown`). In a routing decision's
+// `modelRecommendation`, each candidate's `identity.effort` is the effort its own runs bind (or
+// `unknown`), telemetry cohorts also carry `assistantId` and `effort`, and `effortPlan` records the
+// effort the routing profile would choose per assistant (shadow: no adapter receives it). No
+// earlier field changes; no new capability.
+export const CONTROL_PLANE_API_VERSION = "2.18";
 export const NORMALIZED_EVENT_VERSION = "1.0";
 
 export const OBSERVABILITY_CAPABILITIES = [

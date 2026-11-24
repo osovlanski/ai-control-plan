@@ -23,8 +23,8 @@ import { openDb, type Db } from '../src/db/index.js';
 import { buildServer, type BuiltServer } from '../src/server.js';
 import type { CatalogObservation, CatalogSource } from '../src/modules/model-catalog.js';
 import { buildExecutionRequest } from '../src/modules/harness/control-plane-bridge.js';
-import { resolveCandidateIdentity } from '../src/modules/model-selection.js';
-import { modelCohorts } from '../src/modules/telemetry.js';
+import { effortPlan, priorEffort, resolveCandidateEffort, resolveCandidateIdentity } from '../src/modules/model-selection.js';
+import { cohortId, modelCohorts } from '../src/modules/telemetry.js';
 import { countHardFilterViolations, priceApplicability } from '../src/modules/model-selection.js';
 import { Scheduler } from '../src/modules/scheduler.js';
 
@@ -142,6 +142,8 @@ function recordRun(input: {
   modelRequested?: string;
   modelResolved?: string | null;
   harnessMajor?: string | null;
+  /** P1-5: `runs.effort_reported`. Absent = the provider reported none. */
+  effort?: string | null;
   state?: 'ENDED_OK' | 'ENDED_ERROR';
   durationMs?: number;
   usage?: { inputTokens?: number; outputTokens?: number };
@@ -153,14 +155,17 @@ function recordRun(input: {
   const id = `run_${Math.random().toString(36).slice(2, 10)}`;
   const startedAt = new Date(clock.getTime() - (input.durationMs ?? 10_000)).toISOString();
   db.prepare(
-    `INSERT INTO runs (id, task_id, assistant_id, state, started_at, ended_at, usage, model_requested, model_resolved, model_resolved_source, harness_major)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'run.started', ?)`,
+    `INSERT INTO runs (id, task_id, assistant_id, state, started_at, ended_at, usage, model_requested, model_resolved, model_resolved_source, harness_major,
+                       effort_reported, effort_reported_source)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'run.started', ?, ?, ?)`,
   ).run(
     id, input.taskId, input.assistantId, input.state ?? 'ENDED_OK', startedAt, clock.toISOString(),
     input.usage ? JSON.stringify(input.usage) : null,
     input.modelRequested ?? null,
     input.modelResolved === undefined ? FAKE_MODEL : input.modelResolved,
     input.harnessMajor === undefined ? HARNESS_MAJOR : input.harnessMajor,
+    input.effort ?? null,
+    input.effort ? 'run.started' : null,
   );
   if (input.result) {
     db.prepare(
@@ -215,7 +220,13 @@ function activateGates(): void {
  */
 function fillCodingCohort(): void {
   const past = built.tasks.create({ goal: 'Implement the parser' });
+  // P1-5: a cohort is per assistant, so the activation pair needs k runs on EACH
+  // of A and B; A's runs are no longer evidence about B. B carries one failure so
+  // A stays the winner on score rather than on label order.
   for (let i = 0; i < DIMENSION_K.coding; i += 1) recordCodingRun(past.taskId, A);
+  for (let i = 0; i < DIMENSION_K.coding; i += 1) {
+    recordCodingRun(past.taskId, B, i === 0 ? { state: 'ENDED_ERROR', result: { outcome: 'failed' } } : {});
+  }
 }
 
 /** Route, then start exactly as `POST /api/tasks/:id/start` does. */
@@ -462,7 +473,7 @@ describe('telemetry cohorts are per resolved model', () => {
     recordRun({ taskId: task.taskId, assistantId: A, modelResolved: null });
 
     const cohorts = modelCohorts(db, { taskKind: 'coding', harnessMajor: HARNESS_MAJOR, now });
-    expect(cohorts.get(`fake:${FAKE_MODEL}`)?.reliabilityRuns).toBe(1);
+    expect(cohorts.get(cohortId(A, `fake:${FAKE_MODEL}`, 'unknown'))?.reliabilityRuns).toBe(1);
   });
 
   it('never joins a run from another harness major', async () => {
@@ -473,7 +484,7 @@ describe('telemetry cohorts are per resolved model', () => {
     recordRun({ taskId: task.taskId, assistantId: A, harnessMajor: null });
 
     const cohorts = modelCohorts(db, { taskKind: 'coding', harnessMajor: HARNESS_MAJOR, now });
-    expect(cohorts.get(`fake:${FAKE_MODEL}`)?.reliabilityRuns).toBe(1);
+    expect(cohorts.get(cohortId(A, `fake:${FAKE_MODEL}`, 'unknown'))?.reliabilityRuns).toBe(1);
   });
 
   it('keeps a healthy context yield neutral — out of numerator and denominator', async () => {
@@ -482,7 +493,7 @@ describe('telemetry cohorts are per resolved model', () => {
     recordRun({ taskId: task.taskId, assistantId: A, result: { outcome: 'completed' } });
     recordRun({ taskId: task.taskId, assistantId: A, result: { outcome: 'yielded', yield: { kind: 'context' } } });
 
-    const cohort = modelCohorts(db, { taskKind: 'coding', harnessMajor: HARNESS_MAJOR, now }).get(`fake:${FAKE_MODEL}`)!;
+    const cohort = modelCohorts(db, { taskKind: 'coding', harnessMajor: HARNESS_MAJOR, now }).get(cohortId(A, `fake:${FAKE_MODEL}`, 'unknown'))!;
     expect(cohort.reliabilityRuns).toBe(1);
     expect(cohort.successRate).toBe(1);
   });
@@ -494,18 +505,18 @@ describe('telemetry cohorts are per resolved model', () => {
     recordRun({ taskId: coding.taskId, assistantId: A });
     recordRun({ taskId: review.taskId, assistantId: A });
 
-    expect(modelCohorts(db, { taskKind: 'coding', harnessMajor: HARNESS_MAJOR, now }).get(`fake:${FAKE_MODEL}`)?.reliabilityRuns).toBe(1);
-    expect(modelCohorts(db, { taskKind: 'review', harnessMajor: HARNESS_MAJOR, now }).get(`fake:${FAKE_MODEL}`)?.reliabilityRuns).toBe(1);
+    expect(modelCohorts(db, { taskKind: 'coding', harnessMajor: HARNESS_MAJOR, now }).get(cohortId(A, `fake:${FAKE_MODEL}`, 'unknown'))?.reliabilityRuns).toBe(1);
+    expect(modelCohorts(db, { taskKind: 'review', harnessMajor: HARNESS_MAJOR, now }).get(cohortId(A, `fake:${FAKE_MODEL}`, 'unknown'))?.reliabilityRuns).toBe(1);
   });
 
   it('drops out of the rolling window as it ages, taking n with it', async () => {
     await boot();
     const task = built.tasks.create({ goal: 'Implement the parser' });
     recordRun({ taskId: task.taskId, assistantId: A });
-    expect(modelCohorts(db, { taskKind: 'coding', harnessMajor: HARNESS_MAJOR, now }).get(`fake:${FAKE_MODEL}`)?.reliabilityRuns).toBe(1);
+    expect(modelCohorts(db, { taskKind: 'coding', harnessMajor: HARNESS_MAJOR, now }).get(cohortId(A, `fake:${FAKE_MODEL}`, 'unknown'))?.reliabilityRuns).toBe(1);
 
     clock = new Date(clock.getTime() + 31 * 86_400_000);
-    expect(modelCohorts(db, { taskKind: 'coding', harnessMajor: HARNESS_MAJOR, now }).get(`fake:${FAKE_MODEL}`)).toBeUndefined();
+    expect(modelCohorts(db, { taskKind: 'coding', harnessMajor: HARNESS_MAJOR, now }).get(cohortId(A, `fake:${FAKE_MODEL}`, 'unknown'))).toBeUndefined();
   });
 
   it('blends its own telemetry against the prior at the documented weight', async () => {
@@ -781,7 +792,7 @@ describe('a price is evidence only where it applies (§4.4.5)', () => {
 });
 
 describe('cost per COMPLETED task samples only completed runs', () => {
-  const cohortNow = () => modelCohorts(db, { taskKind: 'coding', harnessMajor: HARNESS_MAJOR, now }).get(`fake:${FAKE_MODEL}`);
+  const cohortNow = () => modelCohorts(db, { taskKind: 'coding', harnessMajor: HARNESS_MAJOR, now }).get(cohortId(A, `fake:${FAKE_MODEL}`, 'unknown'));
 
   it('counts a completed run', async () => {
     await boot();
@@ -921,5 +932,209 @@ describe('the hard-filter audit covers the whole review window', () => {
     const task = built.tasks.create({ goal: 'Implement the parser' });
     expect(countHardFilterViolations(db)).toBe(0);
     expect(routeAndRead(task.taskId).recommendation.activation.gates.find((g) => g.name === 'no-filter-violations')?.passed).toBe(true);
+  });
+});
+
+// --- P1-5: effort- and assistant-aware cohorts --------------------------------
+
+/** One AA-shaped observation for `fake:fake-1` carrying one coding prior per effort. */
+function effortBenchmarkSource(efforts: Array<{ effort: string; coding: number }>): CatalogSource {
+  return {
+    name: 'test-benchmark-effort',
+    collect: async () => {
+      const observedAt = now().toISOString();
+      const provenance = (effort: string) => ({
+        source: 'external:artificial-analysis' as const,
+        tier: 'external-benchmark' as const,
+        observedAt,
+        benchmark: { release: 'intelligence-index-4.3', category: 'coding', configuration: `effort=${effort}` },
+        normalizationVersion: AA_NORMALIZATION_VERSION,
+        attribution: 'test',
+      });
+      return {
+        observations: [{
+          modelId: FAKE_MODEL,
+          provider: 'fake',
+          provenance: provenance(efforts[0]!.effort),
+          benchmarks: efforts.map((e) => ({
+            dimension: 'coding' as const, normalized: e.coding,
+            raw: { metric: 'coding_index', value: e.coding * 100, unit: 'index-0-100' },
+            sourceModelId: `${FAKE_MODEL}-${e.effort}`, normalizationVersion: AA_NORMALIZATION_VERSION,
+            provenance: provenance(e.effort), freshness: 'fresh' as const,
+          })),
+        }],
+      };
+    },
+  };
+}
+
+const cohortsNow = (taskKind = 'coding') => modelCohorts(db, { taskKind, harnessMajor: HARNESS_MAJOR, now });
+
+describe('P1-5 cohorts are keyed by assistant and provider-reported effort', () => {
+  it('splits one model into a cohort per effort, with unknown as its own value', async () => {
+    await boot();
+    const task = built.tasks.create({ goal: 'Implement the parser' });
+    recordRun({ taskId: task.taskId, assistantId: A, effort: 'high' });
+    recordRun({ taskId: task.taskId, assistantId: A, effort: 'high' });
+    recordRun({ taskId: task.taskId, assistantId: A, effort: 'medium' });
+    recordRun({ taskId: task.taskId, assistantId: A });
+
+    const cohorts = cohortsNow();
+    expect(cohorts.get(cohortId(A, `fake:${FAKE_MODEL}`, 'high'))).toMatchObject({ assistantId: A, effort: 'high', reliabilityRuns: 2 });
+    expect(cohorts.get(cohortId(A, `fake:${FAKE_MODEL}`, 'medium'))?.reliabilityRuns).toBe(1);
+    expect(cohorts.get(cohortId(A, `fake:${FAKE_MODEL}`, 'unknown'))?.reliabilityRuns).toBe(1);
+    expect(cohorts.size).toBe(3);
+  });
+
+  it('never pools two assistants, even at the same model and the same effort name', async () => {
+    await boot();
+    const task = built.tasks.create({ goal: 'Implement the parser' });
+    recordRun({ taskId: task.taskId, assistantId: A, effort: 'high' });
+    recordRun({ taskId: task.taskId, assistantId: B, effort: 'high', state: 'ENDED_ERROR' });
+
+    const cohorts = cohortsNow();
+    expect(cohorts.get(cohortId(A, `fake:${FAKE_MODEL}`, 'high'))).toMatchObject({ reliabilityRuns: 1, successRate: 1 });
+    expect(cohorts.get(cohortId(B, `fake:${FAKE_MODEL}`, 'high'))).toMatchObject({ reliabilityRuns: 1, successRate: 0 });
+  });
+});
+
+describe('P1-5 candidate effort binds only by last-N agreement on provider reports', () => {
+  const resolve = () => resolveCandidateEffort(db, { assistantId: A, selector: FAKE_MODEL, now });
+
+  it('binds when the last 3 runs requesting the selector all report one effort', async () => {
+    await boot();
+    const task = built.tasks.create({ goal: 'Implement the parser' });
+    for (let i = 0; i < 3; i += 1) recordRun({ taskId: task.taskId, assistantId: A, modelRequested: FAKE_MODEL, effort: 'high' });
+    const effort = resolve();
+    expect(effort).toMatchObject({ basis: 'observed-effort', value: 'high' });
+    expect(effort.observation).toMatchObject({ rule: 'last-n-effort-agreement-v1', runsExamined: 3, reportedEfforts: ['high'] });
+  });
+
+  it.each([
+    ['too few runs', [['high'], ['high']], 'only 2 of the 3 runs required'],
+    ['a disagreement', [['high'], ['medium'], ['high']], 'disagree (high, medium)'],
+    ['a run that reported no effort', [['high'], [null], ['high']], 'disagree (high, unknown)'],
+    ['no reports at all', [[null], [null], [null]], 'none of its last 3 run(s) reported an effort'],
+  ] as const)('stays unknown on %s', async (_label, runs, reason) => {
+    await boot();
+    const task = built.tasks.create({ goal: 'Implement the parser' });
+    for (const [effort] of runs) recordRun({ taskId: task.taskId, assistantId: A, modelRequested: FAKE_MODEL, effort });
+    const effort = resolve();
+    expect(effort).toMatchObject({ basis: 'unknown', value: 'unknown' });
+    expect(effort.evidence).toContain(reason);
+  });
+
+  it('stays unknown when the newest agreeing run is older than the freshness window', async () => {
+    await boot();
+    const task = built.tasks.create({ goal: 'Implement the parser' });
+    for (let i = 0; i < 3; i += 1) recordRun({ taskId: task.taskId, assistantId: A, modelRequested: FAKE_MODEL, effort: 'high' });
+    clock = new Date(clock.getTime() + 15 * 86_400_000);
+    expect(resolve().evidence).toContain('older than 14 days');
+  });
+
+  it('never borrows another assistant\'s runs', async () => {
+    await boot();
+    const task = built.tasks.create({ goal: 'Implement the parser' });
+    for (let i = 0; i < 3; i += 1) recordRun({ taskId: task.taskId, assistantId: B, modelRequested: FAKE_MODEL, effort: 'high' });
+    expect(resolve()).toMatchObject({ basis: 'unknown' });
+  });
+});
+
+describe('P1-5 recommendation reads the cohort and the prior of the candidate\'s own effort', () => {
+  it('attaches the effort-tagged prior that matches the bound effort, and only that one', async () => {
+    await boot([effortBenchmarkSource([{ effort: 'high', coding: 0.9 }, { effort: 'medium', coding: 0.4 }])]);
+    expect(priorEffort({ provenance: { benchmark: { configuration: 'effort=high' } } })).toBe('high');
+    const task = built.tasks.create({ goal: 'Implement the parser' });
+    for (let i = 0; i < 3; i += 1) recordCodingRun(task.taskId, A, { modelRequested: FAKE_MODEL, effort: 'high' });
+
+    const { recommendation } = routeAndRead(task.taskId);
+    const a = scored(recommendation, A);
+    expect(a.identity.effort).toMatchObject({ basis: 'observed-effort', value: 'high' });
+    const coding = a.dimensions.find((d) => d.dimension === 'coding')!;
+    expect(coding.prior?.value).toBe(0.9);
+    expect(coding.telemetry?.cohort).toMatchObject({ assistantId: A, effort: 'high', resolvedModelKey: `fake:${FAKE_MODEL}` });
+    expect(coding.n).toBe(3);
+    expect(a.advisories.join(' ')).toContain('1 benchmark prior(s) withheld: each scores a reasoning effort other than the high');
+
+    // B has no runs: its effort is unknown, so no effort-tagged prior and no telemetry reach it.
+    const b = scored(recommendation, B);
+    expect(b.identity.effort).toMatchObject({ basis: 'unknown' });
+    const bCoding = b.dimensions.find((d) => d.dimension === 'coding')!;
+    expect(bCoding.prior).toBeUndefined();
+    expect(bCoding.telemetry).toBeUndefined();
+    expect(b.advisories.join(' ')).toContain("2 benchmark prior(s) withheld: each scores one reasoning effort and this candidate's runs bind no effort");
+  });
+
+  it('an unknown-effort candidate reads only the unknown cohort, never an effort-specific one', async () => {
+    await boot();
+    const task = built.tasks.create({ goal: 'Implement the parser' });
+    // A's selector runs disagree, so its effort is unknown; the high runs must not reach it.
+    recordCodingRun(task.taskId, A, { modelRequested: FAKE_MODEL, effort: 'high' });
+    recordCodingRun(task.taskId, A, { modelRequested: FAKE_MODEL, effort: 'high' });
+    recordCodingRun(task.taskId, A, { modelRequested: FAKE_MODEL, state: 'ENDED_ERROR', result: { outcome: 'failed' } });
+
+    const { recommendation } = routeAndRead(task.taskId);
+    const coding = scored(recommendation, A).dimensions.find((d) => d.dimension === 'coding')!;
+    expect(scored(recommendation, A).identity.effort?.value).toBe('unknown');
+    expect(coding.telemetry?.cohort).toMatchObject({ effort: 'unknown' });
+    expect(coding.n).toBe(1);
+  });
+});
+
+describe('P1-5 effort chosen per task by profile (shadow)', () => {
+  const plan = (profile: Parameters<typeof built.tasks.create>[0]['profile'], goal = 'Implement the parser') => {
+    const task = built.tasks.create({ goal, ...(profile ? { profile } : {}) });
+    return routeAndRead(task.taskId).recommendation.effortPlan!;
+  };
+
+  it('places the profile level on each harness ladder, and records it as shadow', async () => {
+    await boot([], {
+      [A]: { provider: 'fake' },
+      [B]: { provider: 'fake', options: { harness: 'codex' } },
+      'fake-c': { provider: 'fake', options: { harness: 'cursor' } },
+    });
+    const best = plan('best-quality');
+    expect(best).toMatchObject({ version: 'effort-choice-v1', mode: 'shadow', profile: 'best-quality', level: 'high' });
+    const byAssistant = Object.fromEntries(best.choices.map((c) => [c.assistantId, c]));
+    expect(byAssistant[A]).toMatchObject({ ladder: 'claude-code', effort: 'high', basis: 'profile-rule' });
+    expect(byAssistant[B]).toMatchObject({ ladder: 'codex', effort: 'high', basis: 'profile-rule' });
+    expect(byAssistant['fake-c']).toMatchObject({ basis: 'no-ladder' });
+    expect(byAssistant['fake-c']!.effort).toBeUndefined();
+
+    expect(plan('fastest').level).toBe('low');
+    expect(plan('lowest-tokens').level).toBe('low');
+    expect(plan('preserve-quota').level).toBe('low');
+  });
+
+  it('auto follows the task weights', async () => {
+    await boot();
+    expect(plan('auto', 'Implement and fix the failing parser tests')).toMatchObject({ level: 'high' });
+    expect(plan('auto', 'Summarise the notes, cheap, and preserve quota')).toMatchObject({ level: 'low' });
+    expect(plan('auto', 'Write the release notes')).toMatchObject({ level: 'medium' });
+  });
+
+  it('is never handed to the run: the request carries no effort', async () => {
+    await boot();
+    const task = built.tasks.create({ goal: 'Implement the parser', profile: 'best-quality' });
+    const { explanation } = routeAndRead(task.taskId);
+    expect(explanation.modelRecommendation!.effortPlan!.mode).toBe('shadow');
+    expect(JSON.stringify(explanation.modelRecommendation!.execution)).not.toContain('effort');
+  });
+
+  it('reports an OpenRouter assistant as pinned by workspace config, not moved by the profile', () => {
+    const fakeRegistry = { list: () => [{ id: 'or', provider: 'openrouter', manifestParsed: null }] };
+    const cfg = { assistants: { or: { provider: 'openrouter', options: { reasoningEffort: 'medium' } } } };
+    const p = effortPlan(
+      { registry: fakeRegistry as never, config: cfg as never },
+      { profile: 'best-quality' },
+      { weights: { coding: 0.8, speed: 0.1, cost: 0.1 } },
+    );
+    expect(p.choices[0]).toMatchObject({ assistantId: 'or', ladder: 'codex', effort: 'medium', basis: 'workspace-config' });
+    const dflt = effortPlan(
+      { registry: fakeRegistry as never, config: { assistants: { or: { provider: 'openrouter' } } } as never },
+      { profile: 'fastest' },
+      { weights: { coding: 0.25, speed: 0.6, cost: 0.15 } },
+    );
+    expect(dflt.choices[0]).toMatchObject({ effort: 'high', basis: 'workspace-config' });
   });
 });

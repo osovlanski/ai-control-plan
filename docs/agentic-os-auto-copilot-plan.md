@@ -205,8 +205,8 @@ Remaining K4b gaps, handled by the launch gate (P0-2) and the host gate (P0-3) r
 | Hard filters before scoring (auth, capability, policy, quota, security) | SHIPPED | `model-selection.ts:80–184` takes the router's own per-assistant filter verdict | tests |
 | Routing profiles | SHIPPED | `RoutingProfile` = `auto`, `preserve-quota`, `fastest`, `best-quality`, `lowest-tokens` (`server.ts` `/api/tasks`) | tests |
 | AA rows for OpenAI/Codex models | MISSING | `AA_MODEL_MAP` has Anthropic entries only | — |
-| Effort as an identity dimension | PARTIAL | AA scores effort variants as separate rows (K8 grounding note); "no effort reported anywhere" in A0 | live A0 |
-| Cohorts keyed by effort or assistant | **MISSING** | `modelCohorts` (`apps/api/src/modules/telemetry.ts:201`) filters by task kind and harness major and groups by resolved provider/model; it selects neither effort nor assistant | — |
+| Effort as an identity dimension | SHIPPED (P1-5), recorded only when the provider reports it | `runs.effort_reported` (migration 057) from `run.started`; no real adapter reports effort yet, so live runs stay `unknown` | FakeAdapter drive; live A0 saw none |
+| Cohorts keyed by effort or assistant | SHIPPED (P1-5) | `modelCohorts` groups by `cohortId(assistant, resolved model, effort)`; candidate effort binds by `last-n-effort-agreement-v1`; profile effort recorded as shadow `effortPlan` | tests + FakeAdapter drive |
 
 ### B.3 Context
 

@@ -124,9 +124,10 @@ export interface AaModelMapEntry {
   /**
    * The reasoning-effort configuration AA benchmarked under this id. Set on every
    * 5.x row (AA scores each effort as its own id). It is recorded on the prior
-   * (`provenance.benchmark.configuration = "effort=<x>"`) and K13 withholds such
-   * a prior: `ExecutionIdentity` records no effort, so no run can be shown to
-   * match it (K8 doc §17a). Absent on the older "base configuration" entries.
+   * (`provenance.benchmark.configuration = "effort=<x>"`). K13 attaches such a
+   * prior only to a candidate whose own last-N runs reported that same effort
+   * (P1-5, `runs.effort_reported`); otherwise it is withheld (K8 doc §17a).
+   * Absent on the older "base configuration" entries.
    */
   effort?: AaEffort;
 }
@@ -135,8 +136,8 @@ export type AaEffort = 'max' | 'xhigh' | 'high' | 'medium' | 'low';
  * One AA effort row for a seeded Anthropic model (grounded 2026-11-19 from the
  * refresh grounding list; `aaCreatorId` is the creator id that list recorded).
  * The catalog identity is the model the AA row names, with the effort kept on the
- * prior rather than in the identity, so no effort-specific score can reach a run
- * (K13 withholds effort-tagged priors; K8 doc §17a).
+ * prior rather than in the identity, so an effort-specific score reaches only a
+ * candidate whose runs reported that effort (P1-5; K8 doc §17a).
  */
 const AA_ANTHROPIC_CREATOR_ID = 'f0aa413f-e8ae-4fcd-9c48-0e049f4f3128';
 function aaEffortRow(aaId: string, slug: string, modelId: string, effort: AaEffort): AaModelMapEntry {
@@ -149,8 +150,8 @@ function aaEffortRow(aaId: string, slug: string, modelId: string, effort: AaEffo
     effort,
     evidence:
       `AA lists this id under its Anthropic creator id as ${slug}, the ${effort}-effort configuration of ${modelId}; ` +
-      'copied from a refresh grounding list. The score is recorded with its effort and is not attributed to any run, ' +
-      'because the plane records no effort for an execution.',
+      'copied from a refresh grounding list. The score is recorded with its effort and attaches only to a candidate ' +
+      'whose own recent runs reported that same effort.',
   };
 }
 

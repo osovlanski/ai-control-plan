@@ -1456,3 +1456,59 @@ describe("the provider CLI version on the run row (K13 A2)", () => {
     expect(versionOf()).toBeNull();
   });
 });
+
+describe("the provider-reported effort on the run row (P1-5)", () => {
+  const effortOf = () =>
+    db.prepare("SELECT effort_reported AS v, effort_reported_source AS s FROM runs WHERE id = ?").get(sessionOf()) as {
+      v: string | null;
+      s: string | null;
+    };
+
+  function startedAdapter(payloads: Array<Record<string, unknown> | undefined>): AgentAdapter {
+    return {
+      id: "a1" as AssistantId,
+      describe: async () => MANIFEST,
+      start: async () => ({ runId: "h5", assistantId: "a1" as AssistantId }),
+      resume: async () => ({ runId: "h5", assistantId: "a1" as AssistantId }),
+      events: async function* () {
+        for (const payload of payloads) {
+          yield { runId: "h5" as RunId, ts: new Date().toISOString(), type: "run.started", summary: "started", payload };
+        }
+        yield { runId: "h5" as RunId, ts: new Date().toISOString(), type: "run.ended", summary: "done", payload: { ok: true } };
+      },
+      cancel: async () => {},
+    };
+  }
+
+  it("stores the effort run.started reported, normalized, with its source", async () => {
+    const result = await new SessionRunner(deps(startedAdapter([{ model: "fake-1", effort: " High " }]))).run(request());
+    expect(result.terminalState).toBe("COMPLETED");
+    expect(effortOf()).toEqual({ v: "high", s: "run.started" });
+  });
+
+  it("is write-once: a later run.started cannot rewrite the first report", async () => {
+    await new SessionRunner(deps(startedAdapter([{ effort: "medium" }, { effort: "max" }]))).run(request());
+    expect(effortOf()).toEqual({ v: "medium", s: "run.started" });
+  });
+
+  it.each([[{ effort: "" }], [{ effort: 3 }], [{ effort: "unknown" }], [{ effort: "high; drop table" }], [undefined]])(
+    "keeps effort unknown (NULL) for a payload that is not an effort token: %j",
+    async (payload) => {
+      await new SessionRunner(deps(startedAdapter([payload]))).run(request());
+      expect(effortOf()).toEqual({ v: null, s: null });
+    },
+  );
+
+  it("is never taken from the model, the version or the requested selector", async () => {
+    await new SessionRunner(deps(startedAdapter([{ model: "claude-opus-5-5-high", version: "2.1.238" }]))).run(request());
+    expect(effortOf()).toEqual({ v: null, s: null });
+  });
+
+  it("FakeAdapter [FAKE:EFFORT:v] marker reports an effort; without it the column stays NULL", async () => {
+    const withMarker = await new SessionRunner(deps(new FakeAdapter("a1" as AssistantId))).run(
+      request({ runSpec: { ...request().runSpec, prompt: "do it [FAKE:EFFORT:xhigh]" } }),
+    );
+    expect(withMarker.terminalState).toBe("COMPLETED");
+    expect(effortOf()).toEqual({ v: "xhigh", s: "run.started" });
+  });
+});
