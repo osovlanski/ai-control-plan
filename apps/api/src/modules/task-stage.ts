@@ -16,10 +16,12 @@ import { effectiveStateSql } from "./harness/state-vocab.js";
  * run reads `AWAITING_APPROVAL` here (the same rule the web's legacy `pendingApproval` uses).
  * Harness rows are unchanged: their `session_state` already says so.
  */
-const STAGE_STATE_SQL = `CASE
-    WHEN runs.execution_request_id IS NULL
+export const LEGACY_AWAITING_APPROVAL_SQL = `runs.execution_request_id IS NULL
      AND runs.state IN ('STARTING', 'ACTIVE')
-     AND (SELECT e.type FROM events e WHERE e.run_id = runs.id ORDER BY e.seq DESC LIMIT 1) = 'approval.requested'
+     AND (SELECT e.type FROM events e WHERE e.run_id = runs.id ORDER BY e.seq DESC LIMIT 1) = 'approval.requested'`;
+
+const STAGE_STATE_SQL = `CASE
+    WHEN ${LEGACY_AWAITING_APPROVAL_SQL}
     THEN 'AWAITING_APPROVAL'
     ELSE ${effectiveStateSql("runs")} END`;
 

@@ -433,7 +433,7 @@ async function follow(taskId: string, id: string, asJson: boolean, deps: TaskDep
   return 0;
 }
 
-/** The detail route serves no stage; the list does (task-stage v1, one plane source for both). */
+/** The list's stage (task-stage v1). Planes before API 2.17 serve none on the detail, so the CLI reads the list. */
 async function stageOf(taskId: string, deps: TaskDeps, opts: Opts): Promise<TaskSummary["stage"] | undefined> {
   const list = await deps.connect("tasks.read", opts).request<TaskSummary[]>("GET", "/api/tasks");
   return Array.isArray(list) ? list.find((t) => t.id === taskId)?.stage : undefined;

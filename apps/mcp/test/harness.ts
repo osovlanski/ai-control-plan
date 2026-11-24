@@ -106,7 +106,7 @@ export interface Rig {
   close(): Promise<void>;
 }
 
-export async function bootRig(opts: { deps?: ServiceDeps; mcp?: Partial<Record<string, unknown>>; planeWebOrigin?: string | null; credentialCapabilities?: string[] } = {}): Promise<Rig> {
+export async function bootRig(opts: { deps?: ServiceDeps; mcp?: Partial<Record<string, unknown>>; planeWebOrigin?: string | null; credentialCapabilities?: string[]; approvalMode?: "auto-approve" | "prompt-on-escalation" } = {}): Promise<Rig> {
   const root = mkdtempSync(join(tmpdir(), "aos-mcp-"));
   const repo = join(root, "repo");
   const hidden = join(root, "hidden");
@@ -116,7 +116,7 @@ export async function bootRig(opts: { deps?: ServiceDeps; mcp?: Partial<Record<s
   const config = loadPlaneConfig({ AGENT_PLANE_HOME: home });
   config.assistants = { "fake-claude": { provider: "fake" } };
   config.repoAllowlist = [repo, hidden];
-  config.policy.approvalMode = "auto-approve";
+  config.policy.approvalMode = opts.approvalMode ?? "auto-approve";
   config.execution.harnessModes.single = true;
   // `hidden` is allowlisted for the plane but not exposed to MCP.
   config.mcp = { repos: { dogfood: repo }, ...(opts.planeWebOrigin === null ? {} : { webOrigin: opts.planeWebOrigin ?? WEB_ORIGIN }) };

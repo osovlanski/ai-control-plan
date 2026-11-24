@@ -8,6 +8,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import { CONTRACT_DIR } from "../src/contract.js";
 import { parseConfig } from "../src/config.js";
+import { apiVersionAtLeast } from "../src/plane.js";
 import {
   DEV_BEARER, LOOPBACK_REDIRECT, OWNER_SUB, WEB_ORIGIN, bootRig, mcpClient, ownerBrowser, ownerTokens, pkce, registerClient, tokenRequest, type Rig,
 } from "./harness.js";
@@ -26,6 +27,15 @@ const sc = (r: unknown) => {
 };
 const isErr = (r: unknown) => (r as { isError?: boolean }).isError === true;
 const planeTasks = (rig: Rig) => (rig.planeDb.prepare("SELECT COUNT(*) AS n FROM tasks").get() as { n: number }).n;
+async function until<T>(read: () => Promise<T>, ok: (v: T) => boolean, ms = 5_000): Promise<T> {
+  const start = Date.now();
+  for (;;) {
+    const v = await read();
+    if (ok(v)) return v;
+    if (Date.now() - start > ms) throw new Error(`timed out; last ${JSON.stringify(v)}`);
+    await new Promise((r) => setTimeout(r, 25));
+  }
+}
 const planeRuns = (rig: Rig) => (rig.planeDb.prepare("SELECT COUNT(*) AS n FROM runs").get() as { n: number }).n;
 
 let rig: Rig;
@@ -245,6 +255,13 @@ describe("tools against the plane (C2 5, 6, 7)", () => {
     const got = await call("get_task", { taskId: c.taskId });
     expect(out.get_task(sc(got)), JSON.stringify(out.get_task.errors)).toBe(true);
     expect((sc(got).latestRun as { runId: string }).runId).toBe(sc(started).runId);
+    expect(sc(got).webLink).toBe(c.webLink);
+
+    // API 2.17: once the run settles, get_task carries the plane's verification summary, not null.
+    const settled = await until(async () => sc(await call("get_task", { taskId: c.taskId })), (x) => (x.stage as { value: string }).value === "done");
+    expect(out.get_task(settled), JSON.stringify(out.get_task.errors)).toBe(true);
+    expect(settled.pendingApprovals).toBe(0);
+    expect(settled.verification).toMatchObject({ runState: "completed" });
 
     const listed = await call("list_tasks", {});
     expect(out.list_tasks(sc(listed)), JSON.stringify(out.list_tasks.errors)).toBe(true);
@@ -303,6 +320,42 @@ describe("tools against the plane (C2 5, 6, 7)", () => {
     const r = await call("start_task", { taskId: c.taskId, idempotencyKey: "FAKE-start-0005-not-real", confirm: { assistantId: "fake-other" } });
     expect(sc(r)).toMatchObject({ code: "route_changed" });
     expect(toolError(sc(r))).toBe(true);
+  });
+});
+
+describe("get_task approvals and verification from the plane read (API 2.17)", () => {
+  it("counts a pending Harness approval, then drops it once answered, and serves the verification", async () => {
+    const prompting = await bootRig({ approvalMode: "prompt-on-escalation" });
+    try {
+      const t = await ownerTokens(prompting);
+      const mcp = await mcpClient(`${prompting.config.publicUrl}/mcp`, t.access);
+      await mcp.client.listTools();
+      const call = (name: string, args: Record<string, unknown>) => mcp.client.callTool({ name, arguments: args });
+      const c = sc(await call("create_task", { goal: "Needs sign-off [FAKE:APPROVAL]", repo: "dogfood", idempotencyKey: "FAKE-create-0101-not-real" }));
+      const proposal = c.proposal as { assistantId: string; compositionDigest: string | null };
+      expect(isErr(await call("start_task", { taskId: c.taskId, idempotencyKey: "FAKE-start-0101-not-real", confirm: { assistantId: proposal.assistantId, compositionDigest: proposal.compositionDigest } }))).toBe(false);
+
+      const waitingResult = await until(() => call("get_task", { taskId: c.taskId }), (r) => sc(r).pendingApprovals === 1);
+      const waiting = sc(waitingResult);
+      expect(out.get_task(waiting), JSON.stringify(out.get_task.errors)).toBe(true);
+      expect(waiting).toMatchObject({ stage: { value: "needs-you", rule: "awaiting-approval" }, verification: null });
+      expect((waitingResult as { content: Array<{ text: string }> }).content[0]!.text).toContain("1 approval waiting.");
+
+      // The owner answers on the Web; the MCP process never sees the approval itself.
+      const requestId = (prompting.planeDb.prepare("SELECT a.provider_request_id AS id FROM approvals a JOIN runs r ON r.id = a.session_id WHERE r.task_id = ?").get(c.taskId) as { id: string }).id;
+      await prompting.plane.orchestrator.respondApproval(String(c.taskId), requestId, true);
+      const done = sc(await until(() => call("get_task", { taskId: c.taskId }), (r) => (sc(r).stage as { value: string }).value === "done"));
+      expect(out.get_task(done), JSON.stringify(out.get_task.errors)).toBe(true);
+      expect(done.pendingApprovals).toBe(0);
+      expect(done.verification).toMatchObject({ runState: "completed" });
+      await mcp.close();
+    } finally { await prompting.close(); }
+  });
+
+  it("needs plane API 2.17 or later", () => {
+    expect(apiVersionAtLeast("2.16")).toBe(false);
+    expect(apiVersionAtLeast("2.17")).toBe(true);
+    expect(apiVersionAtLeast("3.0")).toBe(false);
   });
 });
 
