@@ -1012,7 +1012,7 @@ Migration 041 adds `runs.harness_cli_version` (TEXT NULL, forward only, no backf
 - `apps/mcp` (`@agent-plane/mcp`, MCP TypeScript SDK pinned 1.32.2) serves Streamable HTTP `/mcp` plus a co-hosted OAuth 2.1 server (code + PKCE S256, DCR and CIMD, RFC 9728/8414/8707/9207) on 127.0.0.1 only. Owner login is the service's own OIDC client with an exact `(iss, sub)` pin; email never authorizes. OAuth state lives in its own SQLite file (`stateDb`), never the plane DB. `revoke --all` ends every grant and client.
 - It boots only when the plane credential holds exactly `tasks.read`/`tasks.create`/`tasks.start`, the plane publishes `mcp.webOrigin`, and every MCP alias is in the plane's `mcp.repos` with its path exactly in `repoAllowlist`. The alias→path map is held on both sides (plane config and MCP config) because `GET /api/workspace` publishes alias names only.
 - Contract amendment (mcp-tools/v1 README, ADR): a tool error's `tool-error` object travels as JSON in `content[1].text`, not `structuredContent`. The SDK client validates any `structuredContent` against the success `outputSchema` even when `isError` is true, and rejects it.
-- Known gap: no `tasks.read` route publishes the pending-approval count or the verification summary, so `get_task` returns `pendingApprovals` as the stage's `awaiting-approval` lower bound (0 or 1) and `verification: null`. Closing it needs those fields on `GET /api/tasks/:id` (plane-owned).
+- The `get_task` approval/verification gap found here is closed by API 2.17 (section below).
 - Owner questions still open and left configurable: MCP-created tasks as the agent user (plane `mcp.runAs`), first exposed repos (`repos`), public hostname (`publicUrl`).
 
 ## 2026-11-22 — remote-auth (B2): private Web link, second loopback listener, Google OIDC owner — SHIPPED on merge
@@ -1035,3 +1035,9 @@ Migration 041 adds `runs.harness_cli_version` (TEXT NULL, forward only, no backf
 - `TaskStageReader` now reads a live legacy run (`runs.state` `STARTING`/`ACTIVE`) whose newest event is `approval.requested` as `AWAITING_APPROVAL`, the same rule the web's legacy `pendingApproval` already used. Core `deriveStage` is unchanged; no new value or rule, so no API bump. `effectiveStateSql` is unchanged for every other read path.
 - The legacy event loop publishes a stage-only `state` frame when a run enters or leaves the wait, as the Harness session store does.
 - Known imprecision: between the answer and the adapter's next event the run still reads `needs-you`.
+
+## 2026-11-24 — Task read serves stage, approvals, verification and Web link, API 2.17 — SHIPPED on merge
+
+- **Contract change (additive):** `GET /api/tasks/:id` under `tasks.read` now also serves `stage` (the list's task stage v1), `pendingApprovals`, `verification` and `webLink` (only when `mcp.webOrigin` is set). No earlier field changes; no new capability. Closes the C2 gap: MCP `get_task` returned a 0/1 stage lower bound and `verification: null`.
+- **Rules:** `pendingApprovals` counts Harness `approvals` rows still `pending` plus live legacy runs whose newest event is `approval.requested` (the stage's rule, shared as `LEGACY_AWAITING_APPROVAL_SQL`). `verification` is the latest verification run (highest plan revision) of the task's latest Harness session: `{ sessionId, verificationRunId, runState, passed, checks }`; counts use each check's `status`, else `passed`, as the Web does; `passed` is the stored verdict, never recomputed; counts are zero and `passed` null until the run completes.
+- **MCP:** `get_task` makes one plane read and projects these fields; it no longer reads the task list for the stage. `apps/mcp` now refuses a plane older than 2.17 at boot.

@@ -1,7 +1,7 @@
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { McpConfig } from "./config.js";
 import type { Contract, ToolName } from "./contract.js";
-import { PlaneError, PlaneUnavailable, type PlaneClient, type PlaneResponse, type PlaneTaskDetail, type PlaneTaskSummary } from "./plane.js";
+import { PlaneError, PlaneUnavailable, type PlaneClient, type PlaneResponse, type PlaneTaskDetail } from "./plane.js";
 import type { RateLimiter } from "./ratelimit.js";
 
 /**
@@ -132,26 +132,21 @@ export class Tools {
     return { detail, alias };
   }
 
-  private async stageOf(taskId: string): Promise<PlaneTaskSummary["stage"]> {
-    const summary = (await this.deps.plane.listTasks()).find((t) => t.id === taskId);
-    return summary?.stage;
-  }
-
   private async getTask(taskId: string) {
     const { detail, alias } = await this.exposedTask(taskId);
-    const stage = await this.stageOf(taskId);
-    if (!stage) throw new ToolError("internal", "the plane published no stage for this task");
+    // One plane read (API 2.17) carries the stage, the approval count and the verification summary,
+    // so the three always describe the same moment. The MCP process recomputes none of them.
+    if (!detail.stage) throw new ToolError("internal", "the plane published no stage for this task");
+    if (!Number.isInteger(detail.pendingApprovals)) throw new ToolError("internal", "the plane published no approval count for this task");
+    if (detail.verification === undefined) throw new ToolError("internal", "the plane published no verification field for this task");
     const run = detail.runs.at(-1);
+    const v = detail.verification;
     return {
-      taskId: detail.id, goal: cut(detail.goal, 4000), state: detail.state, stage: { value: stage.value, rule: stage.rule },
-      repo: alias, webLink: this.link(detail.id), createdAt: detail.created_at, updatedAt: detail.updated_at,
-      // Finding (PR body): no tasks.read route publishes the approval count or verification summary, and
-      // the narrow credential holds neither sessions.read nor verification.read. Until the plane adds them to
-      // GET /api/tasks/:id, this is the plane's own `awaiting-approval` stage rule as a lower bound (0 or 1),
-      // and verification is null. The Web link is where approvals are answered either way.
-      pendingApprovals: stage.rule === "awaiting-approval" ? 1 : 0,
+      taskId: detail.id, goal: cut(detail.goal, 4000), state: detail.state, stage: { value: detail.stage.value, rule: detail.stage.rule },
+      repo: alias, webLink: detail.webLink ?? this.link(detail.id), createdAt: detail.created_at, updatedAt: detail.updated_at,
+      pendingApprovals: detail.pendingApprovals,
       latestRun: run ? { runId: run.id, assistantId: run.assistant_id, state: run.state, startedAt: run.started_at, endedAt: run.ended_at } : null,
-      verification: null,
+      verification: v ? { runState: v.runState, checks: { passed: v.checks.passed, failed: v.checks.failed, skipped: v.checks.skipped, blocked: v.checks.blocked } } : null,
     };
   }
 
@@ -217,7 +212,11 @@ function summarize(tool: ToolName, out: Record<string, unknown>): string {
     }
     case "get_task": {
       const s = out.stage as { value: string };
-      return `${String(out.taskId)} is ${String(out.state)} (${s.value}). Open ${String(out.webLink)} to follow it or answer approvals.`;
+      const n = out.pendingApprovals as number;
+      const v = out.verification as { runState: string; checks: Record<string, number> } | null;
+      const approvals = n > 0 ? ` ${n} approval${n === 1 ? "" : "s"} waiting.` : "";
+      const checks = v ? ` Verification ${v.runState}: ${v.checks.passed} passed, ${v.checks.failed} failed, ${v.checks.skipped} skipped, ${v.checks.blocked} blocked.` : "";
+      return `${String(out.taskId)} is ${String(out.state)} (${s.value}).${approvals}${checks} Open ${String(out.webLink)} to follow it or answer approvals.`;
     }
     case "create_task": {
       const p = out.proposal as { eligible: boolean; summary: string };

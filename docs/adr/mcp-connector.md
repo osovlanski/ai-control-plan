@@ -81,7 +81,7 @@ the transport, never tool results.
 | Tool | Scope | Plane calls (C1 shapes) | Notes |
 |---|---|---|---|
 | `list_tasks` | `aos.tasks.read` | `GET /api/tasks` | Only tasks whose repo is an exposed alias. Goal cut to 200 chars. `limit` 1–50. |
-| `get_task` | `aos.tasks.read` | `GET /api/tasks/:id` (+ stage, verification read) | A task outside the exposed repos is `not_found`, same as an unknown id. `pendingApprovals` is a count only. |
+| `get_task` | `aos.tasks.read` | `GET /api/tasks/:id` (API 2.17 serves stage, `pendingApprovals`, verification and `webLink` on that one read) | A task outside the exposed repos is `not_found`, same as an unknown id. `pendingApprovals` is a count only. |
 | `create_task` | `aos.tasks.create` | `POST /api/tasks` with `idempotencyKey` and `propose: true` | Creates `CREATED` and returns the proposal. Never starts. |
 | `start_task` | `aos.tasks.start` | `POST /api/tasks/:id/start` with `idempotencyKey` and `confirm` | Starts once. Returns as soon as the plane accepts the start. |
 

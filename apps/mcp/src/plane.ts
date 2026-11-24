@@ -1,5 +1,5 @@
 /**
- * Loopback client for the plane API (C1 shapes, API 2.14). It holds the narrow MCP credential and
+ * Loopback client for the plane API (C1 shapes, API 2.14; task read, API 2.17). It holds the narrow MCP credential and
  * is the only place that secret is used: client tokens are never forwarded to the plane (T7).
  */
 export interface PlaneResponse { status: number; body: Record<string, unknown> }
@@ -14,9 +14,18 @@ export interface PlaneTaskSummary {
 export interface PlaneTaskDetail {
   id: string; goal: string; state: string; repo_path: string | null; created_at: string; updated_at: string;
   runs: Array<{ id: string; assistant_id: string; state: string; started_at: string | null; ended_at: string | null }>;
+  /** API 2.17: the stage (as on the list), the pending-approval count, verification and Web link. */
+  stage: { value: string; rule: string } | null;
+  pendingApprovals: number;
+  verification: {
+    runState: "ready" | "claimed" | "completed" | "interrupted";
+    checks: { passed: number; failed: number; skipped: number; blocked: number };
+  } | null;
+  webLink?: string;
 }
 
-export const MIN_API_VERSION: [number, number] = [2, 14];
+/** 2.17 is the first plane whose task read carries stage, pendingApprovals, verification and webLink. */
+export const MIN_API_VERSION: [number, number] = [2, 17];
 
 export class PlaneClient {
   constructor(private readonly base: string, private readonly secret: () => string, private readonly timeoutMs = 10_000) {}

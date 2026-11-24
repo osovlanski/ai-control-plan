@@ -17,4 +17,5 @@ access model: [docs/adr/mcp-connector.md](../../../docs/adr/mcp-connector.md).
   `new Ajv2020({ strict: true, allErrors: true })`. C1 adds the conformance test that runs them.
 
 Not covered here: the plane's HTTP request/response shapes for idempotent create/start (C1 owns
-them, API 2.14) and the OAuth endpoints (standard RFC shapes, C2).
+them, API 2.14), the task read `get_task` projects (`GET /api/tasks/:id`, API 2.17 adds `stage`,
+`pendingApprovals`, `verification` and `webLink`) and the OAuth endpoints (standard RFC shapes, C2).

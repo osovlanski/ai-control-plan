@@ -10,7 +10,7 @@ import { BodyTooLarge, readBody, sendJson } from "./http-util.js";
 import { AuthServer } from "./oauth/server.js";
 import { OidcClient } from "./oauth/oidc.js";
 import { OAuthStore, safeEqual } from "./oauth/store.js";
-import { PlaneClient, apiVersionAtLeast } from "./plane.js";
+import { MIN_API_VERSION, PlaneClient, apiVersionAtLeast } from "./plane.js";
 import { RateLimiter } from "./ratelimit.js";
 import { readPlaneSecret, readPrivateFile } from "./secrets.js";
 import { Tools } from "./tools.js";
@@ -48,7 +48,7 @@ interface Session { transport: StreamableHTTPServerTransport; grantId: string; l
 export async function checkPlane(config: McpConfig, plane: PlaneClient): Promise<{ webOrigin: string }> {
   const meta = await plane.meta();
   if (meta.status !== 200) throw new Error(`plane refused the MCP credential on /api/meta (${meta.status})`);
-  if (!apiVersionAtLeast(meta.body.apiVersion)) throw new Error(`plane API ${String(meta.body.apiVersion)} is older than 2.14`);
+  if (!apiVersionAtLeast(meta.body.apiVersion)) throw new Error(`plane API ${String(meta.body.apiVersion)} is older than ${MIN_API_VERSION.join(".")}`);
   const ws = await plane.workspace();
   if (ws.status !== 200) throw new Error(`plane refused GET /api/workspace (${ws.status})`);
   const allowlist = (ws.body.repoAllowlist ?? []) as string[];
