@@ -2,6 +2,7 @@ import { Restart, namesRestartRoute, useRestartOffered } from "./Restart.js";
 import { WaitingSummary } from "./WaitingSummary.js";
 import { TaskRouting } from "./TaskRouting.js";
 import { TaskEstimate } from "./TaskEstimate.js";
+import { TaskProvenance } from "./TaskProvenance.js";
 import { useEffect, useRef, useState, type ComponentProps } from "react";
 import { answerFailure, eventKey, fromStream, liveSessions, mergeEvents, pendingApproval, type PendingApproval, type StreamEvent } from "./task-reconcile.js";
 import {
@@ -16,7 +17,7 @@ import { CompositionPanel } from "./Composition.js";
 import { VerificationChecks, VerificationVerdict } from "./VerificationChecks.js";
 import { Button, Card, StateBadge, tokens } from "./ui.jsx";
 
-type Tab = "activity" | "usage" | "routing" | "composition" | "progress" | "handoff" | "compare" | "sessions";
+type Tab = "activity" | "usage" | "routing" | "provenance" | "composition" | "progress" | "handoff" | "compare" | "sessions";
 
 interface Notice {
   level: "info" | "warn";
@@ -388,7 +389,7 @@ export function TaskDetail({ taskId, onBack }: { taskId: string; onBack: () => v
       )}
 
       <div style={{ display: "flex", flexWrap: "wrap", gap: "0.4rem", marginBottom: "0.9rem" }}>
-        {(["activity", "usage", "routing", "composition", "progress", "handoff", "compare", "sessions"] as Tab[]).map((t) => (
+        {(["activity", "usage", "routing", "provenance", "composition", "progress", "handoff", "compare", "sessions"] as Tab[]).map((t) => (
           <Button key={t} variant={tab === t ? "primary" : "secondary"} onClick={() => setTab(t)}>
             {t[0]!.toUpperCase() + t.slice(1)}
           </Button>
@@ -461,6 +462,12 @@ export function TaskDetail({ taskId, onBack }: { taskId: string; onBack: () => v
       {tab === "routing" && (
         <Card>
           <TaskRouting routing={routing} unavailable={unavailable.includes("Routing")} runs={readError ? null : detail.runs} />
+        </Card>
+      )}
+
+      {tab === "provenance" && (
+        <Card>
+          <TaskProvenance taskId={taskId} refreshKey={`${state}:${detail.runs.length}`} />
         </Card>
       )}
 
