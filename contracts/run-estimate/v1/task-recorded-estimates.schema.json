@@ -1,0 +1,133 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-plane.local/contracts/run-estimate/v1/task-recorded-estimates.schema.json",
+  "title": "TaskRecordedEstimates",
+  "description": "Body of GET /api/tasks/:id/estimates/recorded (API 2.16): stored estimates oldest first, each with its run's actual once it ended. Normative text: docs/contracts/run-estimate-v1.md.",
+  "type": "object",
+  "required": [
+    "taskId",
+    "advisory",
+    "records"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "taskId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "advisory": {
+      "const": true
+    },
+    "records": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "runId",
+          "assistantId",
+          "estimatorVersion",
+          "recordedAt",
+          "estimate",
+          "recommendation",
+          "actual"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "runId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "assistantId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "estimatorVersion": {
+            "type": "string",
+            "pattern": "^run-estimate/[1-9][0-9]*$"
+          },
+          "recordedAt": {
+            "$ref": "run-estimate.schema.json#/$defs/Instant"
+          },
+          "estimate": {
+            "$ref": "run-estimate.schema.json#/$defs/RunEstimate"
+          },
+          "recommendation": {
+            "$ref": "run-estimate.schema.json#/$defs/ScheduleRecommendation"
+          },
+          "actual": {
+            "anyOf": [
+              {
+                "type": "object",
+                "required": [
+                  "state",
+                  "endedAt",
+                  "durationMs",
+                  "tokens",
+                  "costUsd",
+                  "costMethod"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "endedAt": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "durationMs": {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  "tokens": {
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "required": [
+                          "input",
+                          "output"
+                        ],
+                        "additionalProperties": false,
+                        "properties": {
+                          "input": {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          "output": {
+                            "type": "integer",
+                            "minimum": 0
+                          }
+                        }
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "costUsd": {
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "minimum": 0
+                  },
+                  "costMethod": {
+                    "enum": [
+                      "measured",
+                      "estimated",
+                      "unknown"
+                    ]
+                  }
+                }
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+}

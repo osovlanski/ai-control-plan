@@ -1046,3 +1046,11 @@ Migration 041 adds `runs.harness_cli_version` (TEXT NULL, forward only, no backf
 - **Contract change (additive):** `GET /api/tasks/:id` under `tasks.read` now also serves `stage` (the list's task stage v1), `pendingApprovals`, `verification` and `webLink` (only when `mcp.webOrigin` is set). No earlier field changes; no new capability. Closes the C2 gap: MCP `get_task` returned a 0/1 stage lower bound and `verification: null`.
 - **Rules:** `pendingApprovals` counts Harness `approvals` rows still `pending` plus live legacy runs whose newest event is `approval.requested` (the stage's rule, shared as `LEGACY_AWAITING_APPROVAL_SQL`). `verification` is the latest verification run (highest plan revision) of the task's latest Harness session: `{ sessionId, verificationRunId, runState, passed, checks }`; counts use each check's `status`, else `passed`, as the Web does; `passed` is the stored verdict, never recomputed; counts are zero and `passed` null until the run completes.
 - **MCP:** `get_task` makes one plane read and projects these fields; it no longer reads the task list for the stage. `apps/mcp` now refuses a plane older than 2.17 at boot.
+
+## 2026-11-24 — Run estimate v1 JSON Schemas published for Cockpit (SHIPPED on merge)
+
+- `contracts/run-estimate/v1/` publishes closed JSON Schemas for `GET /api/tasks/:id/estimate` and
+  `GET /api/tasks/:id/estimates/recorded`, with fixtures. No route, API version or migration
+  changes: the schemas describe API 2.15/2.16 bodies as served, and
+  `apps/api/test/run-estimate-contract.test.ts` validates real route output against them.
+- Cockpit vendors this directory pinned by SHA. The accuracy report has no schema in v1.
