@@ -28,6 +28,7 @@ import {
   canonicalRequestProjection,
   isSessionTerminal,
   newExecutionSessionId,
+  normalizeReportedEffort,
   outcomeOf,
   requestFingerprint,
 } from "@agent-plane/core";
@@ -513,6 +514,22 @@ export class SessionStore {
     this.db
       .prepare("UPDATE runs SET harness_cli_version = ? WHERE id = ? AND harness_cli_version IS NULL")
       .run(version.trim(), sessionId);
+  }
+
+  /**
+   * Record the reasoning effort the PROVIDER reported on `run.started` (P1-5, migration 057).
+   * Evidence-only and write-once like `recordResolvedModel`: the first report wins, and a value
+   * that is not a short effort token is ignored so the column stays NULL (effort `unknown`)
+   * rather than holding a guess. Never called with a requested or profile-chosen effort.
+   */
+  recordReportedEffort(sessionId: string, effort: unknown): void {
+    const value = normalizeReportedEffort(effort);
+    if (value === undefined) return;
+    this.db
+      .prepare(
+        "UPDATE runs SET effort_reported = ?, effort_reported_source = 'run.started' WHERE id = ? AND effort_reported IS NULL",
+      )
+      .run(value, sessionId);
   }
 
   ackHandle(

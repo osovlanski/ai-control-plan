@@ -209,6 +209,12 @@ export interface ExecutionIdentity {
   resolvedSource: "run.started" | "result" | "unknown";
   servingProvider?: string;
   harness: { id: AssistantId; version?: string };
+  /**
+   * P1-5: the reasoning effort the PROVIDER reported on its own `run.started`
+   * (`runs.effort_reported`). Absent ⇒ unknown; never inferred from a request,
+   * a profile or a CLI default.
+   */
+  reportedEffort?: { value: string; source: "run.started" };
   catalogRevision?: string;
   pricingRevision?: string;
 }

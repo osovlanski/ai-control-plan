@@ -1,6 +1,7 @@
 import type { AssistantId } from "./ids.js";
 import type { Freshness, Provenance } from "./model-catalog.js";
 import type { TaskIntent } from "./scheduler.js";
+import type { EffortPlan } from "./effort.js";
 import { classifyTaskV1 } from "./task-classifier.js";
 
 /**
@@ -66,6 +67,33 @@ export const OBSERVED_RESOLUTION_RUNS = 3;
 export const OBSERVED_RESOLUTION_FRESHNESS_DAYS = 14;
 /** Names the binding rule in the persisted identity, so a later rule change is auditable. */
 export const OBSERVED_RESOLUTION_RULE = "last-n-agreement-v1";
+/**
+ * P1-5: the same last-N rule, applied to the effort the provider reported. A
+ * candidate's effort is bound only when its last N runs (same N and F as
+ * {@link OBSERVED_RESOLUTION_RULE}) all report one effort.
+ */
+export const OBSERVED_EFFORT_RULE = "last-n-effort-agreement-v1";
+
+/**
+ * P1-5: the effort a candidate runs at, as far as this workspace's own runs
+ * prove it. `unknown` is a valid, common answer: the candidate then joins only
+ * the `unknown`-effort cohort and no effort-tagged prior attaches to it.
+ */
+export interface CandidateEffort {
+  basis: "observed-effort" | "unknown";
+  /** The bound level, or `unknown` (`EFFORT_UNKNOWN`). */
+  value: string;
+  evidence: string;
+  observation?: {
+    rule: typeof OBSERVED_EFFORT_RULE;
+    requiredRuns: number;
+    freshnessDays: number;
+    runsExamined: number;
+    /** Distinct reported efforts among the examined runs, sorted; `unknown` for a run that reported none. */
+    reportedEfforts: string[];
+    newestObservedAt?: string;
+  };
+}
 
 /**
  * What the last-N rule looked at, persisted with the identity whether it bound
@@ -113,6 +141,12 @@ export interface CandidateIdentity {
    * attachment unless the prior declares the same configuration.
    */
   executionSettings?: Record<string, string | number | boolean>;
+  /**
+   * P1-5: the provider-reported effort this candidate's runs are bound to, and
+   * so the effort its telemetry cohort and any effort-tagged prior must match.
+   * Absent on records written before P1-5.
+   */
+  effort?: CandidateEffort;
 }
 
 /** One prior offered to a dimension, with everything needed to audit it (I-M1). */
@@ -128,7 +162,7 @@ export interface DimensionPrior {
 /** One own-telemetry measurement for a dimension, with its cohort size. */
 export interface DimensionTelemetry {
   value: number;
-  /** Cohort size — runs with the same resolved model, task kind and harness major, in-window. */
+  /** Cohort size — runs with the same assistant, resolved model, effort, task kind and harness major, in-window. */
   n: number;
   /** The exact metric this number is, so it is never mistaken for the prior's. */
   metric: string;
@@ -137,6 +171,16 @@ export interface DimensionTelemetry {
 
 export interface TelemetryCohortKey {
   resolvedModelKey: string;
+  /**
+   * P1-5: the assistant the runs went through. One model served through two
+   * assistants is two cohorts. Absent on records written before P1-5.
+   */
+  assistantId?: string;
+  /**
+   * P1-5: the provider-reported effort of every run in the cohort, or
+   * `unknown` for runs that reported none. Absent on records written before P1-5.
+   */
+  effort?: string;
   taskKind: string;
   harnessMajor: string;
   windowDays: number;
@@ -268,6 +312,12 @@ export interface ModelRecommendation {
     decidedBy: "unchanged" | "operator-override" | "k13-recommendation";
     detail: string;
   };
+  /**
+   * P1-5: the effort the task's routing profile would choose on each
+   * assistant. Shadow only: no adapter is handed it. Absent on records written
+   * before P1-5.
+   */
+  effortPlan?: EffortPlan;
 }
 
 // --- classification ---------------------------------------------------------
@@ -488,6 +538,8 @@ export interface SelectModelInput {
    * any other assistant is advisory however good its score.
    */
   chosenAssistantId?: AssistantId;
+  /** P1-5: recorded on the recommendation as given; selection never reads it. */
+  effortPlan?: EffortPlan;
 }
 
 /**
@@ -604,6 +656,7 @@ export function selectModel(input: SelectModelInput): ModelRecommendation {
     activation: input.activation,
     ...(applied ? { applied } : {}),
     execution,
+    ...(input.effortPlan ? { effortPlan: input.effortPlan } : {}),
   };
 }
 

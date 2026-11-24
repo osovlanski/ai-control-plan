@@ -1,22 +1,31 @@
 import {
   DIMENSION_K,
+  EFFORT_CHOICE_VERSION,
+  EFFORT_UNKNOWN,
   HARNESS_MAJOR,
+  OBSERVED_EFFORT_RULE,
   OBSERVED_RESOLUTION_FRESHNESS_DAYS,
   OBSERVED_RESOLUTION_RULE,
   OBSERVED_RESOLUTION_RUNS,
   TASK_DIMENSIONS,
+  chooseEffort,
   classifyTask,
+  effortLevelFor,
   evaluateActivationGate,
   modelKey,
   normalizeBenchmark,
+  runtimeKindFor,
   selectModel,
 } from '@agent-plane/core';
 import type {
   AssistantId,
+  CandidateEffort,
   CandidateIdentity,
   DimensionEvidence,
   DimensionPrior,
   DimensionTelemetry,
+  EffortLadderId,
+  EffortPlan,
   IdentityObservation,
   ModelCandidateInput,
   ModelCatalogEntry,
@@ -32,7 +41,7 @@ import type { Db } from '../db/index.js';
 import { AA_SPEED_SCALE_MAX } from './artificial-analysis.js';
 import type { ModelCatalogService } from './model-catalog.js';
 import type { Registry } from './registry.js';
-import { modelCohorts, type ModelCohort } from './telemetry.js';
+import { cohortId, modelCohorts, type ModelCohort } from './telemetry.js';
 
 /**
  * K13 assembly — the impure half of model selection (§4.4.3).
@@ -117,13 +126,16 @@ export function recommendModel(
     // No manifest = no advertised selector = no candidate to reason about. The
     // assistant's own failure is already recorded in the routing explanation.
     for (const model of manifest?.core.models ?? []) {
-      const identity = resolveCandidateIdentity(deps.db, {
-        assistantId: assistant.id,
-        provider: assistant.provider,
-        selector: model.id,
-        catalog,
-        now,
-      });
+      const identity: CandidateIdentity = {
+        ...resolveCandidateIdentity(deps.db, {
+          assistantId: assistant.id,
+          provider: assistant.provider,
+          selector: model.id,
+          catalog,
+          now,
+        }),
+        effort: resolveCandidateEffort(deps.db, { assistantId: assistant.id, selector: model.id, now }),
+      };
       const entry = identity.resolvedModelKey
         ? catalog.find((e) => e.modelKey === identity.resolvedModelKey)
         : undefined;
@@ -159,10 +171,13 @@ export function recommendModel(
         advisories.push('context window unknown (advisory: the task declares no minimum)');
       }
       // Not an exclusion: a withheld prior only changes what evidence is offered.
-      const effortTagged = (entry?.benchmarkPriors ?? []).filter(isEffortTagged).length;
-      if (identity.resolvedModelKey && effortTagged > 0) {
+      const effortTagged = (entry?.benchmarkPriors ?? []).filter(isEffortTagged);
+      const effortMismatched = effortTagged.filter((p) => !effortMatches(p, identity.effort)).length;
+      if (identity.resolvedModelKey && effortMismatched > 0) {
         advisories.push(
-          `${effortTagged} benchmark prior(s) withheld: each scores one reasoning effort and the plane records no effort for a run`,
+          identity.effort?.basis === 'observed-effort'
+            ? `${effortMismatched} benchmark prior(s) withheld: each scores a reasoning effort other than the ${identity.effort.value} this candidate's runs report`
+            : `${effortMismatched} benchmark prior(s) withheld: each scores one reasoning effort and this candidate's runs bind no effort`,
         );
       }
       if (!baseConfig.fresh && identity.resolvedModelKey && (entry?.benchmarkPriors?.length ?? 0) > 0) {
@@ -176,7 +191,7 @@ export function recommendModel(
         identity,
         filterFailures,
         advisories,
-        evidence: gatherEvidence(entry, identity, cohorts, baseConfig, {
+        evidence: gatherEvidence(entry, assistant.id, identity, cohorts, baseConfig, {
           servingProvider: assistant.provider,
           ...(deps.config.assistants[assistant.id]?.accountKind
             ? { accountKind: deps.config.assistants[assistant.id]!.accountKind! }
@@ -209,7 +224,124 @@ export function recommendModel(
     activation: activationGate(deps, candidates, cohorts, at),
     ...(intent.overrides?.model ? { requestedModelSelector: intent.overrides.model } : {}),
     ...(chosenAssistantId ? { chosenAssistantId } : {}),
+    effortPlan: effortPlan(deps, intent, classification),
   });
+}
+
+// --- effort -----------------------------------------------------------------
+
+/** The effort ladder an assistant's harness uses, if the plane knows one. */
+function effortLadderOf(provider: string, manifest: { providerDetail?: Record<string, unknown> } | undefined): EffortLadderId | undefined {
+  // A fake stands in for a harness per instance (`providerDetail.harness`); every
+  // real provider's harness is fixed by the runtime catalogue.
+  const harness = runtimeKindFor(provider)?.harness ?? (provider === 'fake' ? manifest?.providerDetail?.harness : undefined);
+  return harness === 'claude-code' || harness === 'codex' ? harness : undefined;
+}
+
+/**
+ * P1-5: the effort the task's routing profile would choose on each assistant
+ * (`effort-choice-v1`). SHADOW: recorded on the recommendation, handed to no
+ * adapter. OpenRouter is reported as pinned, because its adapter already passes
+ * the workspace's `reasoningEffort` (default `high`) on every run.
+ */
+export function effortPlan(
+  deps: Pick<RecommendModelDeps, 'config' | 'registry'>,
+  intent: Pick<TaskIntent, 'profile'>,
+  classification: Parameters<typeof effortLevelFor>[1],
+): EffortPlan {
+  const { level, rule } = effortLevelFor(intent.profile, classification);
+  const choices = deps.registry.list().map((assistant) => {
+    const ladder = effortLadderOf(assistant.provider, assistant.manifestParsed ?? undefined);
+    const configured = deps.config.assistants[assistant.id]?.options?.reasoningEffort;
+    const pinned =
+      assistant.provider === 'openrouter' ? (typeof configured === 'string' ? configured : 'high') : undefined;
+    return chooseEffort({ assistantId: assistant.id, ...(ladder ? { ladder } : {}), level, ...(pinned ? { pinned } : {}) });
+  });
+  return { version: EFFORT_CHOICE_VERSION, mode: 'shadow', profile: intent.profile, level, rule, choices };
+}
+
+/**
+ * Bind a candidate's effort from its own runs, by the same last-N rule as
+ * observed model resolution (`last-n-effort-agreement-v1`): the newest N runs on
+ * this assistant that requested this selector must all report one effort, the
+ * newest within F days. A run that reported no effort counts as `unknown`, so a
+ * mix of reported and unreported runs binds nothing. Unbound is `unknown`: the
+ * candidate then reads only the `unknown`-effort cohort.
+ */
+export function resolveCandidateEffort(
+  db: Db,
+  input: { assistantId: string; selector: string; now?: () => Date; requiredRuns?: number; freshnessDays?: number },
+): CandidateEffort {
+  const requiredRuns = input.requiredRuns ?? OBSERVED_RESOLUTION_RUNS;
+  const freshnessDays = input.freshnessDays ?? OBSERVED_RESOLUTION_FRESHNESS_DAYS;
+  const nowMs = (input.now?.() ?? new Date()).getTime();
+  const rows = db
+    .prepare(
+      `SELECT effort_reported, started_at FROM runs
+        WHERE assistant_id = ? AND model_requested = ?
+        ORDER BY started_at DESC, rowid DESC
+        LIMIT ?`,
+    )
+    .all(input.assistantId, input.selector, requiredRuns) as Array<{ effort_reported: string | null; started_at: string }>;
+  const unknown = (evidence: string, observation?: CandidateEffort['observation']): CandidateEffort => ({
+    basis: 'unknown',
+    value: EFFORT_UNKNOWN,
+    evidence,
+    ...(observation ? { observation } : {}),
+  });
+  if (rows.length === 0) {
+    return unknown(`no run on ${input.assistantId} has requested "${input.selector}", so no effort is observed`);
+  }
+  const reportedEfforts = [...new Set(rows.map((r) => r.effort_reported ?? EFFORT_UNKNOWN))].sort();
+  const newest = rows[0]!.started_at;
+  const ageDays = (nowMs - Date.parse(newest)) / 86_400_000;
+  const observation: NonNullable<CandidateEffort['observation']> = {
+    rule: OBSERVED_EFFORT_RULE,
+    requiredRuns,
+    freshnessDays,
+    runsExamined: rows.length,
+    reportedEfforts,
+    newestObservedAt: newest,
+  };
+  const refusals: string[] = [];
+  if (reportedEfforts.length > 1) refusals.push(`its last ${rows.length} run(s) disagree (${reportedEfforts.join(', ')})`);
+  else if (reportedEfforts[0] === EFFORT_UNKNOWN) refusals.push(`none of its last ${rows.length} run(s) reported an effort`);
+  if (rows.length < requiredRuns) refusals.push(`only ${rows.length} of the ${requiredRuns} runs required`);
+  if (!(ageDays <= freshnessDays)) {
+    refusals.push(`the newest run started ${ageDays.toFixed(1)} days ago, older than ${freshnessDays} days`);
+  }
+  if (refusals.length > 0) {
+    return unknown(
+      `effort of "${input.selector}" on ${input.assistantId} is unknown: ${refusals.join('; ')} (last-${requiredRuns} rule, newest ${newest})`,
+      observation,
+    );
+  }
+  return {
+    basis: 'observed-effort',
+    value: reportedEfforts[0]!,
+    evidence:
+      `the last ${requiredRuns} runs on ${input.assistantId} requesting "${input.selector}" all reported effort ` +
+      `${reportedEfforts[0]} (provider-reported on run.started; newest ${newest}; freshness ${freshnessDays} days)`,
+    observation,
+  };
+}
+
+/** The effort an effort-tagged AA prior scored (`configuration` carries `effort=<x>`), if any. */
+export function priorEffort(prior: { provenance: { benchmark?: { configuration?: string } } }): string | undefined {
+  return /(?:^|; )effort=([^;]+)/.exec(prior.provenance.benchmark?.configuration ?? '')?.[1]?.trim().toLowerCase();
+}
+
+/**
+ * Whether an effort-tagged prior describes this candidate: only when the
+ * candidate's own runs bind an effort and it is the same level by name. The
+ * prior already sits on a provider-scoped catalog entry, so the comparison is
+ * always within one vendor's ladder.
+ */
+function effortMatches(
+  prior: { provenance: { benchmark?: { configuration?: string } } },
+  effort: CandidateEffort | undefined,
+): boolean {
+  return effort?.basis === 'observed-effort' && priorEffort(prior) === effort.value;
 }
 
 // --- candidate identity -----------------------------------------------------
@@ -407,6 +539,7 @@ export function baseConfigAttestation(attestedAt: string | undefined, at: Date):
  */
 function gatherEvidence(
   entry: ModelCatalogEntry | undefined,
+  assistantId: string,
   identity: CandidateIdentity,
   cohorts: Map<string, ModelCohort>,
   baseConfig: BaseConfigAttestation,
@@ -426,9 +559,10 @@ function gatherEvidence(
     // settings. Benchmark priors attach only under a fresh attestation that they
     // set none; the price prior is a tariff, not a measurement at a configuration.
     for (const prior of baseConfig.fresh ? (entry.benchmarkPriors ?? []) : []) {
-      // An effort-tagged AA row (K8 doc §17a) describes one reasoning effort. A run
-      // records no effort, so it can never be shown to match: withhold, never blend.
-      if (isEffortTagged(prior)) continue;
+      // An effort-tagged AA row (K8 doc §17a) describes one reasoning effort. It
+      // attaches only when this candidate's own runs report that same effort
+      // (P1-5); otherwise it cannot be shown to match: withhold, never blend.
+      if (isEffortTagged(prior) && !effortMatches(prior, identity.effort)) continue;
       const target = evidence[prior.dimension];
       if (!target) continue;
       target.priors.push({
@@ -443,7 +577,9 @@ function gatherEvidence(
     if (costPrior) evidence.cost!.priors.push(costPrior);
   }
 
-  const cohort = cohorts.get(identity.resolvedModelKey);
+  // P1-5: the cohort of THIS assistant at THIS candidate's effort. An unbound
+  // effort reads only the `unknown`-effort cohort.
+  const cohort = cohorts.get(cohortId(assistantId, identity.resolvedModelKey, identity.effort?.value ?? EFFORT_UNKNOWN));
   if (cohort) {
     const coding = codingTelemetry(cohort);
     if ('telemetry' in coding) evidence.coding!.telemetry = coding.telemetry;
@@ -651,6 +787,8 @@ function costTelemetry(
 function cohortKey(cohort: ModelCohort) {
   return {
     resolvedModelKey: cohort.resolvedModelKey,
+    assistantId: cohort.assistantId,
+    effort: cohort.effort,
     taskKind: cohort.taskKind,
     harnessMajor: cohort.harnessMajor,
     windowDays: cohort.windowDays,
@@ -672,7 +810,9 @@ function activationGate(
 ) {
   const selection = deps.config.models.selection;
   const atOrAboveK = candidates.filter((c) => {
-    const cohort = c.identity.resolvedModelKey ? cohorts.get(c.identity.resolvedModelKey) : undefined;
+    const cohort = c.identity.resolvedModelKey
+      ? cohorts.get(cohortId(c.assistantId, c.identity.resolvedModelKey, c.identity.effort?.value ?? EFFORT_UNKNOWN))
+      : undefined;
     if (!cohort || c.filterFailures.length > 0) return false;
     return (
       cohort.reliabilityRuns >= DIMENSION_K.coding ||

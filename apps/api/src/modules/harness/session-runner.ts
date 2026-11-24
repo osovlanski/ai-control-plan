@@ -1413,11 +1413,13 @@ class RunContext {
       case "run.started": {
         // The provider's own statement of what it is serving. Absent ⇒ unknown;
         // the requested selector is never promoted into resolved identity.
-        const payload = event.payload as { model?: string; providerSessionRef?: string; version?: string } | undefined;
+        const payload = event.payload as { model?: string; providerSessionRef?: string; version?: string; effort?: string } | undefined;
         const model = payload?.model;
         if (model) this.d.store.recordResolvedModel(this.sessionId, model, "run.started");
         // The CLI build that served the run (K13 A2): the same event, the same write-once rule.
         this.d.store.recordHarnessCliVersion(this.sessionId, payload?.version);
+        // The effort the provider says it is running at (P1-5): same event, same write-once rule.
+        this.d.store.recordReportedEffort(this.sessionId, payload?.effort);
         // A provider that learns its session id only at startup (Claude's system/init) had no
         // ref for ackHandle. Store it now, write-once: recovery offers a resume from it and
         // imported usage binds to this run by it.

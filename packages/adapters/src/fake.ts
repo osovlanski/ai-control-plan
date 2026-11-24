@@ -91,6 +91,15 @@ function parseCliVersionMarker(prompt: string): string | undefined {
 }
 
 /**
+ * `[FAKE:EFFORT:<v>]`: run.started reports `effort: <v>`, the normalized field a provider adapter
+ * uses for the reasoning effort the provider says it is running at (P1-5). Absent ⇒ no effort is
+ * reported (what every real adapter does today), so the plane's `runs.effort_reported` stays NULL.
+ */
+function parseEffortMarker(prompt: string): string | undefined {
+  return prompt.match(/\[FAKE:EFFORT:([^\]\s]+)\]/)?.[1];
+}
+
+/**
  * `[FAKE:LATE_SESSION]` / `[FAKE:LATE_SESSION:<ref>]`: the run's handle carries no
  * providerSessionRef when start() returns, and the ref is reported only by run.started,
  * the way the Claude CLI learns its session id from `system/init`. With `<ref>`, that is
@@ -301,6 +310,7 @@ export class FakeAdapter implements AgentAdapter {
         providerSessionRef: handle.providerSessionRef,
         model: run.model?.id ?? "fake-1",
         ...(parseCliVersionMarker(run.prompt) ? { version: parseCliVersionMarker(run.prompt) } : {}),
+        ...(parseEffortMarker(run.prompt) ? { effort: parseEffortMarker(run.prompt) } : {}),
         ...(run.profile && this.harness === "claude-code" ? fakeInitEvidence(run.profile, run.prompt) : {}),
       },
     });
