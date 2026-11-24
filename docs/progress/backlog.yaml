@@ -392,12 +392,12 @@ items:
     repo: ai-control-plan
     size: L
     depends_on: []
-    files: ["apps/api/src/modules/scheduler.ts", "apps/api/src/modules/orchestrator.ts"]
+    files: ["apps/api/src/modules/scheduler.ts", "apps/api/src/modules/orchestrator.ts", "apps/api/src/server.ts", "apps/api/src/modules/autopilot.ts", "apps/api/src/modules/harness/session-runner.ts", "apps/api/src/config.ts"]
     lane: manual-cloud
     profile: best-quality
     night: false
     source: "itay 2026-11-21 spec item 4"
-    notes: "Changes dispatch: needs the review packet (docs/agentic-os-qcq-review-packet.md) and one reviewer on Opus High before merge. Today `scheduling.accountConcurrency` is advisory only (wait estimate). Reuse K4b claims keyed by account."
+    notes: "Changes dispatch. Revision 1 (one K4b claim per task keyed by core.auth.account) FAILED Astra review 2026-11-24. Revision 2 in docs/agentic-os-qcq-review-packet.md: per-attempt claims (execution_attempts + attempt_requirements, new migration), one launch reservation on every provider start, release at provider exit, operator-declared (assistant, runAs) account groups. Lands as slices qcq-04a..d after a clean re-review of revision 2; one Opus High reviewer per slice, both reviewers on 04b/04c. Today scheduling.accountConcurrency is advisory only."
 
   - id: qcq-05-act-on-recommendation
     title: "Opt-in: defer a task to its recommended window as a scheduler time wait"
@@ -410,7 +410,7 @@ items:
     profile: best-quality
     night: false
     source: "itay 2026-11-21 spec items 3 and 6"
-    notes: "Live scheduling change: pending itay's rollout approval after the review packet. Acceptance, permissions and spend limits stay in force; an approval wait is never auto-approved."
+    notes: "Live scheduling change: pending itay's rollout approval after the review packet. Revision 2 (packet section 3): a window bound carried on the existing wait, never a replacement; rechecks at wake, reservation and materialized replay. Acceptance, permissions and spend limits stay in force; a timer never answers an approval. Lands after qcq-04b."
 
   - id: qcq-06-decomposition-overhead
     title: "Decompose a task into subtasks and estimate planning, handoff, retry and verification overhead"
