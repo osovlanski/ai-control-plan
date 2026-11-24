@@ -1035,6 +1035,11 @@ Migration 041 adds `runs.harness_cli_version` (TEXT NULL, forward only, no backf
 - `TaskStageReader` now reads a live legacy run (`runs.state` `STARTING`/`ACTIVE`) whose newest event is `approval.requested` as `AWAITING_APPROVAL`, the same rule the web's legacy `pendingApproval` already used. Core `deriveStage` is unchanged; no new value or rule, so no API bump. `effectiveStateSql` is unchanged for every other read path.
 - The legacy event loop publishes a stage-only `state` frame when a run enters or leaves the wait, as the Harness session store does.
 - Known imprecision: between the answer and the adapter's next event the run still reads `needs-you`.
+## 2026-11-24 — Security review fixes: encoded-path auth bypass (C1), MCP CIMD consent (M1) — SHIPPED on merge
+
+- **Defect (C1, critical):** both plane auth gates tested the raw `req.url` for `/api/`, but find-my-way routes on the decoded path, so `/%61pi/tasks` reached `/api/tasks` with no credential and skipped the listener split (remote cancel and local-only revoke-all answered). Rule now: an `onRequest` gate decides "API request" from `req.routeOptions.url` (the matched route), and for unmatched targets from a lenient normalization (decode until stable, collapse slashes, resolve dot segments, lower case) that fails closed. Absolute-form and `*` targets get 400 before any gate. A `preHandler` backstop answers 401 for any route that declares `config.auth` and reached its handler without `req.cred`, and 404 for a listener-scoped route on the other listener. Shared helper: `apps/api/src/auth/request-target.ts`. Never test `req.url` for an auth decision.
+- **Decision (M1):** remembered MCP consent is honoured only for DCR clients. A CIMD `client_id` is a public URL shared by every user of that client app, so CIMD clients see the consent page on every authorization, with the publishing host named.
+- Also: the remote OIDC client secret file is checked with `lstat` (no symlinks, 0600, owner) at config time and on every read (L3); MCP loopback redirects accept `[::1]` (L4); `tools.call` uses `Object.hasOwn` (I2). L1 (CIMD fetch SSRF residue, body cap, cache) and L2 (OAuth limit behind the tunnel needs `trustCloudflareClientIp`) are still open.
 
 ## 2026-11-24 — Task read serves stage, approvals, verification and Web link, API 2.17 — SHIPPED on merge
 

@@ -1,4 +1,4 @@
-import { statSync } from "node:fs";
+import { lstatSync, readFileSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import { COMMAND_CAPABILITIES, OBSERVABILITY_CAPABILITIES, TASK_COMMAND_CAPABILITIES } from "@agent-plane/core";
 
@@ -111,12 +111,8 @@ export function resolveRemoteAuth(raw: unknown, ctx: { localPort: number; config
     if (typeof i.clientSecretFile !== "string" || !i.clientSecretFile) p(".identity.clientSecretFile must be a file path");
     else {
       secretFile = isAbsolute(i.clientSecretFile) ? i.clientSecretFile : resolve(ctx.configDir, i.clientSecretFile);
-      try {
-        const s = statSync(secretFile);
-        if (!s.isFile()) p(".identity.clientSecretFile must be a regular file");
-        else if ((s.mode & 0o077) !== 0) p(`.identity.clientSecretFile must not be readable by group or others; run: chmod 600 ${secretFile}`);
-        else if (s.uid !== process.getuid?.()) p(".identity.clientSecretFile must be owned by the plane's user");
-      } catch { p(".identity.clientSecretFile does not exist"); }
+      const problem = privateFileProblem(secretFile);
+      if (problem) p(`.identity.clientSecretFile ${problem}`);
     }
     const owner = isRecord(i.owner) ? i.owner : undefined;
     if (!owner) p(".identity.owner must be { issuer, subject }");
@@ -182,4 +178,24 @@ function issuerUrl(value: unknown, p: (m: string) => void): string {
     if (u.search || u.hash || u.username || u.password) p(".identity.issuer must have no query, fragment or credentials");
     return value.replace(/\/$/, "");
   } catch { p(".identity.issuer must be a URL"); return ""; }
+}
+
+/**
+ * L3 (security review 2026-11-24): the secret file rule, applied at config time and again on every
+ * read: a regular file, not a symlink, owned by the plane's user, mode 0600 or tighter.
+ */
+export function privateFileProblem(path: string): string | undefined {
+  let s;
+  try { s = lstatSync(path); } catch { return "does not exist"; }
+  if (s.isSymbolicLink() || !s.isFile()) return "must be a regular file, not a symlink";
+  if ((s.mode & 0o077) !== 0) return `must not be readable by group or others; run: chmod 600 ${path}`;
+  if (s.uid !== process.getuid?.()) return "must be owned by the plane's user";
+  return undefined;
+}
+
+/** Reads a private file after re-checking {@link privateFileProblem}; the content is never logged. */
+export function readPrivateFile(path: string): string {
+  const problem = privateFileProblem(path);
+  if (problem) throw new Error(`Unsafe secret file ${path}: it ${problem}`);
+  return readFileSync(path, "utf8");
 }

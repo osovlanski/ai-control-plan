@@ -31,13 +31,13 @@ const CLAUDE_CALLBACK = "https://claude.ai/api/mcp/auth_callback";
 const PKCE_CHALLENGE = /^[A-Za-z0-9_-]{43,128}$/;
 const PKCE_VERIFIER = /^[A-Za-z0-9._~-]{43,128}$/;
 
-/** The fixed redirect allowlist: Claude's hosted callback, and RFC 8252 loopback redirects for CLIs. */
+/** The fixed redirect allowlist: Claude's hosted callback, and RFC 8252 loopback redirects for CLIs (both IP literals, and localhost as before). */
 export function redirectAllowed(uri: string): boolean {
   if (uri === CLAUDE_CALLBACK) return true;
   let u: URL;
   try { u = new URL(uri); } catch { return false; }
   if (u.protocol !== "http:" || u.username || u.password || u.hash) return false;
-  return u.hostname === "127.0.0.1" || u.hostname === "localhost";
+  return u.hostname === "127.0.0.1" || u.hostname === "[::1]" || u.hostname === "localhost";
 }
 
 export function authorizationServerMetadata(publicUrl: string) {
@@ -258,13 +258,18 @@ export class AuthServer {
     }
     this.o.log({ event: "oauth.login", outcome: "owner", client: pending.client_id });
     const scopes = pending.scopes.split(" ") as Scope[];
-    if (this.o.store.consented(pending.client_id, scopes)) return this.finish(res, pending.id);
+    const client = this.o.store.client(pending.client_id)!;
+    // M1 (security review 2026-11-24): remembered consent is honoured only for a DCR client, whose
+    // client_id was minted for one registration. A CIMD client_id is a public URL that every user of
+    // that client app shares, so someone else's authorize URL would otherwise be granted silently.
+    if (client.kind === "dcr" && this.o.store.consented(pending.client_id, scopes)) return this.finish(res, pending.id);
     const csrf = token(24);
     this.o.store.markOwner(pending.id, csrf);
-    const client = this.o.store.client(pending.client_id)!;
     const redirectHost = new URL(pending.redirect_uri).host;
+    // The CIMD name comes from the fetched document, so the page also shows the host that published it.
+    const publisher = client.kind === "cimd" ? `<p>Client published by <code>${escapeHtml(new URL(client.client_id).host)}</code>. Only allow this if you started this sign-in yourself, just now.</p>` : "";
     sendHtml(res, 200, "Allow access to Agent OS?", `
-<p><strong>${escapeHtml(client.client_name)}</strong> wants to use your Agent OS.</p>
+<p><strong>${escapeHtml(client.client_name)}</strong> wants to use your Agent OS.</p>${publisher}
 <p>It will return to <code>${escapeHtml(redirectHost)}</code>.</p>
 <p>It asks to:</p><ul>${scopes.map((s) => `<li>${escapeHtml(SCOPE_TEXT[s])}</li>`).join("")}</ul>
 <p>It cannot approve tool use, answer input, cancel tasks or change settings.</p>

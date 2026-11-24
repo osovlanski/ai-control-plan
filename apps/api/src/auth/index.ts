@@ -7,6 +7,7 @@ import type { Db } from "../db/index.js";
 import type { CredentialStore } from "./credential-file.js";
 import { parseBootstrapToken, verifyBootstrapSignature } from "./bootstrap-token.js";
 import { REMOTE_SESSION_RULE, isRemoteRequest, registerRemoteAuth } from "./remote/index.js";
+import { isApiRequest, isOriginForm } from "./request-target.js";
 
 // `listener` scopes a route to one listener (B2, D-B): the other answers 404 before any auth.
 declare module "fastify" { interface FastifyContextConfig { auth?: null|{require:string}; listener?: "local"|"remote" } interface FastifyRequest { cred?: AuthenticatedCredential } }
@@ -24,8 +25,11 @@ export function registerAuth(app:FastifyInstance, deps:{config:ResolvedConfig;cr
   // Every boot revokes remote sessions a previous process minted, whether or not remote mode is still configured.
   const remote=registerRemoteAuth(app,{config,db,now}); if(!remote) db.prepare("UPDATE remote_sessions SET revoked_at = ?, revoked_reason = 'restart' WHERE revoked_at IS NULL").run(now().getTime());
   app.addHook("onRequest",async(req,reply)=>{
+    // C1: absolute-form (`GET http://host/api/x`) and `*` targets are refused on both listeners before anything else.
+    if(!isOriginForm(req.raw.url)) return reply.code(400).send({error:"bad request target"});
     if(isRemoteRequest(req.raw)) return remote ? remote.onRequest(req,reply) : reply.code(404).send({error:"not found"});
-    const path=req.url.split("?")[0]!; if(!path.startsWith("/api/")) return; if(req.routeOptions.config?.listener==="remote") return reply.code(404).send({error:"not found"}); const rule=req.routeOptions.config?.auth; if(rule===null) return;
+    // C1: the matched route decides, not the raw target (`/%61pi/tasks` routes to `/api/tasks`).
+    if(!isApiRequest(req)) return; if(req.routeOptions.config?.listener==="remote") return reply.code(404).send({error:"not found"}); const rule=req.routeOptions.config?.auth; if(rule===null) return;
     const cred=await authenticate(req,credentials,sessions,now,operateSecretPath(config.dir));
     if(!cred){ reply.header("X-Control-Plane-Api-Version",CONTROL_PLANE_API_VERSION).header("WWW-Authenticate","Bearer"); return reply.code(401).send({error:"unauthenticated"}); }
     if(rule===undefined) return;
@@ -33,6 +37,13 @@ export function registerAuth(app:FastifyInstance, deps:{config:ResolvedConfig;cr
     if(rule.require!==REMOTE_SESSION_RULE&&!capabilityGranted(cred.capabilities,rule.require)) return reply.code(403).send({error:`${rule.require} required`});
     if(cred.kind==="cookie"){const site=req.headers["sec-fetch-site"]; const o=req.headers.origin; if(!(site==="same-origin"||site==="none"||o===origin)) return reply.code(403).send({error:"cross-origin"});}
     req.cred=cred;
+  });
+  // C1 fail-closed backstop: whatever a gate missed, a route that declares a rule never runs without a
+  // credential, and a listener-scoped route never runs on the other listener.
+  app.addHook("preHandler",async(req,reply)=>{
+    const cfg=req.routeOptions.config; const remoteReq=isRemoteRequest(req.raw);
+    if((cfg?.listener==="local"&&remoteReq)||(cfg?.listener==="remote"&&!remoteReq)) return reply.code(404).send({error:"not found"});
+    if(cfg?.auth&&!req.cred){ req.log.error({event:"auth",action:"backstop",route:req.routeOptions.url},"route with an auth rule reached its handler without a credential"); reply.header("X-Control-Plane-Api-Version",CONTROL_PLANE_API_VERSION); return reply.code(401).send({error:"unauthenticated"}); }
   });
   app.post<{Body:{token?:string}}>("/api/auth/bootstrap",{config:{auth:null,listener:"local"}},async(req,reply)=>{
     const token=req.body?.token; if(!token) return reply.code(400).send({error:"bootstrap rejected"}); registerSecret(token); const parsed=parseBootstrapToken(token); if(!parsed) return reply.code(400).send({error:"bootstrap rejected"});

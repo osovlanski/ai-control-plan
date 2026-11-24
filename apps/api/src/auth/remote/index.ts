@@ -1,11 +1,12 @@
-import { readFileSync, realpathSync } from "node:fs";
+import { realpathSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { CONTROL_PLANE_API_VERSION, capabilityGranted, registerSecret } from "@agent-plane/core";
 import { OidcClient, ownerPinMatches } from "@agent-plane/oidc";
 import type { Db } from "../../db/index.js";
-import { REMOTE_CALLBACK_PATH, type RemoteAuthConfig } from "./config.js";
+import { REMOTE_CALLBACK_PATH, readPrivateFile, type RemoteAuthConfig } from "./config.js";
 import { checkProxyContract } from "./proxy.js";
+import { isApiRequest } from "../request-target.js";
 import { principalOf, RemoteSessionStore, sha256, type RemoteSessionRow } from "./store.js";
 
 /**
@@ -79,7 +80,7 @@ export function registerRemoteAuth(app: FastifyInstance, deps: { config: { dir: 
   const kid = `r_${principal.slice(0, 12)}`;
   const store = new RemoteSessionStore(db, { workspaceId, principal, idleMs: cfg.session.idleTtlSeconds * 1000, absoluteMs: cfg.session.absoluteTtlSeconds * 1000, now });
   const revokedAtBoot = store.revokeOnBoot();
-  const clientSecret = () => { const v = readFileSync(cfg.identity.clientSecretFile, "utf8").trim(); registerSecret(v); return v; };
+  const clientSecret = () => { const v = readPrivateFile(cfg.identity.clientSecretFile).trim(); registerSecret(v); return v; };
   const oidc = new OidcClient({ issuer: cfg.identity.issuer, clientId: cfg.identity.clientId, clientSecret, redirectUri: `${cfg.canonicalOrigin}${REMOTE_CALLBACK_PATH}`, now });
   const windows = new Windows(now);
   /** CSRF tokens in protected memory for delivery by GET /api/auth/session; the DB holds only their hash. */
@@ -120,7 +121,7 @@ export function registerRemoteAuth(app: FastifyInstance, deps: { config: { dir: 
   app.addHook("onSend", async (req, reply) => {
     if (!isRemoteRequest(req.raw)) return;
     reply.header("x-frame-options", "DENY").header("referrer-policy", "no-referrer").header("x-content-type-options", "nosniff");
-    if (req.url.startsWith("/api/") && !reply.hasHeader("cache-control")) reply.header("cache-control", "no-store");
+    if (isApiRequest(req) && !reply.hasHeader("cache-control")) reply.header("cache-control", "no-store");
   });
 
   const unauthenticated = (reply: FastifyReply) => reply.code(401).header("X-Control-Plane-Api-Version", CONTROL_PLANE_API_VERSION)
@@ -239,8 +240,10 @@ export function registerRemoteAuth(app: FastifyInstance, deps: { config: { dir: 
       return reply.code(403).header("cache-control", "no-store").send({ error: "forbidden" });
     }
     clientAddresses.set(req.raw, contract.clientAddress);
-    const path = req.url.split("?")[0]!;
-    if (!path.startsWith("/api/")) return undefined; // the SPA shell and its assets carry no data
+    // C1: the matched route decides (find-my-way decodes `/%61pi/…` to `/api/…`); unmatched targets
+    // that could read as /api/ are gated too, before the 404.
+    if (!isApiRequest(req)) return undefined; // the SPA shell and its assets carry no data
+    const path = req.routeOptions.url ?? req.url.split("?")[0]!;
     const routeCfg = req.routeOptions.config as { auth?: null | { require: string }; listener?: "local" | "remote" } | undefined;
     if (routeCfg?.listener === "local" || (routeCfg?.auth === null && routeCfg.listener !== "remote")) return reply.code(404).send({ error: "not found" });
     if (routeCfg?.auth === null) return undefined; // login + callback: their own transaction checks and budget
