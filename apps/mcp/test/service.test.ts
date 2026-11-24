@@ -127,6 +127,16 @@ describe("owner login, consent and tokens (C2 2, 3, 4)", () => {
       expect(back.iss).toBe(b);
       const t = await tokenRequest(b, { grant_type: "authorization_code", code: back.code!, redirect_uri: params.redirect_uri, client_id: cimdId, code_verifier: verifier, resource: `${b}/mcp` });
       expect(t.status).toBe(200);
+      // M1: a CIMD client_id is shared by every user of that client app, so consent is asked on every
+      // authorization, even for the same scopes, and the page names the publishing host.
+      for (const state of ["s2", "s3"]) {
+        const again = await ownerBrowser(cimdRig, { ...params, state });
+        expect(again.code, state).toBeUndefined();
+        expect(again.status).toBe(200);
+        expect(again.html).toContain("Allow access to Agent OS?");
+        expect(again.html).toContain("client.example.org");
+      }
+      expect((await ownerBrowser(cimdRig, { ...params, state: "s4" }, { consent: "approve" })).code).toBeDefined();
       // A document whose client_id differs from its URL is refused.
       docs["https://client.example.org/bad.json"] = { client_id: "https://elsewhere.example/x", redirect_uris: ["https://claude.ai/api/mcp/auth_callback"] };
       expect((await ownerBrowser(cimdRig, { ...params, client_id: "https://client.example.org/bad.json" })).status).toBe(400);
@@ -135,7 +145,12 @@ describe("owner login, consent and tokens (C2 2, 3, 4)", () => {
     } finally { await cimdRig.close(); }
   });
 
-  it("skips consent for a client that already consented, and asks again for more scopes", async () => {
+  it("accepts both loopback IP literals as redirects, never another host", async () => {
+    expect((await registerClient(base(), { redirect_uris: ["http://[::1]:53682/callback"] })).status).toBe(201);
+    for (const uri of ["http://[::2]:53682/callback", "http://127.0.0.2:53682/callback", "http://[::ffff:7f00:1]:53682/callback"]) expect((await registerClient(base(), { redirect_uris: [uri] })).status, uri).toBe(400);
+  });
+
+  it("skips consent for a DCR client that already consented, and asks again for more scopes", async () => {
     const { body } = await registerClient(base());
     const id = body.client_id as string;
     const first = await ownerBrowser(rig, authorizeParams(id, { scope: "aos.tasks.read" }), { consent: "approve" });

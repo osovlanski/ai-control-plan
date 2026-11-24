@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
+import { connect } from "node:net";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { loadConfig, type ResolvedConfig } from "../src/config.js";
 import { openDb, type Db } from "../src/db/index.js";
@@ -10,7 +11,7 @@ import { atomicWriteCredential, credentialPath, readCredential, rotateCredential
 import { mintBootstrapToken } from "../src/auth/bootstrap-token.js";
 
 let home:string,config:ResolvedConfig,db:Db,built:BuiltServer; let clock=new Date("2026-09-03T12:00:00.000Z");
-beforeEach(()=>{home=mkdtempSync(join(tmpdir(),"acp-auth-"));config=loadConfig({AGENT_PLANE_HOME:home});db=openDb(config.dbPath);const errorCanary=readCredential(credentialPath(config.dir)).secrets.at(-1)!.secret;built=buildServer({config,db,now:()=>clock,registerExtraRoutes:app=>{app.get("/api/test-error",{config:{auth:{require:"tasks.read"}}},()=>{throw new Error(`handler failed with ${errorCanary}`);});}});built.registry.init();});
+beforeEach(()=>{home=mkdtempSync(join(tmpdir(),"acp-auth-"));config=loadConfig({AGENT_PLANE_HOME:home});db=openDb(config.dbPath);const errorCanary=readCredential(credentialPath(config.dir)).secrets.at(-1)!.secret;built=buildServer({config,db,now:()=>clock,registerExtraRoutes:app=>{app.get("/api/test-error",{config:{auth:{require:"tasks.read"}}},()=>{throw new Error(`handler failed with ${errorCanary}`);});app.get("/internal/backstop",{config:{auth:{require:"tasks.read"}}},()=>({ran:true}));}});built.registry.init();});
 afterEach(async()=>{await built.app.close();db.close();rmSync(home,{recursive:true,force:true});});
 const secret=()=>readCredential(credentialPath(config.dir)).secrets.at(-1)!;
 const bearer=(s:CredentialSecret=secret())=>({authorization:`Bearer ${s.secret}`});
@@ -69,4 +70,39 @@ describe("authenticated transport and command authorization",()=>{
   });
   it("13 serves parallel authenticated requests without spurious failures during rotation",async()=>{const old=secret();const pending=Array.from({length:20},()=>built.app.inject({method:"GET",url:"/api/tasks",headers:bearer(old)}));const next=rotateCredential(credentialPath(config.dir),300,undefined,clock);pending.push(...Array.from({length:20},()=>built.app.inject({method:"GET",url:"/api/tasks",headers:bearer(next)})));expect((await Promise.all(pending)).every(r=>r.statusCode===200)).toBe(true);});
   it("14 rejects a route without explicit auth metadata at startup",()=>{expect(()=>buildServer({config,db,registerExtraRoutes:app=>{app.get("/api/unsafe",()=>({}));}})).toThrow(/must declare config.auth/);});
+});
+
+describe("C1: encoded and non-canonical request targets on the local listener",()=>{
+  // Each target the router matches to a real API route, written so a raw `startsWith("/api/")` misses it.
+  const matched=["/%61pi/tasks","/ap%69/tasks","/a%70i/tasks?x=1","/%61%70%69/workspace","/%61pi/meta"];
+  // Targets the router does not match but a lenient reader would treat as /api/: gated, then 404.
+  const unmatched=["//api/tasks","/API/tasks","/Api/tasks","/%2561pi/tasks","/api%2Ftasks","/x/../api/tasks","/%2e%2e/api/tasks","/api/./tasks/../tasks"];
+  it("15 every encoded variant is unauthenticated without a credential and answers normally with one",async()=>{
+    for(const url of [...matched,...unmatched]){const r=await built.app.inject({method:"GET",url});expect(r.statusCode,`${url} -> ${r.body}`).toBe(401);expect(r.headers["www-authenticate"]).toBe("Bearer");}
+    for(const url of matched)expect((await built.app.inject({method:"GET",url,headers:bearer()})).statusCode,url).toBe(200);
+    for(const url of unmatched)expect([200,404],url).toContain((await built.app.inject({method:"GET",url,headers:bearer()})).statusCode);
+  });
+  it("16 an encoded write without a credential creates nothing and cancels nothing",async()=>{
+    for(const url of ["/%61pi/tasks","/ap%69/tasks"])expect((await built.app.inject({method:"POST",url,payload:{goal:"x",idempotencyKey:"FAKE-key-not-real"}})).statusCode,url).toBe(401);
+    expect((db.prepare("SELECT COUNT(*) AS n FROM tasks").get() as {n:number}).n).toBe(0);
+    const id=(await built.app.inject({method:"POST",url:"/api/tasks",headers:bearer(),payload:{goal:"keep me"}})).json().taskId as string;
+    expect((await built.app.inject({method:"POST",url:`/%61pi/tasks/${id}/cancel`,payload:{}})).statusCode).toBe(401);
+    expect((await built.app.inject({method:"POST",url:`/api/tasks/${encodeURIComponent(id)}/%63ancel`,payload:{}})).statusCode).toBe(401);
+    expect((db.prepare("SELECT state FROM tasks WHERE id = ?").get(id) as {state:string}).state).not.toBe("CANCELLED");
+  });
+  it("17 an encoded remote-only route stays 404 on the local listener, even with a bearer",async()=>{
+    for(const url of ["/%61pi/auth/login","/%61pi/auth/callback"])expect((await built.app.inject({method:"GET",url,headers:bearer()})).statusCode,url).toBe(404);
+  });
+  it("18 absolute-form and asterisk targets are refused before auth on a real socket",async()=>{
+    await built.app.listen({host:"127.0.0.1",port:0}); const address=built.app.server.address(); if(!address||typeof address==="string") throw new Error("no TCP bind");
+    const raw=(line:string)=>new Promise<string>((resolve,reject)=>{const c=connect(address.port,"127.0.0.1",()=>c.write(`${line}\r\nHost: 127.0.0.1:${address.port}\r\nConnection: close\r\n\r\n`));let d="";c.setEncoding("utf8");c.on("data",x=>{d+=x;});c.on("end",()=>resolve(d));c.on("error",reject);});
+    for(const target of [`http://127.0.0.1:${address.port}/api/tasks`,"http://127.0.0.1/api/tasks","HTTP://127.0.0.1/%61pi/tasks"]){const r=await raw(`GET ${target} HTTP/1.1`);expect(r.split("\r\n")[0],target).toMatch(/^HTTP\/1\.1 400 /);expect(r).not.toContain("[]");}
+    const star=await raw("OPTIONS * HTTP/1.1");expect(star.split("\r\n")[0]).toMatch(/^HTTP\/1\.1 (400|404) /);
+    // Control: the same plane still answers an origin-form request.
+    expect((await raw("GET /api/tasks HTTP/1.1")).split("\r\n")[0]).toMatch(/^HTTP\/1\.1 401 /);
+  });
+  it("19 fail-closed backstop: a route with an auth rule never runs without a credential, wherever it lives",async()=>{
+    const r=await built.app.inject({method:"GET",url:"/internal/backstop"});expect(r.statusCode).toBe(401);expect(r.body).not.toContain("ran");
+    expect((await built.app.inject({method:"GET",url:"/internal/backstop",headers:bearer()})).statusCode).toBe(401); // not under /api/: no gate ever authenticates it
+  });
 });

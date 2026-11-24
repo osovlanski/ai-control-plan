@@ -75,6 +75,7 @@ import { EventRetention } from "./modules/retention.js";
 import { RepositoryIdentityRegistry } from "./repo/identity-registry.js";
 import { renderHandoffMd } from "./render/handoff.js";
 import { renderProgressMd } from "./render/progress.js";
+import { isApiRequest } from "./auth/request-target.js";
 import { registerAuth, type SessionMap } from "./auth/index.js";
 import { CodexAdapter } from "@agent-plane/adapters";
 import { CredentialStore, credentialPath } from "./auth/credential-file.js";
@@ -2010,7 +2011,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   if (existsSync(staticRoot)) {
     void app.register(fastifyStatic, { root: staticRoot, wildcard: false });
     app.setNotFoundHandler((req, reply) => {
-      if (req.url.split("?")[0]!.startsWith("/api/")) return reply.code(404).send({ error: "not found" });
+      if (isApiRequest(req)) return reply.code(404).send({ error: "not found" });
       return reply.sendFile("index.html");
     });
   }

@@ -3,13 +3,16 @@
  * (docs/adr/remote-auth-design.md, "Stage 2 acceptance cases" + "B2 amendments"), on real loopback
  * sockets: the plane's two listeners, a Tailscale-Serve-like TLS proxy and the fake OIDC issuer.
  */
+import { chmodSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { request as httpRequest } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { request as httpsRequest } from "node:https";
 import { afterEach, describe, expect, it } from "vitest";
 import { mintBootstrapToken } from "../src/auth/bootstrap-token.js";
 import { credentialPath, readCredential } from "../src/auth/credential-file.js";
 import { checkProxyContract } from "../src/auth/remote/proxy.js";
-import { resolveRemoteAuth } from "../src/auth/remote/config.js";
+import { privateFileProblem, resolveRemoteAuth } from "../src/auth/remote/config.js";
 import {
   ALL_REMOTE_GRANTS, CANONICAL_HOST, TAILSCALE_LOGIN, command, cookieOf, oidcLogin, ownerSession, rawRequest, sameOrigin,
   startRemoteRig, viaProxy, type RemoteRig,
@@ -424,6 +427,104 @@ describe("local and remote coexistence (D-B)", () => {
       expect(resolveRemoteAuth(raw, { localPort: 1, configDir: "/tmp", workspace: "personal", fileWorkspace: undefined }, problems), name).toBeUndefined();
       expect(problems.length, name).toBeGreaterThan(0);
     }
+  });
+});
+
+describe("C1: encoded and non-canonical request targets on the remote listener", () => {
+  const variants = (p: string) => [`/%61pi${p}`, `/ap%69${p}`, `/%61%70%69${p}`];
+  it("no session: every encoded variant answers like /api/ (never 200) and no command takes effect", async () => {
+    rig = await startRemoteRig();
+    const local = `http://127.0.0.1:${rig.localPort}`;
+    const id = ((await (await fetch(`${local}/api/tasks`, { method: "POST", headers: { ...rig.bearer(), "content-type": "application/json" }, body: JSON.stringify({ goal: "keep me" }) })).json()) as { taskId: string }).taskId;
+    const before = JSON.stringify(rig.db.prepare("SELECT id, state FROM tasks").all());
+    for (const headers of [{}, { "sec-fetch-site": "same-origin" }, { origin: rig.canonicalOrigin, "sec-fetch-site": "same-origin" }] as Array<Record<string, string>>) {
+      const control = await viaProxy(rig, "GET", "/api/tasks", headers);
+      expect([401, 403]).toContain(control.status);
+      for (const p of [...variants("/tasks"), ...variants("/workspace"), "//api/tasks", "/API/tasks", "/%2561pi/tasks", "/x/../api/tasks"]) {
+        const r = await viaProxy(rig, "GET", p, headers);
+        expect([401, 403], `${p} ${JSON.stringify(headers)} -> ${r.status} ${r.body}`).toContain(r.status);
+      }
+      // The review's write: a no-cors cancel from any page the owner has open.
+      for (const p of variants(`/tasks/${id}/cancel`)) {
+        const r = await viaProxy(rig, "POST", p, { ...headers, "content-type": "application/json" }, "{}");
+        expect([401, 403], `${p} -> ${r.status} ${r.body}`).toContain(r.status);
+      }
+      for (const p of variants("/tasks")) {
+        const r = await viaProxy(rig, "POST", p, { ...headers, "content-type": "application/json" }, JSON.stringify({ goal: "x", idempotencyKey: "FAKE-key-0002-not-real" }));
+        expect([401, 403], `${p} -> ${r.status} ${r.body}`).toContain(r.status);
+      }
+    }
+    expect(JSON.stringify(rig.db.prepare("SELECT id, state FROM tasks").all())).toBe(before);
+  });
+
+  it("with an owner session: encoded reads and writes go through the same Origin, CSRF and grant checks", async () => {
+    rig = await startRemoteRig();
+    const s = await ownerSession(rig);
+    for (const p of variants("/tasks")) expect((await viaProxy(rig, "GET", p, sameOrigin(s.cookie))).status, p).toBe(200);
+    const local = `http://127.0.0.1:${rig.localPort}`;
+    const id = ((await (await fetch(`${local}/api/tasks`, { method: "POST", headers: { ...rig.bearer(), "content-type": "application/json" }, body: JSON.stringify({ goal: "keep me" }) })).json()) as { taskId: string }).taskId;
+    // Cookie without the CSRF token, or from a hostile Origin: refused, nothing changes.
+    const noCsrf = { cookie: s.cookie, origin: rig.canonicalOrigin, "sec-fetch-site": "same-origin", "content-type": "application/json" };
+    for (const p of variants(`/tasks/${id}/cancel`)) {
+      const r = await viaProxy(rig, "POST", p, noCsrf, "{}");
+      expect(r.status, p).toBe(403); expect(json(r.body).error).toBe("csrf");
+      expect((await viaProxy(rig, "POST", p, { ...command(rig, s), origin: "https://evil.example" }, "{}")).status, p).toBe(403);
+    }
+    expect((rig.db.prepare("SELECT state FROM tasks WHERE id = ?").get(id) as { state: string }).state).not.toBe("CANCELLED");
+    // The full browser command (Origin + CSRF + grant) still works through an encoded path: the gate ran.
+    const ok = await viaProxy(rig, "POST", `/%61pi/tasks/${id}/cancel`, command(rig, s), "{}");
+    expect(ok.status, ok.body).toBe(200);
+    expect((rig.db.prepare("SELECT state FROM tasks WHERE id = ?").get(id) as { state: string }).state).toBe("CANCELLED");
+  });
+
+  it("the local-only revoke-all is 404 on the remote listener under any encoding, and sessions survive", async () => {
+    rig = await startRemoteRig();
+    const s = await ownerSession(rig);
+    const live = liveSessions(rig);
+    for (const p of ["/api/auth/remote/revoke-all", ...variants("/auth/remote/revoke-all"), "/api/auth/remote/%72evoke-all", "/api/auth/%72emote/revoke-all"]) {
+      for (const headers of [{}, command(rig, s)]) {
+        const r = await viaProxy(rig, "POST", p, headers, "{}");
+        expect(r.status, `${p} -> ${r.status} ${r.body}`).toBe(404);
+        expect(r.body).not.toContain("revoked");
+      }
+    }
+    expect(liveSessions(rig)).toBe(live);
+    expect((await viaProxy(rig, "GET", "/api/tasks", sameOrigin(s.cookie))).status).toBe(200);
+    // And the remote-only session routes stay 404 on the local listener under encoding.
+    for (const p of ["/%61pi/auth/login", "/%61pi/auth/callback"]) expect((await fetch(`http://127.0.0.1:${rig.localPort}${p}`, { headers: rig.bearer(), redirect: "manual" })).status, p).toBe(404);
+    for (const p of ["/%61pi/auth/activity", "/%61pi/auth/logout"]) expect((await fetch(`http://127.0.0.1:${rig.localPort}${p}`, { method: "POST", headers: rig.bearer() })).status, p).toBe(404);
+  });
+
+  it("an absolute-form target straight to the remote port is refused before the proxy contract or auth", async () => {
+    rig = await startRemoteRig();
+    const headers: Array<[string, string]> = [["host", `${CANONICAL_HOST}:${rig.proxyPort}`], ["x-forwarded-host", `${CANONICAL_HOST}:${rig.proxyPort}`], ["x-forwarded-proto", "https"], ["x-forwarded-for", "127.0.0.1"], ["tailscale-user-login", TAILSCALE_LOGIN]];
+    for (const target of [`http://${CANONICAL_HOST}/api/tasks`, `https://${CANONICAL_HOST}:${rig.proxyPort}/api/tasks`, "http://127.0.0.1/%61pi/tasks"]) {
+      const r = await rawRequest(rig.remotePort, "GET", target, headers);
+      expect(r.status, `${target} -> ${r.body}`).toBe(400);
+    }
+  });
+});
+
+describe("L3: the OIDC client secret file", () => {
+  it("is refused as a symlink or a group-readable file, at config time and again at login", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acp-secret-"));
+    try {
+      const real = join(dir, "real"); writeFileSync(real, "FAKE-secret-not-real\n", { mode: 0o600 }); chmodSync(real, 0o600);
+      const link = join(dir, "link"); symlinkSync(real, link);
+      expect(privateFileProblem(real)).toBeUndefined();
+      expect(privateFileProblem(link)).toMatch(/symlink/);
+      expect(privateFileProblem(join(dir, "absent"))).toMatch(/does not exist/);
+      chmodSync(real, 0o640); expect(privateFileProblem(real)).toMatch(/chmod 600/);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+    rig = await startRemoteRig();
+    const secretFile = rig.config.api.remote!.identity.clientSecretFile;
+    chmodSync(secretFile, 0o644);
+    const { callback, session } = await oidcLogin(rig);
+    expect(session).toBeUndefined();
+    expect(callback?.status ?? 0).toBeGreaterThanOrEqual(400);
+    expect(callback?.body ?? "").not.toContain("FAKE");
+    chmodSync(secretFile, 0o600);
+    expect((await oidcLogin(rig)).session).toBeDefined();
   });
 });
 

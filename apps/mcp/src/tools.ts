@@ -40,7 +40,7 @@ export class Tools {
 
   async call(name: string, args: unknown, ctx: ToolContext): Promise<CallToolResult> {
     const { contract } = this.deps;
-    if (!(name in contract.scopeOf)) return this.error(new ToolError("invalid_input", `unknown tool ${cut(name, 64)}`));
+    if (!Object.hasOwn(contract.scopeOf, name)) return this.error(new ToolError("invalid_input", `unknown tool ${cut(name, 64)}`));
     const tool = name as ToolName;
     const input = (args ?? {}) as Record<string, unknown>;
     if (!contract.validateInput[tool](input)) {
