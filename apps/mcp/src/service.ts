@@ -164,11 +164,14 @@ export async function startService(config: McpConfig, deps: ServiceDeps = {}): P
 
   const publicHost = new URL(config.publicUrl).host;
 
-  const handler = (mode: "public" | "dev", devHost?: () => string) => async (req: IncomingMessage, res: ServerResponse) => {
+  const handle = async (mode: "public" | "dev", devHost: (() => string) | undefined, req: IncomingMessage, res: ServerResponse) => {
     const started = now();
-    const url = new URL(req.url ?? "/", "http://placeholder");
-    res.on("finish", () => log({ event: "http", listener: mode, method: req.method, path: url.pathname, status: res.statusCode, ms: now() - started }));
+    // Node's HTTP parser accepts some targets the WHATWG parser refuses (`//`, `//[`, `http://[::1`),
+    // so the parse sits inside the error boundary: a malformed target is a 400, never a rejection.
+    let url: URL | undefined;
+    res.on("finish", () => log({ event: "http", listener: mode, method: req.method, path: url ? url.pathname : "(unparsable)", status: res.statusCode, ms: now() - started }));
     try {
+      try { url = new URL(req.url ?? "/", "http://placeholder"); } catch { return sendJson(res, 400, { error: "bad_request_target" }); }
       // DNS rebinding: the Host must be the canonical one (T8).
       const expectedHost = mode === "public" ? publicHost : devHost!();
       if (req.headers.host !== expectedHost && !(mode === "dev" && req.headers.host === expectedHost.replace("127.0.0.1", "localhost"))) {
@@ -190,10 +193,22 @@ export async function startService(config: McpConfig, deps: ServiceDeps = {}): P
       if (!g || g.resource !== resource) return sendJson(res, 401, { error: "invalid_token" }, { "www-authenticate": challenge("invalid_token") });
       return await serveMcp(req, res, { id: g.id, scopes: g.scopes.split(" ") as Scope[] });
     } catch (err) {
-      log({ event: "error", path: url.pathname, message: err instanceof Error ? err.name : "unknown" });
+      log({ event: "error", path: url ? url.pathname : "(unparsable)", message: err instanceof Error ? err.name : "unknown" });
       if (!res.headersSent) sendJson(res, 500, { error: "internal" });
       else res.end();
     }
+  };
+
+  /**
+   * The request listener. `http.Server` ignores the promise an async listener returns, so a throw
+   * that escapes `handle` (including one from the catch block itself) would be an unhandled
+   * rejection and, under Node's default mode, end the process and both listeners with it.
+   */
+  const handler = (mode: "public" | "dev", devHost?: () => string) => (req: IncomingMessage, res: ServerResponse) => {
+    handle(mode, devHost, req, res).catch((err: unknown) => {
+      try { log({ event: "error", listener: mode, message: err instanceof Error ? err.name : "unknown" }); } catch { /* logging must not rethrow */ }
+      if (!res.headersSent) { res.statusCode = 500; res.end(); } else res.destroy();
+    });
   };
 
   const listen = (server: HttpServer, port: number) => new Promise<number>((resolve, reject) => {

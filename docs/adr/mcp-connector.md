@@ -168,7 +168,10 @@ authorization specifications. C2 implements the intersection, which the 2025-11-
   documented callback for hosted apps, which covers mobile), and RFC 8252 loopback redirects on
   `http://127.0.0.1:<any>/…` and `http://localhost:<any>/…` (Claude Code and Codex CLI use
   ephemeral loopback ports). Any other redirect is refused at registration and at authorize.
-  DCR is rate-limited and registrations not used within 24 hours are deleted. A CIMD document is
+  DCR is rate-limited and registrations not used within 24 hours are deleted. A CIMD client row is
+  deleted once no pending authorization, live code or live grant refers to it, and a trailing DNS
+  root dot is stripped before the local-name checks. At most 8 CIMD lookups may be outstanding,
+  counting ones whose caller already timed out. A CIMD document is
   fetched only from an https name on the default port that resolves solely to public unicast
   addresses; the connection is pinned to the vetted address (no second lookup), the response
   must be a 200 with no redirect and at most 16 KiB, the whole fetch (DNS included) has a 5 s
