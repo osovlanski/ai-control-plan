@@ -85,7 +85,10 @@ describe("aos task reads against a real plane", () => {
     const detail = (await plane.built.app.inject({ method: "GET", url: `/api/tasks/${id}`, headers: auth() })).json() as Record<string, unknown>;
     const provenance = (await plane.built.app.inject({ method: "GET", url: `/api/tasks/${id}/provenance`, headers: auth() })).json();
     const { provenance: p, stage, ...rest } = body;
-    expect(rest).toEqual(detail);
+    // API 2.17 serves the stage on the detail too; the CLI's list-read stage is the same value.
+    const { stage: detailStage, ...detailRest } = detail;
+    expect(rest).toEqual(detailRest);
+    expect(stage).toEqual(detailStage);
     expect(p).toEqual(provenance);
     expect(stage).toMatchObject({ value: "done", rule: "terminal" });
 

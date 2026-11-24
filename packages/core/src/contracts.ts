@@ -72,7 +72,13 @@
 // then (migration 056 `run_estimates`, append-only, record-only). `GET /api/tasks/:id/estimates/recorded`
 // serves them joined to each run's actual, and `GET /api/estimates/accuracy?source=recorded` scores
 // them (default `source=replay` is unchanged). No dispatch reads the stored rows; no new capability.
-export const CONTROL_PLANE_API_VERSION = "2.16";
+// 2.17 (additive, MCP get_task follow-up to C2): `GET /api/tasks/:id` (`tasks.read`) also serves
+// `stage` (task stage v1, as on the list), `pendingApprovals` (Harness approvals still `pending`
+// plus live legacy runs whose newest event is `approval.requested`; a count, never the approval),
+// `verification` (`{ sessionId, verificationRunId, runState, passed, checks: { passed, failed,
+// skipped, blocked } }` for the latest verification run of the latest Harness session, or null) and
+// `webLink` when `mcp.webOrigin` is configured. No earlier field changes; no new capability.
+export const CONTROL_PLANE_API_VERSION = "2.17";
 export const NORMALIZED_EVENT_VERSION = "1.0";
 
 export const OBSERVABILITY_CAPABILITIES = [

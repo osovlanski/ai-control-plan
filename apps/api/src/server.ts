@@ -42,6 +42,7 @@ import { TaskLinkError, TaskLinkService } from "./modules/task-links.js";
 import { routingHistory } from "./modules/router.js";
 import { TaskEventBus } from "./modules/sse.js";
 import { TaskStageReader } from "./modules/task-stage.js";
+import { latestVerification, pendingApprovalCount } from "./modules/task-outcome.js";
 import { Scheduler } from "./modules/scheduler.js";
 import { AutopilotService, AutopilotStartRefused, ExternalInvalid, ExternalNotFound, type AutopilotDeps } from "./modules/autopilot.js";
 import { GitHubRestClient, PublicationRefused, PublicationService, readGitHubTokenFile, type PublicationGit, type PublicationGitHub, type ReconcileGitHub, type ReservationGitHub } from "./modules/publications.js";
@@ -911,6 +912,13 @@ export function buildServer(deps: ServerDeps): BuiltServer {
       schedulerEvents: scheduler.events(req.params.id),
       schedulerEnabled: scheduler.enabled,
       intent: JSON.parse(row.intent_json) as unknown,
+      // API 2.17 (additive): what `tasks.read` alone could not reach before, so the MCP `get_task`
+      // projects them instead of guessing. The stage is the same `deriveStage` answer the task list
+      // serves; the approval is a count only (answering stays on the Web).
+      stage: stages.of(req.params.id) ?? null,
+      pendingApprovals: pendingApprovalCount(db, req.params.id),
+      verification: latestVerification(db, req.params.id),
+      ...webLinkFor(req.params.id),
     };
   });
 
