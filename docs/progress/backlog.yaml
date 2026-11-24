@@ -397,7 +397,7 @@ items:
     profile: best-quality
     night: false
     source: "itay 2026-11-21 spec item 4"
-    notes: "Changes dispatch. Revision 1 (one K4b claim per task keyed by core.auth.account) FAILED Astra review 2026-11-24; revision 2 (PR #257, per-attempt claims) FAILED Astra re-review at c34c29e. Revision 3 in docs/agentic-os-qcq-review-packet.md: synchronous provider-entry gate before all three adapter call sites (held -> starting), full upgrade backfill incl. historical claims, release only on attempt-specific exit proof, explicit compare/race group lifecycle, boot launch barrier, one global grant pass (crossed-age FIFO), FIFO position and auto_wakes kept across the wake gap, ACCOUNT_ENFORCEMENT_READY gate until 04d. Lands as slices qcq-04a..d after a clean re-review of revision 3; one Opus High reviewer per slice, both reviewers on 04b/04c. Today scheduling.accountConcurrency is advisory only."
+    notes: "Changes dispatch. Revision 1 (one K4b claim per task keyed by core.auth.account) FAILED Astra review 2026-11-24; revision 2 (PR #257, per-attempt claims) FAILED Astra re-review at c34c29e; revision 3 (PR #260 at 428f859) FAILED Astra round 3. Revision 4 in docs/agentic-os-qcq-review-packet.md: provider-entry gate split into a read-only precheck and a synchronous enterProvider commit placed after all fallible preparation (adapter call is the next statement), call-site allowlist incl. the bridge callers, hard account limit on Harness starts only (itay 2026-11-24; legacy keeps K4b pool behaviour), upgrade backfill keyed on the dispatch.start_attempted entry mark, exit proof from the per-attempt cgroup (tracker reports are never proof), split owner/queued unique indexes, launch barrier suppressing tick and reserved replay, W/R/G grant ordering with a fixed queue_key, ACCOUNT_ENFORCEMENT_READY gate until 04d with compat adoption of the exact K4b claim row. Lands as slices qcq-04a..d after a clean re-review of revision 4; one Opus High reviewer per slice, both reviewers on 04b/04c. Today scheduling.accountConcurrency is advisory only."
 
   - id: qcq-05-act-on-recommendation
     title: "Opt-in: defer a task to its recommended window as a scheduler time wait"
@@ -410,7 +410,7 @@ items:
     profile: best-quality
     night: false
     source: "itay 2026-11-21 spec items 3 and 6"
-    notes: "Live scheduling change: pending itay's rollout approval after the review packet. Revision 3 (packet section 3): a window bound carried on the existing wait, never a replacement; early rechecks at wake and reservation, authoritative rechecks inside the provider-entry gate (the Harness runner's beforeProviderStart after the start-slot wait, and the legacy boundary). Acceptance, permissions and spend limits stay in force; a timer never answers an approval. Lands after qcq-04b."
+    notes: "Live scheduling change: pending itay's rollout approval after the review packet. Revision 4 (packet section 3): a window bound carried on the existing wait, never a replacement; early rechecks at wake, reservation, grant and the entry precheck, authoritative recheck inside the enterProvider commit (Harness: after the start-slot wait and preparation; legacy: at its boundary), with a positive-control test. Acceptance, permissions and spend limits stay in force; a timer never answers an approval. Lands after qcq-04b."
 
   - id: qcq-06-decomposition-overhead
     title: "Decompose a task into subtasks and estimate planning, handoff, retry and verification overhead"
