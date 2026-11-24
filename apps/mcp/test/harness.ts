@@ -34,6 +34,15 @@ export function freePort(): Promise<number> {
   });
 }
 
+/** `n` distinct free ports: every probe stays bound until all are, so two can't come back equal. */
+export async function freePorts(n: number): Promise<number[]> {
+  const servers = Array.from({ length: n }, () => createServer());
+  await Promise.all(servers.map((s) => new Promise<void>((r) => s.listen(0, "127.0.0.1", () => r()))));
+  const ports = servers.map((s) => (s.address() as AddressInfo).port);
+  await Promise.all(servers.map((s) => new Promise<void>((r) => s.close(() => r()))));
+  return ports;
+}
+
 export function gitRepo(path: string) {
   mkdirSync(path, { recursive: true });
   writeFileSync(join(path, "README.md"), "x\n");
@@ -131,7 +140,7 @@ export async function bootRig(opts: { deps?: ServiceDeps; mcp?: Partial<Record<s
   const issuer = await startFakeIssuer();
   const secretFile = join(root, "oidc-secret");
   writeFileSync(secretFile, OIDC_CLIENT_SECRET, { mode: 0o600 });
-  const port = await freePort();
+  const [port, devPort] = await freePorts(2) as [number, number];
   const mcpConfig = parseConfig({
     listen: { host: "127.0.0.1", port },
     publicUrl: `http://127.0.0.1:${port}`,
@@ -140,7 +149,7 @@ export async function bootRig(opts: { deps?: ServiceDeps; mcp?: Partial<Record<s
     owner: { issuer: issuer.issuer, subject: OWNER_SUB },
     oidc: { issuer: issuer.issuer, clientId: OIDC_CLIENT_ID, clientSecretFile: secretFile },
     stateDb: join(root, "mcp-oauth.db"),
-    devBearer: { port: await freePort(), tokenEnv: "AOS_MCP_DEV_BEARER" },
+    devBearer: { port: devPort, tokenEnv: "AOS_MCP_DEV_BEARER" },
     ...opts.mcp,
     // Tests run many logins a minute; the limit tests set their own values.
     rateLimits: { oauthPerMinutePerAddress: 1000, oauthPerMinutePerInstance: 1000, ...(opts.mcp?.rateLimits as Record<string, number> | undefined) },

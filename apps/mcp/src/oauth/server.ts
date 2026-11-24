@@ -5,6 +5,7 @@ import { cookies, escapeHtml, readBody, redirect, sendHtml, sendJson } from "../
 import type { RateLimiter } from "../ratelimit.js";
 import { hash, safeEqual, token, type ClientRow, type OAuthStore } from "./store.js";
 import { ownerPinMatches, s256, type OidcClient } from "./oidc.js";
+import { cachedClientMetadata, fetchClientMetadataDocument } from "./cimd-fetch.js";
 
 /**
  * OAuth 2.1 authorization server for MCP clients (docs/adr/mcp-connector.md, "Access model"):
@@ -21,8 +22,10 @@ export interface AuthServerOptions {
   limiter: RateLimiter;
   limits: { perAddress: number; perInstance: number };
   clientAddress: (req: IncomingMessage) => string;
-  /** Fetches a Client ID Metadata Document; injectable for tests. */
+  /** Fetches a Client ID Metadata Document; injectable for tests. Default: `fetchClientMetadataDocument` (L1). */
   fetchClientMetadata?: (url: string) => Promise<unknown>;
+  /** Clock for the CIMD document cache. */
+  now?: () => number;
   log: (event: Record<string, unknown>) => void;
 }
 
@@ -83,16 +86,13 @@ function cimdUrl(clientId: string): URL | null {
   return u;
 }
 
-async function defaultFetchClientMetadata(url: string): Promise<unknown> {
-  const res = await fetch(url, { signal: AbortSignal.timeout(5000), redirect: "error", headers: { accept: "application/json" } });
-  if (!res.ok) throw new Error(`client metadata fetch failed (${res.status})`);
-  const text = await res.text();
-  if (text.length > 16_384) throw new Error("client metadata document too large");
-  return JSON.parse(text) as unknown;
-}
-
 export class AuthServer {
-  constructor(private readonly o: AuthServerOptions) {}
+  /** Pinned, size- and time-bounded fetch with a short cache (security review L1, cimd-fetch.ts). */
+  private readonly clientMetadata: (url: string) => Promise<unknown>;
+
+  constructor(private readonly o: AuthServerOptions) {
+    this.clientMetadata = cachedClientMetadata(o.fetchClientMetadata ?? ((url) => fetchClientMetadataDocument(url)), o.now ? { now: o.now } : {});
+  }
 
   private get secure() { return this.o.publicUrl.startsWith("https://"); }
 
@@ -165,7 +165,7 @@ export class AuthServer {
     const u = cimdUrl(clientId);
     if (!u) return null;
     let doc: unknown;
-    try { doc = await (this.o.fetchClientMetadata ?? defaultFetchClientMetadata)(u.toString()); } catch { return null; }
+    try { doc = await this.clientMetadata(u.toString()); } catch { return null; }
     if (!doc || typeof doc !== "object") return null;
     const d = doc as Record<string, unknown>;
     if (d.client_id !== clientId) return null;

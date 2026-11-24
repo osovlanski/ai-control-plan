@@ -31,6 +31,18 @@ export async function freePort(): Promise<number> {
   return port;
 }
 
+/**
+ * `n` distinct free ports. Calling `freePort()` in a row can hand back the same port twice, because
+ * each probe closes before the next one binds; holding every probe open until all are bound cannot.
+ */
+export async function freePorts(n: number): Promise<number[]> {
+  const servers = Array.from({ length: n }, () => createHttpServer());
+  await Promise.all(servers.map((s) => new Promise<void>((r) => s.listen(0, "127.0.0.1", () => r()))));
+  const ports = servers.map((s) => (s.address() as AddressInfo).port);
+  await Promise.all(servers.map((s) => new Promise<void>((r) => s.close(() => r()))));
+  return ports;
+}
+
 export interface ProxyOptions {
   /** What the proxy sends as Tailscale-User-Login. Default: the owner's login. null = omitted (Funnel / tagged node). */
   login?: string | null;
@@ -64,7 +76,7 @@ export async function startRemoteRig(opts: RigOptions = {}): Promise<RemoteRig> 
   // One injected clock for the plane and the issuer, so token times agree when a test moves time.
   const clock = { now: new Date() };
   const issuer = await startFakeIssuer({ now: () => clock.now });
-  const [localPort, remotePort, proxyPort] = [await freePort(), await freePort(), await freePort()];
+  const [localPort, remotePort, proxyPort] = await freePorts(3) as [number, number, number];
   const canonicalOrigin = `https://${CANONICAL_HOST}:${proxyPort}`;
   const first = loadConfig({ AGENT_PLANE_HOME: home });
   const secretFile = join(first.dir, "oidc-client-secret");

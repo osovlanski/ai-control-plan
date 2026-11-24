@@ -168,7 +168,12 @@ authorization specifications. C2 implements the intersection, which the 2025-11-
   documented callback for hosted apps, which covers mobile), and RFC 8252 loopback redirects on
   `http://127.0.0.1:<any>/…` and `http://localhost:<any>/…` (Claude Code and Codex CLI use
   ephemeral loopback ports). Any other redirect is refused at registration and at authorize.
-  DCR is rate-limited and registrations not used within 24 hours are deleted.
+  DCR is rate-limited and registrations not used within 24 hours are deleted. A CIMD document is
+  fetched only from an https name on the default port that resolves solely to public unicast
+  addresses; the connection is pinned to the vetted address (no second lookup), the response
+  must be a 200 with no redirect and at most 16 KiB, the whole fetch (DNS included) has a 5 s
+  deadline, and a fetched document is cached for 5 minutes (security review 2026-11-24, L1;
+  `apps/mcp/src/oauth/cimd-fetch.ts`).
 - **Owner login (D-A).** The authorize endpoint is a top-level browser page. It sends the owner
   to Google with its own OIDC client registration (separate client id and callback from the Web
   login's, same pin), verifies the ID token as `remote-auth-design.md` specifies (signature,
