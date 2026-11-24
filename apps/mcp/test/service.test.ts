@@ -85,6 +85,35 @@ describe("resource server (C2 1, 4, 8)", () => {
   });
 });
 
+/** Sends one raw request line, so a target Node's parser accepts but `new URL` refuses reaches the listener. */
+async function rawTarget(baseUrl: string, target: string): Promise<{ status: number; body: string }> {
+  const net = await import("node:net");
+  const u = new URL(baseUrl);
+  return new Promise((resolve, reject) => {
+    const c = net.connect(Number(u.port), u.hostname, () => c.write(`GET ${target} HTTP/1.1\r\nHost: ${u.host}\r\nConnection: close\r\n\r\n`));
+    let data = "";
+    c.on("data", (b) => { data += b.toString(); });
+    c.on("error", reject);
+    c.on("close", () => resolve({ status: Number(/^HTTP\/1\.1 (\d{3})/.exec(data)?.[1] ?? 0), body: data.split("\r\n\r\n")[1] ?? "" }));
+  });
+}
+
+describe("malformed request targets (Codex review 1)", () => {
+  it("answers 400 on both listeners for targets the URL parser refuses, and keeps serving", async () => {
+    for (const listener of [rig.service.url, rig.service.devUrl!]) {
+      for (const target of ["//", "//[", "//@", "http://[::1"]) {
+        const r = await rawTarget(listener, target);
+        expect(r.status, `${listener} ${target}`).toBe(400);
+        expect(r.body).toContain("bad_request_target");
+      }
+    }
+    expect(rig.logs.some((e) => e.event === "http" && e.path === "(unparsable)" && e.status === 400)).toBe(true);
+    // The process and both listeners are still up.
+    expect((await fetch(`${rig.config.publicUrl}/.well-known/oauth-protected-resource/mcp`)).status).toBe(200);
+    expect((await fetch(`${rig.service.devUrl}/mcp`, { method: "POST", headers: { authorization: `Bearer ${DEV_BEARER}`, "content-type": "application/json" }, body: "{}" })).status).toBe(400);
+  });
+});
+
 describe("owner login, consent and tokens (C2 2, 3, 4)", () => {
   const base = () => rig.config.publicUrl;
   const authorizeParams = (clientId: string, extra: Record<string, string> = {}) => ({
@@ -153,6 +182,58 @@ describe("owner login, consent and tokens (C2 2, 3, 4)", () => {
       // IP-literal client ids are never fetched.
       expect((await ownerBrowser(cimdRig, { ...params, client_id: "https://10.0.0.1/meta.json" })).status).toBe(400);
     } finally { await cimdRig.close(); }
+  });
+
+  it("drops an abandoned CIMD client row once its pending authorization expires, but keeps one with a live grant (Codex review 2)", async () => {
+    const abandoned = "https://client.example.org/oauth/abandoned.json";
+    const used = "https://client.example.org/oauth/used.json";
+    const doc = (id: string) => ({ client_id: id, client_name: "CIMD", redirect_uris: [LOOPBACK_REDIRECT] });
+    let t = Date.now();
+    const cimdRig = await bootRig({ deps: { now: () => t, fetchClientMetadata: async (u) => doc(u) } });
+    try {
+      const b = cimdRig.config.publicUrl;
+      const { verifier, challenge } = pkce();
+      const params = (id: string) => ({ response_type: "code", client_id: id, redirect_uri: LOOPBACK_REDIRECT, code_challenge: challenge, code_challenge_method: "S256", state: "s", resource: `${b}/mcp` });
+      // Abandoned: authorize reaches the identity provider, then nobody comes back.
+      expect((await fetch(`${b}/oauth/authorize?${new URLSearchParams(params(abandoned))}`, { redirect: "manual" })).status).toBe(302);
+      expect(cimdRig.service.store.client(abandoned)).toBeDefined();
+      // Used: the full flow ends in a grant.
+      const back = await ownerBrowser(cimdRig, params(used), { consent: "approve" });
+      const tok = await tokenRequest(b, { grant_type: "authorization_code", code: back.code!, redirect_uri: LOOPBACK_REDIRECT, client_id: used, code_verifier: verifier, resource: `${b}/mcp` });
+      expect(tok.status).toBe(200);
+      // Still inside the pending window: nothing is dropped.
+      cimdRig.service.store.pruneClients();
+      expect(cimdRig.service.store.client(abandoned)).toBeDefined();
+      t += 7 * 24 * 3_600_000;
+      cimdRig.service.store.pruneClients();
+      expect(cimdRig.service.store.client(abandoned)).toBeUndefined();
+      expect(cimdRig.service.store.client(used)).toBeDefined();
+      // The kept client still refreshes; any /oauth request runs the prune.
+      expect((await tokenRequest(b, { grant_type: "refresh_token", refresh_token: tok.body.refresh_token!, client_id: used })).status).toBe(200);
+      // Once its grant is revoked, nothing refers to the row and it goes too.
+      cimdRig.service.store.db.prepare("UPDATE grants SET revoked_at = ? WHERE client_id = ?").run(t, used);
+      cimdRig.service.store.pruneClients();
+      expect(cimdRig.service.store.client(used)).toBeUndefined();
+    } finally { await cimdRig.close(); }
+  });
+
+  it("refuses a CIMD host spelled with a DNS root dot exactly like the bare name, without fetching (Codex review 5)", async () => {
+    let fetches = 0;
+    const cimdRig = await bootRig({ deps: { fetchClientMetadata: async () => { fetches++; return {}; } } });
+    try {
+      const { challenge } = pkce();
+      for (const id of ["https://meta.internal/c.json", "https://meta.internal./c.json", "https://localhost./c.json", "https://example./c.json", "https://meta.example.org../c.json"]) {
+        const r = await ownerBrowser(cimdRig, { response_type: "code", client_id: id, redirect_uri: LOOPBACK_REDIRECT, code_challenge: challenge, code_challenge_method: "S256", state: "s", resource: `${cimdRig.config.publicUrl}/mcp` });
+        expect(r.status, id).toBe(400);
+      }
+      expect(fetches).toBe(0);
+    } finally { await cimdRig.close(); }
+  });
+
+  it("answers 401 invalid_client, not 500, for a Basic credential with a malformed percent-escape", async () => {
+    const r = await tokenRequest(base(), { grant_type: "authorization_code", code: "FAKE-code-not-real" }, { authorization: `Basic ${Buffer.from("%zz:%zz").toString("base64")}` });
+    expect(r.status).toBe(401);
+    expect(r.body.error).toBe("invalid_client");
   });
 
   it("accepts both loopback IP literals as redirects, never another host", async () => {

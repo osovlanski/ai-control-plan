@@ -1,0 +1,93 @@
+{
+  "taskId": "AG-mwuuxxzd1",
+  "advisory": true,
+  "routing": {
+    "chosen": "fake-a",
+    "ruleFired": "auto: config preference order, quota headroom tie-break",
+    "whatIf": false
+  },
+  "estimate": {
+    "estimatorVersion": "run-estimate/1",
+    "advisory": true,
+    "asOf": "2030-01-06T08:00:00.268Z",
+    "subject": {
+      "assistantId": "fake-a",
+      "provider": "fake",
+      "model": null,
+      "modelSource": "assistant default",
+      "effort": null,
+      "effortSource": "not recorded in the execution identity (backlog p1-5-effort-cohorts)",
+      "taskKind": "coding"
+    },
+    "confidence": "unknown",
+    "tokens": {
+      "input": null,
+      "output": null,
+      "confidence": "unknown",
+      "runsWithUsage": 0,
+      "runsMissingUsage": 0
+    },
+    "durationMs": {
+      "range": null,
+      "confidence": "unknown"
+    },
+    "waitUntilStartMs": {
+      "range": {
+        "low": 0,
+        "typical": 0,
+        "high": 0
+      },
+      "reasons": [
+        "no wait observed: quota, scheduler and account are clear"
+      ]
+    },
+    "approvalWait": {
+      "pending": 0,
+      "required": false,
+      "historicalShare": null,
+      "historicalMs": null
+    },
+    "spend": {
+      "billing": "none",
+      "billingBasis": "provider default",
+      "apiUsd": null,
+      "apiEquivalentUsd": null,
+      "subscriptionQuota": null
+    },
+    "evidence": {
+      "cohort": "none",
+      "sampleSize": 0,
+      "runIds": [],
+      "missing": [
+        "model: not pinned; cohort ignores model",
+        "effort: not recorded in the execution identity",
+        "no comparable ended runs"
+      ]
+    }
+  },
+  "recommendation": {
+    "advisory": true,
+    "action": "run-now",
+    "startAt": "2030-01-06T08:00:00.268Z",
+    "window": null,
+    "expectedCompletion": null,
+    "speedWeight": 1,
+    "deadline": null,
+    "meetsDeadline": null,
+    "reasons": [
+      "no comparable runs: no window fit can be checked, so no deferral is recommended",
+      "no duration evidence: expected completion is unknown"
+    ],
+    "unchanged": [
+      "acceptance tests",
+      "permissions and approval mode",
+      "spend limits",
+      "dispatch and scheduling"
+    ]
+  },
+  "policy": {
+    "timezone": "Asia/Jerusalem",
+    "eveningsAllowed": false,
+    "weekendsAllowed": false
+  }
+}

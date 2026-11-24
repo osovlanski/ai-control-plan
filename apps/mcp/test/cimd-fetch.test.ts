@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { CimdFetchError, cachedClientMetadata, fetchClientMetadataDocument, isPublicAddress, type CimdFetchOptions } from "../src/oauth/cimd-fetch.js";
+import { CimdFetchError, LookupSlots, cachedClientMetadata, fetchClientMetadataDocument, isPublicAddress, type CimdFetchOptions } from "../src/oauth/cimd-fetch.js";
 
 const HOST = "client.example.org";
 const DOC = { client_id: `https://${HOST}/oauth/metadata.json`, client_name: "Fixture", redirect_uris: ["https://claude.ai/api/mcp/auth_callback"] };
@@ -111,6 +111,29 @@ describe("fetchClientMetadataDocument", () => {
     expect(await reason(fetchClientMetadataDocument(DOC.client_id, fixture({ timeoutMs: 400 })))).toBe("timeout");
     expect(Date.now() - started).toBeLessThan(2000);
     expect(await reason(fetchClientMetadataDocument(DOC.client_id, fixture({ timeoutMs: 200, resolve: () => new Promise(() => {}) })))).toBe("timeout");
+  });
+
+  it("caps outstanding lookups: timed-out lookups keep their slot until the resolver settles (Codex review 3)", async () => {
+    const slots = new LookupSlots(2);
+    const pending: Array<() => void> = [];
+    let calls = 0;
+    const slow = () => { calls++; return new Promise<never>((_, reject) => { pending.push(() => reject(new Error("late"))); }); };
+    const opts = fixture({ timeoutMs: 100, resolve: slow, lookupSlots: slots });
+    expect(await reason(fetchClientMetadataDocument(DOC.client_id, opts))).toBe("timeout");
+    expect(await reason(fetchClientMetadataDocument(DOC.client_id, opts))).toBe("timeout");
+    expect(slots.outstanding).toBe(2);
+    // Both slots are still held by lookups the callers gave up on: the next one is refused at once.
+    const started = Date.now();
+    expect(await reason(fetchClientMetadataDocument(DOC.client_id, opts))).toBe("dns");
+    expect(Date.now() - started).toBeLessThan(50);
+    expect(calls).toBe(2);
+    for (const settle of pending) settle();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(slots.outstanding).toBe(0);
+    hits = 0;
+    handler = (_req, res) => { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify(DOC)); };
+    expect(await fetchClientMetadataDocument(DOC.client_id, fixture({ lookupSlots: slots }))).toEqual(DOC);
+    expect(slots.outstanding).toBe(0);
   });
 
   it("refuses redirects and other non-200 answers, non-JSON, and a certificate for another name", async () => {
