@@ -103,7 +103,7 @@ repos: { <alias>: <repo path> }                  # same alias and exact path as 
 owner: { issuer: https://accounts.google.com, subject: <owner sub> }
 oidc: { issuer: https://accounts.google.com, clientId: <MCP OAuth client id>, clientSecretFile: <mcp dir>/oidc-client-secret }
 stateDb: <mcp dir>/mcp-oauth.db                  # never the plane database
-# optional: trustCloudflareClientIp: true        # only once the tunnel is the sole ingress (step 6)
+# trustCloudflareClientIp: false                  # default; set true in step 6, once the tunnel is the sole ingress
 ```
 
 Verify: step 5 is the check. The process refuses to boot on a non-loopback bind, a missing plane
@@ -176,8 +176,37 @@ curl -s <publicUrl>/.well-known/oauth-protected-resource/mcp | head -c 300
 ```
 
 The two 404s are the check that the plane and the Web UI are not exposed. If either answers 200,
-stop the tunnel (rollback) and report. Once this passes you may set `trustCloudflareClientIp: true`
-in `mcp.yaml` and restart the MCP process.
+stop the tunnel (rollback) and report.
+
+Once this passes, set `trustCloudflareClientIp: true` in `mcp.yaml` and restart the MCP process.
+This step is required before the connector is used, not optional:
+
+- **Why.** The MCP process binds loopback and `cloudflared` connects from loopback, so with the flag
+  off every request through the tunnel has the peer `127.0.0.1`. The OAuth limit per client address
+  (`oauthPerMinutePerAddress`, 10 a minute) then becomes one bucket for the whole internet, and
+  anyone can lock you out of signing in by sending ten requests a minute. While the flag is off and
+  `publicUrl` is not loopback, the process logs `config.warning` with code `oauth_limit_shared` at
+  boot; that line is expected in step 5 and must be gone after this restart.
+- **What it does.** With the flag on, the OAuth limit keys on Cloudflare's `CF-Connecting-IP`.
+  Cloudflare overwrites that header on every request it proxies, so a client behind the tunnel
+  cannot pick its own key. The header must be exactly one IP address; anything else falls back to
+  the socket peer. IPv6 clients are keyed on their /64, so one subscriber can't rotate addresses
+  to escape the limit. Nothing else reads the header: tool limits stay per grant.
+- **Why it is off by default.** The header is only trustworthy while the tunnel is the **only**
+  way in. Any other path to `<mcp port>` (another proxy, a port forward, a second tunnel without
+  Cloudflare in front) lets the sender set it and spread requests over as many keys as it likes.
+  Keep the flag off on any setup where that is possible.
+- **What it does not fix.** `oauthPerMinutePerInstance` (30 a minute) is still shared by
+  everyone. A distributed flood can still delay a sign-in until the minute rolls over; it cannot
+  get past the owner pin or consent. If that happens, add a Cloudflare rate-limiting rule on
+  `/oauth/*`.
+
+Verify after the restart: the MCP log has no `oauth_limit_shared` warning, and from a machine off
+the box `curl -s -o /dev/null -w '%{http_code}\n' -X POST <publicUrl>/oauth/register` still
+answers (400 for the empty body, not 429).
+
+Rollback: set the flag back to `false` (or delete the line) and restart; this only re-merges the
+per-address buckets.
 
 Rollback:
 

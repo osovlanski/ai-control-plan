@@ -4,6 +4,7 @@ import type { AddressInfo } from "node:net";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { CallToolRequestSchema, ListToolsRequestSchema, isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
+import { oauthClientKey } from "./client-address.js";
 import { resourceUrl, type McpConfig } from "./config.js";
 import { loadContract, SCOPES, type Contract, type Scope } from "./contract.js";
 import { BodyTooLarge, readBody, sendJson } from "./http-util.js";
@@ -93,12 +94,16 @@ export async function startService(config: McpConfig, deps: ServiceDeps = {}): P
     publicUrl: config.publicUrl, resource, owner: config.owner, store, limiter, log,
     oidc: new OidcClient({ issuer: config.oidc.issuer, clientId: config.oidc.clientId, clientSecret: oidcSecret, redirectUri: `${config.publicUrl}/oauth/callback` }),
     limits: { perAddress: config.rateLimits.oauthPerMinutePerAddress, perInstance: config.rateLimits.oauthPerMinutePerInstance },
-    clientAddress: (req) => {
-      const cf = req.headers["cf-connecting-ip"];
-      return config.trustCloudflareClientIp && typeof cf === "string" ? cf : req.socket.remoteAddress ?? "unknown";
-    },
+    clientAddress: (req) => oauthClientKey(req, config.trustCloudflareClientIp),
+    now,
     ...(deps.fetchClientMetadata ? { fetchClientMetadata: deps.fetchClientMetadata } : {}),
   });
+  // L2: a public origin with the flag off means every tunneled login shares one per-address bucket.
+  // Not refused, because the rollout runs the service before the tunnel is the only ingress.
+  const publicHostname = new URL(config.publicUrl).hostname;
+  if (!config.trustCloudflareClientIp && !["127.0.0.1", "localhost", "[::1]"].includes(publicHostname)) {
+    log({ event: "config.warning", code: "oauth_limit_shared", message: "trustCloudflareClientIp is off with a public publicUrl: behind the tunnel every client shares one OAuth rate-limit bucket (docs/autopilot/mcp-rollout.md, step 6)" });
+  }
 
   const sessions = new Map<string, Session>();
   const sweep = setInterval(() => {

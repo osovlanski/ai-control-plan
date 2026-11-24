@@ -25,7 +25,7 @@ oidc: { issuer: https://accounts.google.com, clientId: <this service's OAuth cli
 stateDb: <path>/mcp-oauth.db             # OAuth state; never the plane database
 # optional
 devBearer: { port: <port>, tokenEnv: AOS_MCP_DEV_BEARER }   # loopback-only static bearer, local dev and tests
-trustCloudflareClientIp: false
+trustCloudflareClientIp: false          # true only when the Cloudflare tunnel is the sole ingress (OAuth limit keys on CF-Connecting-IP)
 rateLimits: { readsPerMinute: 60, createsPerHour: 10, startsPerHour: 10, instanceFactor: 3, oauthPerMinutePerAddress: 10, oauthPerMinutePerInstance: 30 }
 ```
 

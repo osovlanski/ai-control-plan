@@ -339,6 +339,54 @@ describe("dev bearer listener, rate limits, boot checks and logs (C2 8, 9)", () 
     } finally { await limited.close(); }
   });
 
+  it("keys the OAuth limit on CF-Connecting-IP only when trustCloudflareClientIp is on (L2)", async () => {
+    const register = (base: string, cf?: string) => fetch(`${base}/oauth/register`, {
+      method: "POST", headers: { "content-type": "application/json", ...(cf === undefined ? {} : { "cf-connecting-ip": cf }) },
+      body: JSON.stringify({ client_name: "L2", redirect_uris: [LOOPBACK_REDIRECT], token_endpoint_auth_method: "none" }),
+    }).then((r) => r.status);
+    // Off (the default): the header is ignored, so every tunneled client shares the peer's bucket.
+    const off = await bootRig({ mcp: { rateLimits: { oauthPerMinutePerAddress: 2 } } });
+    try {
+      expect([await register(off.config.publicUrl, "198.51.100.7"), await register(off.config.publicUrl, "203.0.113.9"), await register(off.config.publicUrl, "192.0.2.1")]).toEqual([201, 201, 429]);
+    } finally { await off.close(); }
+    const on = await bootRig({ mcp: { trustCloudflareClientIp: true, rateLimits: { oauthPerMinutePerAddress: 2 } } });
+    try {
+      const b = on.config.publicUrl;
+      expect([await register(b, "198.51.100.7"), await register(b, "198.51.100.7"), await register(b, "198.51.100.7")]).toEqual([201, 201, 429]);
+      // Another client is not locked out by the first one.
+      expect(await register(b, "203.0.113.9")).toBe(201);
+      // IPv6 keys on the /64: two addresses in one /64 share a bucket, another /64 does not.
+      expect([await register(b, "2001:4860:1:2::1"), await register(b, "2001:4860:1:2:ffff::9"), await register(b, "2001:4860:1:2::abcd")]).toEqual([201, 201, 429]);
+      expect(await register(b, "2001:4860:1:3::1")).toBe(201);
+      // A header that is not one IP address falls back to the socket peer (a non-tunneled request).
+      expect([await register(b, "1.2.3.4, 5.6.7.8"), await register(b, "junk"), await register(b)]).toEqual([201, 201, 429]);
+    } finally { await on.close(); }
+  });
+
+  it("warns at boot when a public publicUrl runs with trustCloudflareClientIp off (L2)", async () => {
+    const pub = await bootRig({ mcp: { publicUrl: "https://mcp.example.org" } });
+    try { expect(pub.logs.some((e) => e.event === "config.warning" && e.code === "oauth_limit_shared")).toBe(true); } finally { await pub.close(); }
+    const on = await bootRig({ mcp: { publicUrl: "https://mcp.example.org", trustCloudflareClientIp: true } });
+    try { expect(on.logs.some((e) => e.event === "config.warning")).toBe(false); } finally { await on.close(); }
+    expect(rig.logs.some((e) => e.event === "config.warning")).toBe(false);
+  });
+
+  it("caches a CIMD document for a short TTL instead of refetching it on every authorize (L1)", async () => {
+    const cimdId = "https://client.example.org/oauth/cached.json";
+    let fetches = 0;
+    let t = Date.now();
+    const cimdRig = await bootRig({ deps: { now: () => t, fetchClientMetadata: async () => { fetches++; return { client_id: cimdId, client_name: "Cached", redirect_uris: [LOOPBACK_REDIRECT] }; } } });
+    try {
+      const { challenge } = pkce();
+      const authorize = () => fetch(`${cimdRig.config.publicUrl}/oauth/authorize?${new URLSearchParams({ response_type: "code", client_id: cimdId, redirect_uri: LOOPBACK_REDIRECT, code_challenge: challenge, code_challenge_method: "S256", state: "s", resource: `${cimdRig.config.publicUrl}/mcp` })}`, { redirect: "manual" }).then((r) => r.status);
+      expect([await authorize(), await authorize()]).toEqual([302, 302]);
+      expect(fetches).toBe(1);
+      t += 5 * 60_000;
+      expect(await authorize()).toBe(302);
+      expect(fetches).toBe(2);
+    } finally { await cimdRig.close(); }
+  });
+
   it("refuses to boot without a plane Web origin, with an unknown alias, or with a wide credential", async () => {
     await expect(bootRig({ planeWebOrigin: null })).rejects.toThrow(/webOrigin/);
     await expect(bootRig({ mcp: { repos: { other: "/nowhere/else" } } })).rejects.toThrow(/repoAllowlist/);
