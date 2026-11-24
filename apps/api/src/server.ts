@@ -882,6 +882,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
            -- K7: requested and served identity are separate facts; NULL resolved
            -- means the provider reported none, not that it matched the request.
            r.model_requested, r.model_resolved, r.model_resolved_source,
+           r.effort_reported, r.effort_reported_source,
            a.provider AS serving_provider, r.composition_revision_id
          FROM runs r ${effectiveUsageJoin("r")}
          LEFT JOIN assistants a ON a.id = r.assistant_id
@@ -891,7 +892,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     return {
       ...row,
       envelope: JSON.parse(row.envelope) as unknown,
-      runs: runs.map(({ model_requested, model_resolved, model_resolved_source, serving_provider, composition_revision_id, ...r }) => ({
+      runs: runs.map(({ model_requested, model_resolved, model_resolved_source, effort_reported, effort_reported_source, serving_provider, composition_revision_id, ...r }) => ({
         ...r,
         // M1: the immutable composition revision this run executed, or null (every pre-M1 run).
         compositionRevisionId: composition_revision_id ?? null,
@@ -901,6 +902,9 @@ export function buildServer(deps: ServerDeps): BuiltServer {
           resolvedModelId: model_resolved ?? null,
           resolvedSource: model_resolved_source ?? "unknown",
           servingProvider: serving_provider ?? null,
+          // P1-5 (API 2.18): the effort the provider reported on run.started, or null (unknown).
+          reportedEffort: effort_reported ?? null,
+          reportedEffortSource: effort_reported_source ?? "unknown",
         },
       })),
       active: orchestrator.isActive(req.params.id),

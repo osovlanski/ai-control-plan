@@ -1,0 +1,529 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-plane.local/contracts/run-estimate/v1/run-estimate.schema.json",
+  "title": "RunEstimateV1",
+  "description": "Run estimate v1 (API 2.15 and 2.16): shared definitions for GET /api/tasks/:id/estimate and GET /api/tasks/:id/estimates/recorded. Advisory: no dispatch, budget, schedule or approval path reads either. Normative text: docs/contracts/run-estimate-v1.md.",
+  "$ref": "#/$defs/RunEstimate",
+  "$defs": {
+    "Instant": {
+      "type": "string",
+      "minLength": 1,
+      "description": "An ISO 8601 instant as the plane serialises it (Date#toISOString)."
+    },
+    "EstimateRange": {
+      "type": "object",
+      "required": [
+        "low",
+        "typical",
+        "high"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "low": {
+          "type": "number",
+          "minimum": 0
+        },
+        "typical": {
+          "type": "number",
+          "minimum": 0
+        },
+        "high": {
+          "type": "number",
+          "minimum": 0
+        }
+      },
+      "description": "Nearest-rank quartiles of the cohort: low p25, typical p50, high p75."
+    },
+    "Confidence": {
+      "enum": [
+        "unknown",
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    "EstimateSubject": {
+      "type": "object",
+      "required": [
+        "assistantId",
+        "provider",
+        "model",
+        "modelSource",
+        "effort",
+        "effortSource",
+        "taskKind"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "assistantId": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "provider": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "modelSource": {
+          "type": "string",
+          "minLength": 1
+        },
+        "effort": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "effortSource": {
+          "type": "string",
+          "minLength": 1
+        },
+        "taskKind": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        }
+      }
+    },
+    "RunEstimate": {
+      "type": "object",
+      "required": [
+        "estimatorVersion",
+        "advisory",
+        "asOf",
+        "subject",
+        "confidence",
+        "tokens",
+        "durationMs",
+        "waitUntilStartMs",
+        "approvalWait",
+        "spend",
+        "evidence"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "estimatorVersion": {
+          "type": "string",
+          "pattern": "^run-estimate/[1-9][0-9]*$"
+        },
+        "advisory": {
+          "const": true
+        },
+        "asOf": {
+          "$ref": "#/$defs/Instant"
+        },
+        "subject": {
+          "$ref": "#/$defs/EstimateSubject"
+        },
+        "confidence": {
+          "$ref": "#/$defs/Confidence"
+        },
+        "tokens": {
+          "type": "object",
+          "required": [
+            "input",
+            "output",
+            "confidence",
+            "runsWithUsage",
+            "runsMissingUsage"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "input": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/EstimateRange"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "output": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/EstimateRange"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "confidence": {
+              "$ref": "#/$defs/Confidence"
+            },
+            "runsWithUsage": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "runsMissingUsage": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "durationMs": {
+          "type": "object",
+          "required": [
+            "range",
+            "confidence"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "range": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/EstimateRange"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "confidence": {
+              "$ref": "#/$defs/Confidence"
+            }
+          }
+        },
+        "waitUntilStartMs": {
+          "type": "object",
+          "required": [
+            "range",
+            "reasons"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "range": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/EstimateRange"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "reasons": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "approvalWait": {
+          "type": "object",
+          "required": [
+            "pending",
+            "required",
+            "historicalShare",
+            "historicalMs"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "pending": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "required": {
+              "type": "boolean"
+            },
+            "historicalShare": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0,
+              "maximum": 1
+            },
+            "historicalMs": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/EstimateRange"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        },
+        "spend": {
+          "type": "object",
+          "required": [
+            "billing",
+            "billingBasis",
+            "apiUsd",
+            "apiEquivalentUsd",
+            "subscriptionQuota"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "billing": {
+              "enum": [
+                "api",
+                "subscription",
+                "none",
+                "unknown"
+              ]
+            },
+            "billingBasis": {
+              "const": "provider default"
+            },
+            "apiUsd": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/EstimateRange"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "apiEquivalentUsd": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/EstimateRange"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "subscriptionQuota": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "required": [
+                    "bucket",
+                    "usedPercent",
+                    "resetsAt",
+                    "observedAt",
+                    "perRunShare"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "bucket": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "minLength": 1
+                    },
+                    "usedPercent": {
+                      "type": "number",
+                      "minimum": 0
+                    },
+                    "resetsAt": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "observedAt": {
+                      "$ref": "#/$defs/Instant"
+                    },
+                    "perRunShare": {
+                      "const": "unknown"
+                    }
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        },
+        "evidence": {
+          "type": "object",
+          "required": [
+            "cohort",
+            "sampleSize",
+            "runIds",
+            "missing"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "cohort": {
+              "enum": [
+                "assistant+model+kind",
+                "assistant+kind",
+                "assistant",
+                "none"
+              ]
+            },
+            "sampleSize": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "runIds": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "missing": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "WindowSpan": {
+      "type": "object",
+      "required": [
+        "kind",
+        "start",
+        "end",
+        "localStart",
+        "localEnd"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": [
+            "work",
+            "evening",
+            "weekend",
+            "closed"
+          ]
+        },
+        "start": {
+          "$ref": "#/$defs/Instant"
+        },
+        "end": {
+          "$ref": "#/$defs/Instant"
+        },
+        "localStart": {
+          "type": "string",
+          "minLength": 1
+        },
+        "localEnd": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "ScheduleRecommendation": {
+      "type": "object",
+      "required": [
+        "advisory",
+        "action",
+        "startAt",
+        "window",
+        "expectedCompletion",
+        "speedWeight",
+        "deadline",
+        "meetsDeadline",
+        "reasons",
+        "unchanged"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "advisory": {
+          "const": true
+        },
+        "action": {
+          "enum": [
+            "run-now",
+            "run-in-window",
+            "wait-for-approval",
+            "wait-for-quota-reset"
+          ]
+        },
+        "startAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "window": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WindowSpan"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "expectedCompletion": {
+          "anyOf": [
+            {
+              "type": "object",
+              "required": [
+                "low",
+                "typical",
+                "high"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "low": {
+                  "$ref": "#/$defs/Instant"
+                },
+                "typical": {
+                  "$ref": "#/$defs/Instant"
+                },
+                "high": {
+                  "$ref": "#/$defs/Instant"
+                }
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "speedWeight": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "deadline": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "meetsDeadline": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "reasons": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "unchanged": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        }
+      }
+    }
+  }
+}

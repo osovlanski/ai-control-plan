@@ -2,8 +2,9 @@
 
 Status: normative for run estimate v1 (API 2.15, backlog `qcq-01-estimates-advisory`, Quality, Cost
 & Quota milestone, 2026-11-21). `packages/core/src/run-estimate.ts` is the only implementation; the
-api module `apps/api/src/modules/run-estimate.ts` only gathers inputs. No JSON Schema is published
-yet: one lands with the first consumer (Cockpit vendoring, `qcq-03-estimate-surfaces`). The Web task
+api module `apps/api/src/modules/run-estimate.ts` only gathers inputs. The JSON Schemas for both task reads are
+published in `contracts/run-estimate/v1/` (see "JSON Schema" below) for the first consumer, Cockpit
+(`qcq-03-estimate-surfaces`). The Web task
 detail (Usage tab) and `aos task estimate` read both routes as served (qcq-03, API 2.16).
 
 The key words MUST, MUST NOT, SHOULD and MAY are used as in RFC 2119.
@@ -144,3 +145,20 @@ scheduling:
   evening: { allowed: true }
   weekend: { allowed: true }
 ```
+
+## JSON Schema
+
+`contracts/run-estimate/v1/` holds JSON Schema 2020-12 files, published for Cockpit to vendor pinned
+by SHA:
+
+- `run-estimate.schema.json`: shared `$defs` (`RunEstimate`, `ScheduleRecommendation`,
+  `EstimateRange`, `WindowSpan`, ...); the document itself validates one `RunEstimate`.
+- `task-estimate.schema.json`: the body of `GET /api/tasks/:id/estimate`.
+- `task-recorded-estimates.schema.json`: the body of `GET /api/tasks/:id/estimates/recorded`.
+
+Objects are closed (`additionalProperties: false`), so adding a field is a contract change that
+lands here first, with the schema. Instants are strings as `Date#toISOString` writes them. Fixtures
+under `fixtures/valid` and `fixtures/invalid` are named by schema prefix; `apps/api/test/run-estimate-contract.test.ts`
+checks them and validates the bodies the real routes serve (no history, a cohort with usage, a
+required approval, a deadline, recorded estimates). The accuracy report is not covered by v1's
+schemas.

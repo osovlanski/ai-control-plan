@@ -70,11 +70,24 @@ export class OAuthStore {
     return this.db.prepare("SELECT * FROM clients WHERE client_id = ?").get(id) as ClientRow | undefined;
   }
   touchClient(id: string) { this.db.prepare("UPDATE clients SET last_used_at = ? WHERE client_id = ?").run(this.now(), id); }
-  /** DCR registrations never used within 24 hours are deleted (ADR). */
+  /**
+   * DCR registrations never used within 24 hours are deleted (ADR). A CIMD row is only a cache of a
+   * fetched document (authorize refetches it every time), so once no pending authorization, live
+   * code or live grant refers to it, it is deleted too: an abandoned CIMD authorize leaves nothing.
+   */
   pruneClients() {
-    this.db.prepare("DELETE FROM clients WHERE kind = 'dcr' AND last_used_at IS NULL AND created_at < ?").run(this.now() - UNUSED_CLIENT_TTL_MS);
-    this.db.prepare("DELETE FROM pending WHERE created_at < ?").run(this.now() - PENDING_TTL_MS);
-    this.db.prepare("DELETE FROM codes WHERE expires_at < ?").run(this.now() - GRANT_TTL_MS);
+    const t = this.now();
+    this.db.transaction(() => {
+      this.db.prepare("DELETE FROM clients WHERE kind = 'dcr' AND last_used_at IS NULL AND created_at < ?").run(t - UNUSED_CLIENT_TTL_MS);
+      this.db.prepare("DELETE FROM pending WHERE created_at < ?").run(t - PENDING_TTL_MS);
+      this.db.prepare("DELETE FROM codes WHERE expires_at < ?").run(t - GRANT_TTL_MS);
+      this.db.prepare(`DELETE FROM clients WHERE kind = 'cimd' AND created_at < @cutoff
+        AND NOT EXISTS (SELECT 1 FROM pending p WHERE p.client_id = clients.client_id)
+        AND NOT EXISTS (SELECT 1 FROM codes c WHERE c.client_id = clients.client_id AND c.used_at IS NULL AND c.expires_at >= @t)
+        AND NOT EXISTS (SELECT 1 FROM grants g WHERE g.client_id = clients.client_id AND g.revoked_at IS NULL AND g.expires_at > @t)`)
+        .run({ cutoff: t - PENDING_TTL_MS, t });
+      this.db.prepare("DELETE FROM consents WHERE NOT EXISTS (SELECT 1 FROM clients c WHERE c.client_id = consents.client_id)").run();
+    })();
   }
 
   // ---- consent ----

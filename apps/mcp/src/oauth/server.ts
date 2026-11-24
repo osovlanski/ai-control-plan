@@ -81,8 +81,10 @@ function cimdUrl(clientId: string): URL | null {
   let u: URL;
   try { u = new URL(clientId); } catch { return null; }
   if (u.protocol !== "https:" || u.username || u.password || u.hash || u.pathname === "/" || u.port) return null;
-  const host = u.hostname.replace(/^\[|\]$/g, "");
-  if (isIP(host) || host === "localhost" || /\.(local|internal|localhost|lan|home|arpa)$/i.test(host) || !host.includes(".")) return null;
+  // One terminal root dot names the same host (`a.internal.` is `a.internal`), so the checks below
+  // see it stripped; anything still ending in a dot (`a..`) is refused.
+  const host = u.hostname.replace(/^\[|\]$/g, "").replace(/\.$/, "");
+  if (host.endsWith(".") || isIP(host) || host === "localhost" || /\.(local|internal|localhost|lan|home|arpa)$/i.test(host) || !host.includes(".")) return null;
   return u;
 }
 
@@ -320,9 +322,11 @@ export class AuthServer {
       const decoded = Buffer.from(basic[1]!, "base64").toString("utf8");
       const i = decoded.indexOf(":");
       if (i < 0) return null;
-      const bid = decodeURIComponent(decoded.slice(0, i));
+      let bid: string; let bsecret: string;
+      // A malformed percent-escape is a bad credential, not a server error.
+      try { bid = decodeURIComponent(decoded.slice(0, i)); bsecret = decodeURIComponent(decoded.slice(i + 1)); } catch { return null; }
       if (id !== null && id !== bid) return null;
-      id = bid; secret = decodeURIComponent(decoded.slice(i + 1)); method = "client_secret_basic";
+      id = bid; secret = bsecret; method = "client_secret_basic";
     }
     if (!id) return null;
     const client = this.o.store.client(id);

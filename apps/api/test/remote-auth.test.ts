@@ -11,7 +11,7 @@ import { request as httpsRequest } from "node:https";
 import { afterEach, describe, expect, it } from "vitest";
 import { mintBootstrapToken } from "../src/auth/bootstrap-token.js";
 import { credentialPath, readCredential } from "../src/auth/credential-file.js";
-import { checkProxyContract } from "../src/auth/remote/proxy.js";
+import { canonicalIp, checkProxyContract } from "../src/auth/remote/proxy.js";
 import { privateFileProblem, resolveRemoteAuth } from "../src/auth/remote/config.js";
 import {
   ALL_REMOTE_GRANTS, CANONICAL_HOST, TAILSCALE_LOGIN, command, cookieOf, oidcLogin, ownerSession, rawRequest, sameOrigin,
@@ -367,6 +367,18 @@ describe("canonical proxy contract", () => {
     expect(checkProxyContract(fake, cfg)).toEqual({ ok: false, reason: "untrusted_peer" });
     const trusted = { ...(fake as object), socket: { remoteAddress: "::1" } } as never;
     expect(checkProxyContract(trusted, cfg)).toEqual({ ok: true, clientAddress: "100.64.0.1" });
+  });
+
+  it("keys the login limiter on one spelling per forwarded address (Codex review 4)", () => {
+    const cfg = { canonicalOrigin: "https://a.example", transport: { kind: "trusted-proxy", peers: ["::1"], tailscaleUserLogin: "a@b" } } as never;
+    const via = (fwd: string) => checkProxyContract({ socket: { remoteAddress: "::1" }, rawHeaders: ["Host", "a.example", "X-Forwarded-Host", "a.example", "X-Forwarded-Proto", "https", "X-Forwarded-For", fwd, "Tailscale-User-Login", "a@b"] } as never, cfg);
+    const spellings = ["fd7a:115c:a1e0::1", "FD7A:115C:A1E0:0:0:0:0:1", "fd7a:115c:a1e0:0000:0000:0000:0000:0001", " fd7a:115c:a1e0::0:1 "];
+    expect(new Set(spellings.map((x) => JSON.stringify(via(x))))).toEqual(new Set([JSON.stringify({ ok: true, clientAddress: "fd7a:115c:a1e0::1" })]));
+    expect(via("::ffff:100.64.0.1")).toEqual({ ok: true, clientAddress: "100.64.0.1" });
+    expect(via("::FFFF:6440:1")).toEqual({ ok: true, clientAddress: "100.64.0.1" });
+    expect(via("fe80::1%eth0")).toEqual({ ok: false, reason: "forwarded_for" });
+    expect(canonicalIp("not-an-ip")).toBeUndefined();
+    expect(canonicalIp("100.64.0.1")).toBe("100.64.0.1");
   });
 });
 

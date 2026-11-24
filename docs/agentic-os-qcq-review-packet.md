@@ -110,7 +110,7 @@ The rules are these:
 
 ### 2.3 Schema change
 
-This is one migration, using the next free number at implementation (057 on `main` at `4997dc4`).
+This is one migration, using the next free number at implementation (057 is taken by `057_run_effort.sql`, so 058 or later).
 It follows the 017/023 rebuild pattern, under deferred foreign keys with an explicit
 `pragma_foreign_key_check`.
 

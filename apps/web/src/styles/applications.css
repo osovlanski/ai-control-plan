@@ -97,3 +97,15 @@
   .agent-actions { margin-left: 0; width: 100%; }
   .agent-actions .btn { flex: 1 1 auto; min-height: 40px; }
 }
+/* tlm-03: task provenance. A stored key, a guess and an unknown read apart at a glance. */
+.task-provenance { overflow-wrap: anywhere; }
+.task-provenance > section + section { margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--line); }
+.task-provenance h3 { font-size: 0.95rem; margin-bottom: 0.4rem; }
+.task-provenance .prov-list { padding-left: 1.1rem; display: grid; gap: 0.8rem; }
+.task-provenance .prov-list > li > div + div { margin-top: 0.25rem; }
+.task-provenance .identity-grid { margin: 8px 0 0; gap: 10px 18px; }
+.prov-join { display: inline-block; font-family: var(--font-mono); font-size: 11px; padding: 1px 6px; border-radius: var(--r-1); border: 1px solid var(--line-strong); color: var(--text-2); }
+.prov-join--inferred { border-style: dashed; color: var(--tone-limit); }
+.prov-join--unrecorded { color: var(--text-3); }
+.prov-open { color: var(--tone-limit); }
+@media (max-width: 760px) { .task-provenance .identity-grid { grid-template-columns: 1fr; } }

@@ -54,6 +54,29 @@ export function isPublicAddress(address: string): boolean {
   return false;
 }
 
+/** How many CIMD name lookups may be outstanding at once, timed-out ones included (Codex review 3). */
+export const CIMD_MAX_LOOKUPS = 8;
+
+/**
+ * Counts resolver jobs from start until the underlying lookup settles, not until the caller gives
+ * up: `dns.lookup` cannot be cancelled, so a lookup that outlived its deadline still holds a libuv
+ * worker. When every slot is taken a new lookup is refused at once instead of queueing behind them.
+ */
+export class LookupSlots {
+  private busy = 0;
+  constructor(readonly max = CIMD_MAX_LOOKUPS) {}
+  get outstanding() { return this.busy; }
+  run<T>(job: () => Promise<T>): Promise<T> {
+    if (this.busy >= this.max) return Promise.reject(new CimdFetchError("dns", "too many client metadata lookups in flight"));
+    this.busy += 1;
+    let p: Promise<T>;
+    try { p = job(); } catch (e) { this.busy -= 1; return Promise.reject(e); }
+    void p.then(() => { this.busy -= 1; }, () => { this.busy -= 1; });
+    return p;
+  }
+}
+const sharedLookupSlots = new LookupSlots();
+
 export interface CimdFetchOptions {
   /** Name resolution (tests inject one). Default: the system resolver, every answer. */
   resolve?: (host: string) => Promise<LookupAddress[]>;
@@ -64,6 +87,8 @@ export interface CimdFetchOptions {
   ca?: string | Buffer;
   timeoutMs?: number;
   maxBytes?: number;
+  /** Outstanding-lookup cap. Default: one process-wide `LookupSlots`. */
+  lookupSlots?: LookupSlots;
 }
 
 const systemResolve = (host: string) => dns.lookup(host, { all: true, verbatim: true });
@@ -82,7 +107,8 @@ export async function fetchClientMetadataDocument(url: string, o: CimdFetchOptio
   });
   try {
     let answers: LookupAddress[];
-    try { answers = await Promise.race([(o.resolve ?? systemResolve)(host), timeout]); } catch (e) {
+    const resolve = o.resolve ?? systemResolve;
+    try { answers = await Promise.race([(o.lookupSlots ?? sharedLookupSlots).run(() => resolve(host)), timeout]); } catch (e) {
       if (e instanceof CimdFetchError) throw e;
       throw new CimdFetchError("dns", "client metadata host did not resolve");
     }

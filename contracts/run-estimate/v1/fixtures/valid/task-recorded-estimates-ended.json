@@ -1,0 +1,119 @@
+{
+  "taskId": "AG-mwuuxy6x4",
+  "advisory": true,
+  "records": [
+    {
+      "runId": "es_00a62c9a-5d02-4fc3-8f71-9b4505c705fc",
+      "assistantId": "fake-a",
+      "estimatorVersion": "run-estimate/1",
+      "recordedAt": "2030-01-06T08:00:00.572Z",
+      "estimate": {
+        "estimatorVersion": "run-estimate/1",
+        "advisory": true,
+        "asOf": "2030-01-06T08:00:00.572Z",
+        "subject": {
+          "assistantId": "fake-a",
+          "provider": "fake",
+          "model": null,
+          "modelSource": "assistant default",
+          "effort": null,
+          "effortSource": "not recorded in the execution identity (backlog p1-5-effort-cohorts)",
+          "taskKind": "coding"
+        },
+        "confidence": "low",
+        "tokens": {
+          "input": {
+            "low": 1200,
+            "typical": 1200,
+            "high": 1200
+          },
+          "output": {
+            "low": 450,
+            "typical": 450,
+            "high": 450
+          },
+          "confidence": "low",
+          "runsWithUsage": 2,
+          "runsMissingUsage": 0
+        },
+        "durationMs": {
+          "range": {
+            "low": 52,
+            "typical": 52,
+            "high": 53
+          },
+          "confidence": "low"
+        },
+        "waitUntilStartMs": {
+          "range": {
+            "low": 0,
+            "typical": 0,
+            "high": 0
+          },
+          "reasons": [
+            "no wait observed: quota, scheduler and account are clear"
+          ]
+        },
+        "approvalWait": {
+          "pending": 0,
+          "required": false,
+          "historicalShare": 0,
+          "historicalMs": null
+        },
+        "spend": {
+          "billing": "none",
+          "billingBasis": "provider default",
+          "apiUsd": null,
+          "apiEquivalentUsd": null,
+          "subscriptionQuota": null
+        },
+        "evidence": {
+          "cohort": "assistant+kind",
+          "sampleSize": 2,
+          "runIds": [
+            "es_a1bfa227-526f-4017-a23b-84c5cdf590dc",
+            "es_0986e6bc-2ea7-48fd-96de-27b3db739a5a"
+          ],
+          "missing": [
+            "model: not pinned; cohort ignores model",
+            "effort: not recorded in the execution identity"
+          ]
+        }
+      },
+      "recommendation": {
+        "advisory": true,
+        "action": "run-now",
+        "startAt": "2030-01-06T08:00:00.572Z",
+        "window": null,
+        "expectedCompletion": {
+          "low": "2030-01-06T08:00:00.624Z",
+          "typical": "2030-01-06T08:00:00.624Z",
+          "high": "2030-01-06T08:00:00.625Z"
+        },
+        "speedWeight": 1,
+        "deadline": null,
+        "meetsDeadline": null,
+        "reasons": [
+          "working hours (Sun 10:00 Asia/Jerusalem)"
+        ],
+        "unchanged": [
+          "acceptance tests",
+          "permissions and approval mode",
+          "spend limits",
+          "dispatch and scheduling"
+        ]
+      },
+      "actual": {
+        "state": "ENDED_OK",
+        "endedAt": "2026-11-24T15:36:42.697Z",
+        "durationMs": 69,
+        "tokens": {
+          "input": 1200,
+          "output": 450
+        },
+        "costUsd": null,
+        "costMethod": "unknown"
+      }
+    }
+  ]
+}

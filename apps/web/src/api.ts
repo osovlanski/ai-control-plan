@@ -654,7 +654,73 @@ export const api = {
     req<SessionSummary[]>(`/api/sessions?groupId=${encodeURIComponent(groupId)}`),
   sessionsByParent: (parentTaskId: string) =>
     req<SessionSummary[]>(`/api/sessions?parentTaskId=${encodeURIComponent(parentTaskId)}`),
+  provenance: (id: string) => req<TaskProvenance>(`/api/tasks/${encodeURIComponent(id)}/provenance`),
+  taskLinks: (id: string) => req<TaskLinks>(`/api/tasks/${encodeURIComponent(id)}/links`),
 };
+
+/**
+ * tlm-02a: `GET /api/tasks/:id/provenance` (API 2.12, sessions.read), as the plane serves it.
+ * The plane makes every join and labels where it came from: a stored key, `inferred` (a fixed,
+ * stated rule in `inferenceRules`) or `unrecorded`. The Web prints the joins; it never makes one.
+ */
+export type ProvenanceJoinSource =
+  | "execution_request" | "dispatch" | "handoff_record" | "handoff_envelope" | "checkpoint" | "inferred" | "unrecorded";
+export interface ProvenanceContinuation {
+  runId: string | null; assistantId: string | null; source: ProvenanceJoinSource;
+  checkpointId: string | null; handoffId: string | null; envelopeId: string | null;
+}
+export interface RunProvenance {
+  runId: string;
+  assistantId: string;
+  executionPath: "harness" | "legacy";
+  executionRequestId: string | null;
+  attempt: number | null;
+  startedAt: string;
+  endedAt: string | null;
+  settlementOwner: string | null;
+  compositionRevisionId: string | null;
+  promptSource: "fresh" | "handoff" | "resume" | null;
+  launch: {
+    kind: "scheduler" | "handoff" | "parallel" | "operator";
+    dispatch: { id: string; origin: string; phase: string; generation: number } | null;
+    handoffTrigger: string | null;
+  };
+  routingDecision: { id: number | null; source: ProvenanceJoinSource; chosenAssistantId: string | null; at: string | null };
+  continuedFrom: ProvenanceContinuation | null;
+}
+export interface HandoffProvenance {
+  id: string;
+  record: "handoff" | "envelope_only";
+  trigger: string | null;
+  at: string;
+  checkpointId: string | null;
+  from: { runId: string | null; assistantId: string | null; source: ProvenanceJoinSource };
+  to: { runId: string | null; assistantId: string | null };
+  closed: boolean;
+  envelope: { id: string; state: string; claimedByRequestId: string | null } | null;
+  successorRoutingDecisionId: number | null;
+}
+export interface TaskProvenance {
+  taskId: string;
+  owner:
+    | { kind: "operator"; runAs: string | null }
+    | { kind: "autopilot"; runAs: string | null; attemptId: string; itemId: string; attemptNo: number; state: string };
+  mode: string;
+  runs: RunProvenance[];
+  handoffs: HandoffProvenance[];
+  inferenceRules: Record<string, string>;
+}
+
+/**
+ * tlm-02b: `GET /api/tasks/:id/links` (API 2.13, tasks.read). `operator` evidence is a stored
+ * claim the plane never checks against GitHub; autopilot evidence is derived at read time.
+ */
+export type TaskLinkEvidence =
+  | { source: "operator"; linkId: string; relation: "tracks" | "implements" | "closes" | "related"; note: string | null; createdBy: string | null; createdAt: string }
+  | { source: "autopilot_publication"; publicationId: string; attemptId: string; state: string; head: string; base: string; verifiedSha: string; at: string }
+  | { source: "autopilot_duplicate"; publicationId: string; attemptId: string; prState: string; at: string };
+export interface TaskLink { kind: "issue" | "pull_request"; repo: string; number: number; url: string; evidence: TaskLinkEvidence[] }
+export interface TaskLinks { taskId: string; links: TaskLink[] }
 
 export interface SessionVerification {
   sessionId: string;
