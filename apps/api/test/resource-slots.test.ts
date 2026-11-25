@@ -232,17 +232,22 @@ describe('K4b resource slots', () => {
   });
 
   /* H — restart with a claim whose owner did not survive. */
-  it('sweeps a claim whose dispatch and session are both gone', async () => {
+  it('holds a terminal task\'s claim while its provider runs, and releases it at the stream\'s end', async () => {
     await boot(); const s = scheduler();
     const id = rtask(s, { goal: HOLD });
     const held = holding(id); await s.tick(); await held;
-    // Simulate a restart that lost the owner: the task is terminal but the
-    // claim row is still open, exactly what a crash mid-settle leaves behind.
-    db.prepare('UPDATE resource_claims SET released_at = NULL, release_reason = NULL WHERE task_id = ?').run(id);
+    // The task goes terminal behind the run's back. qcq-04b (packet 2.13 item 4, section 5 test 11):
+    // a terminal task alone no longer releases an entered attempt; the sweep keeps the claim while
+    // the provider's stream is open.
     built.tasks.transition(id, 'CANCELLED');
     const recovered = scheduler(); await recovered.reconcileOnBoot(); await drain();
+    expect(claims()).toHaveLength(1);
+    // The stream ends (the provider is stopped): the attempt settles stream_closed_unverified and the slot frees.
+    await built.orchestrator.cancelTask(id);
+    for (let i = 0; i < 400 && claims().length; i++) await new Promise((r) => setImmediate(r));
     expect(claims()).toHaveLength(0);
-    expect(claimRows(id).at(-1)).toMatchObject({ release_reason: expect.stringContaining('no execution owner') });
+    expect(claimRows(id).at(-1)).toMatchObject({ release_reason: 'event stream closed' });
+    expect(db.prepare('SELECT state, exit_proof FROM execution_attempts WHERE task_id = ?').get(id)).toEqual({ state: 'settled', exit_proof: 'stream_closed_unverified' });
   });
 
   /* Failed start / recovery — a re-park gives the slot back and re-acquires. */

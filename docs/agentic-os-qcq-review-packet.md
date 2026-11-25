@@ -1,6 +1,6 @@
 # Quality, Cost & Quota: review packet for dispatch-changing follow-ups
 
-Status: PROPOSED, revision 6 (errata), 2026-11-25, with the 04a as-built notes of section 8.1. Applies to `qcq-04-account-concurrency` and
+Status: PROPOSED, revision 6 (errata), 2026-11-25, with the 04a as-built notes of section 8.1 and the 04b part 1 notes of section 8.2. Applies to `qcq-04-account-concurrency` and
 `qcq-05-act-on-recommendation` only. `qcq-01` (advisory estimate, API 2.15) changes no dispatch,
 budget or schedule and needs none of this. Paid verification runs stay pending itay's budget
 approval; any live scheduling change stays pending his rollout approval.
@@ -1710,3 +1710,53 @@ and these notes say why:
    `claim_id`, `claimed_at` or `generation`, and an `INSERT OR REPLACE` that would delete a claim
    without its DELETE trigger. The allowlist resolves the callee by symbol, so bracket, destructured
    and aliased calls are sites. The early launch check reads every requirement the attempt carries.
+
+### 8.2 qcq-04b part 1 as built
+
+04b ships in two PRs. Part 1 is the exit proofs of 2.6.1, the release points of 2.13 item 4, and the
+operator path. Part 2 is W, R and G with the grant pass (2.5), the Harness-only refusal (2.2), the
+full commit (account re-resolve, autopilot check, deadline `D`) and the launch barrier (2.8). Part 1
+writes no account claim, so `trg_attempt_weak_proof` has nothing to refuse yet beyond the 04a
+trigger tests. Where part 1 and the sections above differ:
+
+1. **Who gets a unit.** Only a Harness attempt whose adapter declares `scopedSpawn`, on a lane where
+   the host has strong evidence (`ExitEvidence.unavailable(lane)` is undefined). The plane lane needs
+   cgroup v2, a user manager reachable through `XDG_RUNTIME_DIR` and `systemd-run` on PATH. The agent
+   lane needs `execution.agentUser`, the agent's `user@<uid>.service` cgroup (lingering) and a
+   `/proc` without `hidepid`. Everything else is pool-only and settles `stream_closed_unverified`.
+   `AGENT_PLANE_PROVIDER_SCOPES=off` turns units off on every lane, and boot logs the reason per lane.
+   Every legacy run is pool-only.
+2. **Reading.** The plane reads `cgroup.events` under the owning user's manager, never `systemctl`,
+   so it reads the agent's scope without privilege. A name that is not `aos-(att|run)-<id>.scope` is
+   `unreadable`, and `unreadable` proves nothing.
+3. **Proof order** (`AttemptStore.settleEntered`): `host_rebooted` first, for an attempt another
+   incarnation entered on a different, known `boot_id`. Then, with a unit: `populated` registers
+   it (`provider_unit_seen_at`) and holds; `empty`, or `absent` once registered, is `cgroup_empty`
+   (an existing empty unit counts too, because systemd created it). `absent` and never registered is
+   `unscoped_exit` only when the spawn path is closed, the launcher scan finds nothing, and a second
+   read is still `absent`. Without a unit, the end of the stream (`stream_closed_unverified`), or
+   `boot_unverified` for a dead incarnation's attempt.
+4. **Spawn path.** In this incarnation, the runner registers the adapter's `spawnClosed` once its
+   start call settled; until then the path is open. For the Claude adapter, `spawnClosed` is true
+   when the query stream has ended and the CLI either never spawned, exited, or failed to spawn. The
+   fake spawns nothing, so its path closes with its stream. A dead incarnation's spawn path is closed.
+5. **Stop and ambiguity.** A task cancel moves every entered attempt to `stopping` (`stopTask`) and
+   keeps its claims. An attempt asked to stop, or whose execution ended, with no proof after
+   `stopEvidenceMs` (65 s) becomes `ambiguous` and writes `attempt.stop_unconfirmed` with its
+   claims. A wall-clock jump can only bring that forward: it never writes a proof. A plane-lane stop
+   (`systemctl --user stop`) kills everything in the scope, including hook daemons the CLI started.
+6. **Watching.** An entered attempt with a unit is re-read every second from entry, and again after
+   its session ends, until it is final or `ambiguous`; from `ambiguous` the sweep and the operator
+   settle it. A dead incarnation's provider found running at boot is stopped and watched (2.8.2 row 13).
+7. **Release points.** A task's terminal transition alone releases nothing that entered. A legacy run
+   is released in the transaction that writes its `ended_at` after its stream drained; a Harness
+   session at `terminalize`. The K4b tests that expected release at the terminal transition now
+   expect release at the stream's end.
+8. **Operator path (API 2.20, capability `commands.write`).** `POST /api/attempts/:id/confirm-stopped`
+   writes `operator_confirmed`; it answers 409 `unit_populated` with the stop link while the unit reads
+   populated, and 409 `attempt_live` while a live execution still owns the attempt.
+   `POST /api/attempts/:id/stop-unit` moves the attempt to `stopping` and stops its unit; the proof
+   follows on the next read. Run-now with `confirmNoLiveOwner` uses the same check.
+9. **Not exercised here.** The real scope on a systemd host (OCI), and the agent wrapper's stop on
+   that host. The cgroup and `/proc` reads are tested against fake trees, and the Claude adapter's
+   `systemd-run` argv against a recording stub.

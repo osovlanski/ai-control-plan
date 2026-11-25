@@ -1347,7 +1347,8 @@ describe("execution.maxConcurrentProviderStarts", () => {
     expect(attemptOf(store.forRequest("erq_2")!.sessionId as string)).toMatchObject({ state: "dropped", exit_proof: "never_entered" });
     g.open("g1");
     expect((await a).terminalState).toBe("COMPLETED");
-    expect(attemptOf(sessionOf())).toMatchObject({ state: "live", entered_at: expect.any(String) });
+    // qcq-04b: an entered attempt with no unit is released at the end of its session's stream.
+    expect(attemptOf(sessionOf())).toMatchObject({ state: "settled", exit_proof: "stream_closed_unverified", entered_at: expect.any(String) });
   });
 
   it("unset: no queue and no trace event (unchanged default)", async () => {
@@ -1538,12 +1539,13 @@ describe("the provider-reported effort on the run row (P1-5)", () => {
 });
 
 describe("qcq-04a provider-entry commit on the Harness boundary (packet 2.4.1)", () => {
-  it("binds a held direct attempt at session insert, enters it once, and marks it live on the handle", async () => {
+  it("binds a held direct attempt at session insert, enters it once, and settles it at the session's end", async () => {
     const runner = new SessionRunner(deps(countingFake()));
     const result = await runner.run(request());
     expect(result.terminalState).toBe("COMPLETED");
     expect(startCount).toBe(1);
-    expect(attemptOf(sessionOf())).toMatchObject({ kind: "direct", candidate_slot: 0, state: "live", entered_at: expect.any(String) });
+    // `live` at the handle is pinned in session-store.test.ts; qcq-04b settles it when the session ends (no unit).
+    expect(attemptOf(sessionOf())).toMatchObject({ kind: "direct", candidate_slot: 0, state: "settled", exit_proof: "stream_closed_unverified", entered_at: expect.any(String) });
     const types = (db.prepare("SELECT type FROM scheduler_events WHERE task_id = 'AG-1' ORDER BY id").all() as { type: string }[]).map((e) => e.type);
     expect(types.filter((t) => t === "attempt.entered")).toHaveLength(1);
   });

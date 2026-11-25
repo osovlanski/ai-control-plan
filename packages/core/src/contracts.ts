@@ -90,7 +90,14 @@
 // `slot`, `state`, `assistantId`, `dispatchId`, `sessionId`, `account`, `enteredAt`, `requirements`,
 // `claims`). `resourceClaim` keeps its K4b value. Scheduler events gain `attempt.entered`,
 // `attempt.dropped` and `attempt.settled`. No dispatch outcome changes; no new capability.
-export const CONTROL_PLANE_API_VERSION = "2.19";
+// 2.20 (additive, qcq-04b part 1, release at proven provider exit): each `attempts` entry also
+// carries `providerUnit` (the attempt's cgroup scope, or null), `unitRegistered`, `stopRequestedAt`
+// and `exitPending` (true once the attempt is stopping or ambiguous). Scheduler events gain
+// `attempt.stopping` and `attempt.stop_unconfirmed`. `POST /api/attempts/:id/confirm-stopped`
+// (capability `commands.write`) writes `operator_confirmed`, refused 409 `unit_populated` while the
+// unit reads populated (the body offers `POST /api/attempts/:id/stop-unit`). A pool slot is now
+// released at the attempt's exit proof, not at the task's terminal transition (packet 2.13 item 4).
+export const CONTROL_PLANE_API_VERSION = "2.20";
 export const NORMALIZED_EVENT_VERSION = "1.0";
 
 export const OBSERVABILITY_CAPABILITIES = [

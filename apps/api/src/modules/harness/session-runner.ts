@@ -1208,7 +1208,7 @@ class RunContext {
   }
 
   /** The runSpec the adapter actually receives — policy-derived gate + idempotency key (§6). */
-  private effectiveRunSpec() {
+  private effectiveRunSpec(attemptId?: string) {
     const p = this.request.policy;
     return {
       ...this.request.runSpec,
@@ -1218,8 +1218,9 @@ class RunContext {
           : undefined,
       runControl: { executionRequestId: this.request.executionRequestId },
       ...(this.verifiedProfile ? { profile: this.verifiedProfile } : {}),
-      // The scope is named after the session, so a stop and a crash reap can address it.
-      ...(p.runAs === "agent" ? { runAs: { kind: "agent" as const, unit: this.sessionId } } : {}),
+      // The scope is named after the attempt (qcq-04b, packet 2.6.1), so a stop, a crash reap and the
+      // exit proof can address it; a session with no attempt keeps the session's name.
+      ...(p.runAs === "agent" ? { runAs: { kind: "agent" as const, unit: attemptId ?? this.sessionId } } : {}),
     };
   }
 
@@ -1365,7 +1366,13 @@ class RunContext {
   }
 
   private async startProvider(adapter: AgentAdapter): Promise<RunHandle> {
-    const spec = this.effectiveRunSpec();
+    // qcq-04b (packet 2.6.1): the attempt's cgroup unit, when the adapter spawns into one and the
+    // host can read it. Plane lane: the adapter wraps the spawn in `aos-att-<attempt>.scope`. Agent
+    // lane: the wrapper's `aos-run-<attempt>.scope`. No unit: release at the end of the stream.
+    const attempt = this.d.store.attemptOf(this.sessionId);
+    const unit = attempt ? this.d.store.unitFor(attempt.attempt_id, adapter.scopedSpawn === true) : undefined;
+    const spec = this.effectiveRunSpec(attempt?.attempt_id) as RunSpec;
+    if (unit && this.request.policy.runAs !== "agent") spec.scope = { unit: unit.replace(/\.scope$/, "") };
     this.effectiveSpec = spec as RunSpec; // secretEnv is deleted in the finally below
 
     // Resolve secret REFERENCES at the launch boundary; values are transient,
@@ -1396,9 +1403,17 @@ class RunContext {
       // qcq-04a (packet 2.4.1): the provider-entry commit, after every fallible preparation step
       // (the spec, both secret resolutions, the resume reference). The adapter call is the next
       // statement: no await, I/O or transaction between them.
-      const entry = this.d.store.enterProvider(this.sessionId, this.lease);
+      const entry = this.d.store.enterProvider(this.sessionId, this.lease, unit);
       if (!entry.ok) throw new ProviderEntryRefused(entry.kind, entry.reason);
-      return ref && adapter.resume ? await adapter.resume(ref, spec) : await adapter.start(spec);
+      const call = ref && adapter.resume ? adapter.resume(ref, spec) : adapter.start(spec);
+      // qcq-04b: the spawn-closed report the `unscoped_exit` proof reads. Open while the call is
+      // unsettled; a call that rejected spawned nothing this process still holds.
+      if (unit) {
+        let settled: { handle?: RunHandle } | undefined;
+        void call.then((h) => { settled = { handle: h }; }, () => { settled = {}; });
+        this.d.store.registerSpawn(entry.attempt.attempt_id, () => !!settled && (settled.handle ? adapter.spawnClosed?.(settled.handle) ?? false : true));
+      }
+      return await call;
     } finally {
       broker?.dispose();
       profileBroker?.dispose();
