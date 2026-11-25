@@ -1,5 +1,6 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { ensureCredential } from "./auth/credential-file.js";
+import { resolveAccounts, type ResolvedAccountsConfig } from "./modules/accounts.js";
 import { resolveRemoteAuth, type RemoteAuthConfig } from "./auth/remote/config.js";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
@@ -282,6 +283,8 @@ export interface WorkspaceConfig {
     workHours?: Partial<SchedulingPolicy["workHours"]>;
     evening?: Partial<SchedulingPolicy["evening"]>;
     weekend?: Partial<SchedulingPolicy["weekend"]>;
+    /** qcq-04a (packet 2.2): operator-declared provider accounts. Resolved into `ResolvedConfig.accounts`. */
+    accounts?: unknown;
   };
 }
 
@@ -595,6 +598,8 @@ export interface ResolvedComposerConfig {
 export interface ResolvedConfig extends Omit<WorkspaceConfig, "execution" | "models" | "decisions" | "sessionInput" | "registry" | "composer" | "autopilot" | "mcp" | "scheduling"> {
   /** qcq-01: resolved advisory scheduling policy. `loadConfig` always sets it; absent means the workspace default. */
   scheduling?: SchedulingPolicy;
+  /** qcq-04a: resolved `scheduling.accounts` (enforcement off only in this build). Absent means `DEFAULT_ACCOUNTS`. */
+  accounts?: ResolvedAccountsConfig;
   registry: ResolvedRegistryConfig;
   /** Always present; empty aliases and no Web origin unless the workspace sets `mcp`. */
   mcp: ResolvedMcpConfig;
@@ -754,8 +759,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ResolvedConfig
   const registry = resolveRegistry(file.registry, configPath);
   const composer = resolveComposer(file.composer, configPath);
   const autopilot = resolveAutopilot(file.autopilot, configPath);
-  const scheduling = resolveScheduling(file.scheduling, file.workspace ?? workspace, configPath);
+  // `scheduling.accounts` is its own block, not part of the advisory SchedulingPolicy contract.
+  const schedulingIsMapping = typeof file.scheduling === "object" && file.scheduling !== null && !Array.isArray(file.scheduling);
+  const { accounts: rawAccounts, ...fileScheduling } = (schedulingIsMapping ? file.scheduling : {}) as NonNullable<WorkspaceConfig["scheduling"]>;
+  const scheduling = resolveScheduling(schedulingIsMapping ? fileScheduling : file.scheduling, file.workspace ?? workspace, configPath);
   const resources = pools(file.scheduler?.resources);
+  const accounts = resolveAccounts(rawAccounts, {
+    assistants: file.assistants ?? defaults.assistants,
+    pools: Object.keys(resources),
+    schedulerEnabled: file.scheduler?.enabled ?? true,
+  }, configPath);
   const admission = resolveAdmission(file.scheduler?.admission, resources, execution.agentUser?.worktreesRoot ?? dir, configPath);
 
   // `api.remote` is parsed strictly on its own; it never rides the permissive `...file.api` spread.
@@ -789,7 +802,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ResolvedConfig
   }
   ensureCredential(dir);
 
-  return { ...config, execution, models, decisions, sessionInput, registry, composer, autopilot, mcp, scheduling, dir, dbPath: join(dir, "agent-plane.db"), warnings };
+  return { ...config, execution, models, decisions, sessionInput, registry, composer, autopilot, mcp, scheduling, accounts, dir, dbPath: join(dir, "agent-plane.db"), warnings };
 }
 
 /** The workspace default advisory scheduling policy (qcq-01). */

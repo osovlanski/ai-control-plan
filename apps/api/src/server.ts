@@ -912,6 +912,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
       /** K4b: derived pool truth for the Orbital Inspector; null unless the task waits on one. */
       resourceWait: scheduler.resourceWaitStatus(req.params.id) ?? null,
       resourceClaim: scheduler.claim(req.params.id) ?? null,
+      attempts: scheduler.attemptsOf(req.params.id),
       dispatches: scheduler.dispatches(req.params.id),
       schedulerEvents: scheduler.events(req.params.id),
       schedulerEnabled: scheduler.enabled,
@@ -948,6 +949,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
       // per request — a stored occupancy number would be stale on arrival.
       resourceWait: scheduler.resourceWaitStatus(req.params.id) ?? null,
       resourceClaim: scheduler.claim(req.params.id) ?? null,
+      attempts: scheduler.attemptsOf(req.params.id),
       schedulerEnabled: scheduler.enabled };
   });
 

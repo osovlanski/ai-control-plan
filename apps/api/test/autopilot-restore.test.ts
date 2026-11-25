@@ -90,7 +90,7 @@ describe("backup script module (D-11 local half)", () => {
     writeFileSync(join(local, "notes.txt"), "keep me");
 
     const taken = await takeBackup({ dbPath: rig.config.dbPath, localDir: local, keepDays: 7, destination: directoryDestination(offsite), now });
-    expect(taken.manifest).toMatchObject({ name: "agent-plane-20300101T230000Z.db", integrity: "ok", lastMigration: "057_run_effort.sql" });
+    expect(taken.manifest).toMatchObject({ name: "agent-plane-20300101T230000Z.db", integrity: "ok", lastMigration: "058_execution_attempts.sql" });
     expect(taken.pruned).toEqual(["agent-plane-20291201T000000Z.db"]);
     expect(readdirSync(local).sort()).toEqual(["agent-plane-20300101T230000Z.db", "agent-plane-20300101T230000Z.json", "notes.txt"]);
     expect(readdirSync(offsite).sort()).toEqual(["agent-plane-20300101T230000Z.db", "agent-plane-20300101T230000Z.json"]);

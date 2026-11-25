@@ -1,6 +1,6 @@
 # Quality, Cost & Quota: review packet for dispatch-changing follow-ups
 
-Status: PROPOSED, revision 6 (errata), 2026-11-25. Applies to `qcq-04-account-concurrency` and
+Status: PROPOSED, revision 6 (errata), 2026-11-25, with the 04a as-built notes of section 8.1. Applies to `qcq-04-account-concurrency` and
 `qcq-05-act-on-recommendation` only. `qcq-01` (advisory estimate, API 2.15) changes no dispatch,
 budget or schedule and needs none of this. Paid verification runs stay pending itay's budget
 approval; any live scheduling change stays pending his rollout approval.
@@ -371,7 +371,8 @@ free). This is the K4b known ceiling carried over, recorded on the attempt (`rea
 (section 2.8.2 step 3). Row 3 precedes every claim-only row, so a released claim never hides an entry mark.
 A run carrying a dispatch is unique per dispatch already (`014_durable_dispatch.sql` 42 to 43), so
 rows 1 and 2 are unambiguous. The migration's `execution_path` comes from `dispatches.execution_path`,
-and for a run without a dispatch from whether `runs.session_state` is set.
+and for a run without a dispatch from whether `runs.execution_request_id` is set (04a as built:
+migration 005 backfills `session_state` on legacy runs too, so it does not mark a Harness run).
 
 A migrated final attempt carries `dispatch_id` only for audit. `uq_attempt_dispatch` holds because
 there is one attempt per dispatch. A migrated attempt never holds an account claim: before 04d no
@@ -379,14 +380,23 @@ account claim exists, and `trg_claim_account_harness` forbids one on a legacy at
 row has `entered_boot_id` NULL, because the pre-upgrade plane never recorded it (section 2.6.1 says
 how such an attempt is settled).
 
-Then, for every run or session with `ended_at IS NULL` and no attempt yet (direct starts, parallel
-candidates, runs from before the upgrade): an attempt `att_mig_run_<run_id>` in state `live`, with
-`account_source = 'unresolved'`, `entered_at = run.started_at`. Its `candidate_slot` is 0 on a
-single task, and 1..n on a compare or race task, ordered by `started_at` and then run id (a stable
-tie-break for equal timestamps; Astra's run gave `f_a = 1`, `f_z = 2` whatever the insertion order).
-A single task that would get two owners in slot 0 already violates today's ownership rules; the
-migration aborts with a named error and the operator reconciles before upgrading, rather than the
-migration guessing. Ended runs with no claim get no attempt.
+Then, for every run or session that is still **open** and has no attempt yet (direct starts,
+parallel candidates, runs from before the upgrade): an attempt `att_mig_run_<run_id>` in state
+`live`, with `account_source = 'unresolved'`, `entered_at = run.started_at`. A run is open when
+`ended_at IS NULL`, its legacy `state` is not an end state (`ENDED_OK`, `ENDED_ERROR`, `CANCELLED`),
+a Harness session's `session_state` is not terminal, and its task is not terminal. Its
+`candidate_slot` is 1..n on a compare or race task, ordered by `started_at` and then run id (a
+stable tie-break for equal timestamps; Astra's run gave `f_a = 1`, `f_z = 2` whatever the insertion
+order). On a single task it is the first free slot, 0 when no dispatch attempt owns slot 0.
+
+04a as built (section 8.1): a single task with **more than one** open run is not aborted. A crash can
+leave a legacy run open beside a later one (the 005 legacy fixture has exactly that), and today's
+boot reconcile already ends such runs (`orchestrator.ts` `reconcileOnBoot` steps 1.5 and 3). Each
+extra run is kept as an owner on the next slot (`reason = 'migrated: extra open run on a single
+task'`), never released or guessed away; boot reconcile ends the legacy run and the boot sweep then
+settles its attempt `boot_unverified`. Two **dispatch** owners on one slot do break K4b's own
+one-open-dispatch rule, and that still aborts with `qcq_backfill_two_owners`. Ended runs with no
+claim get no attempt.
 
 SQL cannot read manifests or config, so `unresolved` keys are resolved at boot, behind the launch
 barrier (section 2.8).
@@ -1630,7 +1640,8 @@ Per slice:
   written before the K4b claim in the wake transaction; the ownership-only commit is the statement
   before each credentialed call, and the allowlist test finds every call by declaration; the
   session-terminal rule drops `held` attempts; weak settlement uses only `never_entered`,
-  `task_terminal_unverified` and `boot_unverified`.
+  `task_terminal_unverified`, `boot_unverified`, `operator_confirmed`, and `stream_closed_unverified`
+  where K4b releases a non-terminal task with no owner (section 8.1).
 - **qcq-04b.** The strong proofs and their order (2.6.1), the full commit and deadline (2.4.1), W, R
   and G as the only runtime claim writers (2.5.2), the barrier and boot table (2.8), the Harness-only
   refusal (2.2) and test 11.
@@ -1639,3 +1650,39 @@ Per slice:
 - **qcq-04d.** Recorded failover intent, inherited keys, first enable by unit with
   `occupies_account`, no compat write left, and the flipped constant.
 - **qcq-05.** The rechecks in the commit and the positive control (section 3, tests 9 and 10).
+
+### 8.1 qcq-04a as built
+
+Where the 04a code and the sections above differ, the code is what the slice review checks against,
+and these notes say why:
+
+1. **Settlement at a non-terminal release point.** K4b releases a claim at a terminal task *or* when
+   no owner row remains (`releaseIfIdle`, the sweep, the autopilot park). The first is
+   `task_terminal_unverified`. The second is an attempt whose run, session or dispatch no longer owns
+   execution while the task is not terminal (the run ended and the task parked); 04a settles it
+   `stream_closed_unverified`, since that is the event that did happen there. Both are weak, pool-only
+   proofs, allowed by `trg_attempt_weak_proof`; the release timing is K4b's.
+2. **A legacy start whose provider call threw.** With no run row, K4b sees no owner. An entered
+   (`starting`) direct or candidate attempt with no bound run is settled `stream_closed_unverified`
+   when `startTask` throws; a `held` one is dropped `never_entered`.
+3. **The autopilot park** releases exactly as K4b did: a `held` attempt drops `never_entered`
+   whatever still points at it, and an entered attempt whose session has ended settles like any
+   idle one (note 1).
+4. **Guard form.** The commit's result is kept for the bind that follows the adapter call, so each
+   credentialed call is preceded by `const entry = enterProvider(...)` (or `store.enterProvider`) and
+   `if (!entry.ok) throw ...`. The allowlist test accepts that two-statement form and the one-statement
+   `if (!enterProvider(...).ok)` form, and fails an unguarded or ignored commit.
+5. **`starting` to `live`.** A Harness attempt becomes `live` when the session's handle is acknowledged
+   (`providerStartAcked`, or STARTING to RUNNING), in the same transition; a legacy one when its run
+   row is written.
+6. **Upgrade backfill.** Runs are classified Harness by `execution_request_id`, open runs exclude legacy
+   end states and terminal tasks, and extra open runs on one single task are kept as owners
+   (section 2.3.1). A dispatch reserved before the upgrade with no claim gets its compat attempt
+   lazily, in its route transaction or at session insert.
+7. **Account config.** `scheduling.accounts` is parsed beside, not inside, the advisory
+   `SchedulingPolicy` contract. 04a resolves keys but writes none: every 04a attempt has
+   `account_source = 'none'` (migrated ones `unresolved`). The strong-exit-evidence check for
+   `enforce: true` arrives with the units of 04b; until 04d the build gate refuses `enforce: true`
+   first.
+8. **Events.** `attempt.entered`, `attempt.dropped` and `attempt.settled` join `scheduler_events`, so a
+   test that reads the last scheduler event filters them.

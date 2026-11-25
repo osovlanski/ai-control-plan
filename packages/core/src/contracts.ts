@@ -85,7 +85,12 @@
 // `unknown`), telemetry cohorts also carry `assistantId` and `effort`, and `effortPlan` records the
 // effort the routing profile would choose per assistant (shadow: no adapter receives it). No
 // earlier field changes; no new capability.
-export const CONTROL_PLANE_API_VERSION = "2.18";
+// 2.19 (additive, qcq-04a execution attempts): `GET /api/tasks/:id` and `GET /api/tasks/:id/wait`
+// also serve `attempts`: the task's open execution attempts (`attemptId`, `kind`, `executionPath`,
+// `slot`, `state`, `assistantId`, `dispatchId`, `sessionId`, `account`, `enteredAt`, `requirements`,
+// `claims`). `resourceClaim` keeps its K4b value. Scheduler events gain `attempt.entered`,
+// `attempt.dropped` and `attempt.settled`. No dispatch outcome changes; no new capability.
+export const CONTROL_PLANE_API_VERSION = "2.19";
 export const NORMALIZED_EVENT_VERSION = "1.0";
 
 export const OBSERVABILITY_CAPABILITIES = [

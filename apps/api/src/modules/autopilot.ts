@@ -581,9 +581,13 @@ export class AutopilotService {
       if (live && live !== ctx.sessionId) refuse("host_busy", `session ${live} of this attempt is still live`);
       if (!["admitted", "suspended", "running"].includes(attempt.state)) refuse("not_owner", `attempt ${attempt.id} is ${attempt.state}; nothing launches from there`);
 
-      // 2. The dispatch still holds its K4b claim.
-      const claim = this.db.prepare("SELECT dispatch_id, resource FROM resource_claims WHERE task_id = ? AND released_at IS NULL").get(taskId) as { dispatch_id: string; resource: string } | undefined;
-      if (!dispatchId || !claim || claim.dispatch_id !== dispatchId || claim.resource !== this.cfg.pool) {
+      // 2. The dispatch's attempt (qcq-04a, packet 2.3.2) requires the autopilot pool and holds a live
+      // claim with this dispatch for every requirement it lists.
+      const requirements = dispatchId ? this.db.prepare(`SELECT r.resource, r.units,
+          (SELECT c.units FROM resource_claims c WHERE c.attempt_id = a.attempt_id AND c.resource = r.resource AND c.dispatch_id = a.dispatch_id AND c.released_at IS NULL) AS held
+        FROM execution_attempts a JOIN attempt_requirements r ON r.attempt_id = a.attempt_id
+        WHERE a.dispatch_id = ? AND a.task_id = ?`).all(dispatchId, taskId) as { resource: string; units: number; held: number | null }[] : [];
+      if (!dispatchId || !requirements.some((r) => r.resource === this.cfg.pool) || requirements.some((r) => (r.held ?? 0) < r.units)) {
         refuse("not_owner", `dispatch ${dispatchId ?? "(none)"} holds no live ${this.cfg.pool} claim for the task`);
       }
 
