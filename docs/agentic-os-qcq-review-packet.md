@@ -1,6 +1,6 @@
 # Quality, Cost & Quota: review packet for dispatch-changing follow-ups
 
-Status: PROPOSED, revision 4, 2026-11-24. Applies to `qcq-04-account-concurrency` and
+Status: PROPOSED, revision 5, 2026-11-24. Applies to `qcq-04-account-concurrency` and
 `qcq-05-act-on-recommendation` only. `qcq-01` (advisory estimate, API 2.15) changes no dispatch,
 budget or schedule and needs none of this. Paid verification runs stay pending itay's budget
 approval; any live scheduling change stays pending his rollout approval.
@@ -11,8 +11,12 @@ introduced per-attempt claims; Astra High at `c34c29e`: FAIL. Revision 3 (PR #26
 added a provider-entry gate, exit proofs, a boot barrier and a global grant pass; Astra High at
 `428f859`: FAIL, with the crossed-age FIFO deadlock and the qcq-05 recheck placement resolved, and
 the gate, upgrade, exit evidence, legacy loser, successor intent, wake/grant ordering, rollout and
-test seams still open. Revision 4 answers those, and narrows account enforcement to Harness starts
-(itay's decision, 2026-11-24). Section 4 maps every round's findings. Nothing here is implemented:
+test seams still open. Revision 4 (PR #261, merged `d0c2099`, head `641c4a3`) answered those and
+narrowed account enforcement to Harness starts (itay's decision, 2026-11-24); Astra High at
+`641c4a3`: FAIL, with the qcq-05 placement and positive control resolved, and a stale-lease commit,
+backfill precedence, scope registration, boot identity, the first-enable legacy path, G write order,
+re-route replay, the compat insert order and test-slice gaps open. Revision 5 answers those.
+Section 4 maps every round's findings. Nothing here is implemented:
 every code reference is to `main` at `c34c29e`, and every "today" describes that revision.
 
 ## 1. What changes
@@ -64,13 +68,16 @@ The upgrade migration is the one other writer of `starting`, for pre-upgrade dis
 classify otherwise (section 2.3.1). Boot recovery, cancellation and group settlement rely on this
 invariant, and test 1 enforces it with a call-site allowlist.
 
-**The session-terminal rule.** Every Harness session terminal transaction (`SessionStore.finalize`
-and the failure finalizers) also reads the attempt bound to the session. If that attempt is still
+**The session-terminal rule.** `SessionStore.terminalize` (`session-store.ts` 413 to 448), the one
+transaction every Harness session terminal state goes through, also reads the attempt bound to the
+session (its `extra` hook already runs inside that transaction). If that attempt is still
 `held`, the same transaction moves it to `dropped` with `never_entered` and releases its claims.
 This covers every runner exit that never reaches the commit: an abort while waiting for the
-provider-start slot (`finalizeBeforeStream`, `session-runner.ts` 447 to 452), a fence, a preparation
-error, and a session-only cancel. If the attempt is `starting` or later, the rule leaves it alone;
-only an exit proof settles it.
+provider-start slot (`finalizeBeforeStream`, `session-runner.ts` 447 to 452), a preparation error,
+a session-only cancel, and a lease takeover. A fence that throws at `session-runner.ts` 451 leaves
+finalization to recovery, whose `terminalize` applies the same rule; until then the `held` attempt
+keeps its claims, which is safe because it cannot enter (the commit checks the lease, section 2.4.1).
+If the attempt is `starting` or later, the rule leaves it alone; only an exit proof settles it.
 
 ### 2.2 Account identity
 
@@ -126,7 +133,9 @@ The rules are these:
   requirement set contains an `account:` key and whose execution path is legacy (a legacy dispatch, a
   legacy direct start, a plain legacy compare/race candidate), with reason
   `account_requires_harness`. The task goes to `WAITING_INPUT` `intervention_required` with that
-  explanation; nothing is held and nothing starts. Config check warns when `enforce: true` is set
+  explanation; nothing is held and nothing starts. G, the re-route and boot reconciliation apply
+  the same check (sections 2.5.2, 2.5.3, 2.8.2), and `trg_claim_account_harness` makes a legacy
+  account claim impossible whatever code tries to write one. Config check warns when `enforce: true` is set
   while `execution.harnessModes.single` is off, because every single-path start would then be
   refused. Legacy paths keep K4b pool semantics.
 - `enforce: true` also requires that every assistant that would receive an account requirement
@@ -168,12 +177,17 @@ CREATE TABLE execution_attempts (
  session_id TEXT REFERENCES runs(id),
  launch_plan_json TEXT,                         -- candidate / direct: the bound plan a deferred grant launches from
  entered_at TEXT,                               -- set by the provider-entry commit (or the migration), never otherwise
+ entered_boot_id TEXT,                          -- /proc/sys/kernel/random/boot_id at the commit; NULL only on migrated rows (2.6.1)
  stop_requested_at TEXT,
  provider_unit TEXT,                            -- the systemd unit / cgroup the provider runs in (2.6.1)
- exit_proof TEXT CHECK(exit_proof IN ('cgroup_empty','host_rebooted','operator_confirmed','never_entered',
-                                      'stream_closed_unverified','migrated_historical')),
+ provider_unit_seen_at TEXT,                    -- first time the plane read that unit populated: registration (2.6.1)
+ exit_proof TEXT CHECK(exit_proof IN ('cgroup_empty','unscoped_exit','host_rebooted','operator_confirmed',
+                                      'never_entered','stream_closed_unverified','boot_unverified',
+                                      'migrated_historical')),
  exit_proof_at TEXT,
  predecessor_id TEXT REFERENCES execution_attempts(attempt_id),  -- failover / retry / restart chain
+ inherited_hops INTEGER NOT NULL DEFAULT 0,     -- times this lineage inherited a queue_key (2.5.1)
+ deadline_at TEXT,                              -- absolute launch deadline D from the precheck (2.4.1)
  created_at TEXT NOT NULL, updated_at TEXT NOT NULL, final_at TEXT, reason TEXT,
  CHECK((account_key IS NULL) = (account_source IN ('none','unresolved','pending'))),
  -- an owner-state dispatch attempt is bound to its dispatch; queued attempts may sit between dispatches (2.5.3)
@@ -183,10 +197,13 @@ CREATE TABLE execution_attempts (
  CHECK(state IN ('queued','held','dropped') OR entered_at IS NOT NULL),
  -- final states carry their proof; dropped is always never_entered. COALESCE: a NULL must not pass.
  CHECK(state != 'dropped' OR COALESCE(exit_proof, '') = 'never_entered'),
- CHECK(state != 'settled' OR COALESCE(exit_proof, '') IN ('cgroup_empty','host_rebooted','operator_confirmed',
-                                                          'stream_closed_unverified','migrated_historical')),
- -- an account claim is never released by a weak proof
- CHECK(COALESCE(exit_proof, '') != 'stream_closed_unverified' OR account_key IS NULL)
+ CHECK(state != 'settled' OR COALESCE(exit_proof, '') IN ('cgroup_empty','unscoped_exit','host_rebooted',
+                                                          'operator_confirmed','stream_closed_unverified',
+                                                          'boot_unverified','migrated_historical')),
+ -- an attempt with an account key is never settled by a weak proof (the claim side is a trigger below)
+ CHECK(COALESCE(exit_proof, '') NOT IN ('stream_closed_unverified','boot_unverified') OR account_key IS NULL),
+ -- a runtime entry records its boot; only a migrated row (proof or state from the migration) may lack it
+ CHECK(entered_at IS NULL OR entered_boot_id IS NOT NULL OR attempt_id LIKE 'att_mig_%')
 );
 CREATE UNIQUE INDEX uq_attempt_dispatch ON execution_attempts(dispatch_id) WHERE dispatch_id IS NOT NULL;
 CREATE UNIQUE INDEX uq_attempt_session ON execution_attempts(session_id) WHERE session_id IS NOT NULL;
@@ -196,6 +213,13 @@ CREATE UNIQUE INDEX uq_attempt_owner ON execution_attempts(task_id, candidate_sl
 -- At most one waiting successor per slot. It may coexist with the owner it succeeds (2.8.1, 2.9).
 CREATE UNIQUE INDEX uq_attempt_queued ON execution_attempts(task_id, candidate_slot) WHERE state = 'queued';
 CREATE INDEX idx_attempt_queue ON execution_attempts(queue_key, task_id, candidate_slot) WHERE state = 'queued';
+-- A queued attempt in a slot that has an owner must name that owner as its predecessor (2.9).
+CREATE TRIGGER trg_attempt_successor BEFORE INSERT ON execution_attempts
+WHEN NEW.state = 'queued' AND EXISTS (SELECT 1 FROM execution_attempts o
+  WHERE o.task_id = NEW.task_id AND o.candidate_slot = NEW.candidate_slot
+    AND o.state IN ('held','starting','live','stopping','ambiguous')
+    AND o.attempt_id IS NOT COALESCE(NEW.predecessor_id, ''))
+BEGIN SELECT RAISE(ABORT, 'queued attempt in an owned slot must name the owner as predecessor'); END;
 
 -- Everything an attempt needs to launch, granted all together or not at all.
 CREATE TABLE attempt_requirements (
@@ -230,6 +254,23 @@ the boot table apply without re-deriving it.
 - Replace `uq_claim_dispatch ON (dispatch_id)` with `UNIQUE(dispatch_id, resource) WHERE
   dispatch_id IS NOT NULL`.
 - Keep `idx_claim_live_resource`.
+- Add two triggers, so the cross-table invariants hold whatever code writes the rows (Astra showed
+  the attempt-side CHECK alone accepts a weak proof when the account lives only on the claim):
+
+```sql
+-- An account claim exists only on a Harness attempt in an owner state (Harness-only rule, 2.2).
+-- Writers set the attempt's owner state before inserting its claims, in the same transaction.
+CREATE TRIGGER trg_claim_account_harness BEFORE INSERT ON resource_claims
+WHEN NEW.resource LIKE 'account:%' AND NOT EXISTS (SELECT 1 FROM execution_attempts a
+  WHERE a.attempt_id = NEW.attempt_id AND a.execution_path = 'harness'
+    AND a.state IN ('held','starting','live','stopping','ambiguous'))
+BEGIN SELECT RAISE(ABORT, 'account claim requires a Harness owner attempt'); END;
+-- An attempt that ever held an account claim is never settled by a weak proof.
+CREATE TRIGGER trg_attempt_weak_proof BEFORE UPDATE OF exit_proof ON execution_attempts
+WHEN NEW.exit_proof IN ('stream_closed_unverified','boot_unverified') AND EXISTS (SELECT 1 FROM resource_claims c
+  WHERE c.attempt_id = NEW.attempt_id AND c.resource LIKE 'account:%')
+BEGIN SELECT RAISE(ABORT, 'weak exit proof on an account attempt'); END;
+```
 
 `wait_conditions` is rebuilt as follows:
 
@@ -259,31 +300,44 @@ persists its session before calling the provider. An operator's `confirmNoLiveOw
 `dispatch.aborted` event "Operator confirmed no live execution owner") closes a legacy entry mark.
 
 Classification, first match wins, by the claim (if any), its dispatch, the dispatch's entry mark and
-the run carrying that dispatch (`runs.dispatch_id`):
+the run carrying that dispatch (`runs.dispatch_id`). Revision 4 tested the claim's release first;
+Astra showed that loses to the entry mark (K4b releases a claim when the task turns terminal,
+`scheduler.ts` 395 to 403 and 713 to 718, while a legacy `adapter.start` may still be in flight with
+no run row, `orchestrator.ts` 1016 to 1019 and 2163 to 2174) and that a live claim on an ended run
+matched no row. Revision 5 orders the rows by evidence of entry, then by the claim:
 
-| Pre-upgrade row | Attempt | State | `entered_at` / `exit_proof` |
-|---|---|---|---|
-| claim **released**, a run carries the dispatch | `att_mig_<claim_id>`, kind `dispatch` | `settled` | `run.started_at` / `migrated_historical`; `final_at = released_at` |
-| claim **released**, no run | `att_mig_<claim_id>` | `dropped` | none / `never_entered` |
-| any dispatch (claim or not) carried by a run with `ended_at IS NULL` | `att_mig_<claim_id>` or `att_mig_d_<dispatch_id>`, `session_id` = that run | `live` | `run.started_at` / none |
-| **legacy** dispatch with an entry mark, no run, no operator confirmation, live claim or none, whatever the current phase | `att_mig_<claim_id>` or `att_mig_d_<dispatch_id>` | **`ambiguous`** | the entry mark's time / none |
-| **Harness** dispatch with an entry mark, no session, live claim | `att_mig_<claim_id>` | `dropped` | none / `never_entered` |
-| **Harness** dispatch with an entry mark, no session, no claim | none: nothing was entered and nothing is owned | | |
-| live claim, no entry mark, dispatch `reserved` | `att_mig_<claim_id>` | `held` | none |
-| live claim, no entry mark, dispatch re-parked, aborted or cancelled | `att_mig_<claim_id>` | `dropped` | none / `never_entered` |
+| # | Pre-upgrade row | Attempt | State | `entered_at` / `exit_proof` |
+|---|---|---|---|---|
+| 1 | a run carrying the dispatch has `ended_at IS NULL` (claim live, released or none) | `att_mig_<claim_id>` or `att_mig_d_<dispatch_id>`, `session_id` = that run | `live` | `run.started_at` / none |
+| 2 | a run carrying the dispatch has ended (claim live, released or none) | as row 1 | `settled` | `run.started_at` / `migrated_historical`; a live claim is released in the migration, `final_at` = `released_at` or the migration time |
+| 3 | **legacy** dispatch with an entry mark, no run, no operator confirmation (claim live, released or none; any current phase) | as row 1 | **`ambiguous`** | the entry mark's time / none |
+| 4 | **Harness** dispatch with an entry mark, no session, a claim (live or released) | `att_mig_<claim_id>` | `dropped` | none / `never_entered` |
+| 5 | **Harness** dispatch with an entry mark, no session, no claim | none: nothing was entered and nothing is owned | | |
+| 6 | live claim, no entry mark, dispatch `reserved` | `att_mig_<claim_id>` | `held` | none |
+| 7 | claim (live or released), no entry mark, no run | `att_mig_<claim_id>` | `dropped` | none / `never_entered` |
+| 8 | anything else | the migration **aborts** with `qcq_backfill_unclassified` and the row's ids, rather than failing later on `attempt_id NOT NULL` | | |
+
+The scan covers every claim row and every dispatch with an entry mark; a dispatch with neither gets
+no attempt and is not an "anything else" row. Rows 1 and 2 come first because a run row is the strongest pre-upgrade evidence of entry, whatever
+the claim says. Row 3 precedes every claim-only row, so a released claim never hides an entry mark.
+A run carrying a dispatch is unique per dispatch already (`014_durable_dispatch.sql` 42 to 43), so
+rows 1 and 2 are unambiguous. The migration's `execution_path` comes from `dispatches.execution_path`,
+and for a run without a dispatch from whether `runs.session_state` is set.
 
 A migrated final attempt carries `dispatch_id` only for audit. `uq_attempt_dispatch` holds because
-there is one attempt per dispatch. Under the Harness-only rule, a legacy `ambiguous` attempt can only
-ever hold a pool claim, never an account, so a legacy call in flight at upgrade cannot undercount an
-account. It still counts against its pool, as K4b intends.
+there is one attempt per dispatch. A migrated attempt never holds an account claim: before 04d no
+account claim exists, and `trg_claim_account_harness` forbids one on a legacy attempt. Every migrated
+row has `entered_boot_id` NULL, because the pre-upgrade plane never recorded it (section 2.6.1 says
+how such an attempt is settled).
 
 Then, for every run or session with `ended_at IS NULL` and no attempt yet (direct starts, parallel
 candidates, runs from before the upgrade): an attempt `att_mig_run_<run_id>` in state `live`, with
 `account_source = 'unresolved'`, `entered_at = run.started_at`. Its `candidate_slot` is 0 on a
 single task, and 1..n on a compare or race task, ordered by `started_at` and then run id (a stable
-tie-break for equal timestamps). A single task that would get two owners in slot 0 already violates
-today's ownership rules; the migration aborts with a named error and the operator reconciles before
-upgrading, rather than the migration guessing. Ended runs with no claim get no attempt.
+tie-break for equal timestamps; Astra's run gave `f_a = 1`, `f_z = 2` whatever the insertion order).
+A single task that would get two owners in slot 0 already violates today's ownership rules; the
+migration aborts with a named error and the operator reconciles before upgrading, rather than the
+migration guessing. Ended runs with no claim get no attempt.
 
 SQL cannot read manifests or config, so `unresolved` keys are resolved at boot, behind the launch
 barrier (section 2.8).
@@ -296,15 +350,15 @@ reader. These are the call sites at `c34c29e`, from `git grep resource_claims` a
 
 | Reader today | Becomes |
 |---|---|
-| `Scheduler.assertLaunchClaim` (`scheduler.ts` 261 to 269) | per attempt: the start's attempt is `held` and has a live claim for every requirement (an early check; the commit is authoritative) |
+| `Scheduler.assertLaunchClaim` (`scheduler.ts` 261 to 269) | per attempt: the start's attempt is `held` and has a live claim for every requirement, **each with at least the required units** (today's `held.units < need.units` check is kept per resource). An early check; the commit is authoritative |
 | `Scheduler.claim(taskId)` (`scheduler.ts` 381) | `claimsOf(attemptId)`: all live rows, keyed by resource |
 | `releaseIfIdle(taskId)` (`scheduler.ts` 395) | `releaseIfSettled(attemptId)` releases every claim of the attempt in one transaction, notifying each freed resource |
 | `releaseIdleClaims` (`scheduler.ts` 419) | walks open attempts, not claim rows |
 | dispatch abort release, `.get(dispatch_id)` (`scheduler.ts` 892) | `.all(dispatch_id)` |
 | `autopilotPark` release via `claim(taskId)` (`scheduler.ts` 1150) | releases every claim of the attempt bound to the dispatch |
 | `Autopilot.launchCheck` step 2, `.get(taskId)` (`autopilot.ts` 585) | the attempt with `dispatch_id = ?`; it must list `this.cfg.pool` **and** its account (if any) in `attempt_requirements`, and hold a live claim with that `dispatch_id` for **every** requirement |
-| `GET /api/tasks/:id` `resourceClaim` (`server.ts` 914) and the task wait read (`server.ts` 950) | `resourceClaim` keeps its K4b meaning: the live **pool** claim of the task's single-path owner, or null, so a K4b client sees the same value with enforcement off. New: `attempts`, the task's open attempts, each with its state, slot, account, requirements and live claims |
-| web `TaskDetail.resourceClaim` (`apps/web/src/api.ts` 272) | unchanged type; `attempts?: AttemptStatus[]` added. Cockpit reads neither field at `c34c29e` |
+| `GET /api/tasks/:id` `resourceClaim` (`server.ts` 914) and the task wait read (`server.ts` 950) | `resourceClaim` keeps its K4b meaning: the live **pool** claim of the task's single-path owner **when that claim carries a `dispatch_id`**, or null. A direct-owner or candidate pool claim (no dispatch) is never projected there; it appears only in `attempts`. Today a direct start with a pool requirement is refused by `assertLaunchClaim` (no dispatch owns a claim), so null is the K4b value for it. New: `attempts`, the task's open attempts, each with its state, slot, account, requirements and live claims (`dispatchId: string \| null`) |
+| web `TaskDetail.resourceClaim` (`apps/web/src/api.ts` 191 to 196, 272) | unchanged type, whose `dispatchId: string` stays correct because of the projection rule above; `attempts?: AttemptStatus[]` added. Cockpit reads neither field at `c34c29e` |
 | `claimed(resource)` sum, pool listing (`scheduler.ts` 113, 178) | unchanged: already per resource |
 
 The `attempts` field is an additive API change, so it takes the API minor bump of section 2.11.
@@ -358,10 +412,26 @@ The gate has two parts. Only the second is authoritative.
 **Precheck** (read-only, writes nothing). It runs where today's checks run: on the Harness in the
 runner's `beforeProviderStart` hook after the provider-start slot wait (`session-runner.ts` 462), on
 the legacy paths before the run spec is built. It evaluates every condition of the commit below, so
-a doomed start does no preparation work, and it computes the **absolute launch deadline** `D` (the
-autopilot window's remaining time, the request's runtime bound, the qcq-05 window end). The runner's
-spec and its runtime timer use `D`, not a duration measured from the precheck, so preparation time
-cannot extend a run past its window. Today's "launch admitted" event moves to the commit.
+a doomed start does no preparation work, and it computes the **absolute launch deadline** `D`: the
+earliest of the autopilot window's end, the qcq-05 window end (its minimum-slice rule is checked
+separately, section 3), and the request's own runtime bound, which is turned into an instant once, at
+the precheck (`precheckAt + min(policy.timeout.hardMs - elapsed, runSpec.env.maxRuntimeMs)`). `D` is
+stored on the attempt and passed to the commit. Today's "launch admitted" event moves to the commit.
+
+**The deadline contract.** Every path derives its remaining duration from `D` at the commit, never
+from a duration measured earlier, and never floors it upward:
+
+- *Refusal.* The commit refuses with `deadline_expired` (owner refused, below) when
+  `D - now < scheduling.minLaunchMs` (default 1,000 ms). Today the Harness final check floors the
+  remaining time at 1,000 ms (`session-runner.ts` 1328 to 1336), which can extend a run past its
+  window; the floor becomes this refusal.
+- *Harness.* `startProvider` sets `runSpec.env.maxRuntimeMs = D - now` and `policy.timeout.hardMs`
+  to the elapsed time plus that value, in the statement before the commit returns, so the adapter's
+  own bound and the runner's timer both end at `D`.
+- *Legacy.* Both legacy paths arm their timeout **after** the awaited adapter call
+  (`orchestrator.ts` 922 to 924, 1022 to 1023), so the time `adapter.start` takes is not counted.
+  Revision 5 passes `maxRuntimeMs = D - now` into the spec at the commit and arms the timeout as
+  `setTimeout(cancel, max(0, D - Date.now()))` after the call returns, so it fires at `D`.
 
 **Commit**, `enterProvider(attemptId, ctx)`, is one synchronous SQLite transaction. It runs **after
 all fallible preparation**: on the Harness inside `startProvider`, after `effectiveRunSpec`, both
@@ -376,7 +446,13 @@ In one transaction the commit does the following:
 1. **Ownership.** The attempt is `held`, has no `stop_requested_at`, its task is not `CANCELLED`,
    and it owns a live claim for every row in `attempt_requirements`. On the Harness, the session
    bound to the attempt has `cancel_requested = 0` (`session-store.ts` 586 to 593), which covers a
-   session-only cancel during handoff or shutdown (`orchestrator.ts` 1842 to 1844, 2240). For a
+   session-only cancel during handoff or shutdown (`orchestrator.ts` 1842 to 1844, 2240), **and the
+   caller's lease is current**: `runs.lease_token = ctx.leaseToken AND runs.lease_expires_at > now`.
+   Astra showed that recovery can take the lease over (`recovery.ts` 161 to 174, `acquireLease` at
+   `session-store.ts` 599 to 610) while the original runner is still preparing, and that a `held`
+   attempt bound to the right session passed every revision-4 predicate after its token was
+   replaced. A stale caller is `not_owner`; it makes no provider call, and recovery's
+   `terminalize` then drops the `held` attempt through the session-terminal rule. For a
    dispatch-kind attempt, the dispatch is bound to this attempt, is in `start_attempted` **or
    `started`** with `dispatches.session_id` NULL or equal to this session, and is not `aborted`,
    `reparked` or `cancelled`. Today `startRequest` returns the session id while execution is
@@ -388,14 +464,16 @@ In one transaction the commit does the following:
 3. Runs the autopilot final launch check, when the task is the autopilot's (window, budget,
    attestation, typed refusal; the window charge commits only on admission), against `D`.
 4. Runs the qcq-05 rechecks, when the task carries a window bound (section 3).
-5. On success, sets `state = 'starting'`, `entered_at = now` and `provider_unit`, writes the
-   admission event, and commits.
+5. Checks `D` (the deadline contract above).
+6. On success, sets `state = 'starting'`, `entered_at = now`, `entered_boot_id` and
+   `provider_unit`, writes the admission event, and commits.
 
 Refusals come in two kinds:
 
-- **Not the owner.** Step 1 finds the attempt not `held`: already `starting`, `live`, final, or bound
-  to another session or dispatch. The commit changes nothing and returns `not_owner`. A duplicate
-  caller can never drop or release a live owner.
+- **Not the owner.** Step 1 finds the attempt not `held` (already `starting`, `live` or final), bound
+  to another session or dispatch, or the caller's Harness lease not current. The commit changes
+  nothing and returns `not_owner`. A duplicate or stale caller can never drop or release an owner,
+  and never enters a provider.
 - **Owner refused.** Any other failure while the attempt is `held`. The attempt goes `dropped` with
   `never_entered` and the refusal reason, every claim is released, and the caller parks the task by
   that reason. A refused autopilot pass charges nothing.
@@ -427,12 +505,17 @@ The runtime conformance probes (`runtime-conformance.ts` 228 to 229 and 251 to 2
 in-process run (`runtime-catalog.ts` 170 to 206: missing executables, Bedrock without a runtime ARN,
 `FakeAdapter`). They are not provider entries and stay outside the gate.
 
-Test 1's **call-site allowlist** is a source test over `apps/api/src`. It matches
-`/\badapter\.(start|resume)\(/`, `/\.startProvider\(/`, `/\bharnessBridge!?\.(start|startRequest)\(/`
-and `/\brunner\.start\(/`, and fails on any match not in the two tables above (five adapter calls,
-three bridge calls, one `runner.start`, the conformance calls). It also asserts, by parsing each
-boundary, that `enterProvider(` is the statement directly before each adapter call. A conformance
-run against a credentialed descriptor fails the same test at runtime.
+Test 1's **call-site allowlist** works on the TypeScript syntax tree with the type checker, not on
+source text. Revision 4's regexes also matched a comment (`secret-broker.ts` 6) and would miss a
+renamed receiver. The test loads `apps/api/src` as a program and finds every call expression whose
+resolved method symbol is `ProviderAdapter.start` or `ProviderAdapter.resume`,
+`ControlPlaneBridge.start` or `startRequest`, `SessionRunner.start`, or `RunContext.startProvider`,
+whatever the receiver is called. It fails on any call not in the two tables above (five adapter
+calls, three bridge calls, the internal delegation at `control-plane-bridge.ts` 204, one
+`runner.start` at 208, `this.startProvider` at `session-runner.ts` 471, the two conformance calls).
+For each of the five adapter calls it asserts that the preceding statement in the same block is the
+guarded commit, `if (!enterProvider(...).ok) return ...;`, so only a **successful** commit reaches
+the call. A conformance run against a credentialed descriptor fails the same test at runtime.
 
 ### 2.5 Waiting without holding
 
@@ -456,10 +539,13 @@ order and a single pass; Astra's round-3 SQLite run confirmed it grants X in bot
 and matches strict K4b FIFO with enforcement off. Revision 4 keeps the rule and defines `queue_key`
 for every case:
 
-1. Every attempt has a fixed `queue_key`, set once at creation: the minimum `queued_at` of its known
-   requirements; with no known requirement yet, the creation time of the wait that produced it (for
-   a wake, the consumed condition's `created_at`, so waking a task does not reset its age). Adding or
-   replacing the account requirement later never changes it. The global order is (`queue_key`,
+1. Every attempt has a fixed `queue_key`, set once at creation, by the first rule that applies:
+   the minimum `queued_at` of its known requirements; else the creation time of the wait that
+   produced it (for a wake, the consumed condition's `created_at`, so waking a task does not reset
+   its age); else **the attempt's own `created_at`**. The last case covers a fresh direct start and
+   a group candidate, which have neither a requirement nor a producing wait (`server.ts` 1121 to
+   1135, `orchestrator.ts` 2273 to 2280). Adding or replacing the account requirement later never
+   changes it. The global order is (`queue_key`,
    `task_id`, `candidate_slot`).
 2. A grant pass reads every ready `queued` attempt in global order, inside one `BEGIN IMMEDIATE`
    transaction, with the live free units of each resource.
@@ -482,11 +568,19 @@ Properties, with their premises stated:
   every `pending` route completes (a crash in the gap is resumed after the barrier, section 2.8);
   every owner eventually reaches a final state (an exit proof, or the operator's `confirm-stopped`
   for an `ambiguous` attempt, section 2.6); a permanently unsatisfiable head leaves the queue (K4b's
-  `resource.unsatisfiable` expiry, unchanged); operator run-now is used finitely; and an older key
-  cannot recur indefinitely. The last premise matters because a successor inherits its
-  predecessor's pool age (section 2.9), and Astra observed repeated older successors winning every
-  pass. Inheritance is bounded: a chain of successors on one task is capped by `maxAutoWakes` and the
-  existing failover limits, and a successor never inherits a key older than its task's first wait.
+  `resource.unsatisfiable` expiry, unchanged); operator run-now is used finitely; an attempt stays
+  eligible (it is not cancelled or re-parked out of readiness); and only finitely many attempts with
+  an older key can arrive. Revision 4 claimed `maxAutoWakes` enforced the last premise. It does not:
+  a pool handoff and a context continuation write their new wait with `autoWakes = 0`
+  (`scheduler.ts` 339 to 344, 659 to 663), so a task's chain of successors is not bounded by it.
+  Revision 5 bounds the key instead of the chain. **With `enforce: true`**, a successor inherits its
+  predecessor's `queue_key` only while its lineage has inherited fewer than
+  `scheduling.accounts.maxInheritedKeys` times (default 3, counted on the attempt as
+  `inherited_hops`); after that it takes its own `created_at`. An attempt with key `k` can therefore
+  be overtaken by at most `maxInheritedKeys + 1` attempts per older task already waiting, and by no
+  attempt created after it, which makes the set of older keys finite. **With `enforce: false`** the
+  successor inherits the pool age exactly as `deferResourceContinuation` does today, so K4b order is
+  unchanged, and pool fairness is K4b's existing property, not a new claim of this design.
 - **K4b equivalence with enforcement off.** An attempt then has at most one requirement, the pool.
   The global order restricted to one pool is the K4b per-pool order (`resource_queued_at`, then
   `task_id`), and closing a blocked attempt's pool is K4b's strict FIFO. Who runs, in what order, and
@@ -512,12 +606,15 @@ by the grant (G)**:
 |---|---|---|
 | **W, wake** | a single-path condition with no `attempt_id`, or whose attempt has no route yet | consumes the condition, reserves the dispatch, and creates the attempt (`queued`, `pending`, `queue_key` per 2.5.1) or binds the task's routeless queued attempt to this dispatch. **No claims.** |
 | **R, reservation** | the dispatch's route transaction (`Scheduler.start`), a direct `/start`, a group open | fixes the route, writes the requirements, runs the grant rule for this attempt. Grant: claims, attempt `held`. No grant: re-park `resource_wait` (2.5.3), route kept on the attempt |
-| **G, grant** | a grant pass, for a queued attempt with a fixed route | single path, in one transaction: writes the claims, consumes the attempt's condition, reserves a dispatch whose `routing_decision_id` is the attempt's, binds the attempt to it, sets `held`. Candidate: writes the claims and sets `held`, then `grantCandidate` launches |
+| **G, grant** | a grant pass, for a queued attempt with a fixed route | single path, in one transaction **in this order**: re-checks the effective execution path (an `account:` requirement on a legacy path refuses `account_requires_harness`, as R does); consumes the attempt's condition; inserts the `reserved` dispatch whose `routing_decision_id` is the attempt's; binds the attempt to it and sets `held`; inserts the claims with that `dispatch_id`. Candidate: sets `held`, inserts the claims, then `grantCandidate` launches |
 
 After G, `continueDispatch` runs `Scheduler.start`, which takes its existing replay branch because
 `routing_decision_id` is already set (`scheduler.ts` 969 to 976), including the disabled-assistant
 recheck. So a single-path attempt that waited is launched on the route it waited for, and the claims
-G wrote always match its requirement set. A timer or event wake of a condition whose `attempt_id`
+G wrote always match its requirement set. The write order matters: Astra's SQLite run showed that
+inserting the claim before its new dispatch fails the immediate `dispatch_id` foreign key, and
+`trg_claim_account_harness` needs the attempt in an owner state before an account claim is inserted.
+A timer or event wake of a condition whose `attempt_id`
 names a queued attempt with a fixed route does not consume it: it schedules a pass. That removes
 both conflicts Astra found. Granting an unbound dispatch attempt can no longer violate the CHECK,
 because the dispatch is created inside G. Re-waking a consumed condition can no longer return stale,
@@ -530,9 +627,15 @@ The durable wait for a single path is the existing `wait_conditions` row, kind `
 wait. A candidate's wait is its `queued` attempt row, and the task stays `RUNNING` (section 2.7).
 
 - **The gap between W and R.** The attempt exists from W, at its `queue_key`, and readiness counts it
-  (section 2.5), so a pass closes its known resources to later attempts. A second wake cannot
-  overtake it. A crash in the gap leaves a `reserved` dispatch and its `queued` attempt; boot
-  continues the dispatch after the barrier opens (section 2.8), with the same attempt and key.
+  (section 2.5: dispatch `reserved`, route `pending`), so a pass closes its known resources to later
+  attempts. A second wake cannot overtake it. A crash in the gap leaves a `reserved` dispatch and its
+  `queued` attempt; boot continues the dispatch after the barrier opens (section 2.8), with the same
+  attempt and key.
+- **R never leaves a routed attempt without a wait.** R's no-grant branch writes the re-park and the
+  new `resource` condition (with `attempt_id`) **inside R's own transaction**, together with the
+  route. So no durable state has a consumed condition, a fixed route and no active wait; the
+  readiness rule for a routed queued attempt is always "its condition is ready", and the
+  `pending` term applies only before R commits.
 - **A `resource_wait` re-park keeps the attempt.** When R finds the full requirement set not
   grantable, the re-park transaction releases nothing (the attempt holds nothing), keeps the attempt
   `queued` with its `queue_key` and its route, unbinds it from the aborted dispatch, and writes the
@@ -545,9 +648,12 @@ wait. A candidate's wait is its `queued` attempt row, and the task stays `RUNNIN
   (`resource.unsatisfiable`) is separate and unchanged.
 - **Re-route.** A queued attempt keeps its route. It is re-routed only by an explicit event: its
   stored assistant becomes disabled, or a cooldown or quota block is observed on it. The re-route
-  transaction replaces the route and the account requirement, keeps `queue_key`, and spends exactly
-  one wake (`auto_wakes + 1`, as today's `no_candidate` re-park does) **in that same transaction**,
-  so a replay cannot spend it twice. Capacity-aware routing, which prefers a free account, is not in
+  transaction is a compare-and-set on the route it replaces: `UPDATE execution_attempts SET
+  routing_decision_id = :new ... WHERE attempt_id = :a AND state = 'queued' AND routing_decision_id
+  = :expected`. Only when that changes one row does the same transaction replace the account
+  requirement (after the effective-path check of G), keep `queue_key`, and spend exactly one wake
+  (`auto_wakes + 1`, as today's `no_candidate` re-park does). A replay of the same event carries the
+  old `:expected`, changes nothing and spends nothing. Capacity-aware routing, which prefers a free account, is not in
   this design (section 7).
 
 ### 2.6 Release at proven provider exit
@@ -568,35 +674,52 @@ unit-stop error is swallowed (`provider-processes.ts` 159, `claude.ts` 585 to 61
 need an OS process identity to survive reuse. Revision 4 bases strong evidence on the **cgroup**,
 which contains every process the provider starts, whatever its parentage, and has a durable name.
 
-- **Every Harness provider runs in its own cgroup**, named for its attempt. On the agent lane this is
-  the transient unit the `aos-agent` wrapper already runs (`claude.ts` 587 to 589, `agent.unit`),
-  with the attempt id in the unit name. On the plane lane the adapter spawns the provider inside a
-  transient user scope, `systemd-run --user --scope --unit=aos-att-<attempt>`, through the same
-  `spawnProvider` seam (`claude.ts` 583). The commit writes the unit name to `provider_unit`. A host
-  without systemd and cgroup v2 has no strong evidence (section 2.2).
-- The tracker keeps its role, terminating the tree. Its outcome is never a proof.
+- **Every Harness provider runs in its own cgroup**, named for its attempt. On the plane lane the
+  adapter spawns `systemd-run --user --scope --unit=aos-att-<attempt> -- <cmd>` through the same
+  `spawnProvider` seam (`claude.ts` 583); `systemd-run --scope` registers the scope and then execs
+  the command inside it, or fails without running the command. On the agent lane it is the scope
+  `aos-run-<id>.scope` that `setup/run-as-agent` already creates in **the agent user's** manager
+  (`run-as-agent` 22 to 38), with the attempt id as `<id>`. The commit writes the unit name to
+  `provider_unit`. The plane reads a unit through its cgroup file, `cgroup.events` under the owning
+  user's `user@<uid>.service`, not through `systemctl`, so it can read the agent's scope without
+  privilege. A host without systemd and cgroup v2, or whose `/proc` hides other users' processes
+  (`hidepid`), has no strong evidence (section 2.2), and config check says which.
+- The tracker keeps its role, terminating the tree. Its outcome is never a proof. Neither is
+  `stopAgentUnit` resolving: it swallows every error (`claude.ts` 669 to 682, `run-as-agent` stop
+  ends in `|| true`), and the stray-unit reaper records a unit as stopped even when the stop failed
+  (`provider-processes.ts` 290 to 299).
 
-An attempt becomes `settled` only in a transaction that writes one of these proofs:
+**Registration.** A missing unit is not, by itself, a proof. Astra drove a real transient scope and
+observed: launcher alive with the unit not found, then `populated 1`, then the leader gone and a
+worker still present (`populated 1`), then the unit not found after the worker exited. The first and
+last observations look the same. So the plane records **registration**: `provider_unit_seen_at` is
+set the first time it reads the unit populated (the runner polls for it after the adapter call
+resolves; the sweep and boot also set it). The proofs then distinguish the two absent cases:
 
 | Proof | Written by | Strong |
 |---|---|---|
-| `cgroup_empty` | the plane, after reading the attempt's own cgroup: `cgroup.events` reports `populated 0`, or the unit no longer exists. Read by the runner's `finally` after `processes.terminate`, by the sweep, and at boot. Never inferred from `stop()` resolving, from the tracker's `gone` or `killed`, or from a pid | yes |
-| `host_rebooted` | boot reconciliation: the host's boot time (`/proc/stat` `btime`) is later than `entered_at` plus a 5-second margin, so no process from before can exist | yes |
-| `operator_confirmed` | `POST /api/attempts/:id/confirm-stopped`, with the scope `runNow` uses today, or `runNow(confirmNoLiveOwner)` on the attempt's dispatch | yes |
+| `cgroup_empty` | the plane, for a **registered** unit (`provider_unit_seen_at` set): `cgroup.events` reports `populated 0`, or the unit no longer exists. A scope exists while any process is in it, and every descendant stays in it, so once registered, empty means every provider process is gone | yes |
+| `unscoped_exit` | the plane, for an **unregistered** unit, only when no process can still create it: (1) no live process on this boot carries the unit name in its argv (the launcher scan: `systemd-run --unit=aos-att-<attempt>` on the plane lane, `run-as-agent run <id>` on the agent lane; neither rewrites its argv), **then** (2) the unit does not exist. The scan comes first, so a launcher that registers between the two reads is seen at (1) or found at (2). It is applied only when no incarnation can still spawn for the attempt: by the runner itself after its adapter call has settled, or at boot or by recovery after the lease is taken over. The runtime sweep never applies it to an attempt whose runner holds a live lease | yes |
+| `host_rebooted` | boot reconciliation: the current `/proc/sys/kernel/random/boot_id` differs from the attempt's `entered_boot_id`. Revision 4 compared `/proc/stat` `btime` with a 5-second margin; Astra pointed out that `btime` is derived from wall time and moves when the clock is set, so it is not a proof. A boot id changes exactly at boot | yes |
+| `operator_confirmed` | `POST /api/attempts/:id/confirm-stopped`, with the scope `runNow` uses today, or `runNow(confirmNoLiveOwner)` on the attempt's dispatch. **Refused with 409 `unit_populated`** when the attempt has a `provider_unit` that reads populated: the operator stops it first (the response offers the stop). It is accepted when the unit is absent or unreadable, which is the case it exists for | yes |
 | `never_entered` | any transition from `queued` or `held` to `dropped` (the entry invariant) | yes, but `dropped`, not `settled` |
 | `stream_closed_unverified` | the end of the event stream after finish or cancel, for an attempt with no `provider_unit` (a legacy run, or an adapter that cannot spawn into a cgroup) | **no** |
+| `boot_unverified` | boot, for a migrated or legacy attempt with no `provider_unit` whose owning plane incarnation is dead; this is today's K4b boot release (`orchestrator.ts` 599 to 603), kept only where K4b had it | **no** |
 
 Consequences:
 
-- An **account** claim is released only by a strong proof, and the schema CHECK forbids
-  `stream_closed_unverified` on an attempt with an account key. Under the Harness-only rule, every
+- An **account** claim is released only by a strong proof. The attempt CHECK forbids a weak proof
+  on an attempt with an account key, and `trg_attempt_weak_proof` forbids it on any attempt that
+  ever held an account claim, whatever `account_key` says. Under the Harness-only rule, every
   account-bearing attempt runs in a cgroup. Codex joins an enforced group once its adapter spawns
   into one; until then `enforce: true` rejects it as a member (section 2.2).
 - A **pool-only** attempt without a cgroup (every legacy run, and Codex) may settle on
-  `stream_closed_unverified`. That is today's K4b known ceiling, kept only there, recorded on the
-  attempt and in `attempt.released`, so it is visible rather than silent.
-- A legacy run's `ended_at` written by boot bookkeeping is not a proof. Such an attempt is
-  `ambiguous` unless `host_rebooted` holds, and it holds only a pool claim.
+  `stream_closed_unverified` or `boot_unverified`. That is today's K4b known ceiling, kept only
+  there, recorded on the attempt and in `attempt.released`, so it is visible rather than silent.
+- A **migrated** attempt (`entered_boot_id` NULL) can never prove `host_rebooted`, has no unit, and
+  never held an account. If it is pool-only and its incarnation is dead, boot settles it
+  `boot_unverified`, as K4b does today; a Harness one is settled through its session's recovery
+  with the same weak proof. It therefore cannot hold an account at first enable.
 
 `releaseIfIdle(taskId)` becomes `releaseIfSettled(attemptId)`. The sweep walks open attempts and
 applies the proof test. `hasOwner(taskId)` stays for the task-level questions it answers today.
@@ -661,16 +784,28 @@ Each slot's outcome is its last attempt's: `succeeded`, `failed`, `refused`, `ra
   cancel (`session-runner.ts` 480 to 492). That check also reads the attempt's `stop_requested_at`,
   so a race loss is honoured even without a task cancel.
 - *Legacy.* Today a legacy candidate has no `ActiveRun` while `adapter.start` is unresolved, and the
-  post-start check requires a dispatch id and a `CANCELLED` task (`orchestrator.ts` 884 to 891), and
-  a losing candidate has neither. Revision 4 replaces that check with one read of the attempt,
-  **before** the run becomes active. If `stop_requested_at` is set, the plane calls
-  `adapter.cancel(handle)`, writes the run row with `outcome = 'rejected'` (so the attempt has its
-  `session_id`), never registers the `ActiveRun`, and leaves the attempt `stopping`. The same read
-  replaces the dispatch-only `CANCELLED` check at 1018.
+  post-start check requires a dispatch id and a `CANCELLED` task (`orchestrator.ts` 888 to 891), and
+  a losing candidate has neither. Revision 5 replaces that check with one read of the attempt,
+  **before** the run becomes active, and defines every outcome of the start and of the cancel:
 
-Either way the slot stays held until a proof (for legacy, `stream_closed_unverified` on a pool-only
-attempt). A loser's later settlement never re-runs group settlement for a decided group
-(`consumePlaneOwnsTerminal` returns early, `orchestrator.ts` 2492).
+  | Event on a legacy candidate in `starting` | What the plane does | Attempt |
+  |---|---|---|
+  | `adapter.start` resolves, `stop_requested_at` not set | today's path: run row `ACTIVE`, `ActiveRun`, `consume` | `live` |
+  | `adapter.start` resolves, `stop_requested_at` set | writes the run row with `outcome = 'rejected'` (so the attempt has its `session_id`), never registers the `ActiveRun`, calls `adapter.cancel(handle)`, and starts the **loser drain** (below) | `stopping` |
+  | `adapter.cancel` throws or rejects | logged; the drain still runs, and the run's existing timeout (armed at `D`) cancels again | `stopping` |
+  | `adapter.start` rejects (throws) | no handle exists, so nothing can be cancelled or drained. A legacy adapter that threw from `start` may still have spawned a process the plane cannot see. The attempt is pool-only (Harness-only rule), so it settles `stream_closed_unverified` with reason `start_rejected`, which is today's K4b behaviour for a failed start; group settlement then runs | `settled` (weak) |
+
+  The **loser drain** is the same `consume` loop (`orchestrator.ts` 1074 to 1129) run in a
+  `role: 'loser'` mode. It persists the loser's events, skips `settleRun`'s task transitions (the
+  winner owns them), and at the end of the stream writes `stream_closed_unverified` on the attempt
+  and releases its pool claim. Without it, a loser excluded from `ActiveRun` would have no one to
+  close its stream and its slot would be held until boot. The same read replaces the dispatch-only
+  `CANCELLED` check at 1018.
+
+Either way the slot stays held until a proof (for a Harness loser, `cgroup_empty`; for a legacy
+pool-only loser, `stream_closed_unverified` from the drain). A loser's later settlement never re-runs
+group settlement for a decided group (`consumePlaneOwnsTerminal` returns early at `orchestrator.ts`
+2481).
 
 Autopilot tasks never run in parallel. That is unchanged (`startTask` throws).
 
@@ -710,12 +845,26 @@ exactly once, at the end of boot. While it is closed:
    (`orchestrator.ts` 559 to 572), which treats the latest candidate as a single task, and the legacy
    step marks the task `FAILED` (590 to 603). Both are wrong for an open group.
 3. **Attempt reconciliation**, a new step before `acceptance.reconcileOnBoot` (`index.ts` 19):
-   - Resolve the account key of **every** open attempt from its assistant, its `runAs` and the
-     current config, not only the `unresolved` ones. Insert a missing account claim (an attempt from
-     an enforcement-off build has none), and replace a claim whose key changed after regrouping: the
-     operator's current declaration is the authority. A live owner that pushes an account over its
+   - Resolve the account key of **every** open attempt from its assistant, its `runAs`, its
+     `execution_path` and the current config, not only the `unresolved` ones. Revision 4 inserted a
+     missing account claim for every open attempt; Astra's literal run of that rule gave a migrated
+     legacy owner `[('legacy','account:A'), ('legacy','pool')]` and gave a queued Harness attempt a
+     live account claim. Revision 5 applies the key by attempt kind:
+
+     | Open attempt | Account handling at reconciliation |
+     |---|---|
+     | Harness, owner state | insert the missing account claim, or replace one whose key changed after regrouping; `attempt_requirements` updated to match |
+     | Harness, `queued` | update `attempt_requirements` only (add, replace or remove the account row); **no claim** |
+     | legacy, owner state, key resolves to an account | no claim (`trg_claim_account_harness` forbids one). The attempt keeps its K4b pool disposition, and it is counted as **one unit of occupancy** on that account, read from the attempt row, until it is final (below) |
+     | legacy, `queued`, key resolves to an account | `dropped` `account_requires_harness`; the task goes `WAITING_INPUT` `intervention_required`, exactly as R refuses it |
+     | any, key resolves to none | any account requirement row and live account claim removed |
+
+     The operator's current declaration is the authority. A live owner that pushes an account over its
      limit is allowed: it is not cancelled, and the grant pass grants nothing on that account until
-     occupancy falls below the limit.
+     occupancy falls below the limit. **Occupancy** of an account is its live claimed units plus the
+     number of open legacy owner attempts whose key resolves to it. That term exists only for
+     owners from before enforcement was enabled, since no legacy attempt can obtain an account at
+     runtime, and it reaches zero as they settle.
    - Classify every open attempt (table below).
    - **Group recovery**: for each compare or race task, settle each candidate's session result
      individually, apply the classification, then run group settlement once.
@@ -727,7 +876,10 @@ exactly once, at the end of boot. While it is closed:
 5. **Barrier opens.** Continue every `reserved` dispatch (in `created_at` order), run one grant pass,
    then `startTimer` and the first tick.
 
-Classification in step 3, keyed by binding rather than kind, first match wins:
+Classification in step 3, keyed by binding rather than kind, first match wins. Revision 4's row for
+a migrated Harness `starting` attempt is removed: the backfill never produces it (rows 4 and 5 of
+section 2.3.1 give `dropped` or no attempt). Revision 5 adds the runtime Harness `starting` attempt
+whose session exists, which had no row:
 
 | Open attempt at boot | Disposition |
 |---|---|
@@ -736,16 +888,23 @@ Classification in step 3, keyed by binding rather than kind, first match wins:
 | `queued` (task non-terminal; for a candidate, group open) | kept, with its `queue_key`; granted by a pass after the barrier |
 | `held`, bound to a `reserved` dispatch | kept `held`; continued after the barrier with its claims |
 | `held`, bound to a `start_attempted` or `started` dispatch, Harness, session row exists and is not terminal | the session's recovery decides. The attempt was never entered (the commit did not happen), so when recovery ends the session, the session-terminal rule drops it. If recovery offers a resume, that is a new dispatch-kind attempt |
-| `held`, bound to a `start_attempted` dispatch, no session or run | never entered, by the entry invariant. The dispatch re-parks with reason `start_not_entered`, which does not spend a wake; the attempt returns to `queued` with its `queue_key` and route (claims released) and is re-granted by a pass. Revision 3 promised a replay here that `Scheduler.start` cannot perform, since it returns for any phase but `reserved` (`scheduler.ts` 960 to 964) |
+| `held`, bound to a `start_attempted` dispatch, no session or run (Harness **or legacy**) | never entered, by the entry invariant. The dispatch re-parks with reason `start_not_entered`, which does not spend a wake; the attempt returns to `queued` with its `queue_key` and route (claims released) and is re-granted by a pass. Today a legacy dispatch here stays `start_attempted` indefinitely and a Harness one waits 60 seconds (`scheduler.test.ts` 93 to 102); both change (section 2.13) |
 | `held`, bound to a re-parked, aborted or cancelled dispatch | `dropped` (`never_entered`) |
 | `held`, kind `direct`, no dispatch | `dropped` (`never_entered`). The task takes today's crash outcome for an interrupted direct start (`WAITING_INPUT` `harness_error`, "start interrupted by restart") and is never re-launched automatically |
 | `held`, candidate, group open | returns to `queued` with its `queue_key` (claims released); granted after the barrier |
-| `starting` or later, with a `provider_unit` whose cgroup is empty or gone | `settled` (`cgroup_empty`) |
-| `starting` or later, `host_rebooted` holds | `settled` (`host_rebooted`) |
-| `starting`, Harness, migrated, no session row | kept inside `RECOVERY_WINDOW_MS` (60 seconds) after `entered_at`; after it, `dropped` (`never_entered`), by the pre-upgrade Harness invariant. A runtime Harness attempt cannot be in this row, because the commit happens after the session exists |
-| `starting`, legacy, no run | `ambiguous`, held (pool only) until a proof |
-| `live` or `stopping`, no proof possible | `ambiguous`, held, `attempt.stop_unconfirmed` |
-| `ambiguous` | kept until a proof (`cgroup_empty`, `host_rebooted`, `operator_confirmed`) |
+| `starting` or later, `host_rebooted` holds (boot id differs) | `settled` (`host_rebooted`) |
+| `starting` or later, unit **registered** and empty or gone | `settled` (`cgroup_empty`) |
+| `starting` or later, unit **unregistered**, launcher scan empty, unit absent | `settled` (`unscoped_exit`): the previous incarnation is dead, so nothing can still spawn for it |
+| `starting`, Harness, runtime, session row exists, unit populated or a launcher still running | the session's recovery takes the lease and terminates the tree (`recovery.ts` 161 to 169); the attempt goes `stopping`, is settled `cgroup_empty` once the unit reads empty (setting registration first if it was not), and becomes `ambiguous` with `attempt.stop_unconfirmed` if that has not happened within `stopEvidenceMs` |
+| `starting` or `live`, legacy or migrated, no `provider_unit` | `settled` (`boot_unverified`), pool only, as K4b releases today. `trg_attempt_weak_proof` makes this impossible for an attempt that held an account, and none can (Harness-only) |
+| `live` or `stopping`, Harness, unit populated or a launcher still running | `stopping`; recovery terminates the tree; settled at `cgroup_empty`, else `ambiguous` after `stopEvidenceMs` |
+| `ambiguous` | kept until a strong proof (`cgroup_empty`, `unscoped_exit`, `host_rebooted`, `operator_confirmed`) or, for a pool-only attempt with no unit, `boot_unverified` |
+
+Every open state is covered: `queued` by rows 1 to 3, `held` by rows 1, 2 and 4 to 9, and
+`starting`, `live`, `stopping` and `ambiguous` by rows 10 to 16, whose conditions are exhaustive for
+an attempt with a unit (registered or not, populated or not) and for one without. A Harness attempt
+in `starting` always has a session row: the runtime commit runs inside an existing session, and the
+backfill never writes a Harness `starting` row.
 
 #### 2.8.3 The `runNow` predicate
 
@@ -814,19 +973,38 @@ Slices 04b and 04c land before 04d converts failover, handoff, restart and resum
   rejects `scheduling.accounts.enforce: true` with "account enforcement is not available in this
   build". 04d flips it, in the PR whose allowlist test asserts that every allowlisted path obtains its
   claims through R or G. Astra confirmed this keeps `enforce: true` unavailable through 04c.
-- **Compat grant, defined.** From 04a through 04c, a path 04d has not converted still creates an
-  attempt row (04a does that for every start path), through a compat grant with no account
-  requirement. The compat grant **adopts the exact K4b claim row** the path already owns, matched by
-  dispatch identity (`resource_claims.dispatch_id`, as `assertLaunchClaim` and `launchCheck` match it
-  today, `scheduler.ts` 261 to 269), by setting that row's `attempt_id`. It never inserts a second pool
-  claim. A path that owns no claim and needs a pool takes it through G, synchronously; if G cannot
-  grant, the path defers exactly as `deferResourceContinuation` does today. So the compat path keeps
-  K4b's claim identity for that path. 04d replaces every compat grant with W, R and G and deletes the
-  shim, and a test asserts none remains.
+- **Compat attempt, defined.** From 04a through 04c, a path 04d has not converted still creates an
+  attempt row (04a does that for every start path), with no account requirement. Astra pointed out
+  that revision 4's "adopt the K4b row later" cannot work: the K4b writer inserts its claim without an
+  `attempt_id` (`scheduler.ts` 797 to 799), and 04a makes that column `NOT NULL`, so the insert fails
+  before anything can adopt it. Revision 5 creates the compat attempt **in the transaction that
+  writes the K4b claim, before the claim**, and passes its id in the original insert:
+  - *Wake* (`scheduler.ts` 787 to 799): consume the condition, insert the `reserved` dispatch,
+    insert the compat attempt (kind `dispatch`, bound to that dispatch, `held`, `queue_key` per
+    2.5.1), then insert the claim, if the condition has a pool, with `attempt_id` and the
+    `dispatch_id`. The claim's identity (task, dispatch, generation, resource, units) is exactly
+    K4b's; only the new column is added.
+  - *A deferred continuation* (`deferResourceContinuation`): the continuation's wake is a wake, so
+    the same order applies when its condition is woken. Nothing is granted outside a wake, so 04a
+    does **not** depend on G, which arrives in 04b.
+  - *A start with no pool* (direct `/start`, a candidate): the compat attempt is created `held` with
+    no requirement in the path's existing start transaction, so the commit has an attempt to move.
+  04b replaces the single-path compat writes with W, R and G; 04c the candidate ones; 04d the rest,
+  and deletes the shim. A test in 04d asserts no compat write remains.
+- **The entry invariant holds from 04a.** A compat attempt is `held` before its provider is called,
+  so 04a must also move it, or a later boot would read "held, never entered" for a provider that
+  ran. 04a therefore ships the commit at all three boundaries in its **ownership-only** form
+  (step 1 of section 2.4.1, then step 6; the account, autopilot, qcq-05 and deadline steps arrive in
+  04b), the session-terminal rule, the allowlist test, and the settlement transitions with the
+  proofs 04a can produce: `never_entered`, and, at the points where K4b releases today,
+  `stream_closed_unverified` at runtime and `boot_unverified` at boot. Every 04a attempt is
+  pool-only, so those weak proofs are allowed, and the K4b release timing is unchanged in 04a. 04b
+  adds cgroups and the strong proofs.
 - **First enabled boot.** Enabling `enforce: true`, or regrouping, takes effect at boot. Step 3 of
-  section 2.8.2 re-resolves every open attempt, inserting missing account claims and replacing stale
-  keys, before the barrier opens. No grant on an account happens before every possibly live owner of
-  it is counted.
+  section 2.8.2 re-resolves every open attempt by kind (Harness owners get claims, Harness queued
+  attempts get requirements only, legacy owners count as occupancy without a claim, legacy queued
+  attempts that now need an account are refused), before the barrier opens. No grant on an account
+  happens before every possibly live owner of it is counted.
 - **Test seam.** 04b and 04c must test account contention while production config rejects it. The
   capacity module takes its policy as a constructor argument, and tests construct it with
   `{ enforce: true }` directly (the seam `resource-slots.test.ts` already uses for pools). Config load
@@ -845,11 +1023,19 @@ the existing test it changes (section 5, test 11):
    written at wake and then released.
 3. A crash at the reservation boundary leaves a `queued` attempt and a `reserved` dispatch with no
    live claim, where today the claim is live.
-4. A pool slot with a cgroup-backed provider is released at `cgroup_empty`, not at the task's
-   terminal transition while a provider may still be running.
-5. A Harness `start_attempted` dispatch whose attempt is still `held` at boot is known not to have
-   entered a provider, so it re-parks at once (`start_not_entered`, no wake spent) instead of after
-   the 60-second window.
+4. A pool slot is released at the attempt's exit proof, not at the task's terminal transition. With
+   a cgroup-backed provider that is `cgroup_empty`. **A pool-only attempt without a cgroup** (every
+   legacy run) releases at `stream_closed_unverified`, the end of its event stream, where today K4b
+   releases as soon as the task is terminal and no owner row remains (`scheduler.ts` 395 to 403,
+   413, 713 to 718), possibly while the stream is still open. A legacy race loser holds its slot
+   until the loser drain closes its stream (section 2.7).
+5. A `held` attempt bound to a `start_attempted` dispatch with no session or run at boot is known
+   not to have entered a provider, on **both** paths, so it re-parks at once (`start_not_entered`,
+   no wake spent). Today the Harness waits the 60-second window and then re-parks spending a wake
+   (`start_ambiguous`), and legacy keeps the dispatch `start_attempted` indefinitely
+   (`scheduler.test.ts` 93 to 102).
+6. A legacy or migrated attempt still open at boot with no unit releases with `boot_unverified` at
+   the same point K4b releases today; the change is only that the proof is recorded.
 
 Who runs, in what order, the strict FIFO and every `resource.*` event type stay as in K4b.
 
@@ -933,16 +1119,36 @@ Who runs, in what order, the strict FIFO and every `resource.*` event type stay 
 | R3-10. Slice tests | not resolved | section 5 (r4 cases, test 11 for changed K4b expectations), section 6 (owning slices corrected) |
 | Non-blocking: account identity | resolved | unchanged (2.2) |
 
+### Round 4 (Astra High, `641c4a3`)
+
+| Finding | Round 4 status | Answered in revision 5 |
+|---|---|---|
+| R4-1. Entry: stale Harness lease | not resolved: the commit accepted a caller whose lease recovery had taken over | 2.4.1 step 1 (current lease required; a stale caller is `not_owner`), 2.1 (session-terminal rule names `terminalize`; fence-throw path) |
+| R4-1b. Deadline `D` | contract incomplete: per-path derivation, the 1,000 ms floor, legacy timers armed after the call | 2.4.1 deadline contract (`deadline_at` stored; refuse `deadline_expired`; Harness and legacy derive from `D` at the commit) |
+| R4-1c. Allowlist | regexes match a comment and miss a renamed receiver | 2.4.2 (type-checked call symbols; successful-commit guard as the preceding statement) |
+| R4-2. Backfill precedence | released claim beat the entry mark; a live claim on an ended run matched no row | 2.3.1 (rows reordered by entry evidence; row 2 covers ended runs with any claim; row 8 aborts by name) |
+| R4-2b. `resourceClaim` for a direct owner | projection undefined for a claim with no dispatch | 2.3.2 (projected only with a `dispatch_id`; units check kept) |
+| R4-3. Exit evidence | an unregistered or vanished unit looked like exit; `btime` moves with the clock; operator confirm unchecked; weak proof accepted when only the claim held the account | 2.6.1 (registration; `cgroup_empty` only when registered; `unscoped_exit` with the launcher scan and its ordering; `host_rebooted` by boot id; operator refused while populated; agent scope read by cgroup path), 2.3 (`trg_attempt_weak_proof`) |
+| R4-4. Legacy loser paths | rejected start, throwing cancel and stream drain undefined | 2.7 (outcome table; the loser drain) |
+| R4-5. Boot table | no row for a runtime Harness `starting` attempt with a populated unit; an unreachable migrated row | 2.8.2 (row added, unreachable row removed, coverage stated) |
+| R4-7. Starvation | `maxAutoWakes` does not bound successor chains | 2.5.1 (`maxInheritedKeys` with enforcement on; K4b inheritance unchanged with it off; premises restated) |
+| R4-8. G order, re-route replay, fresh keys | G inserted the claim before its dispatch; re-route not replay-safe; no key for a fresh start or candidate | 2.5.2 (write order), 2.5.3 (compare-and-set re-route; R writes its re-park in its own transaction), 2.5.1 (own `created_at`) |
+| R4-9. Rollout | boot gave legacy and queued attempts account claims; compat adoption impossible under `NOT NULL`; 04a depended on G | 2.8.2 step 3 (by attempt kind; legacy owners as occupancy), 2.3 (`trg_claim_account_harness`), 2.12 (compat attempt created before the K4b claim; ownership-only commit in 04a; no G in 04a) |
+| R4-9b. Successor lineage | an unrelated queued row was admitted into an owned slot | 2.3 (`trg_attempt_successor`) |
+| R4-10. Tests and slices | test 11 lines wrong; missing negative mutation, legacy fixtures, migration, first-enable and registration cases; slice ordering | section 5 (r5 cases; test 11 corrected), section 6 (matrix corrected) |
+| Non-blocking: references | `terminalize`, `orchestrator.ts` 2481 | 2.1, 2.7 |
+
 ## 5. Required tests for the implementation PRs
 
 Every test uses an injected clock and fake adapters that independently record: entry into `start` or
 `resume`, cancellation acknowledgement, provider exit, and the state of a fake cgroup the test
 controls (populated or empty), read through the same seam the plane uses. Every test asserts both the
 durable claims **and** the maximum number of fake providers live at the same time. Account contention
-in 04b and 04c is exercised through the test seam of section 2.12. Cases new in revision 4 are marked
-**r4**, and **r3** cases are kept.
+in 04b and 04c is exercised through the test seam of section 2.12. Cases new in revision 5 are marked
+**r5**; **r3** and **r4** cases are kept.
 
-1. **Last-slot contention and the entry gate.** (04b; parallel parts in 04c)
+1. **Last-slot contention and the entry gate.** (ownership commit, session-terminal rule and
+   allowlist in 04a; account contention and the full commit in 04b; parallel parts in 04c)
    - Set account A's limit to 1. Two scheduler wakes, a direct `/start`, a compare/race candidate and
      an admitted autopilot attempt all race for the slot. Exactly one provider enters. Every other
      eligible attempt has a durable resource wait, with no provider call, no failure and no duplicate
@@ -964,7 +1170,18 @@ in 04b and 04c is exercised through the test seam of section 2.12. Cases new in 
    - **r4** With `enforce: true`, a legacy dispatch, a legacy direct start and a plain legacy compare
      candidate that need account A refuse with `account_requires_harness`, hold nothing and start
      nothing.
-2. **Identity, configuration and readers.** (04a; the mapping-change case in 04b)
+   - **r5** Lease takeover (04a): while the runner is preparing (hold it inside secret resolution),
+     let recovery acquire the expired lease. The runner reaches the commit and gets `not_owner`, with
+     zero provider calls; recovery's `terminalize` drops the `held` attempt `never_entered`.
+   - **r5** Deadline (04b): advance the injected clock by 90 s during preparation on the Harness
+     (secret resolution) and on legacy (spec build), and make the legacy `adapter.start` take 30 s.
+     The provider's `maxRuntimeMs` and the plane's timer both end at `D`, not later. With `D` already
+     past at the commit, the result is `deadline_expired` and zero provider calls; no 1,000 ms floor
+     extends it.
+   - **r5** Allowlist (04a): a call through a renamed receiver (`const a = adapter; a.start(spec)`)
+     fails the test, a comment naming `adapter.start()` does not, and an adapter call preceded by an
+     unguarded `enterProvider(...)` (result ignored) fails.
+2. **Identity, configuration and readers.** (04a; the mapping-change and limit-change cases in 04b)
    - Two assistant ids mapped to A share one slot. Two undeclared assistants each use their own
      fallback. A fallback key cannot collide with a declared group or a host pool.
    - Exercise identical provider labels, credential aliases (`env:<VAR>`) and the agent-user lane.
@@ -979,6 +1196,9 @@ in 04b and 04c is exercised through the test seam of section 2.12. Cases new in 
      the same task with its own claim. Every reader in section 2.3.2 returns or releases the right
      rows, including `assertLaunchClaim`, `GET /api/tasks/:id` and the task wait read. `launchCheck`
      finds its pool claim by dispatch, and `resourceClaim` keeps its K4b value.
+   - **r5** A direct-owner pool claim with no `dispatch_id`: `resourceClaim` is null and the claim is
+     listed under `attempts` with `dispatchId: null`; `assertLaunchClaim` refuses an attempt whose
+     claim has fewer units than its requirement.
 3. **Parallel progress and fairness.** (04c)
    - At limit 1, compare two profiles on A, with an older ready single waiter and later arrivals.
      Both candidates eventually run in the documented order. The compare enters `comparison_pending`
@@ -992,8 +1212,15 @@ in 04b and 04c is exercised through the test seam of section 2.12. Cases new in 
      all-failed (including all-refused) is recorded only after the last candidate is final.
    - **r3/r4** Race decided while a loser is `starting`, on the **legacy** path and the Harness path:
      the loser goes `stopping`, its cancel is delivered when start resolves, the legacy run never
-     becomes an `ActiveRun` and is written `rejected`, and the slot is held until its proof. Repeat
-     with the start rejecting.
+     becomes an `ActiveRun` and is written `rejected`, and the slot is held until its proof.
+   - **r5** Legacy loser outcomes, on an explicit pool-only fixture (legacy cannot hold an account):
+     (a) the start resolves after the race is decided: cancel delivered, the loser drain persists its
+     events, writes `stream_closed_unverified` at stream end and only then releases the pool slot;
+     (b) `adapter.cancel` throws: the drain still runs and the slot is released at stream end; (c)
+     `adapter.start` rejects: the attempt settles `stream_closed_unverified` with `start_rejected`
+     and group settlement runs once. In each case the winner's task transitions are not repeated.
+   - **r5** Legacy contention at the pool (04c): two legacy candidates and a legacy single waiter on
+     a pool of 1 run one at a time in `queue_key` order.
    - A quota-blocked or dependency-blocked head cannot stall ready work, and run-now cannot exceed
      capacity.
 4. **Multiple resources, ordering and autopilot.** (04b)
@@ -1010,8 +1237,13 @@ in 04b and 04c is exercised through the test seam of section 2.12. Cases new in 
    - **r3/r4** Wake budget: a task re-parked `resource_wait` more than `maxAutoWakes` times stays
      `WAITING_RESOURCE` with `auto_wakes` unchanged, and starts when capacity frees. A re-route spends
      exactly one wake, and replaying the re-route transaction does not spend a second.
-   - **r4** Inherited age: a task whose successors repeatedly inherit an older pool age stops winning
-     once its chain reaches `maxAutoWakes`, and a younger waiter is then granted.
+   - **r5** Write order: run G with immediate foreign keys on; the dispatch is inserted before the
+     claim, the attempt is `held` before its claims, and no FK or trigger error occurs.
+   - **r5** Re-route replay: deliver the same disabled-assistant event twice; the second re-route
+     changes nothing (compare-and-set on `routing_decision_id`) and `auto_wakes` rises by one in
+     total.
+   - **r5** Fresh keys: a fresh direct start with no pool and a group candidate get
+     `queue_key = created_at`.
    - Close the autopilot window, or expire its billing attestation, between the precheck and the
      commit: zero provider calls, the existing typed refusal, release of both claims and no duplicate
      window charge.
@@ -1026,6 +1258,18 @@ in 04b and 04c is exercised through the test seam of section 2.12. Cases new in 
    - **r4** Reproduce Astra's tracker case: the group leader exits while a worker in its cgroup stays
      alive. The tracker reports `gone`, but the attempt stays `live` and its account claim held until
      the worker exits and the cgroup reads empty. Repeat on the agent lane with a failing unit stop.
+   - **r5** Registration: (a) the launcher is alive and the unit not yet created: no proof, claim
+     held; (b) registered, then empty: `cgroup_empty`; (c) never registered, the runner's adapter
+     call has settled, the launcher scan is empty and the unit absent: `unscoped_exit`; (d) the
+     sweep does not apply (c) while the runner holds a live lease; (e) on the agent lane,
+     `stopAgentUnit` swallows a failing stop and the reaper records the unit stopped, but the scope
+     still reads populated, so the claim stays held.
+   - **r5** Boot identity: a changed `boot_id` gives `host_rebooted`; setting the wall clock back or
+     forward with the same `boot_id` gives nothing.
+   - **r5** Operator confirmation is refused with `unit_populated` while the unit reads populated,
+     and accepted when it is absent.
+   - **r5** `trg_attempt_weak_proof` rejects `stream_closed_unverified` on an attempt whose account
+     lives only on its claim (`account_key` NULL).
    - **r3** An adapter with no cgroup: a pool-only attempt settles on `stream_closed_unverified` and
      says so, and the schema rejects that proof on an attempt with an account key.
    - A duplicate cancel, a duplicate settle and a stale-generation wake are inert.
@@ -1042,6 +1286,14 @@ in 04b and 04c is exercised through the test seam of section 2.12. Cases new in 
      whose phase is now `cancelled`** and one **with no claim**; a Harness entry mark with no session;
      an autopilot pool claim; a compare with two live runs of equal `started_at`. The migration passes
      `pragma_foreign_key_check`, and every classification matches section 2.3.1.
+   - **r5** Backfill counterexamples (04a): a legacy entry mark with a **released** claim and no run
+     gives `ambiguous`; a live claim on a dispatch whose run has ended gives `settled`
+     `migrated_historical` and releases the claim; a released claim with a still-open run gives
+     `live`; an unclassifiable row aborts with `qcq_backfill_unclassified`, not a `NOT NULL` error.
+   - **r5** Boot (04b): a runtime Harness `starting` attempt with its session and a populated unit
+     goes `stopping`, recovery terminates it, and it settles `cgroup_empty` only after the unit
+     empties; a legacy `start_attempted` dispatch with a `held` attempt and no run re-parks
+     `start_not_entered`.
    - **r4** Boot classification (04b): every row of the section 2.8.2 table, including a `held`
      Harness attempt on a `started` dispatch, a `held` attempt on a `start_attempted` dispatch with no
      session (re-parked `start_not_entered`, no wake spent, re-granted), a `held` direct start, a
@@ -1065,9 +1317,20 @@ in 04b and 04c is exercised through the test seam of section 2.12. Cases new in 
      with `enforce: true` through config. Reconciliation inserts A's claim before the barrier opens,
      and a second A waiter does not start. Regroup a member from A to B and reboot: the claim moves to
      B before any grant.
-   - **r4** Compat grant (04b, 04c): an unconverted path adopts the exact K4b claim row by dispatch
-     identity, and no second pool claim is inserted. In 04d, no compat grant remains, and the allowlist
-     asserts that every path uses R or G.
+   - **r5** Compat attempt (04a): a wake writes the dispatch, the compat attempt and the claim, in
+     that order, in one transaction; the claim's task, dispatch, generation, resource and units equal
+     K4b's; a crash after the wake leaves all three or none. No G exists in 04a. In 04d no compat write
+     remains, and the allowlist asserts that every path uses R or G.
+   - **r5** First enable by kind (04d): a migrated legacy owner whose key resolves to A gets no
+     account claim (`trg_claim_account_harness` rejects one) but counts as occupancy, so a Harness
+     waiter on A at limit 1 does not start until it settles; a queued Harness attempt gets the
+     account requirement and no claim; a queued legacy attempt that now needs A is dropped
+     `account_requires_harness`.
+   - **r5** Inherited keys (04d, enforcement on): a task whose successors keep inheriting an older
+     key stops inheriting after `maxInheritedKeys`, and a younger waiter is then granted. With
+     enforcement off the successor keeps K4b's inherited pool age.
+   - **r5** Successor lineage (04d): inserting a `queued` attempt into an owned slot without naming
+     the owner as predecessor fails `trg_attempt_successor`.
    - Repeat for manual handoff and unattended same-assistant quota resume. Assert checkpoint
      continuity, K2 backoff and the maximum number of automatic wakes.
    - A reset while quota stays blocked produces no provider call and no tight timer loop.
@@ -1103,27 +1366,37 @@ in 04b and 04c is exercised through the test seam of section 2.12. Cases new in 
     - **r4** Positive control for the same setup: nothing changes while the task waits, and when the
       slot opens the still-authorized task passes the commit and its provider enters exactly once. A
       blanket phase refusal would fail this case.
+    - **r5** Negative mutation after a successful precheck: let the slot open and the precheck pass,
+      then, inside preparation (the secret-resolution hook on the Harness, the spec build on legacy),
+      close the window, and separately insert a pending approval. The precheck never sees the change,
+      so only the commit can refuse it: zero provider calls, the right reason, the attempt `dropped`.
     - Capture the effective approval mode, including the autopilot's and the workspace read-only mode.
     - Fail a required acceptance command, and assert no accepted state and no publication.
     - The wait and refusal evidence names the account, the limit, the live owners and the
       recommendation used.
-11. **r4 Changed K4b expectations.** (04b) The existing K4b tests are the regression set, except for
-    these assertions, which contradict the intended changes of section 2.13. They are updated in the
-    same PR, each with a comment naming 2.13:
-    - `resource-slots.test.ts` 202 to 216 (cancel at `reserved`): there is no claim row for the
-      cancelled task, the attempt is `dropped` `never_entered`, and the waiter still gets the slot.
-    - `resource-slots.test.ts` 219 to 232 (restart at the reservation boundary): after the crash there
-      is no live claim, but a `queued` attempt and a `reserved` dispatch; after boot the provider
-      starts once and the claim is released after its proof.
-    - `resource-slots.test.ts` 235 to 246 (sweep of an owner-less claim): with a cgroup-backed fake the
-      claim is released at `cgroup_empty`, not because the task is terminal while the fake is still
-      running. A pool-only fake without a cgroup keeps today's assertion, with
-      `stream_closed_unverified`.
-    - `resource-slots.test.ts` 249 to 262 and `scheduler.test.ts` 111 to 120 (Harness start ambiguity
-      and the 60-second window): a fresh pre-commit Harness attempt is `held` and re-parks at once as
-      `start_not_entered` without spending a wake. The 60-second expectation stays only for a migrated
-      `starting` attempt.
-    - The strict-FIFO test (`resource-slots.test.ts` 150 to 161) is kept unchanged.
+11. **Changed K4b expectations.** (04b; corrected in r5) The existing K4b tests are the regression
+    set, except for these assertions, which contradict the intended changes of section 2.13. They
+    are updated in the same PR, each with a comment naming 2.13. Revision 4 pointed at the wrong
+    lines; these are the ones that change:
+    - `resource-slots.test.ts` 210 (cancel at `reserved`): `claimRows(id)` is empty instead of one
+      released row; the attempt is `dropped` `never_entered`. Lines 211 to 215 (the waiter gets the
+      slot and finishes) are kept.
+    - `resource-slots.test.ts` 225 (restart at the reservation boundary): after the crash there is no
+      live claim, but a `queued` attempt and a `reserved` dispatch. Lines 228 to 231 (one provider
+      start after boot, claims settle to zero) are kept.
+    - `resource-slots.test.ts` 235 to 246 (sweep of a claim on a cancelled task): the fixture's
+      approval-blocked fake is still running, so neither proof exists, with a cgroup or without. The
+      claim must **stay held** while the fake runs; the test then ends the fake and asserts the
+      release with `cgroup_empty` (cgroup fixture) or `stream_closed_unverified` (pool-only fixture),
+      replacing the "no execution owner" release reason.
+    - `resource-slots.test.ts` 249 to 262 (Harness start ambiguity): the claim is released at once
+      and the condition is `reason: 'start_not_entered'`, `autoWakes: 0`, with no 60-second wait.
+    - `scheduler.test.ts` 93 to 102 (attempted start without a session): both paths re-park at once
+      as `start_not_entered` with `autoWakes: 0`, instead of the 60-second window on the Harness and
+      an indefinite `start_attempted` on legacy.
+    - Kept unchanged: the strict-FIFO test (`resource-slots.test.ts` 150 to 161), `scheduler.test.ts`
+      105 to 109 (a committed session is recovered without replay) and 111 to 120 (cancel of an
+      entered provider reaches the adapter).
 
 ## 6. Evidence and slices
 
@@ -1132,11 +1405,11 @@ qcq-05:
 
 | Slice | Scope | Tests |
 |---|---|---|
-| qcq-04a | Migration and backfill (2.3, 2.3.1); per-attempt claim readers and the `attempts` projection (2.3.2); attempt rows on every start path with the compat grant (2.12); resolver and config (`enforce: false` only, `ACCOUNT_ENFORCEMENT_READY = false`); proof columns | 2 (identity, unset, enforcement refused, readers), 6 (upgrade backfill) |
-| qcq-04b | Cgroup spawn for Harness providers and `cgroup_empty` (2.6.1); W, R, G and the grant pass (2.5) on the single, direct `/start` and autopilot paths; re-park and re-route budget (2.5.3); precheck/commit gate at all three boundaries, the session-terminal rule and the allowlist (2.1, 2.4.1, 2.4.2); the Harness-only refusal (2.2); launch barrier, boot order and classification (2.8); `runNow` predicate; K4b test updates | 1 (single paths, gate, allowlist, Harness-only), 4, 5, 6 (boot, barrier, classification, recovery failover under compat), 7 (compat grant adoption), 8, 11 |
-| qcq-04c | Group open, candidate grants, group settlement on drops, the legacy `starting` loser, group recovery (2.7, 2.8.2) | 1 (parallel), 3, 5 (race loser), 6 (group recovery), 7 (compat adoption on parallel paths) |
-| qcq-04d | Failover, handoff, restart and resume through W, R and G as recorded intent; delete the compat grant; flip `ACCOUNT_ENFORCEMENT_READY`; config-enabled end-to-end test | 7 (incl. boot-time failover, first enable, regrouping, no compat grant), 1 (allowlist asserts R or G on every path) |
-| qcq-05 | Window bound and rechecks in the commit, after qcq-04b | 9, 10 (incl. between the hooks and the positive control) |
+| qcq-04a | Migration, backfill and triggers (2.3, 2.3.1); per-attempt claim readers and the `attempts` projection (2.3.2); compat attempts written before the K4b claim on every start path (2.12); the **ownership-only** commit at all three boundaries, the session-terminal rule and the allowlist (2.1, 2.4.1 steps 1 and 6, 2.4.2); settlement with `never_entered`, `stream_closed_unverified` and `boot_unverified` at today's K4b release points; resolver and config (`enforce: false` only, `ACCOUNT_ENFORCEMENT_READY = false`) | 1 (lease takeover, allowlist, cancel during preparation), 2 (identity, unset, enforcement refused, readers, direct-owner projection), 6 (upgrade backfill and its counterexamples), 7 (compat attempt order) |
+| qcq-04b | Cgroup spawn, registration and the strong proofs (2.6.1); the full commit: account re-resolve, autopilot check, deadline `D` (2.4.1); W, R, G and the grant pass (2.5) on the single, direct `/start` and autopilot paths; re-park, re-route compare-and-set and wake budget (2.5.3); the Harness-only refusal (2.2); launch barrier, boot order and classification (2.8); `runNow` predicate; K4b test updates | 1 (single paths, account contention, deadline, Harness-only), 2 (mapping and limit change), 4 (except inherited keys), 5, 6 (boot, barrier, classification, recovery failover under compat), 8, 11 |
+| qcq-04c | Group open, candidate grants, group settlement on drops, the legacy loser outcomes and the loser drain, group recovery (2.7, 2.8.2) | 1 (parallel), 3 (incl. legacy loser outcomes and pool contention), 5 (race loser), 6 (group recovery) |
+| qcq-04d | Failover, handoff, restart and resume through W, R and G as recorded intent; successor lineage and inherited keys (2.5.1, 2.9); first-enable reconciliation by kind (2.8.2 step 3); delete the compat writes; flip `ACCOUNT_ENFORCEMENT_READY`; config-enabled end-to-end test | 7 (incl. boot-time failover, first enable by kind, regrouping, inherited keys, successor lineage, no compat write), 1 (allowlist asserts R or G on every path) |
+| qcq-05 | Window bound and rechecks in the commit, after qcq-04b | 9, 10 (incl. between the hooks, the positive control and the negative mutation) |
 
 `enforce: true` cannot be configured on any build before qcq-04d, so 04b and 04c never run with an
 uncovered path under enforcement (section 2.12). Their account cases run through the test seam.
@@ -1180,33 +1453,39 @@ The last three need itay's explicit approval.
 ## 8. What the re-review must check
 
 1. The commit is the statement immediately before each of the five adapter calls in section 2.4.2,
-   after every fallible preparation step, and the allowlist names every bridge caller. No `await`,
-   I/O or transaction sits between the commit and the call.
-2. The entry invariant holds at runtime: only the commit writes `starting` (the migration is the
-   named exception); the session-terminal rule drops every `held` attempt whose session ends without
-   the commit; every kind of cancel (task, session-only, slot-wait abort) serializes against the
-   commit; and a `not_owner` refusal never touches an owner.
-3. The commit accepts a Harness dispatch in `started` bound to its session, and the absolute deadline
-   `D` stops preparation time from extending a run.
-4. The backfill in section 2.3.1 classifies by the durable entry mark, so an in-flight legacy call
-   whose dispatch is now `cancelled`, and a `start_attempted` dispatch with no claim, are not
-   misclassified. The run-id tie-break is stable.
-5. Every claim reader in section 2.3.2, including `assertLaunchClaim` and both HTTP reads, is per
-   attempt and per resource, and `resourceClaim` keeps its K4b value.
-6. `cgroup_empty`, `host_rebooted` and `operator_confirmed` are strong proofs. The tracker outcome and
-   a pid never release an account. The CHECK forbids `stream_closed_unverified` on an account.
-7. The Harness-only rule (itay's scope decision) refuses every legacy account requirement before
-   anything is held, on every legacy path.
-8. The three transactions in section 2.5.2 are the only claim writers, G creates and binds the
-   dispatch, no wake re-consumes a routed attempt's condition, and a re-route spends one wake once.
-   The starvation premises in section 2.5.1 are sufficient.
-9. `uq_attempt_owner` and `uq_attempt_queued` admit the successor beside its predecessor and nothing
-   else, and readiness keeps the successor waiting until the predecessor is final.
-10. The barrier stops every grant path, tick and replay before boot step 5. Recovery skips groups, and
-    group recovery settles them. The classification table gives every open attempt exactly one
-    disposition.
-11. The compat grant adopts the exact K4b row, and the first enabled boot counts every possibly live
-    owner before any grant.
-12. Section 2.13 lists every intended K4b change, and test 11 updates exactly the contradicting
-    assertions.
-13. The tests in section 5 are sufficient, and each maps to its owning slice in section 6.
+   after every fallible preparation step, and the type-checked allowlist finds every call by symbol,
+   not by receiver name. No `await`, I/O or transaction sits between a successful commit and the
+   call.
+2. The entry invariant holds at runtime and from 04a onward: only the commit writes `starting` (the
+   migration is the named exception); a stale lease is `not_owner`; the session-terminal rule in
+   `terminalize` drops every `held` attempt whose session ends without the commit; every kind of
+   cancel serializes against the commit.
+3. The deadline contract derives every path's remaining time from `D` at the commit, refuses
+   `deadline_expired`, and leaves no floor or post-call timer that extends a run.
+4. The backfill rows of section 2.3.1, in order, classify every pre-upgrade claim and entry mark,
+   including Astra's released-claim and ended-run counterexamples, and abort by name on anything
+   else.
+5. Every claim reader in section 2.3.2 is per attempt and per resource, keeps the units check, and
+   `resourceClaim` keeps its K4b value, including for a direct owner.
+6. `cgroup_empty` needs registration; `unscoped_exit`'s scan-then-read order and its "no incarnation
+   can still spawn" condition are sufficient; `host_rebooted` uses the boot id; the operator cannot
+   confirm a populated unit; the two triggers make a weak proof impossible on any attempt that ever
+   held an account.
+7. The Harness-only rule holds on every path, including boot reconciliation and G: no legacy attempt
+   ever holds an account claim, and a pre-existing legacy owner is counted as occupancy until final.
+8. The three transactions of section 2.5.2 are the only claim writers, G writes in an order the
+   foreign keys and triggers accept, R never leaves a routed attempt without a wait, and a re-route
+   replay is inert.
+9. The starvation premises of section 2.5.1 are sufficient with enforcement on, and K4b order is
+   unchanged with it off.
+10. The successor indexes and `trg_attempt_successor` admit only the owner's named successor beside
+    it, and readiness keeps the successor waiting until the predecessor is final.
+11. The barrier stops every grant path, tick and replay before boot step 5, and the classification
+    table gives every open attempt exactly one disposition, including a runtime Harness `starting`
+    attempt with a populated unit.
+12. The legacy loser outcomes and the loser drain close every legacy loser's stream and slot.
+13. The compat attempt is written before the K4b claim in the same transaction, 04a needs nothing
+    from 04b, and first enable counts every possibly live owner before any grant.
+14. Section 2.13 lists every intended K4b change, and test 11 names the exact assertions that
+    change and the ones kept.
+15. The tests in section 5 are sufficient, and each maps to its owning slice in section 6.
