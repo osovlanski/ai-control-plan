@@ -708,7 +708,8 @@ export interface TaskProvenance {
   mode: string;
   runs: RunProvenance[];
   handoffs: HandoffProvenance[];
-  inferenceRules: Record<string, string>;
+  /** The plane's `INFERENCE_RULES`: the stated rule each `inferred` join follows. */
+  inferenceRules: { routingDecision: string; predecessor: string };
 }
 
 /**

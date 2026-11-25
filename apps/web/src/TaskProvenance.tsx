@@ -11,30 +11,69 @@
  */
 import { useEffect, useState } from "react";
 import {
-  api, type HandoffProvenance, type ProvenanceContinuation, type ProvenanceJoinSource, type RunProvenance,
+  api, ApiError, type HandoffProvenance, type ProvenanceContinuation, type ProvenanceJoinSource, type RunProvenance,
   type TaskLink, type TaskLinkEvidence, type TaskLinks, type TaskProvenance as Provenance,
 } from "./api.js";
 
 const SOURCES: readonly ProvenanceJoinSource[] = ["execution_request", "dispatch", "handoff_record", "handoff_envelope", "checkpoint", "inferred", "unrecorded"];
 
+const OWNERS = ["operator", "autopilot"];
+const LAUNCHES = ["scheduler", "handoff", "parallel", "operator"];
+const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+const labelled = (v: unknown) => isObject(v) && SOURCES.includes(v.source as ProvenanceJoinSource);
+
 /**
  * A shape check, not a contract validator (tlm-02a ships none): a plane older than API 2.12, or a
- * body of another shape, is refused instead of shown as if it were provenance. Mirrors the CLI's.
+ * body of another shape, is refused instead of shown as if it were provenance. It checks every
+ * field the panel reads to decide what to print, so a body that passes cannot half-render or be
+ * read as something it is not (an unknown owner as the operator, a missing `closed` as an open
+ * handoff). Stricter than the CLI's, which prints raw fields.
  */
 export function provenanceProblem(body: unknown, taskId: string): string | null {
-  if (typeof body !== "object" || body === null || Array.isArray(body)) return "not an object";
+  if (!isObject(body)) return "not an object";
   const p = body as Partial<Provenance>;
   if (p.taskId !== taskId) return `taskId is ${JSON.stringify(p.taskId)}`;
   if (!Array.isArray(p.runs)) return "runs is not a list";
   if (!Array.isArray(p.handoffs)) return "handoffs is not a list";
-  if (typeof p.owner !== "object" || p.owner === null) return "owner is missing";
-  if (typeof p.inferenceRules !== "object" || p.inferenceRules === null) return "inferenceRules is missing";
-  for (const r of p.runs) {
-    if (typeof r?.runId !== "string" || !r.routingDecision || !SOURCES.includes(r.routingDecision.source)) return `run ${JSON.stringify(r?.runId)} has no labelled routing decision`;
-    if (r.continuedFrom && !SOURCES.includes(r.continuedFrom.source)) return `run ${r.runId} has an unlabelled continuation`;
+  if (!isObject(p.owner) || !OWNERS.includes(p.owner.kind)) return "owner is missing or of an unknown kind";
+  if (typeof p.mode !== "string") return "mode is missing";
+  if (!isObject(p.inferenceRules) || Object.values(p.inferenceRules).some((rule) => typeof rule !== "string")) return "inferenceRules is missing";
+  for (const r of p.runs as unknown[]) {
+    const run = isObject(r) ? r as Partial<RunProvenance> : {};
+    const name = JSON.stringify(run.runId);
+    if (typeof run.runId !== "string" || typeof run.startedAt !== "string") return `run ${name} has no id or start time`;
+    if (run.executionPath !== "harness" && run.executionPath !== "legacy") return `run ${name} has no execution path`;
+    if (!isObject(run.launch) || !LAUNCHES.includes(run.launch.kind)) return `run ${name} has no launch`;
+    if (!labelled(run.routingDecision)) return `run ${name} has no labelled routing decision`;
+    if (run.continuedFrom !== null && !labelled(run.continuedFrom)) return `run ${name} has an unlabelled continuation`;
   }
-  for (const h of p.handoffs) {
-    if (typeof h?.id !== "string" || !h.from || !SOURCES.includes(h.from.source)) return `handoff ${JSON.stringify(h?.id)} has no labelled source run`;
+  for (const h of p.handoffs as unknown[]) {
+    const handoff = isObject(h) ? h as Partial<HandoffProvenance> : {};
+    const name = JSON.stringify(handoff.id);
+    if (typeof handoff.id !== "string" || typeof handoff.at !== "string") return `handoff ${name} has no id or time`;
+    if (handoff.record !== "handoff" && handoff.record !== "envelope_only") return `handoff ${name} is neither a record nor an envelope`;
+    if (typeof handoff.closed !== "boolean") return `handoff ${name} does not say whether it closed`;
+    if (!labelled(handoff.from) || !isObject(handoff.to)) return `handoff ${name} has no labelled source run`;
+  }
+  // The panel prints the rules beside every inferred join; a body that infers without them is refused.
+  if (sourcesUsed(p as Provenance).has("inferred") && Object.keys(p.inferenceRules).length === 0) return "a join is inferred but no inference rule is served";
+  return null;
+}
+
+const KINDS = ["issue", "pull_request"];
+const EVIDENCE = ["operator", "autopilot_publication", "autopilot_duplicate"];
+/** The links read (API 2.13) gets the same treatment: another shape is refused, never half-shown. */
+export function linksProblem(body: unknown, taskId: string): string | null {
+  if (!isObject(body)) return "not an object";
+  if (body.taskId !== taskId) return `taskId is ${JSON.stringify(body.taskId)}`;
+  if (!Array.isArray(body.links)) return "links is not a list";
+  for (const l of body.links as unknown[]) {
+    const link = isObject(l) ? l : {};
+    const name = `${String(link.repo)}#${String(link.number)}`;
+    if (typeof link.repo !== "string" || typeof link.number !== "number" || !KINDS.includes(link.kind as string)) return `link ${name} has no repo, number or kind`;
+    // The plane builds every URL on github.com; anything else is not shown as a link.
+    if (typeof link.url !== "string" || !link.url.startsWith("https://github.com/")) return `link ${name} has no GitHub URL`;
+    if (!Array.isArray(link.evidence) || link.evidence.some((e) => !isObject(e) || !EVIDENCE.includes(e.source as string))) return `link ${name} has unlabelled evidence`;
   }
   return null;
 }
@@ -154,7 +193,7 @@ function LinkItem({ link }: { link: TaskLink }) {
   );
 }
 
-export function ProvenanceView({ p, links, linksError }: { p: Provenance; links: TaskLinks | null; linksError: boolean }) {
+export function ProvenanceView({ p }: { p: Provenance }) {
   const used = sourcesUsed(p);
   const owner = p.owner.kind === "autopilot"
     ? `Autopilot attempt ${p.owner.attemptId} (item ${p.owner.itemId}, attempt ${p.owner.attemptNo}, ${p.owner.state})`
@@ -179,13 +218,6 @@ export function ProvenanceView({ p, links, linksError }: { p: Provenance; links:
         {p.handoffs.length === 0 ? <p className="fine-print">No handoffs.</p>
           : <ul className="prov-list">{p.handoffs.map((h) => <HandoffItem key={h.id} h={h} />)}</ul>}
       </section>
-      <section aria-label="Linked issues and PRs">
-        <h3>Linked issues and PRs</h3>
-        {linksError ? <p role="status" className="error">Links unavailable in this read (the plane may predate API 2.13).</p>
-          : !links ? <p className="fine-print">Loading…</p>
-          : links.links.length === 0 ? <p className="fine-print">No issue or PR is linked to this task.</p>
-          : <ul className="prov-list">{links.links.map((l) => <LinkItem key={`${l.repo}#${l.number}`} link={l} />)}</ul>}
-      </section>
       {(used.has("inferred") || used.has("unrecorded")) && (
         <section aria-label="How joins are labelled">
           {used.has("inferred") && (
@@ -203,11 +235,30 @@ export function ProvenanceView({ p, links, linksError }: { p: Provenance; links:
   );
 }
 
+/**
+ * The task's links, independent of provenance: either read failing leaves the other shown.
+ * `problem` is why the links read is not shown; null with no links means it is still loading.
+ */
+export function LinksSection({ links, problem }: { links: TaskLinks | null; problem: string | null }) {
+  return (
+    <section aria-label="Linked issues and PRs">
+      <h3>Linked issues and PRs</h3>
+      {problem ? <p role="status" className="error">{problem}</p>
+        : !links ? <p className="fine-print">Loading…</p>
+        : links.links.length === 0 ? <p className="fine-print">No issue or PR is linked to this task.</p>
+        : <ul className="prov-list">{links.links.map((l) => <LinkItem key={`${l.repo}#${l.number}`} link={l} />)}</ul>}
+    </section>
+  );
+}
+
+/** Why a read failed, with its HTTP status when the plane answered. */
+const failure = (reason: unknown) => (reason instanceof ApiError ? `HTTP ${reason.status}` : "no answer");
+
 export function TaskProvenance({ taskId, refreshKey }: { taskId: string; refreshKey: string }) {
   const [provenance, setProvenance] = useState<Provenance | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
   const [links, setLinks] = useState<TaskLinks | null>(null);
-  const [linksError, setLinksError] = useState(false);
+  const [linksProblemText, setLinksProblem] = useState<string | null>(null);
   useEffect(() => {
     let live = true;
     void Promise.allSettled([api.provenance(taskId), api.taskLinks(taskId)]).then(([p, l]) => {
@@ -218,17 +269,25 @@ export function TaskProvenance({ taskId, refreshKey }: { taskId: string; refresh
         setProblem(why ? `The plane's provenance is not the API 2.12 shape, so nothing is shown: ${why}` : null);
       } else {
         setProvenance(null);
-        setProblem("Provenance unavailable in this read (the plane may predate API 2.12).");
+        setProblem(`Provenance unavailable in this read (${failure(p.reason)}). A plane older than API 2.12 does not serve it, and the read needs sessions.read.`);
       }
-      setLinks(l.status === "fulfilled" ? l.value : null);
-      setLinksError(l.status === "rejected");
+      if (l.status === "fulfilled") {
+        const why = linksProblem(l.value, taskId);
+        setLinks(why ? null : l.value);
+        setLinksProblem(why ? `The plane's links are not the API 2.13 shape, so none are shown: ${why}` : null);
+      } else {
+        setLinks(null);
+        setLinksProblem(`Links unavailable in this read (${failure(l.reason)}). A plane older than API 2.13 does not serve them.`);
+      }
     });
     return () => { live = false; };
   }, [taskId, refreshKey]);
   return (
     <section className="task-provenance" aria-label="Task provenance">
-      {problem && <p role="status" className="error">{problem}</p>}
-      {provenance ? <ProvenanceView p={provenance} links={links} linksError={linksError} /> : !problem && <p className="fine-print">Loading…</p>}
+      {problem ? <section aria-label="Provenance unavailable"><p role="status" className="error">{problem}</p></section>
+        : provenance ? <ProvenanceView p={provenance} />
+        : <p className="fine-print">Loading…</p>}
+      <LinksSection links={links} problem={linksProblemText} />
     </section>
   );
 }

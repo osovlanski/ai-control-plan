@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { TaskLinks, TaskProvenance } from "./api.js";
-import { evidenceText, joinLabel, provenanceProblem, ProvenanceView } from "./TaskProvenance.js";
+import { evidenceText, joinLabel, LinksSection, linksProblem, provenanceProblem, ProvenanceView } from "./TaskProvenance.js";
 
 const rules = {
   routingDecision: "latest routing decision for the task that chose the run's assistant, made at or before the run started, and not already bound to another run",
@@ -62,7 +62,7 @@ describe("task provenance (tlm-03 web)", () => {
   });
 
   it("renders runs, the handoff, links and the inference rules only because a join is inferred", () => {
-    const html = renderToStaticMarkup(<ProvenanceView p={body()} links={links} linksError={false} />);
+    const html = renderToStaticMarkup(<><ProvenanceView p={body()} /><LinksSection links={links} problem={null} /></>);
     expect(html).toContain('data-source="inferred"');
     expect(html).toContain('data-source="execution_request"');
     expect(html).toContain("Handoff (trigger limit)");
@@ -74,18 +74,81 @@ describe("task provenance (tlm-03 web)", () => {
 
     const exact = body();
     exact.runs = [exact.runs[1]!];
-    const exactHtml = renderToStaticMarkup(<ProvenanceView p={exact} links={null} linksError={true} />);
+    const exactHtml = renderToStaticMarkup(<ProvenanceView p={exact} />);
     expect(exactHtml).not.toContain(rules.routingDecision.replace("'", "&#x27;"));
-    expect(exactHtml).toContain("Links unavailable");
   });
 
   it("an unrecorded routing join stays unknown and is explained", () => {
     const p = body();
     p.runs[0]!.routingDecision = { id: null, source: "unrecorded", chosenAssistantId: null, at: null };
-    const html = renderToStaticMarkup(<ProvenanceView p={p} links={{ taskId: "t1", links: [] }} linksError={false} />);
+    const html = renderToStaticMarkup(<><ProvenanceView p={p} /><LinksSection links={{ taskId: "t1", links: [] }} problem={null} /></>);
     expect(html).toContain("no decision names this run");
     expect(html).toContain("the plane does not guess");
     expect(html).toContain("No issue or PR is linked");
+  });
+
+  it("refuses a body that would otherwise half-render or read as something it is not", () => {
+    const cases: Array<[string, (b: Record<string, unknown> & TaskProvenance) => void, string]> = [
+      ["unknown owner", (b) => { (b.owner as { kind: string }).kind = "robot"; }, "owner is missing or of an unknown kind"],
+      ["no launch", (b) => { delete (b.runs[0] as Partial<TaskProvenance["runs"][0]>).launch; }, 'run "run_a" has no launch'],
+      ["missing continuation", (b) => { delete (b.runs[0] as Partial<TaskProvenance["runs"][0]>).continuedFrom; }, 'run "run_a" has an unlabelled continuation'],
+      ["no closed flag", (b) => { delete (b.handoffs[0] as Partial<TaskProvenance["handoffs"][0]>).closed; }, 'handoff "h_1" does not say whether it closed'],
+      ["unknown record", (b) => { (b.handoffs[0] as { record: string }).record = "guess"; }, 'handoff "h_1" is neither a record nor an envelope'],
+      ["no mode", (b) => { delete (b as Partial<TaskProvenance>).mode; }, "mode is missing"],
+      ["inferred without rules", (b) => { (b as { inferenceRules: object }).inferenceRules = {}; }, "a join is inferred but no inference rule is served"],
+    ];
+    for (const [, mutate, why] of cases) {
+      const b = body() as Record<string, unknown> & TaskProvenance;
+      mutate(b);
+      expect(provenanceProblem(b, "t1")).toBe(why);
+    }
+    // With no inferred join, an empty rule set is not a reason to refuse.
+    const exact = body();
+    exact.runs = [exact.runs[1]!];
+    (exact as { inferenceRules: object }).inferenceRules = {};
+    expect(provenanceProblem(exact, "t1")).toBeNull();
+  });
+
+  it("an envelope with no handoff record, an open handoff and a fresh start each read truthfully", () => {
+    const p = body();
+    p.runs = [p.runs[0]!];
+    p.handoffs = [{
+      id: "env_1", record: "envelope_only", trigger: null, at: "2030-01-01T10:05:30.000Z", checkpointId: "cp_1",
+      from: { runId: "run_a", assistantId: "claude", source: "handoff_envelope" },
+      to: { runId: null, assistantId: null }, closed: false,
+      envelope: { id: "env_1", state: "parked", claimedByRequestId: null }, successorRoutingDecisionId: null,
+    }];
+    expect(provenanceProblem(p, "t1")).toBeNull();
+    const html = renderToStaticMarkup(<ProvenanceView p={p} />);
+    expect(html).toContain("Harness envelope with no handoff record");
+    expect(html).not.toContain("trigger -");
+    expect(html).toContain("OPEN: no successor has started");
+    expect(html).toContain("to no run");
+    expect(html).toContain("envelope env_1 (parked, unclaimed)");
+    expect(html).not.toContain("successor decision");
+    expect(html).toContain("Nothing (fresh start)");
+    expect(html).toContain('data-source="handoff_envelope"');
+  });
+
+  it("numbers runs once, by the list, and names each item for the e2e locators", () => {
+    const html = renderToStaticMarkup(<ProvenanceView p={body()} />);
+    expect(html).toMatch(/<ol class="prov-list"><li class="prov-run" aria-label="Run run_a"><div><span class="mono">run_a<\/span>/);
+    expect(html).not.toMatch(/>\s*\d+\.\s/);
+    expect(html).toContain('aria-label="Handoff h_1"');
+  });
+
+  it("refuses a links body of another shape, and a failed read says why without hiding anything else", () => {
+    expect(linksProblem(links, "t1")).toBeNull();
+    expect(linksProblem({ error: "not found" }, "t1")).toBe("taskId is undefined");
+    expect(linksProblem({ taskId: "t1" }, "t1")).toBe("links is not a list");
+    expect(linksProblem({ taskId: "t1", links: [{ ...links.links[0]!, url: "javascript:alert(1)" }] }, "t1")).toBe("link osovlanski/ai-control-plan#42 has no GitHub URL");
+    expect(linksProblem({ taskId: "t1", links: [{ ...links.links[0]!, evidence: [{ source: "rumour" }] }] }, "t1")).toBe("link osovlanski/ai-control-plan#42 has unlabelled evidence");
+    expect(linksProblem({ taskId: "t1", links: [{ ...links.links[0]!, evidence: undefined }] }, "t1")).toBe("link osovlanski/ai-control-plan#42 has unlabelled evidence");
+    const failed = renderToStaticMarkup(<LinksSection links={null} problem="Links unavailable in this read (HTTP 404)." />);
+    expect(failed).toContain('aria-label="Linked issues and PRs"');
+    expect(failed).toContain("Links unavailable in this read (HTTP 404).");
+    expect(failed).not.toContain("No issue or PR is linked");
+    expect(renderToStaticMarkup(<LinksSection links={null} problem={null} />)).toContain("Loading…");
   });
 
   it("describes autopilot evidence as derived, not as an operator claim", () => {
