@@ -12,7 +12,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { isTerminal, redactValue, type TaskState } from "@agent-plane/core";
+import { isTerminal, redactText, redactValue, type TaskState } from "@agent-plane/core";
 import type { Db } from "../db/index.js";
 
 export type AttemptState = "queued" | "held" | "starting" | "live" | "stopping" | "ambiguous" | "settled" | "dropped";
@@ -199,7 +199,7 @@ export class AttemptStore {
         routing_decision_id, run_as, account_source, queue_key, state, session_id, created_at, updated_at, reason)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'none', ?, 'held', ?, ?, ?, ?)`)
       .run(id, input.taskId, input.kind, input.path, input.dispatchId ?? null, input.slot, input.assistantId ?? null,
-        input.routingDecisionId ?? null, input.runAs, input.queueKey ?? at, input.sessionId ?? null, at, at, input.reason ?? "compat");
+        input.routingDecisionId ?? null, input.runAs, input.queueKey ?? at, input.sessionId ?? null, at, at, redactText(input.reason ?? "compat"));
     for (const r of input.requirements ?? []) {
       this.db.prepare("INSERT INTO attempt_requirements (attempt_id, resource, units, queued_at) VALUES (?, ?, ?, ?)").run(id, r.resource, r.units, r.queuedAt);
     }
@@ -217,7 +217,7 @@ export class AttemptStore {
   private releaseClaims(a: AttemptRow, reason: string): Released[] {
     const released: Released[] = [];
     for (const c of this.claimsOf(a.attempt_id)) {
-      this.db.prepare("UPDATE resource_claims SET released_at = ?, release_reason = ? WHERE claim_id = ? AND released_at IS NULL").run(this.iso(), reason, c.claim_id);
+      this.db.prepare("UPDATE resource_claims SET released_at = ?, release_reason = ? WHERE claim_id = ? AND released_at IS NULL").run(this.iso(), redactText(reason), c.claim_id);
       this.event(c.task_id, "resource.released", c.dispatch_id, { resource: c.resource, units: c.units, reason, attemptId: a.attempt_id });
       released.push({ taskId: c.task_id, dispatchId: c.dispatch_id, resource: c.resource, units: c.units, reason });
     }
@@ -237,7 +237,7 @@ export class AttemptStore {
     const finalProof: ExitProof = held ? "never_entered" : proof;
     const at = this.iso();
     const changed = this.db.prepare(`UPDATE execution_attempts SET state = ?, exit_proof = ?, exit_proof_at = ?, final_at = ?, updated_at = ?, reason = ?
-      WHERE attempt_id = ? AND state = ?`).run(state, finalProof, at, at, at, reason, a.attempt_id, a.state).changes;
+      WHERE attempt_id = ? AND state = ?`).run(state, finalProof, at, at, at, redactText(reason), a.attempt_id, a.state).changes;
     if (!changed) return [];
     const released = this.releaseClaims(a, reason);
     this.event(a.task_id, state === "dropped" ? "attempt.dropped" : "attempt.settled", a.dispatch_id,
@@ -265,6 +265,23 @@ export class AttemptStore {
   }
 
   /**
+   * #264 review finding 5: a direct or candidate legacy start whose adapter returned a handle and
+   * then failed before its run was registered. The caller has cancelled the provider. `drained`: its
+   * stream ended, so the K4b release (`stream_closed_unverified`). Otherwise nothing proves it
+   * stopped: the attempt is `ambiguous` and keeps its slot until the boot proof.
+   */
+  abandonedStart(attemptId: string, reason: string, drained: boolean): Released[] {
+    const a = this.get(attemptId);
+    if (!a || (a.state !== "starting" && a.state !== "live")) return [];
+    if (drained) return this.finalize(a, "stream_closed_unverified", reason);
+    const at = this.iso();
+    const changed = this.db.prepare("UPDATE execution_attempts SET state = 'ambiguous', reason = ?, updated_at = ? WHERE attempt_id = ? AND state = ?")
+      .run(redactText(reason), at, a.attempt_id, a.state).changes;
+    if (changed) this.event(a.task_id, "attempt.ambiguous", a.dispatch_id, { attemptId: a.attempt_id, reason, slot: a.candidate_slot });
+    return [];
+  }
+
+  /**
    * The session-terminal rule (packet 2.1): inside `SessionStore.terminalize`'s transaction, a
    * session that ends without the commit drops its `held` attempt. `starting` or later is left alone.
    */
@@ -273,11 +290,18 @@ export class AttemptStore {
     return a?.state === "held" ? this.finalize(a, "never_entered", "session ended before provider entry") : [];
   }
 
-  /** Whether a run or session row still owns execution: the K4b `hasOwner` predicate, for one row. */
-  private runOwns(runId: string): boolean {
-    return !!this.db.prepare(`SELECT 1 FROM runs r WHERE r.id = ? AND (r.ended_at IS NULL OR
+  /**
+   * Whether a run or session row still owns execution: the K4b `hasOwner` predicate, for one row.
+   * At boot a legacy run row (no `execution_request_id`) owns nothing whatever its `ended_at` says:
+   * its stream was consumed in memory by the process that died (#264 review finding 2: boot's
+   * blanket-fail ends only the runs of running tasks, and a run left open on a parked or created
+   * task would otherwise hold its slot forever). A Harness session is recovered, so it still owns.
+   */
+  private runOwns(runId: string, mode: "runtime" | "boot"): boolean {
+    return !!this.db.prepare(`SELECT 1 FROM runs r WHERE r.id = ? AND (
+      (r.ended_at IS NULL AND (? = 'runtime' OR r.execution_request_id IS NOT NULL)) OR
       (r.execution_request_id IS NOT NULL AND (r.session_state NOT IN ${SESSION_TERMINAL_SQL} OR
-       NOT EXISTS (SELECT 1 FROM execution_results er WHERE er.session_id = r.id))))`).get(runId);
+       NOT EXISTS (SELECT 1 FROM execution_results er WHERE er.session_id = r.id))))`).get(runId, mode);
   }
 
   /**
@@ -286,12 +310,12 @@ export class AttemptStore {
    * boot that process is gone, so it is not.
    */
   owned(a: AttemptRow, mode: "runtime" | "boot"): boolean {
-    if (a.session_id) return this.runOwns(a.session_id);
+    if (a.session_id) return this.runOwns(a.session_id, mode);
     if (a.dispatch_id) {
       const d = this.db.prepare("SELECT phase, session_id FROM dispatches WHERE dispatch_id = ?").get(a.dispatch_id) as { phase: string; session_id: string | null } | undefined;
       if (!d) return false;
       if (d.phase === "reserved" || d.phase === "start_attempted") return true;
-      return d.session_id ? this.runOwns(d.session_id) : false;
+      return d.session_id ? this.runOwns(d.session_id, mode) : false;
     }
     return mode === "runtime";
   }

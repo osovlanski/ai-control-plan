@@ -31,6 +31,10 @@ export async function unguarded(db: Db, adapter: AgentAdapter, spec: RunSpec) { 
 export async function ignored(db: Db, adapter: AgentAdapter, spec: RunSpec) { const entry = enterProvider(db, { path: "legacy" }); void entry; return adapter.start(spec); }
 export async function guarded(db: Db, adapter: AgentAdapter, spec: RunSpec) { const entry = enterProvider(db, { path: "legacy" }); if (!entry.ok) throw new Error(entry.reason); return adapter.start(spec); }
 export async function inline(db: Db, adapter: AgentAdapter, spec: RunSpec) { if (!enterProvider(db, { path: "legacy" }).ok) return undefined; return adapter.resume("r" as never, spec); }
+export async function destructured(adapter: AgentAdapter, spec: RunSpec) { const { start } = adapter; return start(spec); }
+export async function bracket(adapter: AgentAdapter, spec: RunSpec) { return adapter["start"](spec); }
+export async function aliased(adapter: AgentAdapter, spec: RunSpec) { const s = adapter.resume; return s("r" as never, spec); }
+export async function guardedBracket(db: Db, adapter: AgentAdapter, spec: RunSpec) { const entry = enterProvider(db, { path: "legacy" }); if (!entry.ok) throw new Error(entry.reason); return adapter["start"](spec); }
 `;
 
 type Kind = "adapter" | "bridge" | "runner" | "startProvider";
@@ -69,13 +73,39 @@ function implementsAdapter(c: ts.ClassDeclaration): boolean {
   return false;
 }
 
-/** Which pinned declaration (or implementation of one) a property-access call resolves to. */
+const MEMBERS = ["start", "resume", "startRequest", "run", "startProvider"];
+
+/**
+ * The member symbol a callee resolves to, whatever its syntax (#264 review: the scan missed
+ * `adapter["start"](spec)` and `const { start } = adapter; start(spec)`): a property access, an
+ * element access with a literal key, a destructured binding, or a local initialised from one of them.
+ */
+function resolveMember(callee: ts.Expression, depth = 0): ts.Symbol | undefined {
+  if (depth > 4) return undefined;
+  while (ts.isParenthesizedExpression(callee) || ts.isNonNullExpression(callee) || ts.isAsExpression(callee)) callee = callee.expression;
+  if (ts.isPropertyAccessExpression(callee)) return checker.getSymbolAtLocation(callee.name);
+  if (ts.isElementAccessExpression(callee) && ts.isStringLiteralLike(callee.argumentExpression)) {
+    return checker.getPropertyOfType(checker.getTypeAtLocation(callee.expression), callee.argumentExpression.text);
+  }
+  if (ts.isIdentifier(callee)) {
+    let s = checker.getSymbolAtLocation(callee);
+    if (s && s.flags & ts.SymbolFlags.Alias) s = checker.getAliasedSymbol(s);
+    for (const d of s?.declarations ?? []) {
+      if (ts.isBindingElement(d) && ts.isObjectBindingPattern(d.parent)) {
+        const key = d.propertyName && (ts.isIdentifier(d.propertyName) || ts.isStringLiteralLike(d.propertyName)) ? d.propertyName.text : ts.isIdentifier(d.name) ? d.name.text : undefined;
+        if (key) return checker.getPropertyOfType(checker.getTypeAtLocation(d.parent), key);
+      }
+      if (ts.isVariableDeclaration(d) && d.initializer) return resolveMember(d.initializer, depth + 1);
+    }
+  }
+  return undefined;
+}
+
+/** Which pinned declaration (or implementation of one) a call resolves to, by symbol. */
 function classify(call: ts.CallExpression): Kind | undefined {
-  const callee = call.expression;
-  if (!ts.isPropertyAccessExpression(callee)) return undefined;
-  const member = callee.name.text;
-  if (!["start", "resume", "startRequest", "run", "startProvider"].includes(member)) return undefined;
-  const sym = checker.getSymbolAtLocation(callee.name);
+  const sym = resolveMember(call.expression);
+  const member = sym?.name;
+  if (!member || !MEMBERS.includes(member)) return undefined;
   for (const d of sym?.declarations ?? []) {
     const owner = d.parent;
     const owned = nameOf(owner);
@@ -183,7 +213,7 @@ describe("provider-entry call-site allowlist (packet 2.4.2)", () => {
     expect(credentialed.filter((s) => !s.guarded).map((s) => `${s.file} ${s.fn} ${s.text}`)).toEqual([]);
   });
 
-  it("counts a renamed receiver, ignores a comment, and refuses an unguarded or ignored commit", () => {
+  it("counts a renamed receiver, bracket, destructured and aliased calls, ignores a comment, and refuses an unguarded or ignored commit", () => {
     const fixture = scan((f) => f === FIXTURE);
     expect(readFileSync(join(SRC, "modules/orchestrator.ts"), "utf8")).toContain("adapter.start"); // the real file is scanned, the fixture is virtual
     expect(fixture.map((s) => [s.fn, s.text, s.guarded])).toEqual([
@@ -192,6 +222,10 @@ describe("provider-entry call-site allowlist (packet 2.4.2)", () => {
       ["ignored", "adapter.start", false],
       ["guarded", "adapter.start", true],
       ["inline", "adapter.resume", true],
+      ["destructured", "start", false],
+      ["bracket", 'adapter["start"]', false],
+      ["aliased", "s", false],
+      ["guardedBracket", 'adapter["start"]', true],
     ]);
   });
 });

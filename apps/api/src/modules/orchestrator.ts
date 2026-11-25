@@ -73,6 +73,15 @@ import type { TaskEventBus } from "./sse.js";
 import type { TaskStore } from "./tasks.js";
 import type { ProjectVerificationDiscovery } from "./project-verification.js";
 
+/** What a legacy start has acquired so far, so its catch knows what it must undo (#264 review finding 5). */
+interface LegacyStart {
+  attemptId?: string;
+  /** The adapter returned a handle that no registered run consumes yet. */
+  started?: { adapter: AgentAdapter; handle: RunHandle; attemptId: string; dispatch?: boolean };
+}
+/** How long a start that failed after its handle drains the cancelled provider's stream. */
+const LEGACY_ABANDON_DRAIN_MS = 10_000;
+
 interface ActiveRun {
   runId: string;
   taskId: string;
@@ -642,25 +651,54 @@ export class Orchestrator {
     options: StartOptions = {},
   ): Promise<{ runId: string }> {
     // qcq-04a: a legacy start that fails before its provider-entry commit leaves its attempt `held`;
-    // the catch drops it `never_entered` (packet 2.4.1). One whose provider call threw after the
-    // commit, with no run row, settles `stream_closed_unverified` (K4b: no run row, no owner).
-    const legacy: { attemptId?: string } = {};
+    // the catch drops it `never_entered` (packet 2.4.1). One whose provider call rejected (no handle,
+    // so no provider this process holds) settles `stream_closed_unverified`. One that failed AFTER the
+    // adapter returned a handle has a provider that may be running with nothing consuming it: the
+    // catch cancels it and drains its stream first (`abandonStartedHandle`).
+    const legacy: LegacyStart = {};
     try {
       return await this.startTaskInner(taskId, assistantId, options, legacy);
     } catch (error) {
-      if (legacy.attemptId) {
-        try { announceReleased(this.db, this.db.transaction(() => new AttemptStore(this.db).startFailed(legacy.attemptId!, `start failed: ${message(error)}`))()); }
+      const reason = `start failed: ${redactText(message(error), DEFAULT_REDACTION_RULES)}`;
+      if (legacy.started) {
+        try { await this.abandonStartedHandle(legacy, reason); }
+        catch { /* the start's own error is the one to report */ }
+      } else if (legacy.attemptId) {
+        try { announceReleased(this.db, this.db.transaction(() => new AttemptStore(this.db).startFailed(legacy.attemptId!, reason))()); }
         catch { /* the start's own error is the one to report */ }
       }
       throw error;
     }
   }
 
+  /**
+   * #264 review finding 5: the adapter returned a handle, then a later step of the start failed
+   * before the run was registered (`active`), so nothing consumes or cancels the provider. Cancel
+   * it, end any run row the start wrote, and drain its stream for a bounded time. A direct or
+   * candidate attempt settles `stream_closed_unverified` only once the stream has ended; otherwise
+   * it is `ambiguous` and keeps its slot until a restart's boot proof. A dispatch's attempt is left
+   * to the dispatch's own ambiguity (operator run-now with `confirmNoLiveOwner`).
+   */
+  private async abandonStartedHandle(legacy: LegacyStart, reason: string): Promise<void> {
+    const { adapter, handle, attemptId, dispatch } = legacy.started!;
+    try { await adapter.cancel(handle); } catch { /* still drained below */ }
+    this.db.prepare("UPDATE runs SET state = 'ENDED_ERROR', ended_at = ? WHERE id = ? AND ended_at IS NULL").run(new Date().toISOString(), handle.runId);
+    let drained = false;
+    const drain = (async () => { for await (const _ of adapter.events(handle)) { /* discarded: the start failed */ } drained = true; })().catch(() => { drained = true; });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([drain, new Promise<void>((r) => { timer = setTimeout(r, LEGACY_ABANDON_DRAIN_MS); timer.unref?.(); })]);
+    if (timer) clearTimeout(timer);
+    if (dispatch) return;
+    const store = new AttemptStore(this.db);
+    if (drained) announceReleased(this.db, this.db.transaction(() => store.abandonedStart(attemptId, `${reason}; provider cancelled and its stream ended`, true))());
+    else this.db.transaction(() => store.abandonedStart(attemptId, `${reason}; provider cancelled, its stream did not end`, false))();
+  }
+
   private async startTaskInner(
     taskId: string,
     assistantId: AssistantId,
     options: StartOptions,
-    legacy: { attemptId?: string },
+    legacy: LegacyStart,
   ): Promise<{ runId: string }> {
     if (!options.parallel && this.isActive(taskId)) {
       throw new Error(`Task ${taskId} already has an active run`);
@@ -699,7 +737,7 @@ export class Orchestrator {
         request.policy.approval.mode = mode;
         request.runSpec.permissionPolicy = { ...request.runSpec.permissionPolicy, mode };
         new SessionStore(this.db).recordRequest(request); // fingerprint witnesses semantic replay
-        const replayed = await this.executeDispatch(request, options);
+        const replayed = await this.executeDispatch(request, options, legacy);
         this.recordModelSource(taskId, replayed.runId, this.committedModelSource(request));
         // M2 S6: the saved request already names its revision; the replayed run binds to it.
         if (request.compositionRevisionId) this.dispatchComposer?.attachRun(replayed.runId, request.compositionRevisionId);
@@ -913,6 +951,7 @@ export class Orchestrator {
     const handle = priorRef
       ? await adapter.resume(priorRef, runSpec)
       : await adapter.start(runSpec);
+    legacy.started = { adapter, handle, attemptId: entry.attempt.attempt_id };
 
     // A legacy provider start may resolve after cancellation committed.
     if (options.dispatchId && this.tasks.get(taskId)?.state === "CANCELLED") {
@@ -955,6 +994,7 @@ export class Orchestrator {
     };
     this.closeHandoffRecord(taskId, handle.runId, options.handoffTrigger ?? 'wake', options.continuation);
     this.active.set(handle.runId, run);
+    legacy.started = undefined; // `consume` owns the provider from here
     void this.consume(run);
     this.recordEstimate(handle.runId, taskId, assistantId);
     return { runId: handle.runId };
@@ -1042,7 +1082,7 @@ export class Orchestrator {
       repository: intent.repository ? { path: intent.repository.path, branch: request.context.worktree?.branch ?? intent.repository.branch ?? '' } : undefined });
   }
 
-  private async executeDispatch(request: ExecutionRequest, options: StartOptions): Promise<{ runId: string }> {
+  private async executeDispatch(request: ExecutionRequest, options: StartOptions, legacy: LegacyStart = {}): Promise<{ runId: string }> {
     await options.beforeStart?.();
     const taskId = request.taskId;
     const d = this.db.prepare('SELECT phase, execution_path, origin FROM dispatches WHERE dispatch_id = ?').get(request.executionRequestId) as { phase: string; execution_path: string; origin: string };
@@ -1070,6 +1110,7 @@ export class Orchestrator {
     const entry = enterProvider(this.db, { dispatchId: request.executionRequestId, path: 'legacy' });
     if (!entry.ok) throw new Error(`Provider entry ${entry.kind === 'not_owner' ? 'not owned' : 'refused'}: ${entry.reason}`);
     const handle = await adapter.start(request.runSpec);
+    legacy.started = { adapter, handle, attemptId: entry.attempt.attempt_id, dispatch: true };
     if (this.tasks.get(taskId)?.state === 'CANCELLED') await adapter.cancel(handle);
     this.db.prepare(`INSERT INTO runs(id,task_id,assistant_id,provider_session_ref,state,started_at,dispatch_id,model_requested)
       VALUES(?,?,?,?,'ACTIVE',?,?,?)`).run(handle.runId, taskId, request.assistantId, handle.providerSessionRef ?? null, new Date().toISOString(), request.executionRequestId, request.model?.id ?? null);
@@ -1080,6 +1121,7 @@ export class Orchestrator {
       timeout: setTimeout(() => { void adapter.cancel(handle); }, request.runSpec.env?.maxRuntimeMs ?? this.maxRuntimeMs) };
     this.closeHandoffRecord(taskId, handle.runId, trigger, options.continuation);
     this.active.set(handle.runId, run);
+    legacy.started = undefined; // `consume` owns the provider from here
     void this.consume(run);
     this.recordEstimate(handle.runId, taskId, request.assistantId);
     return { runId: handle.runId };

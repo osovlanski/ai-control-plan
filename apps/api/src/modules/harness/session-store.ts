@@ -584,14 +584,19 @@ export class SessionStore {
     ref: ProviderSessionRef,
     input: { expectedVersion: number; leaseToken: string },
   ): ExecutionSession {
-    const info = this.db
-      .prepare(
-        `UPDATE runs SET provider_session_ref = ?, version = version + 1
-         WHERE id = ? AND version = ? AND session_state = 'STARTING'
-           AND lease_token = ? AND lease_expires_at > ?`,
-      )
-      .run(ref, sessionId, input.expectedVersion, input.leaseToken, this.iso());
-    if (info.changes !== 1) throw new SessionCasConflictError(sessionId, "ackHandle: stale version/state or dead lease");
+    this.db.transaction(() => {
+      const info = this.db
+        .prepare(
+          `UPDATE runs SET provider_session_ref = ?, version = version + 1
+           WHERE id = ? AND version = ? AND session_state = 'STARTING'
+             AND lease_token = ? AND lease_expires_at > ?`,
+        )
+        .run(ref, sessionId, input.expectedVersion, input.leaseToken, this.iso());
+      if (info.changes !== 1) throw new SessionCasConflictError(sessionId, "ackHandle: stale version/state or dead lease");
+      // qcq-04a (packet 2.1, section 8.1 note 5; #264 review): the returned handle is the provider's
+      // acknowledgment, so the entered attempt is `live` in this same write, not at the first event.
+      this.db.prepare("UPDATE execution_attempts SET state = 'live', updated_at = ? WHERE session_id = ? AND state = 'starting'").run(this.iso(), sessionId);
+    })();
     runSessionRefStored(this.db, sessionId);
     return this.get(sessionId)!;
   }

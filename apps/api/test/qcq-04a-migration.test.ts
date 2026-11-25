@@ -158,6 +158,18 @@ describe("migration 058 upgrade backfill (packet 2.3.1)", () => {
     expect(attempts(tt)).toEqual([]);
   });
 
+  it("#264 review finding 3: a terminal task's open dispatch run with a released claim is row 1, owning zero units", () => {
+    const t = task(); wait(t); dispatch(t, "dc", "cancelled"); event(t, "dc", "dispatch.start_attempted");
+    const c = claim(t, "dc", true); run(t, "rc", { dispatchId: "dc" });
+    db.prepare("UPDATE tasks SET state = 'CANCELLED' WHERE id = ?").run(t);
+    upgrade();
+    expect(attempts(t).map((a) => [a.attempt_id, a.state, a.session_id, a.exit_proof, a.reason])).toEqual([
+      [`att_mig_${c}`, "live", "rc", null, "k4b_released_before_upgrade"],
+    ]);
+    expect(db.prepare("SELECT COUNT(*) n FROM attempt_requirements WHERE attempt_id = ?").get(`att_mig_${c}`)).toEqual({ n: 0 });
+    expect(liveClaims(t)).toEqual([]);
+  });
+
   it("aborts by name when two dispatch owners share a slot", () => {
     const t = task(); wait(t, 1); wait(t, 2);
     // A started dispatch whose run is still open (row 1) and a newer reserved one with a live claim (row 6).
@@ -217,5 +229,55 @@ describe("migration 058 schema triggers (packet 2.3)", () => {
       .toThrow(/CHECK constraint failed/);
     insertAttempt({ attempt_id: "att_mig_run_x", task_id: t, candidate_slot: 2, occupies_account: "account:A", ...live, entered_boot_id: null });
     db.prepare("UPDATE execution_attempts SET state = 'settled', exit_proof = 'boot_unverified' WHERE attempt_id = 'att_mig_run_x'").run();
+  });
+});
+
+describe("migration 059 attempt guards (#264 review)", () => {
+  beforeEach(() => {
+    upgrade();
+    copyFileSync(join(MIGRATIONS, "059_attempt_guards.sql"), join(dir, "059_attempt_guards.sql"));
+    expect(migrate(db, dir)).toEqual(["059_attempt_guards.sql"]);
+  });
+  const insertAttempt = (over: Record<string, unknown>) => {
+    const row = { attempt_id: "a", task_id: "", kind: "direct", execution_path: "harness", candidate_slot: 0, run_as: "plane",
+      account_source: "none", queue_key: T, state: "held", entered_at: null, entered_boot_id: null, predecessor_id: null, created_at: T, updated_at: T, ...over };
+    db.prepare(`INSERT INTO execution_attempts (attempt_id, task_id, kind, execution_path, candidate_slot, run_as, account_source, queue_key, state, entered_at, entered_boot_id, predecessor_id, created_at, updated_at)
+      VALUES (@attempt_id, @task_id, @kind, @execution_path, @candidate_slot, @run_as, @account_source, @queue_key, @state, @entered_at, @entered_boot_id, @predecessor_id, @created_at, @updated_at)`).run(row);
+  };
+  const live = { state: "live", entered_at: T, entered_boot_id: "b" };
+
+  it("refuses moving an existing owner into a slot that holds an unrelated queued row", () => {
+    const t = task();
+    insertAttempt({ attempt_id: "q", task_id: t, state: "queued", candidate_slot: 3 });
+    insertAttempt({ attempt_id: "h", task_id: t, candidate_slot: 1 });
+    insertAttempt({ attempt_id: "l", task_id: t, candidate_slot: 2, ...live });
+    expect(() => db.prepare("UPDATE execution_attempts SET candidate_slot = 3 WHERE attempt_id = 'h'").run()).toThrow(/not this owner's successor/);
+    const t2 = task();
+    insertAttempt({ attempt_id: "q2", task_id: t2, state: "queued", candidate_slot: 2 });
+    expect(() => db.prepare("UPDATE execution_attempts SET task_id = ? WHERE attempt_id = 'l'").run(t2)).toThrow(/not this owner's successor/);
+    // The named successor's own owner may still move into nothing, and a plain state step is unaffected.
+    db.prepare("UPDATE execution_attempts SET state = 'starting', entered_at = ?, entered_boot_id = 'b' WHERE attempt_id = 'h'").run(T);
+  });
+
+  it("keeps claim_id, claimed_at and generation immutable, and refuses a REPLACE that would erase a claim", () => {
+    const t = task(); wait(t);
+    insertAttempt({ attempt_id: "H", task_id: t, ...live });
+    db.prepare("INSERT INTO resource_claims (attempt_id, task_id, generation, resource, units, claimed_at) VALUES ('H', ?, 1, 'account:A', 1, ?)").run(t, T);
+    const id = (db.prepare("SELECT claim_id FROM resource_claims WHERE attempt_id = 'H'").get() as { claim_id: number }).claim_id;
+    expect(() => db.prepare("UPDATE resource_claims SET claim_id = claim_id + 100 WHERE claim_id = ?").run(id)).toThrow(/identity is immutable/);
+    expect(() => db.prepare("UPDATE resource_claims SET claimed_at = ? WHERE claim_id = ?").run("2030-01-01T00:00:00.000Z", id)).toThrow(/identity is immutable/);
+    expect(() => db.prepare("UPDATE resource_claims SET generation = NULL WHERE claim_id = ?").run(id)).toThrow(/identity is immutable/);
+    // The repository connection's default: a REPLACE would delete without firing the DELETE trigger.
+    expect(db.pragma("recursive_triggers", { simple: true })).toBe(0);
+    expect(() => db.prepare("INSERT OR REPLACE INTO resource_claims (claim_id, attempt_id, task_id, generation, resource, units, claimed_at) VALUES (?, 'H', ?, 1, 'gpu', 1, ?)").run(id, t, T))
+      .toThrow(/never replaced/);
+    expect(() => db.prepare("INSERT OR REPLACE INTO resource_claims (attempt_id, task_id, generation, resource, units, claimed_at) VALUES ('H', ?, 1, 'account:A', 1, ?)").run(t, T))
+      .toThrow(/never replaced/);
+    // The account evidence survives, so a weak proof is still refused.
+    expect(db.prepare("SELECT resource FROM resource_claims WHERE claim_id = ?").get(id)).toEqual({ resource: "account:A" });
+    expect(() => db.prepare("UPDATE execution_attempts SET state = 'settled', exit_proof = 'boot_unverified' WHERE attempt_id = 'H'").run()).toThrow(/weak exit proof/);
+    // A release, and a fresh claim after it, are still ordinary writes.
+    db.prepare("UPDATE resource_claims SET released_at = ?, release_reason = 'done' WHERE claim_id = ?").run(T, id);
+    db.prepare("INSERT INTO resource_claims (attempt_id, task_id, generation, resource, units, claimed_at) VALUES ('H', ?, 1, 'account:A', 1, ?)").run(t, T);
   });
 });

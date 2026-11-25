@@ -393,8 +393,8 @@ order). On a single task it is the first free slot, 0 when no dispatch attempt o
 leave a legacy run open beside a later one (the 005 legacy fixture has exactly that), and today's
 boot reconcile already ends such runs (`orchestrator.ts` `reconcileOnBoot` steps 1.5 and 3). Each
 extra run is kept as an owner on the next slot (`reason = 'migrated: extra open run on a single
-task'`), never released or guessed away; boot reconcile ends the legacy run and the boot sweep then
-settles its attempt `boot_unverified`. Two **dispatch** owners on one slot do break K4b's own
+task'`), never released or guessed away; the boot sweep settles its attempt `boot_unverified` on any
+task state, since at boot a legacy run row owns nothing (section 8.1 note 6). Two **dispatch** owners on one slot do break K4b's own
 one-open-dispatch rule, and that still aborts with `qcq_backfill_two_owners`. Ended runs with no
 claim get no attempt.
 
@@ -1663,26 +1663,50 @@ and these notes say why:
    `stream_closed_unverified`, since that is the event that did happen there. Both are weak, pool-only
    proofs, allowed by `trg_attempt_weak_proof`; the release timing is K4b's.
 2. **A legacy start whose provider call threw.** With no run row, K4b sees no owner. An entered
-   (`starting`) direct or candidate attempt with no bound run is settled `stream_closed_unverified`
-   when `startTask` throws; a `held` one is dropped `never_entered`.
+   (`starting`) direct or candidate attempt whose adapter call **rejected** (no handle) is settled
+   `stream_closed_unverified` when `startTask` throws; a `held` one is dropped `never_entered`. A start
+   that failed **after** the adapter returned a handle (the run-row insert, the bind) has a provider
+   nothing consumes: the catch cancels the handle, ends any run row it wrote, and drains the stream
+   for up to 10 s. The attempt settles `stream_closed_unverified` only once the stream ended;
+   otherwise it is `ambiguous` and keeps its slot until the boot proof (04b adds `confirm-stopped`).
+   A dispatch's attempt is left to the dispatch's ambiguity. Every attempt and claim reason is
+   redacted before it is written (#264 review finding 5).
 3. **The autopilot park** releases exactly as K4b did: a `held` attempt drops `never_entered`
    whatever still points at it, and an entered attempt whose session has ended settles like any
-   idle one (note 1).
+   idle one (note 1). The timing differs by path: an early refusal drops the `held` attempt at the
+   park, but on a Harness final-check refusal `terminalize` has already dropped it and released its
+   claim (the session-terminal rule) before the detached callback parks the task (#264 review).
 4. **Guard form.** The commit's result is kept for the bind that follows the adapter call, so each
    credentialed call is preceded by `const entry = enterProvider(...)` (or `store.enterProvider`) and
    `if (!entry.ok) throw ...`. The allowlist test accepts that two-statement form and the one-statement
    `if (!enterProvider(...).ok)` form, and fails an unguarded or ignored commit.
-5. **`starting` to `live`.** A Harness attempt becomes `live` when the session's handle is acknowledged
-   (`providerStartAcked`, or STARTING to RUNNING), in the same transition; a legacy one when its run
-   row is written.
-6. **Upgrade backfill.** Runs are classified Harness by `execution_request_id`, open runs exclude legacy
-   end states and terminal tasks, and extra open runs on one single task are kept as owners
-   (section 2.3.1). A dispatch reserved before the upgrade with no claim gets its compat attempt
-   lazily, in its route transaction or at session insert.
+5. **`starting` to `live`.** A Harness attempt becomes `live` when the session's handle is acknowledged:
+   `ackHandle` (the returned provider reference) or, for a provider that reports its reference only
+   with its first event, the STARTING to RUNNING transition, in the same write. A legacy one when its
+   run row is written. (#264 review: as merged, `ackHandle` moved only the session.)
+6. **Upgrade backfill.** Runs are classified Harness by `execution_request_id` (005 populated
+   `session_state` on legacy rows too). Whether a dispatch-bound run has ended decides rows 1 and 2
+   whatever its task's state, so a terminal task's open run with a released claim is row 1 with zero
+   units (`k4b_released_before_upgrade`); only runs no dispatch carries skip terminal tasks. Extra open
+   runs on one single task are kept as owners (section 2.3.1), and at boot a legacy run row (no
+   `execution_request_id`) is never an owner, whatever its `ended_at`, because the process that
+   consumed its stream is dead: the boot sweep settles them `boot_unverified` on every task state,
+   not only the running tasks boot reconcile ends. A dispatch reserved before the upgrade with no
+   claim gets its compat attempt lazily: in its route transaction, for a fresh or a replayed saved
+   route, at the `start_attempted` mark, or at Harness session insert (#264 review findings 1 to 3).
 7. **Account config.** `scheduling.accounts` is parsed beside, not inside, the advisory
    `SchedulingPolicy` contract. 04a resolves keys but writes none: every 04a attempt has
    `account_source = 'none'` (migrated ones `unresolved`). The strong-exit-evidence check for
    `enforce: true` arrives with the units of 04b; until 04d the build gate refuses `enforce: true`
    first.
-8. **Events.** `attempt.entered`, `attempt.dropped` and `attempt.settled` join `scheduler_events`, so a
-   test that reads the last scheduler event filters them.
+8. **Events.** `attempt.entered`, `attempt.dropped`, `attempt.settled` and `attempt.ambiguous` join
+   `scheduler_events` as durable history. The live stream keeps its pre-04a outcome: `publish` sends
+   the newest event that is not `attempt.*`, so a settlement written after its release does not
+   displace `resource.released` (#264 review finding 6).
+9. **Review fixes (#264, Codex).** Operator run-now with `confirmNoLiveOwner` refuses on a run of the
+   ambiguous dispatch itself, not on any run of the task, so an ended handoff predecessor no longer
+   strands an entered continuation whose start rejected (finding 4). Migration 059 closes three write
+   paths: an owner moved by `task_id` or `candidate_slot` beside an unrelated queued row, a rewrite of
+   `claim_id`, `claimed_at` or `generation`, and an `INSERT OR REPLACE` that would delete a claim
+   without its DELETE trigger. The allowlist resolves the callee by symbol, so bracket, destructured
+   and aliased calls are sites. The early launch check reads every requirement the attempt carries.
