@@ -42,7 +42,7 @@ Columns:
 | Compare / race (`NewTask`) | `POST /api/tasks/:id/parallel` | — | `aos task compare\|race <id> <a> <b>` | P1 |
 | Mission list / attention (`useBoard`, `Overview.tsx:29`) | `GET /api/tasks` | **`aos task ls [--attention] [--state] [--stage]`** (`--attention` = the plane's stage `needs-you`) | — | P0 |
 | Mission detail (`TaskDetail`, `Inspector`) | `GET /api/tasks/:id`, `/context`, `/wait` | **`aos task show <id>`** (detail, stage from `GET /api/tasks`, and the provenance block) | `/context` and `/wait` are not read yet | P0 |
-| Run and handoff provenance (web view not built yet; tlm-03 web half) | `GET /api/tasks/:id/provenance` (API 2.12) | **`aos task provenance <id> [--json]`** (tlm-03); embedded by `aos task show` (same read, same `provenanceText`) | — | P1 |
+| Run and handoff provenance (`TaskProvenance`, `TaskDetail` Provenance tab, tlm-03) | `GET /api/tasks/:id/provenance` (API 2.12) | **`aos task provenance <id> [--json]`** (tlm-03); embedded by `aos task show` (same read, same `provenanceText`) | — | P1 |
 | Run estimate and recommendation (`TaskDetail` Usage tab, qcq-03) | `GET /api/tasks/:id/estimate` (API 2.15), `GET /api/tasks/:id/estimates/recorded` (API 2.16) | **`aos task estimate <id> [--deadline] [--approval-required] [--assistant]`**, **`aos task estimate <id> --recorded`** (qcq-03) | — | P1 |
 | Live activity (`TaskDetail.tsx:50`, SSE) | `GET /api/tasks/:id/events`, `/events/stream` | **`aos task events <id> [--follow] [--json]`** (NDJSON when following; exits when the stage is `done`) | — | P0 |
 | Routing evidence (`TaskRouting`, `TaskDetail`) | `GET /api/tasks/:id/routing` | — | `aos task routing <id>` | P1 |

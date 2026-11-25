@@ -286,18 +286,7 @@ items:
 
   # Runtime correctness, traceability, and UX
 
-  - id: tlm-03
-    title: "Show task provenance in the Web task detail"
-    phase: "Agentic OS follow-up"
-    repo: ai-control-plan
-    size: S
-    depends_on: []
-    files: ["apps/web/src/**"]
-    lane: manual-cloud
-    profile: auto
-    night: false
-    source: "Traceability review"
-    notes: "Web half only. `aos task provenance` shipped in #231 on the provenance API from #230 (API 2.12). Consume GET provenance through the shared read API; add a web test."
+  # tlm-03 (task provenance) shipped and was removed 2026-11-25: CLI half #231, Web half #255.
 
   - id: demo-journey
     title: "Recorded end-to-end demo: goal to verified outcome in Web and CLI, fakes only"

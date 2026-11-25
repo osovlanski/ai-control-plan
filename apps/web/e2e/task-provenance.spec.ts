@@ -1,3 +1,4 @@
+import { writeFileSync } from "node:fs";
 import { expect, test, type BrowserContext, type Page } from "@playwright/test";
 import type { TaskProvenance } from "../src/api.js";
 import { A, B, boot, type Harness } from "./harness.js";
@@ -71,18 +72,100 @@ test("shows each run's joins with their sources, the handoff, and an operator li
   await expect(handoff).toContainText(`h_${task.taskId}`);
   await expect(handoff).toContainText("trigger manual");
   await expect(handoff.locator('[data-source="inferred"]')).toBeVisible();
-  await expect(panel(page).getByRole("region", { name: "How joins are labelled" })).toContainText(served.inferenceRules.predecessor!);
+  await expect(panel(page).getByRole("region", { name: "How joins are labelled" })).toContainText(served.inferenceRules.predecessor);
 
   const links = panel(page).getByRole("region", { name: "Linked issues and PRs" });
   await expect(links.getByRole("link", { name: "osovlanski/ai-control-plan#9999" })).toHaveAttribute("href", "https://github.com/osovlanski/ai-control-plan/pull/9999");
   await expect(links).toContainText("Operator claim: implements (FAKE-link-not-real)");
   await expect(links).toContainText("not checked against GitHub");
 
-  for (const width of [1440, 390]) {
+  for (const width of [1440, 390, 320]) {
     await page.setViewportSize({ width, height: 1100 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await page.screenshot({ path: info.outputPath(`provenance-${width}.png`), fullPage: true });
   }
+});
+
+/** Every label the plane served, in the order the panel prints them: runs, then handoffs. */
+const servedSources = (served: TaskProvenance) => [
+  ...served.runs.flatMap(r => [r.routingDecision.source, ...(r.continuedFrom ? [r.continuedFrom.source] : [])]),
+  ...served.handoffs.map(x => x.from.source),
+];
+
+test("a real [FAKE:LIMIT] run that hands off to the other assistant shows the plane's joins as served", async ({ context }, info) => {
+  // Nothing seeded: the plane runs fake-a, hits the scripted quota limit, checkpoints and hands off to fake-b.
+  const task = h.built.tasks.create({ goal: "Regenerate the API reference [FAKE:LIMIT]" });
+  const api = await h.privileged();
+  const started = await api.post(`/api/tasks/${task.taskId}/start`, { data: { assistantId: A } });
+  expect(started.ok(), await started.text()).toBe(true);
+  await h.waitForState(task.taskId, "COMPLETED");
+  const res = await api.get(`/api/tasks/${task.taskId}/provenance`);
+  expect(res.ok()).toBe(true);
+  const served = await res.json() as TaskProvenance;
+  await api.dispose();
+  writeFileSync(info.outputPath("provenance-limit-served.json"), JSON.stringify(served, null, 2));
+
+  // The plane's own answer, so the panel is checked against a real handoff, not a fixture.
+  expect(served.runs.map(r => r.assistantId)).toEqual([A, B]);
+  expect(served.handoffs).toHaveLength(1);
+  const [first, successor] = served.runs;
+  const handoffServed = served.handoffs[0]!;
+  expect(handoffServed).toMatchObject({ record: "handoff", closed: true, from: { runId: first!.runId, source: "handoff_record" }, to: { runId: successor!.runId } });
+
+  const page = await open(context, task.taskId);
+  const runs = panel(page).getByRole("region", { name: "Run provenance" });
+  await expect(runs).toContainText("Runs (2)");
+  await expect(runs.getByRole("listitem")).toHaveCount(2);
+  for (const r of served.runs) {
+    const item = runs.getByRole("listitem", { name: `Run ${r.runId}` });
+    await expect(item).toContainText(r.assistantId);
+    await expect(item).toContainText(r.executionPath === "harness" ? `Harness (request ${r.executionRequestId}` : "Legacy (no execution request)");
+    const routing = item.locator("dd").filter({ has: page.locator(`[data-source="${r.routingDecision.source}"]`) }).first();
+    if (r.routingDecision.id !== null) await expect(routing).toContainText(`Decision #${r.routingDecision.id} chose ${r.routingDecision.chosenAssistantId}`);
+    if (r.continuedFrom) await expect(item).toContainText(`handoff ${r.continuedFrom.handoffId}`);
+    else await expect(item).toContainText("Nothing (fresh start)");
+  }
+  await expect(runs.getByRole("listitem", { name: `Run ${successor!.runId}` })).toContainText(`Handoff (trigger ${handoffServed.trigger})`);
+  const sources = await panel(page).locator("[data-source]").evaluateAll(els => els.map(el => el.getAttribute("data-source")));
+  const expected = servedSources(served);
+  expect(sources.slice(0, expected.length)).toEqual(expected);
+
+  const handoff = panel(page).getByRole("listitem", { name: `Handoff ${handoffServed.id}` });
+  await expect(handoff).toContainText(`trigger ${handoffServed.trigger}`);
+  await expect(handoff).toContainText("closed");
+  await expect(handoff.locator('[data-source="handoff_record"]')).toHaveText("via handoff_record");
+  // The legend is there exactly when the plane inferred a join, with the plane's own rules.
+  const legend = panel(page).getByRole("region", { name: "How joins are labelled" });
+  if (expected.includes("inferred")) await expect(legend).toContainText(served.inferenceRules.routingDecision);
+  else if (!expected.includes("unrecorded")) await expect(legend).toHaveCount(0);
+  for (const width of [390, 320]) {
+    await page.setViewportSize({ width, height: 1100 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: info.outputPath(`provenance-limit-${width}.png`), fullPage: true });
+  }
+});
+
+test("either read failing leaves the other shown, and says why", async ({ context }) => {
+  const task = h.built.tasks.create({ goal: "Trace where each run came from" });
+  seedHandoff(task.taskId);
+  const page = await h.openApp(context);
+  // A plane older than API 2.12 answers the provenance route with 404; the links read still shows.
+  await page.route("**/api/tasks/*/provenance", route => route.fulfill({ status: 404, contentType: "application/json", body: '{"error":"not found"}' }));
+  await page.goto(`${h.origin}/#/missions/${task.taskId}`);
+  await page.locator(".task-detail").getByRole("button", { name: "Provenance", exact: true }).click();
+  await expect(panel(page)).toContainText("Provenance unavailable in this read (HTTP 404)");
+  await expect(panel(page).getByRole("region", { name: "Run provenance" })).toHaveCount(0);
+  await expect(panel(page).getByRole("region", { name: "Linked issues and PRs" })).toContainText("No issue or PR is linked to this task.");
+
+  // And a links read of the wrong shape is refused while provenance still shows.
+  await page.unroute("**/api/tasks/*/provenance");
+  await page.route("**/api/tasks/*/links", route => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ taskId: task.taskId }) }));
+  await page.reload();
+  await page.locator(".task-detail").getByRole("button", { name: "Provenance", exact: true }).click();
+  await expect(panel(page).getByRole("region", { name: "Run provenance" })).toContainText("Runs (2)");
+  await expect(panel(page).getByRole("region", { name: "Linked issues and PRs" })).toContainText("not the API 2.13 shape, so none are shown: links is not a list");
+  // The browser logs the intercepted 404 itself; that one is expected here, nothing else is.
+  errors = errors.filter(e => !/status of 404/.test(e));
 });
 
 test("a task that has not started shows no runs, no handoffs and no links", async ({ context }) => {
