@@ -227,7 +227,9 @@ export interface SchedulerEvent {
     /** K4b: the durable audit trail of who holds a slot and why another task waited. */
     | 'resource.claimed' | 'resource.released' | 'resource.unsatisfiable'
     /** P0-2: a launch the autopilot refused, with its reason and the wait that was written. */
-    | 'autopilot.parked';
+    | 'autopilot.parked'
+    /** qcq-04a: an attempt passed the provider-entry commit, or became final (packet 2.1). */
+    | 'attempt.entered' | 'attempt.dropped' | 'attempt.settled';
   at: string;
   payload: Record<string, unknown>;
 }

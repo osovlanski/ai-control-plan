@@ -354,7 +354,11 @@ describe("the final check, after provisioning (G19)", () => {
     // No claim yet: the check refuses with the typed error rather than a deadline.
     expect(() => ap().launchCheck(taskId, "dispatch_x", "early", { composed: true })).toThrow(AutopilotLaunchRefused);
     rig!.db.prepare("INSERT INTO dispatches(dispatch_id,task_id,condition_generation,origin,execution_path,phase,created_at,updated_at) VALUES('dispatch_x',?,1,'wake','harness','started',?,?)").run(taskId, at(instant), at(instant));
-    rig!.db.prepare("INSERT INTO resource_claims(task_id,dispatch_id,generation,resource,units,claimed_at) VALUES(?,?,?,?,?,?)").run(taskId, "dispatch_x", 1, "oci-heavy", 1, at(instant));
+    // qcq-04a: the dispatch's compat attempt requires the pool and owns the claim (packet 2.3.2).
+    rig!.db.prepare(`INSERT INTO execution_attempts(attempt_id,task_id,kind,execution_path,dispatch_id,candidate_slot,run_as,account_source,queue_key,state,created_at,updated_at)
+      VALUES('att_x',?,'dispatch','harness','dispatch_x',0,'agent','none',?,'held',?,?)`).run(taskId, at(instant), at(instant), at(instant));
+    rig!.db.prepare("INSERT INTO attempt_requirements(attempt_id,resource,units,queued_at) VALUES('att_x','oci-heavy',1,?)").run(at(instant));
+    rig!.db.prepare("INSERT INTO resource_claims(attempt_id,task_id,dispatch_id,generation,resource,units,claimed_at) VALUES('att_x',?,?,?,?,?,?)").run(taskId, "dispatch_x", 1, "oci-heavy", 1, at(instant));
     expect(ap().launchCheck(taskId, "dispatch_x", "early", { composed: true })).toMatchObject({ remainingMs: 90 * MIN, bound: "budget" });
     rig!.db.prepare("INSERT INTO autopilot_runtime(session_id, attempt_id, ms, recorded_at) VALUES('s-earlier', ?, ?, ?)").run(attemptId, 60 * MIN, at(instant));
     instant += 7 * 60 * MIN + 40 * MIN; // 20 minutes of window left

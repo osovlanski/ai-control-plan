@@ -222,6 +222,18 @@ export class SessionFencedError extends Error {
   }
 }
 
+/**
+ * qcq-04a: the provider-entry commit did not move the attempt to `starting`, so no provider was
+ * called. `not_owner`: this runner is not the attempt's owner (a stale lease or a duplicate caller);
+ * nothing changed. `refused`: the owner was refused; the attempt is `dropped` `never_entered`.
+ */
+export class ProviderEntryRefused extends Error {
+  constructor(readonly kind: "not_owner" | "refused", readonly reason: string) {
+    super(`provider entry ${kind === "not_owner" ? "not owned" : "refused"}: ${reason}`);
+    this.name = "ProviderEntryRefused";
+  }
+}
+
 export interface ToolGateInput {
   hook: "pre-exec" | "post-start";
   toolName: string;
@@ -471,6 +483,15 @@ class RunContext {
       handle = await this.startProvider(adapter);
     } catch (err) {
       clearInterval(heartbeat);
+      if (err instanceof ProviderEntryRefused) {
+        this.releaseStartSlot();
+        // A stale lease: recovery owns this session now and its `terminalize` drops the attempt.
+        if (err.kind === "not_owner") throw new SessionFencedError(this.sessionId, err.reason);
+        if (["cancel_requested", "task_cancelled", "stop_requested"].includes(err.reason)) {
+          return this.finalize("STARTING", "CANCELLED", { cancellation: { requestedBy: "plane", at: this.iso() }, checkpoint: await this.attemptCheckpoint("cancel") });
+        }
+        return this.finalizeFailure("FAILED", { kind: "internal", retryable: false, message: err.message }, "STARTING");
+      }
       return this.finalizeFailure(
         "FAILED",
         normalizeStartError(err),
@@ -1367,14 +1388,17 @@ class RunContext {
         profileBroker = new SecretBroker(this.d.provisioning.resolveSecret, profileRefs);
         spec.secretEnv = { ...spec.secretEnv, ...profileBroker.resolve(profileRefs) };
       }
+      let ref: ProviderSessionRef | undefined;
       if (this.request.origin.kind === "resume") {
         const prior = this.d.store.get(this.request.origin.sessionId as string);
-        const ref = prior?.providerSessionRef;
-        if (ref && typeof adapter.resume === "function") {
-          return await adapter.resume(ref as ProviderSessionRef, spec);
-        }
+        if (prior?.providerSessionRef && typeof adapter.resume === "function") ref = prior.providerSessionRef as ProviderSessionRef;
       }
-      return await adapter.start(spec);
+      // qcq-04a (packet 2.4.1): the provider-entry commit, after every fallible preparation step
+      // (the spec, both secret resolutions, the resume reference). The adapter call is the next
+      // statement: no await, I/O or transaction between them.
+      const entry = this.d.store.enterProvider(this.sessionId, this.lease);
+      if (!entry.ok) throw new ProviderEntryRefused(entry.kind, entry.reason);
+      return ref && adapter.resume ? await adapter.resume(ref, spec) : await adapter.start(spec);
     } finally {
       broker?.dispose();
       profileBroker?.dispose();

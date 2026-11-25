@@ -1059,3 +1059,10 @@ Migration 041 adds `runs.harness_cli_version` (TEXT NULL, forward only, no backf
   changes: the schemas describe API 2.15/2.16 bodies as served, and
   `apps/api/test/run-estimate-contract.test.ts` validates real route output against them.
 - Cockpit vendors this directory pinned by SHA. The accuracy report has no schema in v1.
+
+## qcq-04a execution attempts (2026-11-25, SHIPPED)
+
+- Migration 058 adds `execution_attempts` and `attempt_requirements`, and rebuilds `resource_claims` with `attempt_id NOT NULL` (claims are immutable and never deleted) and `wait_conditions` with `attempt_id`. Any code or test that inserts a claim must name its attempt; the wake writes dispatch, attempt, then claim in one transaction.
+- Every provider entry goes through `enterProvider` (ownership-only in 04a) at the three credentialed boundaries; `apps/api/test/qcq-04a-allowlist.test.ts` pins the call inventory with the type checker. A new adapter call site fails that test until it is guarded and listed.
+- API 2.19: `attempts` on `GET /api/tasks/:id` and the task wait read; `resourceClaim` keeps its K4b value. `scheduler_events` gains `attempt.entered`, `attempt.dropped`, `attempt.settled`.
+- `scheduling.accounts` parses with `enforce: false` only; `ACCOUNT_ENFORCEMENT_READY` is false until qcq-04d. Where 04a differs from the review packet, packet section 8.1 says why (notably: a pre-upgrade single task with extra open runs keeps them as owners on later slots instead of aborting the upgrade).

@@ -67,6 +67,7 @@ import type { Registry } from "./registry.js";
 import { persistRoutingDecision, routeTask } from "./router.js";
 import { decideContextContinuation } from "./context-continuation.js";
 import { runSessionRefStored } from "./usage.js";
+import { AttemptStore, announceReleased, enterProvider } from "./attempts.js";
 import { conformanceBlock } from "./runtime-lifecycle.js";
 import type { TaskEventBus } from "./sse.js";
 import type { TaskStore } from "./tasks.js";
@@ -640,6 +641,27 @@ export class Orchestrator {
     assistantId: AssistantId,
     options: StartOptions = {},
   ): Promise<{ runId: string }> {
+    // qcq-04a: a legacy start that fails before its provider-entry commit leaves its attempt `held`;
+    // the catch drops it `never_entered` (packet 2.4.1). One whose provider call threw after the
+    // commit, with no run row, settles `stream_closed_unverified` (K4b: no run row, no owner).
+    const legacy: { attemptId?: string } = {};
+    try {
+      return await this.startTaskInner(taskId, assistantId, options, legacy);
+    } catch (error) {
+      if (legacy.attemptId) {
+        try { announceReleased(this.db, this.db.transaction(() => new AttemptStore(this.db).startFailed(legacy.attemptId!, `start failed: ${message(error)}`))()); }
+        catch { /* the start's own error is the one to report */ }
+      }
+      throw error;
+    }
+  }
+
+  private async startTaskInner(
+    taskId: string,
+    assistantId: AssistantId,
+    options: StartOptions,
+    legacy: { attemptId?: string },
+  ): Promise<{ runId: string }> {
     if (!options.parallel && this.isActive(taskId)) {
       throw new Error(`Task ${taskId} already has an active run`);
     }
@@ -688,6 +710,9 @@ export class Orchestrator {
     let row = this.tasks.get(taskId);
     if (!row) throw new Error(`Unknown task ${taskId}`);
     let envelope = this.tasks.envelope(taskId);
+    // qcq-04a compat attempt (packet 2.12): a legacy direct start or candidate owns a `held` attempt
+    // before any preparation, so a cancel during the worktree await drops it and the commit refuses.
+    if (!options.dispatchId && !this.harnessRouting(taskId, options)) legacy.attemptId = this.openLegacyAttempt(taskId, assistantId, options);
 
     // Repo tasks run in an isolated worktree on branch task/<id>. A handoff
     // reuses the existing tree so the next assistant inherits the work; a
@@ -881,6 +906,10 @@ export class Orchestrator {
       permissionPolicy: { mode: this.config.policy.approvalMode },
       env: { redactionRules: DEFAULT_REDACTION_RULES, maxRuntimeMs: this.maxRuntimeMs },
     };
+    // qcq-04a (packet 2.4.1): the provider-entry commit, after the run spec is built; the adapter call
+    // is the next statement.
+    const entry = enterProvider(this.db, { attemptId: legacy.attemptId, path: "legacy" });
+    if (!entry.ok) throw new Error(`Provider entry ${entry.kind === "not_owner" ? "not owned" : "refused"}: ${entry.reason}`);
     const handle = priorRef
       ? await adapter.resume(priorRef, runSpec)
       : await adapter.start(runSpec);
@@ -910,6 +939,7 @@ export class Orchestrator {
         launchModel?.source ?? null,
         HARNESS_MAJOR,
       );
+    new AttemptStore(this.db).bindSession(entry.attempt.attempt_id, handle.runId, true);
     if (handle.providerSessionRef) runSessionRefStored(this.db, handle.runId);
 
     if (options.dispatchId && this.tasks.get(taskId)?.state === "ROUTING") this.tasks.transition(taskId, "RUNNING");
@@ -928,6 +958,28 @@ export class Orchestrator {
     void this.consume(run);
     this.recordEstimate(handle.runId, taskId, assistantId);
     return { runId: handle.runId };
+  }
+
+  /**
+   * qcq-04a: the compat attempt of a legacy direct start (slot 0) or candidate (the next slot), `held`
+   * with no requirement. A slot-0 predecessor whose run already ended is settled first, by the same
+   * ownership test K4b releases by. The scheduler's own check runs first, so a task it owns fails
+   * with its usual reason rather than on the slot index.
+   */
+  private openLegacyAttempt(taskId: string, assistantId: string, options: StartOptions): string {
+    if (!options.parallel && (this.tasks.get(taskId)?.state === "WAITING_RESOURCE" || this.db.prepare("SELECT 1 FROM dispatches WHERE task_id = ? AND phase IN ('reserved','start_attempted')").get(taskId))) {
+      throw new Error("Scheduler owns this task; use generation-aware run-now");
+    }
+    const attempts = new AttemptStore(this.db);
+    const runAs = this.tasks.get(taskId)?.run_as === "agent" ? "agent" as const : "plane" as const;
+    let released: ReturnType<AttemptStore["settleIdle"]> = [];
+    const attempt = this.db.transaction(() => {
+      if (!options.parallel) released = attempts.settleIdle(taskId, "runtime", "legacy start: no execution owner");
+      return attempts.createHeld({ taskId, kind: options.parallel ? "candidate" : "direct", path: "legacy",
+        slot: options.parallel ? attempts.nextCandidateSlot(taskId) : 0, runAs, assistantId, reason: "compat: legacy start" });
+    })();
+    announceReleased(this.db, released);
+    return attempt.attempt_id;
   }
 
   /**
@@ -1013,10 +1065,15 @@ export class Orchestrator {
       return result;
     }
     const adapter = this.registry.adapter(request.assistantId);
+    // qcq-04a (packet 2.4.1): the provider-entry commit; `beforeStart` already marked the dispatch
+    // `start_attempted`. The adapter call is the next statement.
+    const entry = enterProvider(this.db, { dispatchId: request.executionRequestId, path: 'legacy' });
+    if (!entry.ok) throw new Error(`Provider entry ${entry.kind === 'not_owner' ? 'not owned' : 'refused'}: ${entry.reason}`);
     const handle = await adapter.start(request.runSpec);
     if (this.tasks.get(taskId)?.state === 'CANCELLED') await adapter.cancel(handle);
     this.db.prepare(`INSERT INTO runs(id,task_id,assistant_id,provider_session_ref,state,started_at,dispatch_id,model_requested)
       VALUES(?,?,?,?,'ACTIVE',?,?,?)`).run(handle.runId, taskId, request.assistantId, handle.providerSessionRef ?? null, new Date().toISOString(), request.executionRequestId, request.model?.id ?? null);
+    new AttemptStore(this.db).bindSession(entry.attempt.attempt_id, handle.runId, true);
     if (handle.providerSessionRef) runSessionRefStored(this.db, handle.runId);
     if (this.tasks.get(taskId)?.state === 'ROUTING') this.tasks.transition(taskId, 'RUNNING');
     const run: ActiveRun = { runId: handle.runId, taskId, assistantId: request.assistantId, adapter, handle,

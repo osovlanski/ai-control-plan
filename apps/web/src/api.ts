@@ -188,6 +188,22 @@ export interface ResourceWaitStatus {
 }
 
 /** A granted K4b slot claim. */
+/** qcq-04a (API 2.19): one open execution attempt and the claims it owns. */
+export interface AttemptStatus {
+  attemptId: string;
+  kind: "dispatch" | "direct" | "candidate";
+  executionPath: "harness" | "legacy";
+  slot: number;
+  state: "queued" | "held" | "starting" | "live" | "stopping" | "ambiguous" | "settled" | "dropped";
+  assistantId: string | null;
+  dispatchId: string | null;
+  sessionId: string | null;
+  account: { key: string | null; source: string };
+  enteredAt: string | null;
+  requirements: { resource: string; units: number }[];
+  claims: { resource: string; units: number; dispatchId: string | null; claimedAt: string }[];
+}
+
 export interface ResourceClaim {
   claim_id: number;
   resource: string;
@@ -270,6 +286,8 @@ export interface TaskDetail {
   /** K4b: why this task waits on a pool, and the slot it holds. */
   resourceWait?: ResourceWaitStatus | null;
   resourceClaim?: ResourceClaim | null;
+  /** qcq-04a (API 2.19): the task's open execution attempts. */
+  attempts?: AttemptStatus[];
   schedulerEnabled?: boolean;
   id: string;
   goal: string;
