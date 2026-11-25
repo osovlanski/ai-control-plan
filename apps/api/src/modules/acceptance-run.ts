@@ -208,8 +208,46 @@ function lockDown(snapshot: string, writable: readonly string[], writableFiles: 
   }
 }
 
+function lstatOrUndefined(p: string) { try { return lstatSync(p); } catch { return undefined; } }
 function lexists(p: string): boolean {
   try { lstatSync(p); return true; } catch { return false; }
+}
+
+/**
+ * `node_modules` directories a workspace install must be able to create: the root one plus one per
+ * workspace package. Derived from the snapshot's own `pnpm-workspace.yaml` (a new package must not
+ * need a backlog edit before acceptance can install it). Only real directories that hold a tracked
+ * `package.json` and sit on a path with no symlink qualify, and only the `node_modules` below them
+ * opens, never the package itself. No workspace file: nothing derived.
+ */
+export function workspaceNodeModules(snapshot: string): string[] {
+  let globs: string[];
+  try {
+    const doc = parseYaml(readFileSync(join(snapshot, "pnpm-workspace.yaml"), "utf8")) as { packages?: unknown } | null;
+    if (!doc || !Array.isArray(doc.packages)) return [];
+    globs = doc.packages.filter((g): g is string => typeof g === "string");
+  } catch {
+    return [];
+  }
+  const re = (g: string) => new RegExp(`^${g.replace(/^\.\//, "").replace(/\/+$/, "").split("/").map((seg) => seg === "**" ? ".*" : seg.replace(/[.+^${}()|[\]\\?]/g, "\\$&").replace(/\*/g, "[^/]+")).join("/")}$`);
+  const include = globs.filter((g) => !g.startsWith("!") && !g.includes("..") && !isAbsolute(g)).map(re);
+  const exclude = globs.filter((g) => g.startsWith("!") && !g.includes("..")).map((g) => re(g.slice(1)));
+  const found: string[] = [];
+  const walk = (rel: string, depth: number): void => {
+    if (depth > 4) return;
+    let names: string[];
+    try { names = readdirSync(join(snapshot, rel)); } catch { return; }
+    for (const name of names) {
+      if (name === "node_modules" || name === ".git" || name === WRITABLE_FILES_DIR) continue;
+      const r = rel ? `${rel}/${name}` : name;
+      const st = lstatOrUndefined(join(snapshot, r));
+      if (!st?.isDirectory()) continue; // symlinks are neither followed nor matched
+      if (include.some((x) => x.test(r)) && !exclude.some((x) => x.test(r)) && lexists(join(snapshot, r, "package.json"))) found.push(r);
+      walk(r, depth + 1);
+    }
+  };
+  walk("", 0);
+  return ["node_modules", ...found.sort().map((r) => `${r}/node_modules`)];
 }
 
 /** Every existing component of each relative path must be a real directory (or the leaf, a real file or dir), never a symlink. */
@@ -570,7 +608,13 @@ export class AcceptanceRunner {
       mkdirSync(this.d.snapshotsRoot, { recursive: true });
       await git(task.repo_path!, ["worktree", "add", "--detach", snapshot, sha!]);
       await this.d.prefetch?.(snapshot);
-      lockDown(snapshot, spec.writable, spec.writableFiles);
+      const derived = workspaceNodeModules(snapshot).filter((w) => !spec.writable.includes(w) && !lstatOrUndefined(join(snapshot, w))?.isSymbolicLink());
+      const writable = [...spec.writable, ...derived];
+      if (derived.length > 0) {
+        this.db.prepare("UPDATE acceptance_runs SET writable_json = ? WHERE id = ?")
+          .run(JSON.stringify([...writable, ...spec.writableFiles.map((file) => ({ file }))]), runId);
+      }
+      lockDown(snapshot, writable, spec.writableFiles);
       const paths = await trackedPaths(snapshot);
       const before = hashTrackedTree(snapshot, paths);
       this.db.prepare("UPDATE acceptance_runs SET state = 'running', tree_before = ? WHERE id = ?").run(before.hash, runId);

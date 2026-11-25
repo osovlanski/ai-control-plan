@@ -217,6 +217,26 @@ describe("G10 acceptance outcomes", () => {
     expect(out.started && out.run.state).toBe("failed");
   });
 
+  it("opens node_modules for every workspace package, including one the backlog never named", async () => {
+    const w = setup(cmds(
+      ["touch node_modules/a apps/web/node_modules/a packages/newpkg/node_modules/a", true],
+    ), {
+      worktreeChange: (wt) => {
+        writeFileSync(join(wt, "src.txt"), "feature\n");
+        writeFileSync(join(wt, "pnpm-workspace.yaml"), "packages:\n  - apps/*\n  - packages/*\n  - '!packages/notpkg'\n");
+        for (const d of ["apps/web", "packages/newpkg", "packages/notpkg"]) {
+          mkdirSync(join(wt, d), { recursive: true });
+          writeFileSync(join(wt, d, "package.json"), "{}\n");
+        }
+      },
+    });
+    const out = await runner(w).accept(w.attemptId);
+    expect(out.started && out.run.state).toBe("passed");
+    const rec = JSON.parse((w.db.prepare("SELECT writable_json FROM acceptance_runs").get() as { writable_json: string }).writable_json) as unknown[];
+    expect(rec).toEqual(expect.arrayContaining(["node_modules", "apps/web/node_modules", "packages/newpkg/node_modules"]));
+    expect(rec).not.toContain("packages/notpkg/node_modules");
+  });
+
   it("a tracked symlink on a declared writable path is refused, never followed", async () => {
     const outside = mkdtempSync(join(tmpdir(), "acc-outside-"));
     chmodSync(outside, 0o755);
