@@ -94,6 +94,24 @@ describe('requested model selector', () => {
     expect(run.model_resolved === null || typeof run.model_resolved === 'string').toBe(true);
   });
 
+  it.each([
+    ['records the CLI version run.started reported', 'ship it [FAKE:CLI_VERSION:2.1.238]', '2.1.238'],
+    ['leaves the CLI version NULL when run.started reports none', 'ship it', null],
+  ] as const)('legacy orchestrator path %s on runs.harness_cli_version (K13 A2)', async (_label, goal, expected) => {
+    await boot();
+    expect(config.execution.harnessModes.single).toBe(false);
+    const created = await built.app.inject({ method: 'POST', url: '/api/tasks', headers: headers(), payload: { goal, overrides: { assistantId: A } } });
+    expect(created.statusCode).toBe(201);
+    const taskId = (created.json() as { taskId: string }).taskId;
+    const started = await built.app.inject({ method: 'POST', url: `/api/tasks/${taskId}/start`, headers: headers(), payload: {} });
+    expect(started.statusCode).toBe(200);
+    await built.orchestrator.waitForSettled(taskId);
+    const dispatch = db.prepare('SELECT COUNT(*) AS n FROM execution_requests WHERE task_id = ?').get(taskId) as { n: number } | undefined;
+    expect(dispatch?.n ?? 0).toBe(0);
+    const run = db.prepare('SELECT harness_cli_version FROM runs WHERE task_id = ?').get(taskId) as { harness_cli_version: string | null };
+    expect(run.harness_cli_version).toBe(expected);
+  });
+
   it('rejects overrides other than assistantId and model', async () => {
     await boot();
     const res = await built.app.inject({
