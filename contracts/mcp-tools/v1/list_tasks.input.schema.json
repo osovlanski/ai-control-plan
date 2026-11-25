@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-plane.local/contracts/mcp-tools/v1/list_tasks.input.schema.json",
+  "title": "ListTasksInput",
+  "description": "list_tasks arguments. Returns only tasks whose repository is an exposed alias.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [],
+  "properties": {
+    "limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 50,
+      "default": 20
+    },
+    "stage": {
+      "enum": [
+        "done",
+        "needs-you",
+        "verifying",
+        "working",
+        "queued"
+      ],
+      "description": "Only tasks at this stage."
+    },
+    "repo": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$",
+      "description": "A repository alias from the MCP service's exposed-repo map. Never a filesystem path."
+    }
+  }
+}

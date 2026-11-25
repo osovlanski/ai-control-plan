@@ -1,0 +1,23 @@
+{
+  "name": "@agent-plane/oidc",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Shared OIDC relying-party client and exact (iss, sub) owner pin (D-A), used by the Web remote login and the MCP OAuth server",
+  "exports": {
+    ".": "./src/index.ts",
+    "./testing": "./src/testing.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "jose": "6.2.9"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.0"
+  }
+}

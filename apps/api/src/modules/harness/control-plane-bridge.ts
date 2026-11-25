@@ -61,6 +61,11 @@ export interface BridgeStartInput {
 }
 
 const APPROVAL_STRICTNESS: Readonly<Record<ApprovalMode, number>> = { "auto-approve": 0, "prompt-on-escalation": 1, "read-only": 2 };
+
+/** The stricter of two modes: a saved request replayed under a tightened baseline never runs looser. */
+export function stricterApproval(saved: ApprovalMode, current: ApprovalMode): ApprovalMode {
+  return APPROVAL_STRICTNESS[current] > APPROVAL_STRICTNESS[saved] ? current : saved;
+}
 const SPEC_APPROVAL: Readonly<Record<AgentSpec["policy"]["permission"], ApprovalMode>> = {
   auto: "auto-approve", "prompt-on-escalation": "prompt-on-escalation", "read-only": "read-only",
 };

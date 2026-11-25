@@ -134,6 +134,44 @@ describe("stage on the task list and the SSE state frame", () => {
     expect(seen.indexOf("needs-you/awaiting-approval")).toBeLessThan(seen.lastIndexOf("working/live-run"));
   });
 
+  it("shows needs-you while a legacy run awaits approval, then leaves it once answered", async () => {
+    const { built: b, headers } = await boot(false);
+    const taskId = b.tasks.create({ goal: "legacy sign-off [FAKE:APPROVAL]" }).taskId;
+    const seen = stagesOn(b, taskId);
+    expect((await b.app.inject({ method: "POST", url: `/api/tasks/${taskId}/start`, headers, payload: { assistantId: "fake-a" } })).statusCode).toBe(200);
+    const row = await until(() => listStage(b, headers, taskId), (t) => key(t.stage as TaskStage) === "needs-you/awaiting-approval");
+    expect(row.state).toBe("RUNNING");
+    // The legacy path writes no approval row and no session_state: the stage comes from the run's newest event.
+    const run = db!.prepare("SELECT id, execution_request_id AS er FROM runs WHERE task_id = ?").get(taskId) as { id: string; er: string | null };
+    expect(run.er).toBeNull();
+    expect(db!.prepare("SELECT COUNT(*) AS n FROM approvals WHERE session_id = ?").get(run.id)).toEqual({ n: 0 });
+    await until(() => seen.at(-1), (s) => s === "needs-you/awaiting-approval"); // announced on the bus, not only on a re-read
+    const requestId = (JSON.parse((db!.prepare("SELECT payload FROM events WHERE run_id = ? AND type = 'approval.requested'").get(run.id) as { payload: string }).payload) as { requestId: string }).requestId;
+    const done = reaches(b, taskId, ["COMPLETED", "FAILED"]);
+    await b.orchestrator.respondApproval(taskId, requestId, true);
+    expect(await done).toBe("COMPLETED");
+    await until(() => seen.at(-1), (s) => s === "done/terminal");
+    const approvalAt = seen.indexOf("needs-you/awaiting-approval");
+    expect(seen.slice(approvalAt + 1)).toContain("working/live-run"); // left needs-you once answered, before settling
+    expect((await listStage(b, headers, taskId)).stage).toEqual({ value: "done", rule: "terminal" });
+  });
+
+  it("keeps a live legacy run working when approval.requested is not its newest event", async () => {
+    const { built: b, headers } = await boot(false);
+    const taskId = b.tasks.create({ goal: "legacy plain" }).taskId;
+    const now = new Date().toISOString();
+    db!.prepare("UPDATE tasks SET state = 'RUNNING' WHERE id = ?").run(taskId);
+    db!.prepare("INSERT INTO runs (id, task_id, assistant_id, state, started_at) VALUES ('run_l1', ?, 'fake-a', 'ACTIVE', ?)").run(taskId, now);
+    const ev = db!.prepare("INSERT INTO events (run_id, seq, ts, type, summary) VALUES ('run_l1', ?, ?, ?, 'x')");
+    ev.run(1, now, "approval.requested");
+    ev.run(2, now, "tool.started");
+    expect((await listStage(b, headers, taskId)).stage).toEqual({ value: "working", rule: "live-run" });
+    ev.run(3, now, "approval.requested");
+    expect((await listStage(b, headers, taskId)).stage).toEqual({ value: "needs-you", rule: "awaiting-approval" });
+    db!.prepare("UPDATE runs SET state = 'ENDED_OK' WHERE id = 'run_l1'").run(); // an ended run is never awaiting
+    expect((await listStage(b, headers, taskId)).stage).toEqual({ value: "verifying", rule: "run-ended-unsettled" });
+  });
+
   it("queues a task behind a wait condition", async () => {
     const { built: b, headers } = await boot(false);
     const res = await b.app.inject({

@@ -34,7 +34,7 @@ import {
 import { migrate, openDb, type Db } from "../src/db/index.js";
 import { listDecisions } from "../src/modules/decision.js";
 import { TaskStore } from "../src/modules/tasks.js";
-import { TelemetryService, modelCohorts, taskKindOf } from "../src/modules/telemetry.js";
+import { TelemetryService, cohortId, modelCohorts, taskKindOf } from "../src/modules/telemetry.js";
 import { CARRIERS } from "./helpers/decision-eval.js";
 
 const CORPUS = readFileSync(new URL("../../../plans/k20-corpus-draft.jsonl", import.meta.url), "utf8")
@@ -102,7 +102,7 @@ describe("K20 §6.2 — cohort freeze across migration 031", () => {
     ).run(`run_${taskId}`, taskId, at, "2026-10-01T00:01:00.000Z");
   const runsIn = (db: Db, kind: TaskKind) => ({
     scores: new TelemetryService(db, 3650).scores(kind).get("a1")?.runs ?? 0,
-    cohort: modelCohorts(db, { taskKind: kind, harnessMajor: "1", windowDays: 3650, now: () => new Date("2026-10-03T00:00:00.000Z") }).get("fake:m1")?.reliabilityRuns ?? 0,
+    cohort: modelCohorts(db, { taskKind: kind, harnessMajor: "1", windowDays: 3650, now: () => new Date("2026-10-03T00:00:00.000Z") }).get(cohortId("a1", "fake:m1", "unknown"))?.reliabilityRuns ?? 0,
   });
 
   // Goals on which v2 disagrees with v1: if any read used v2, these would move.
@@ -129,7 +129,7 @@ describe("K20 §6.2 — cohort freeze across migration 031", () => {
       expect(OLD.map((goal) => classifyTaskV2({ goal }).kind !== classifyTaskV1(goal))).toEqual([true, true, true, true, false]);
       const expected = (kind: TaskKind) => old.filter((o) => classifyTaskV1(o.goal) === kind).length;
 
-      expect(migrate(db)).toEqual(["031_task_classifier.sql", "032_registry_federation.sql", "033_composition.sql", "034_composition_attempts.sql", "035_run_model_requested_source.sql", "036_usage_run_link.sql", "037_asset_usage.sql", "038_asset_shadow_log.sql", "039_memory_proposals.sql", "040_memory_shadow.sql", "041_run_harness_cli_version.sql", "042_task_run_as.sql", "043_autopilot_core.sql", "044_acceptance_runs.sql", "045_autopilot_publications.sql", "046_autopilot_reservations.sql"]);
+      expect(migrate(db)).toEqual(["031_task_classifier.sql", "032_registry_federation.sql", "033_composition.sql", "034_composition_attempts.sql", "035_run_model_requested_source.sql", "036_usage_run_link.sql", "037_asset_usage.sql", "038_asset_shadow_log.sql", "039_memory_proposals.sql", "040_memory_shadow.sql", "041_run_harness_cli_version.sql", "042_task_run_as.sql", "043_autopilot_core.sql", "044_acceptance_runs.sql", "045_autopilot_publications.sql", "046_autopilot_reservations.sql", "047_autopilot_requeue.sql", "048_autopilot_heartbeats.sql", "049_autopilot_restores.sql", "050_autopilot_external_resolutions.sql", "051_runtime_lifecycle.sql", "052_task_links.sql", "053_autopilot_work_base.sql", "054_idempotency_records.sql", "055_remote_auth.sql", "056_run_estimates.sql", "057_run_effort.sql", "058_execution_attempts.sql"]);
       for (const { id } of old) {
         expect(db.prepare("SELECT task_kind, classifier_version FROM tasks WHERE id = ?").get(id)).toEqual({ task_kind: null, classifier_version: null });
       }

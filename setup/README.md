@@ -88,7 +88,7 @@ Design: plan §C.2.5 and §C.2.6. Host drive: `docs/autopilot/p0-3-host-drive.md
   it cannot, the check refuses: nothing runs whose close the timer does not know.
 - **Close timer**: `aos-close.timer` fires every minute in `aos-agent`'s user manager. Within 15
   minutes after a listed close it runs `systemctl --user stop 'aos-run-*.scope'` and fails the
-  unit (`systemctl --user -M aos-agent@ status aos-close.service`) if the slice is not empty
+  unit (`sudo -u aos-agent env XDG_RUNTIME_DIR=/run/user/1002 systemctl --user status aos-close.service`) if the slice is not empty
   after 10 s. It also stops a manual agent task still running at that moment.
 
 ## The operator secret (itay only)

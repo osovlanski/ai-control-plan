@@ -1,5 +1,5 @@
 import type { ExecutionResult, TaskKind } from "@agent-plane/core";
-import { CLASSIFIER_VERSION, classifyTaskV1, modelKey, reliabilityClass } from "@agent-plane/core";
+import { CLASSIFIER_VERSION, EFFORT_UNKNOWN, classifyTaskV1, modelKey, reliabilityClass } from "@agent-plane/core";
 import type { Db } from "../db/index.js";
 import { effectiveStateSql, effectiveUsageJoin, effectiveUsageSql } from "./harness/state-vocab.js";
 
@@ -154,8 +154,12 @@ export class TelemetryService {
 }
 
 /**
- * One K13 telemetry cohort: runs with the SAME resolved model, task kind and
- * harness major version, inside the rolling window (§4.4.3). Runs whose model
+ * One K13 telemetry cohort: runs through the SAME assistant, with the SAME
+ * resolved model, provider-reported effort, task kind and harness major
+ * version, inside the rolling window (§4.4.3; assistant and effort added by
+ * P1-5). A run whose provider reported no effort is in the `unknown`-effort
+ * cohort, which is its own value: it never joins, and is never joined by, an
+ * effort-specific cohort. Runs whose model
  * the provider never reported (`model_resolved` NULL) and runs recorded before
  * the harness major was stamped never join one — an unknown model is not a
  * model, and a cohort that silently absorbed them would be measuring something
@@ -164,6 +168,10 @@ export class TelemetryService {
 export interface ModelCohort {
   /** `provider:modelId` — the identity every evidence row joins on. */
   resolvedModelKey: string;
+  /** P1-5: the assistant the runs went through. */
+  assistantId: string;
+  /** P1-5: `runs.effort_reported`, or `unknown` (`EFFORT_UNKNOWN`) for runs that reported none. */
+  effort: string;
   taskKind: string;
   harnessMajor: string;
   windowDays: number;
@@ -193,7 +201,17 @@ export interface ModelCohort {
 }
 
 /**
- * Rolling per-resolved-model cohorts for K13. Deliberately a second read over
+ * The key {@link modelCohorts} files a cohort under. Assistant and effort are
+ * part of it, so Claude `high` and Codex `high` (or two assistants serving one
+ * model) can never share a cohort.
+ */
+export function cohortId(assistantId: string, resolvedModelKey: string, effort: string): string {
+  return JSON.stringify([assistantId, resolvedModelKey, effort]);
+}
+
+/**
+ * Rolling per-(assistant, resolved model, effort) cohorts for K13, keyed by
+ * {@link cohortId}. Deliberately a second read over
  * the same tables the assistant-level scores use, sharing `reliabilityClass`
  * (I-M4) so a model cohort and an assistant score can never disagree about what
  * a session said.
@@ -208,7 +226,8 @@ export function modelCohorts(
 
   const rows = db
     .prepare(
-      `SELECT r.id, r.model_resolved AS model_resolved, a.provider AS provider,
+      `SELECT r.id, r.assistant_id AS assistant_id, r.model_resolved AS model_resolved, a.provider AS provider,
+         r.effort_reported AS effort_reported,
          ${effectiveStateSql("r")} AS state,
          ${effectiveUsageSql("r")} AS usage,
          er.result AS result,
@@ -222,8 +241,10 @@ export function modelCohorts(
     )
     .all(since, opts.harnessMajor) as Array<{
     id: string;
+    assistant_id: string;
     model_resolved: string;
     provider: string;
+    effort_reported: string | null;
     state: string;
     usage: string | null;
     result: string | null;
@@ -244,11 +265,13 @@ export function modelCohorts(
   const byModel = new Map<string, Acc>();
   for (const row of rows) {
     if (taskKindOf(row) !== opts.taskKind) continue;
-    const key = modelKey(row.provider, row.model_resolved);
+    const resolvedModelKey = modelKey(row.provider, row.model_resolved);
+    const effort = row.effort_reported ?? EFFORT_UNKNOWN;
+    const key = cohortId(row.assistant_id, resolvedModelKey, effort);
     let acc = byModel.get(key);
     if (!acc) {
       acc = {
-        resolvedModelKey: key, taskKind: opts.taskKind, harnessMajor: opts.harnessMajor, windowDays,
+        resolvedModelKey, assistantId: row.assistant_id, effort, taskKind: opts.taskKind, harnessMajor: opts.harnessMajor, windowDays,
         reliabilityRuns: 0, successRate: 0, outputRateRuns: 0, completedUsageRuns: 0,
         successes: 0, rates: [], inputs: [], outputs: [], runIds: [],
       };
@@ -289,7 +312,8 @@ export function modelCohorts(
   for (const [key, acc] of byModel) {
     const tests = testAndVerificationRates(db, acc.runIds);
     out.set(key, {
-      resolvedModelKey: acc.resolvedModelKey, taskKind: acc.taskKind, harnessMajor: acc.harnessMajor,
+      resolvedModelKey: acc.resolvedModelKey, assistantId: acc.assistantId, effort: acc.effort,
+      taskKind: acc.taskKind, harnessMajor: acc.harnessMajor,
       windowDays: acc.windowDays,
       reliabilityRuns: acc.reliabilityRuns,
       successRate: acc.reliabilityRuns > 0 ? acc.successes / acc.reliabilityRuns : 0,

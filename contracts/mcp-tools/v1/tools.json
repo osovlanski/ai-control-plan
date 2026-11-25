@@ -1,0 +1,62 @@
+{
+  "contract": "mcp-tools/v1",
+  "description": "Tool definitions the MCP service serves on tools/list. inputSchema/outputSchema name files in this directory; the service inlines them verbatim (minus $id/$schema if a client needs that). Normative text: docs/adr/mcp-connector.md.",
+  "tools": [
+    {
+      "name": "list_tasks",
+      "title": "List tasks",
+      "requiredScope": "aos.tasks.read",
+      "description": "List recent Agent OS tasks in the exposed repositories, newest first, with each task's stage and private Web link.",
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "inputSchema": "list_tasks.input.schema.json",
+      "outputSchema": "list_tasks.output.schema.json"
+    },
+    {
+      "name": "get_task",
+      "title": "Get task",
+      "requiredScope": "aos.tasks.read",
+      "description": "Read one task: state, stage, latest run, verification counts and pending approval count. Approvals are answered on the Web link.",
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "inputSchema": "get_task.input.schema.json",
+      "outputSchema": "get_task.output.schema.json"
+    },
+    {
+      "name": "create_task",
+      "title": "Create task (does not start)",
+      "requiredScope": "aos.tasks.create",
+      "description": "Create a task in an exposed repository and return its id, Web link and proposed route. It does not start anything. Generate one idempotencyKey per intended task and reuse it on every retry.",
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "inputSchema": "create_task.input.schema.json",
+      "outputSchema": "create_task.output.schema.json"
+    },
+    {
+      "name": "start_task",
+      "title": "Start task",
+      "requiredScope": "aos.tasks.start",
+      "description": "Start a CREATED task on the host, once. Pass confirm with the assistantId and compositionDigest create_task proposed. Returns promptly; follow progress with get_task or the Web link.",
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
+      },
+      "inputSchema": "start_task.input.schema.json",
+      "outputSchema": "start_task.output.schema.json"
+    }
+  ]
+}

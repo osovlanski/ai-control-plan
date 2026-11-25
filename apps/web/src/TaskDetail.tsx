@@ -1,10 +1,13 @@
 import { Restart, namesRestartRoute, useRestartOffered } from "./Restart.js";
 import { WaitingSummary } from "./WaitingSummary.js";
+import { TaskRouting } from "./TaskRouting.js";
+import { TaskEstimate } from "./TaskEstimate.js";
+import { TaskProvenance } from "./TaskProvenance.js";
 import { useEffect, useRef, useState, type ComponentProps } from "react";
+import { answerFailure, eventKey, fromStream, liveSessions, mergeEvents, pendingApproval, type PendingApproval, type StreamEvent } from "./task-reconcile.js";
 import {
   api,
   type Comparison,
-  type RoutingExplanation,
   type SessionDetail,
   type SessionSummary,
   type TaskDetail as Detail,
@@ -14,12 +17,7 @@ import { CompositionPanel } from "./Composition.js";
 import { VerificationChecks, VerificationVerdict } from "./VerificationChecks.js";
 import { Button, Card, StateBadge, tokens } from "./ui.jsx";
 
-type Tab = "activity" | "usage" | "routing" | "composition" | "progress" | "handoff" | "compare" | "sessions";
-
-interface PendingApproval {
-  requestId: string;
-  summary: string;
-}
+type Tab = "activity" | "usage" | "routing" | "provenance" | "composition" | "progress" | "handoff" | "compare" | "sessions";
 
 interface Notice {
   level: "info" | "warn";
@@ -46,7 +44,11 @@ export function WorkspaceCompositionPanel(props: ComponentProps<typeof Compositi
   return <CompositionPanel {...props} />;
 }
 
-export function openTaskEventStream(taskId: string, onMessage: (message: MessageEvent<string>) => void): EventSource {
+export function openTaskEventStream(
+  taskId: string,
+  onMessage: (message: MessageEvent<string>) => void,
+  handlers: { onOpen?: () => void; onError?: (source: EventSource) => void } = {},
+): EventSource {
   const source = new EventSource(`/api/tasks/${taskId}/events/stream`, { withCredentials: true });
   let probed = false;
   source.onerror = () => {
@@ -54,10 +56,15 @@ export function openTaskEventStream(taskId: string, onMessage: (message: Message
       probed = true;
       void api.workspace().catch(() => undefined);
     }
+    handlers.onError?.(source);
   };
+  if (handlers.onOpen) source.onopen = handlers.onOpen;
   source.onmessage = onMessage;
   return source;
 }
+
+/** Reopen backoff after the browser gives up on a stream (it retries a CONNECTING one itself). */
+const REOPEN_MS = [1_000, 2_000, 5_000, 10_000, 30_000];
 
 export function TaskDetail({ taskId, onBack }: { taskId: string; onBack: () => void }) {
   const [eventError, setEventError] = useState<string | null>(null);
@@ -67,7 +74,16 @@ export function TaskDetail({ taskId, onBack }: { taskId: string; onBack: () => v
   const [events, setEvents] = useState<TaskEvent[]>([]);
   const [state, setState] = useState<string>("");
   const [approval, setApproval] = useState<PendingApproval | null>(null);
-  const [routing, setRouting] = useState<Array<{ chosen: string | null; at: string; explanation: RoutingExplanation }>>([]);
+  // Approve-once: the request in flight from this tab, and the requests this tab has answered.
+  // Both are refs so a double tap inside one render frame still sees the first press.
+  const [answering, setAnswering] = useState<string | null>(null);
+  const [approvalNote, setApprovalNote] = useState<string | null>(null);
+  const inFlight = useRef(new Set<string>());
+  const answeredHere = useRef(new Set<string>());
+  // Bumped by every stream approval frame, so a durable read that started earlier cannot clear it.
+  const streamApprovals = useRef(0);
+  const resyncs = useRef(0);
+  const [routing, setRouting] = useState<Awaited<ReturnType<typeof api.routing>>>([]);
   const [notices, setNotices] = useState<Notice[]>([]);
   const [handoffs, setHandoffs] = useState<
     Array<{ id: string; trigger: string; at: string; from_assistant: string | null; to_assistant: string | null }>
@@ -89,7 +105,38 @@ export function TaskDetail({ taskId, onBack }: { taskId: string; onBack: () => v
   }} />;
   const timelineRef = useRef<HTMLDivElement>(null);
 
+  /**
+   * Durable reconcile (B1): `/events` merged by `(run, seq)`, and the pending approval replaced by
+   * what the sessions' approval rows (or, for legacy runs, the events) say now. The newest call
+   * wins; an older read that lands late is dropped.
+   */
+  const reconcile = () => {
+    const generation = ++resyncs.current;
+    const approvalsSeen = streamApprovals.current;
+    void Promise.allSettled([api.events(taskId), api.sessions(taskId), api.task(taskId)]).then(async ([rows, runs, task]) => {
+      const sessionList = runs.status === "fulfilled" ? runs.value : [];
+      const details = await Promise.allSettled(liveSessions(sessionList).map(s => api.session(s.sessionId)));
+      if (generation !== resyncs.current) return;
+      if (rows.status === "fulfilled") {
+        setEventError(null);
+        setEvents(prev => mergeEvents(prev, rows.value));
+      } else setEventError("Mission event read unavailable");
+      if (rows.status !== "fulfilled" || runs.status !== "fulfilled" || task.status !== "fulfilled" || details.some(d => d.status === "rejected")) return;
+      const current = pendingApproval({
+        state: task.value.state,
+        events: rows.value,
+        sessions: sessionList,
+        sessionDetails: details.flatMap(d => (d.status === "fulfilled" ? [d.value] : [])),
+      });
+      const shown = current && !answeredHere.current.has(current.requestId) ? current : null;
+      // A stream approval that arrived while this read was in flight is newer than its answer.
+      if (!shown && approvalsSeen !== streamApprovals.current) return;
+      setApproval(shown);
+    });
+  };
+
   const refresh = () => {
+    reconcile();
     void Promise.allSettled([api.task(taskId), api.routing(taskId), api.handoffs(taskId),
       api.checkpoints(taskId), api.comparison(taskId), api.sessions(taskId)]).then(([task, routes, transfers, points, compared, runs]) => {
       if (task.status === "fulfilled") { setDetail(task.value); setState(task.value.state); setReadError(null); }
@@ -117,15 +164,20 @@ export function TaskDetail({ taskId, onBack }: { taskId: string; onBack: () => v
     setSession(null);
     setSessionActionError(null);
     setSessions([]);
+    setEvents([]);
+    setApproval(null);
+    setApprovalNote(null);
+    inFlight.current.clear();
+    answeredHere.current.clear();
     selectedSessionId.current = null;
-    void api.events(taskId).then(rows => { setEvents(rows); setEventError(null); }).catch(() => setEventError("Mission event read unavailable"));
     refresh();
 
-    // Live tail: SSE carries normalized events and authoritative state changes.
-    const source = openTaskEventStream(taskId, (msg) => {
+    // Live tail: SSE carries normalized events and authoritative state changes. Frames lost while
+    // the phone was locked, the tab hidden or the network gone are recovered from durable reads.
+    const onMessage = (msg: MessageEvent<string>) => {
       const payload = JSON.parse(msg.data) as {
         kind: "event" | "state" | "notice";
-        event?: TaskEvent;
+        event?: StreamEvent;
         state?: { state: string };
         notice?: { level: "info" | "warn"; text: string };
       };
@@ -138,30 +190,94 @@ export function TaskDetail({ taskId, onBack }: { taskId: string; onBack: () => v
         setNotices((prev) => [...prev, { ...payload.notice!, at: new Date().toISOString() }]);
       }
       if (payload.kind === "event" && payload.event) {
-        const event = payload.event;
-        setEvents((prev) => [...prev, event]);
-        if (event.type === "approval.requested") {
-          setApproval({
-            requestId: (event.payload as { requestId: string }).requestId,
-            summary: event.summary,
-          });
+        const event = fromStream(payload.event);
+        if (!event) return;
+        setEvents((prev) => mergeEvents(prev, [event]));
+        const requestId = (event.payload as { requestId?: unknown } | null)?.requestId;
+        if (event.type === "approval.requested" && typeof requestId === "string" && !answeredHere.current.has(requestId)) {
+          streamApprovals.current += 1;
+          setApproval({ requestId, summary: event.summary });
         }
       }
-    });
-    return () => source.close();
+    };
+
+    let source: EventSource | null = null;
+    let disposed = false;
+    let lost = false;
+    let attempt = 0;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const open = () => {
+      clearTimeout(timer);
+      source?.close();
+      source = openTaskEventStream(taskId, onMessage, {
+        onOpen: () => {
+          attempt = 0;
+          // The browser reconnected a dropped stream on its own: read what it missed.
+          if (lost) { lost = false; reconcile(); }
+        },
+        onError: (failed) => {
+          if (disposed || failed !== source) return;
+          lost = true;
+          // CONNECTING: the browser retries itself. CLOSED: it gave up, so reopen with backoff.
+          if (failed.readyState === EventSource.CLOSED) {
+            timer = setTimeout(() => { if (!disposed) open(); }, REOPEN_MS[Math.min(attempt++, REOPEN_MS.length - 1)]);
+          }
+        },
+      });
+    };
+    open();
+
+    // Returning from the background or back online: a stream that looks open may be dead (a locked
+    // phone drops the socket silently), so reopen it, then reconcile. Stream first, read second, so
+    // nothing falls between them; the merge drops the overlap.
+    const wake = () => {
+      if (disposed || document.visibilityState !== "visible") return;
+      open();
+      refresh();
+    };
+    const onPageShow = (e: PageTransitionEvent) => { if (e.persisted) wake(); };
+    document.addEventListener("visibilitychange", wake);
+    window.addEventListener("online", wake);
+    window.addEventListener("pageshow", onPageShow);
+    return () => {
+      disposed = true;
+      clearTimeout(timer);
+      source?.close();
+      document.removeEventListener("visibilitychange", wake);
+      window.removeEventListener("online", wake);
+      window.removeEventListener("pageshow", onPageShow);
+    };
   }, [taskId]);
 
   useEffect(() => {
     timelineRef.current?.scrollTo({ top: timelineRef.current.scrollHeight });
   }, [events.length]);
 
-  const respond = async (approved: boolean) => {
-    if (!approval) return;
+  /**
+   * Approve-once: the first press sends, every later press of the same request is ignored, and
+   * nothing is ever re-sent on reconnect. An identical re-answer is a success on the plane; a 409
+   * means it was already answered elsewhere, so the card takes the server's state.
+   */
+  const respond = async (requestId: string, approved: boolean) => {
+    if (inFlight.current.has(requestId) || answeredHere.current.has(requestId)) return;
+    inFlight.current.add(requestId);
+    setAnswering(requestId);
+    setApprovalNote(null);
+    setSessionActionError(null);
     try {
-      await api.approve(taskId, approval.requestId, approved);
-      setApproval(null);
+      await api.approve(taskId, requestId, approved);
+      answeredHere.current.add(requestId);
+      setApproval(current => (current?.requestId === requestId ? null : current));
+    } catch (e) {
+      const text = (e as Error).message;
+      if (namesRestartRoute(text)) setSessionActionError(text);
+      else if (answerFailure(e) === "already-answered") setApprovalNote(`This approval was already answered (${text}). Showing the current state.`);
+      else setApprovalNote(`Could not confirm the answer reached the plane (${text}). It was not re-sent; the current state was re-read.`);
+    } finally {
+      inFlight.current.delete(requestId);
+      setAnswering(null);
       refresh();
-    } catch (e) { setSessionActionError((e as Error).message); refresh(); }
+    }
   };
 
   if (!detail) return <div><Button variant="secondary" onClick={onBack}>Back to Overview</Button>
@@ -256,21 +372,24 @@ export function TaskDetail({ taskId, onBack }: { taskId: string; onBack: () => v
         </Card>
       ))}
 
+      {approvalNote && <p role="status" className="muted">{approvalNote}</p>}
       {approval && (
         <Card style={{ borderColor: tokens.warn, background: `${tokens.warn}0d`, marginBottom: "1rem" }}>
-          <strong style={{ fontSize: "0.9rem" }}>Approval requested</strong>
-          <p style={{ margin: "0.4rem 0 0.7rem", fontSize: "0.9rem" }}>{approval.summary}</p>
-          <div style={{ display: "flex", gap: "0.5rem" }}>
-            <Button onClick={() => void respond(true)}>Approve</Button>
-            <Button variant="danger" onClick={() => void respond(false)}>
-              Deny
-            </Button>
+          <div role="group" aria-label="Approval requested">
+            <strong style={{ fontSize: "0.9rem" }}>Approval requested</strong>
+            <p style={{ margin: "0.4rem 0 0.7rem", fontSize: "0.9rem" }}>{approval.summary}</p>
+            <div style={{ display: "flex", gap: "0.5rem" }}>
+              <Button disabled={answering === approval.requestId} onClick={() => void respond(approval.requestId, true)}>Approve</Button>
+              <Button variant="danger" disabled={answering === approval.requestId} onClick={() => void respond(approval.requestId, false)}>
+                Deny
+              </Button>
+            </div>
           </div>
         </Card>
       )}
 
       <div style={{ display: "flex", flexWrap: "wrap", gap: "0.4rem", marginBottom: "0.9rem" }}>
-        {(["activity", "usage", "routing", "composition", "progress", "handoff", "compare", "sessions"] as Tab[]).map((t) => (
+        {(["activity", "usage", "routing", "provenance", "composition", "progress", "handoff", "compare", "sessions"] as Tab[]).map((t) => (
           <Button key={t} variant={tab === t ? "primary" : "secondary"} onClick={() => setTab(t)}>
             {t[0]!.toUpperCase() + t.slice(1)}
           </Button>
@@ -283,7 +402,8 @@ export function TaskDetail({ taskId, onBack }: { taskId: string; onBack: () => v
             {events.length === 0 && <p style={{ color: tokens.muted, fontSize: "0.9rem" }}>No events yet.</p>}
             {events.map((e) => (
               <div
-                key={`${e.run_id}-${e.seq}`}
+                key={eventKey(e)}
+                data-event-key={eventKey(e)}
                 style={{
                   display: "grid",
                   gridTemplateColumns: "62px 130px 1fr",
@@ -333,24 +453,21 @@ export function TaskDetail({ taskId, onBack }: { taskId: string; onBack: () => v
         </Card>
       )}
 
+      {tab === "usage" && (
+        <Card>
+          <TaskEstimate taskId={taskId} refreshKey={`${state}:${detail.runs.length}`} />
+        </Card>
+      )}
+
       {tab === "routing" && (
         <Card>
-          {routing.map((r, i) => (
-            <div key={i} style={{ marginBottom: "0.9rem", fontSize: "0.88rem" }}>
-              <div style={{ color: tokens.muted }}>{new Date(r.at).toLocaleString()}</div>
-              <div>
-                chose <strong>{r.chosen ?? "nothing"}</strong> —{" "}
-                <code style={{ fontFamily: tokens.mono }}>{r.explanation.ruleFired}</code>
-              </div>
-              {r.explanation.candidates
-                .filter((c) => c.filterFailures.length > 0)
-                .map((c) => (
-                  <div key={c.assistantId} style={{ color: tokens.muted, fontSize: "0.82rem" }}>
-                    {c.assistantId}: {c.filterFailures.join(", ")}
-                  </div>
-                ))}
-            </div>
-          ))}
+          <TaskRouting routing={routing} unavailable={unavailable.includes("Routing")} runs={readError ? null : detail.runs} />
+        </Card>
+      )}
+
+      {tab === "provenance" && (
+        <Card>
+          <TaskProvenance taskId={taskId} refreshKey={`${state}:${detail.runs.length}`} />
         </Card>
       )}
 
@@ -546,14 +663,8 @@ export function TaskDetail({ taskId, onBack }: { taskId: string; onBack: () => v
                   <p>Approval requested: <code>{a.providerRequestId}</code>. Review the recorded request below.</p>
                   <div className="controls">
                     {[true, false].map(approved => (
-                      <Button key={String(approved)} disabled={busy} variant={approved ? "primary" : "danger"} onClick={() => {
-                        setBusy(true);
-                        setSessionActionError(null);
-                        void api.approve(taskId, a.providerRequestId, approved)
-                          .then(() => { setApproval(null); refresh(); })
-                          .catch((e: Error) => setSessionActionError(e.message))
-                          .finally(() => setBusy(false));
-                      }}>{approved ? "Approve" : "Deny"}</Button>
+                      <Button key={String(approved)} disabled={busy || answering === a.providerRequestId} variant={approved ? "primary" : "danger"}
+                        onClick={() => void respond(a.providerRequestId, approved)}>{approved ? "Approve" : "Deny"}</Button>
                     ))}
                   </div>
                 </div>

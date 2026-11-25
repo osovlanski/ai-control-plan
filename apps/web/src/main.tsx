@@ -9,10 +9,13 @@ import "./styles/command-center.css";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./App.js";
+import { AuthGate } from "./auth/AuthGate.js";
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <App />
+    <AuthGate>
+      <App />
+    </AuthGate>
   </StrictMode>,
 );
 
@@ -22,3 +25,5 @@ import "./styles/mission-shell.css";
 import "./styles/standalone-shell.css";
 import "./styles/composition.css";
 import "./styles/shell-view.css";
+import "./styles/calm-overview.css";
+import "./styles/navigation.css";

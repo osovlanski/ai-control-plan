@@ -1,0 +1,112 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-plane.local/contracts/mcp-tools/v1/list_tasks.output.schema.json",
+  "title": "ListTasksOutput",
+  "description": "list_tasks structuredContent. Newest updated first.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "tasks",
+    "truncated"
+  ],
+  "properties": {
+    "tasks": {
+      "type": "array",
+      "maxItems": 50,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "taskId",
+          "goal",
+          "state",
+          "stage",
+          "repo",
+          "webLink",
+          "updatedAt"
+        ],
+        "properties": {
+          "taskId": {
+            "type": "string",
+            "pattern": "^AG-[0-9a-z]{1,32}$",
+            "description": "Plane task id (`newTaskId`, packages/core/src/ids.ts)."
+          },
+          "goal": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "description": "Redacted goal, cut to 200 characters."
+          },
+          "state": {
+            "enum": [
+              "CREATED",
+              "ROUTING",
+              "RUNNING",
+              "WAITING_RESOURCE",
+              "WAITING_INPUT",
+              "LIMIT_PAUSED",
+              "HANDING_OFF",
+              "COMPLETED",
+              "FAILED",
+              "CANCELLED"
+            ],
+            "description": "Task state (TASK_STATES, packages/core/src/state-machine.ts)."
+          },
+          "stage": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "value",
+              "rule"
+            ],
+            "description": "The plane's task stage, copied from GET /api/tasks. Values and rules are those of contracts/task-stage/v1; the MCP service never derives a stage.",
+            "properties": {
+              "value": {
+                "enum": [
+                  "done",
+                  "needs-you",
+                  "verifying",
+                  "working",
+                  "queued"
+                ]
+              },
+              "rule": {
+                "enum": [
+                  "terminal",
+                  "waiting-input",
+                  "limit-paused",
+                  "awaiting-approval",
+                  "verification-running",
+                  "run-ended-unsettled",
+                  "live-run",
+                  "run-starting",
+                  "wait-condition",
+                  "no-run"
+                ]
+              }
+            }
+          },
+          "repo": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$",
+            "description": "A repository alias from the MCP service's exposed-repo map. Never a filesystem path."
+          },
+          "webLink": {
+            "type": "string",
+            "maxLength": 300,
+            "pattern": "^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?/#/missions/AG-[0-9a-z]{1,32}$",
+            "description": "Private Web link to the task: the configured HTTPS Web origin + `/#/missions/<taskId>`. Reachable only on the private network."
+          },
+          "updatedAt": {
+            "type": "string",
+            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,6})?Z$"
+          }
+        }
+      }
+    },
+    "truncated": {
+      "type": "boolean",
+      "description": "True when more matching tasks exist than `limit`."
+    }
+  }
+}

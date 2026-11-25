@@ -1,11 +1,12 @@
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import fastifyStatic from "@fastify/static";
 import { existsSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   AUTOPILOT_OPERATE_CAPABILITY,
   COMMAND_CAPABILITIES,
+  TASK_COMMAND_CAPABILITIES,
   INGEST_CAPABILITIES,
   CONTROL_PLANE_API_VERSION,
   NORMALIZED_EVENT_VERSION,
@@ -18,6 +19,7 @@ import {
   type RoutingProfile,
   type ScheduleInput,
   type TaskIntent,
+  type TaskEnvelope,
   type WaitInput,
 } from "@agent-plane/core";
 import type { ResolvedConfig } from "./config.js";
@@ -31,19 +33,30 @@ import { effectiveStateSql, effectiveUsageJoin, effectiveUsageSql } from "./modu
 import { Orchestrator } from "./modules/orchestrator.js";
 import type { planProjectVerification } from "./modules/project-verification.js";
 import { Registry } from "./modules/registry.js";
+import { sessionInputResolver } from "./modules/runtime-catalog.js";
+import { AGENT_RUNTIME_SCHEMA_VERSION, RuntimeLifecycleReader, runtimeCatalogProjection } from "./modules/runtime-lifecycle.js";
+import { ConformanceBusyError, RuntimeConformance, type RuntimeConformanceOptions } from "./modules/runtime-conformance.js";
+import { taskProvenance } from "./modules/provenance.js";
+import { RunEstimates } from "./modules/run-estimate.js";
+import { TaskLinkError, TaskLinkService } from "./modules/task-links.js";
 import { routingHistory } from "./modules/router.js";
 import { TaskEventBus } from "./modules/sse.js";
 import { TaskStageReader } from "./modules/task-stage.js";
+import { latestVerification, pendingApprovalCount } from "./modules/task-outcome.js";
 import { Scheduler } from "./modules/scheduler.js";
-import { AutopilotService, AutopilotStartRefused, type AutopilotDeps } from "./modules/autopilot.js";
-import { GitHubRestClient, PublicationRefused, PublicationService, readGitHubTokenFile, type PublicationGit, type PublicationGitHub, type ReservationGitHub } from "./modules/publications.js";
+import { AutopilotService, AutopilotStartRefused, ExternalInvalid, ExternalNotFound, type AutopilotDeps } from "./modules/autopilot.js";
+import { GitHubRestClient, PublicationRefused, PublicationService, readGitHubTokenFile, type PublicationGit, type PublicationGitHub, type ReconcileGitHub, type ReservationGitHub } from "./modules/publications.js";
 import { agentIdleFromConfig, hostGateFromConfig, syncCloseSchedule } from "./modules/host-admission.js";
-import { AcceptanceRunner, agentAcceptanceExecutor, type AcceptanceExecutor } from "./modules/acceptance-run.js";
+import { AcceptanceRunner, agentAcceptanceExecutor, pnpmStorePrefetch, type AcceptanceExecutor } from "./modules/acceptance-run.js";
+import { renderScope } from "./modules/autopilot-scope.js";
 import { AutopilotDispatcher, type DispatchGit } from "./modules/autopilot-dispatcher.js";
 import { QuotaProbeService, type QuotaProbeFn } from "./modules/quota-probe.js";
 import { ModelCatalogService, CATALOG_REVISION, type CatalogSource } from "./modules/model-catalog.js";
 import { RegistryFederation } from "./modules/registry-federation.js";
 import { BundledComposition, CockpitBundleClient } from "./modules/bundle-request.js";
+import { morningReport, renderMorningReport, UnknownWindow } from "./modules/autopilot-report.js";
+import { AutopilotHeartbeat, type HeartbeatFetch } from "./modules/autopilot-heartbeat.js";
+import { AutopilotRestore, detectRestore, RestoreRefused } from "./modules/autopilot-restore.js";
 import { ComposerService, parseOverrides, type StartAttempt, type StartBinding } from "./modules/composer/service.js";
 import { createArtificialAnalysisSource } from "./modules/artificial-analysis.js";
 import { QuotaProjection } from "./modules/quota.js";
@@ -63,11 +76,13 @@ import { EventRetention } from "./modules/retention.js";
 import { RepositoryIdentityRegistry } from "./repo/identity-registry.js";
 import { renderHandoffMd } from "./render/handoff.js";
 import { renderProgressMd } from "./render/progress.js";
+import { isApiRequest } from "./auth/request-target.js";
 import { registerAuth, type SessionMap } from "./auth/index.js";
-import { ClaudeAdapter, ClaudeCodeSessionInputAdapter, CodexAdapter, FakeSessionInputAdapter } from "@agent-plane/adapters";
+import { CodexAdapter } from "@agent-plane/adapters";
 import { CredentialStore, credentialPath } from "./auth/credential-file.js";
 import { onRunSessionRef, UsageLedger, validateUsageRecord } from "./modules/usage.js";
 import { AssetTelemetry } from "./modules/asset-telemetry.js";
+import { IDEMPOTENCY_KEY, IdempotencyStore, fingerprint } from "./modules/idempotency.js";
 import { AssetShadow, parseScoresQuery, parseShadowQuery, type ShadowScorer } from "./modules/asset-shadow.js";
 import { MemoryProposals, parseMemoryFeedQuery, readMemoryProposalPage } from "./modules/memory-proposals.js";
 import { MemoryFederation, MemoryShadowLog, memoryShadowResponse, parseMemoryShadowQuery, type MemorySnapshotSource, type MemoryShadowScorer } from "./modules/memory-federation.js";
@@ -97,6 +112,14 @@ export interface ServerDeps {
   autopilotReservationGitHub?: ReservationGitHub;
   /** P0-6: the dispatcher's local git (fetch, rev-parse, show, commit-tree). */
   autopilotDispatchGit?: DispatchGit;
+  /** P0-7a: the heartbeat's HTTP call (tests). Defaults to global fetch with `redirect: "error"`. */
+  autopilotHeartbeatFetch?: HeartbeatFetch;
+  /** P0-7b: GitHub reads for the restore reconciliation. Defaults like `autopilotReservationGitHub`. */
+  autopilotReconcileGitHub?: ReconcileGitHub;
+  /** P0-7b: the agent slice census the restore report shows. Defaults to the real slice when an agent user is configured. */
+  autopilotRestoreAgentSlice?: () => { ok: true } | { ok: false; detail: string };
+  /** PR 4: bounds and the `--version` seam of `POST /api/assistants/:id/test` (tests). */
+  conformance?: RuntimeConformanceOptions;
   /** P0-6: the acceptance executor. Defaults to `setup/accept-as-agent` when an agent user is configured. TEST-ONLY when not offline. */
   acceptanceExecutor?: AcceptanceExecutor;
   /** P0-6: where acceptance snapshots go. Defaults to `<agent worktreesRoot>/acceptance`. */
@@ -147,6 +170,10 @@ export interface BuiltServer {
   /** P0-6: absent when the instance has no acceptance executor (no agent user). */
   acceptance?: AcceptanceRunner;
   dispatcher: AutopilotDispatcher;
+  /** P0-7a: absent when `autopilot.heartbeat` is not configured. */
+  heartbeat?: AutopilotHeartbeat;
+  /** P0-7b: restore detection, reconciliation and the start gate (§C.5). */
+  restore: AutopilotRestore;
   quotaProbes: QuotaProbeService;
   modelCatalog: ModelCatalogService;
   registryFederation: RegistryFederation;
@@ -160,7 +187,11 @@ export interface BuiltServer {
    * true; it exists so a caller can await the pump instead of racing it.
    */
   sessionInputRedelivery?: () => Promise<unknown>;
+  /** qcq-02: stored run estimates (record-only). */
+  runEstimates: RunEstimates;
 }
+
+const MAX_ASSISTANT_ID_LENGTH = 128;
 
 export function buildServer(deps: ServerDeps): BuiltServer {
   const { config, db } = deps;
@@ -176,9 +207,12 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   const telemetry = new TelemetryService(db);
   const retention = new EventRetention(db);
   const repositoryIdentities = new RepositoryIdentityRegistry(db);
+  // find-my-way counts decoded UTF-16 units. Let even the first invalid code-point length
+  // reach the assistant schema (400), including IDs made entirely of surrogate pairs.
+  const routerOptions = { maxParamLength: 2 * (MAX_ASSISTANT_ID_LENGTH + 1) };
   // pino's default `base` adds the machine's hostname to every line; the plane never logs hostnames.
-  const app = Fastify({ logger: { base: { pid: process.pid }, stream: { write: (line) => process.stdout.write(redactSecrets(line)) }, serializers: { req: (r) => ({ method: r.method, url: String(r.url).split("?")[0] }), res: (r) => ({ statusCode: r.statusCode }) }, redact: ["req.headers.authorization", "req.headers.cookie", "res.headers[\"set-cookie\"]"] } });
-  const credentials = new CredentialStore(credentialPath(config.dir), now);
+  const app = Fastify({ routerOptions, logger: { base: { pid: process.pid }, stream: { write: (line) => process.stdout.write(redactSecrets(line)) }, serializers: { req: (r) => ({ method: r.method, url: String(r.url).split("?")[0] }), res: (r) => ({ statusCode: r.statusCode }) }, redact: ["req.headers.authorization", "req.headers.cookie", "res.headers[\"set-cookie\"]"] } });
+  const credentials = new CredentialStore(credentialPath(config.dir), now, config.dir);
   const authSessions: SessionMap = new Map();
   registerAuth(app, { config, credentials, sessions: authSessions, db, now });
   for (const warning of config.warnings ?? []) app.log.warn(warning);
@@ -220,6 +254,10 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   // P0-3: the real host gate (§C.2.6) unless a test injects one. It is fail-closed: without
   // `scheduler.admission.<pool>` every autopilot launch is refused `host_busy`.
   const autopilot: AutopilotService = new AutopilotService({ db, config, tasks, now, hostGate: deps.autopilotHostGate ?? hostGateFromConfig(config, { windows: () => autopilot.windows(), openWindow: () => autopilot.openWindow(), now }) });
+  // P0-7b (§C.5): a restored database is detected here, before any boot reconciliation, timer or
+  // route: one transaction records it and stops the autopilot, so nothing can start from it.
+  const restored = detectRestore(db, config.dir, now, (msg) => app.log.warn(msg));
+  if (restored) app.log.warn(`autopilot: restored database detected (restore ${restored.restoreId}${restored.recorded ? "" : ", seen before"}); the autopilot is stopped until its reconciliation report is read back`);
   // P0-6: the production GitHub client, on the plane user's token file (read per request).
   const restGitHub = config.autopilot.github
     ? new GitHubRestClient({ token: () => readGitHubTokenFile(config.autopilot.github!.tokenFile), ...(config.autopilot.github.apiBase ? { apiBase: config.autopilot.github.apiBase } : {}) })
@@ -250,6 +288,8 @@ export function buildServer(deps: ServerDeps): BuiltServer {
       backlog: { repoPath: backlogRepo.path },
       snapshotsRoot: deps.acceptanceSnapshotsRoot ?? join(agentUser!.worktreesRoot, "acceptance"),
       agentIdle: deps.acceptanceAgentIdle ?? agentIdleFromConfig(config),
+      // The wrapper points pnpm at this store (setup/accept-as-agent); the plane fills it before each run.
+      ...(!deps.acceptanceExecutor && agentUser ? { prefetch: pnpmStorePrefetch(join(dirname(agentUser.worktreesRoot), "pnpm-store")) } : {}),
       ...(acceptanceExecutor.offline ? {} : { allowOnlineExecutor: true }),
     })
     : undefined;
@@ -261,6 +301,28 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     log: (level, msg) => app.log[level](msg),
   });
   autopilot.onSettled = () => dispatcher.kick();
+  // P0-7b: the reconciliation and the start gate. Worktree roots are every place a task, a
+  // candidate or an acceptance snapshot is created.
+  const reconcileGitHub = deps.autopilotReconcileGitHub
+    ?? (deps.autopilotGitHub && "listBranches" in deps.autopilotGitHub ? deps.autopilotGitHub as unknown as ReconcileGitHub : undefined)
+    ?? (deps.autopilotGitHub ? undefined : restGitHub);
+  const snapshotsRoot = deps.acceptanceSnapshotsRoot ?? (agentUser ? join(agentUser.worktreesRoot, "acceptance") : undefined);
+  const restore = new AutopilotRestore({
+    db, config, autopilot, now,
+    ...(reconcileGitHub ? { github: reconcileGitHub } : {}),
+    worktreeRoots: [
+      { root: join(config.dir, "worktrees") },
+      ...(agentUser ? [{ root: agentUser.worktreesRoot, skip: snapshotsRoot && dirname(snapshotsRoot) === agentUser.worktreesRoot ? [basename(snapshotsRoot)] : [] }] : []),
+      ...(snapshotsRoot ? [{ root: snapshotsRoot }] : []),
+    ],
+    ...(deps.autopilotRestoreAgentSlice ? { agentSlice: deps.autopilotRestoreAgentSlice } : agentUser ? { agentSlice: agentIdleFromConfig(config) } : {}),
+    log: (level, msg) => app.log[level](msg),
+  });
+  autopilot.startGate = restore;
+  // P0-7a (D-14): the external heartbeat. Absent config = no ping and no ledger rows.
+  const heartbeat = config.autopilot.heartbeat
+    ? new AutopilotHeartbeat({ db, now, config: config.autopilot.heartbeat, ...(deps.autopilotHeartbeatFetch ? { fetch: deps.autopilotHeartbeatFetch } : {}) })
+    : undefined;
   const composed = buildHarnessComposition({
     db,
     config,
@@ -330,7 +392,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     apiVersion: CONTROL_PLANE_API_VERSION,
     eventVersion: NORMALIZED_EVENT_VERSION,
     authRequired: true,
-    capabilities: [...OBSERVABILITY_CAPABILITIES, ...COMMAND_CAPABILITIES, ...INGEST_CAPABILITIES],
+    capabilities: [...OBSERVABILITY_CAPABILITIES, ...COMMAND_CAPABILITIES, ...TASK_COMMAND_CAPABILITIES, ...INGEST_CAPABILITIES],
   }));
 
   app.get("/api/health", read.tasks, () => ({
@@ -351,28 +413,85 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     // without probing a route that does not exist.
     sessionInput: { enabled: config.sessionInput.enabled },
     composer: { enabled: config.composer.enabled, requireRevision: config.composer.requireRevision },
+    // 2.14: the repository aliases a narrow credential may create in, and whether tasks get a Web link.
+    mcp: { repos: Object.keys(config.mcp.repos), webOrigin: config.mcp.webOrigin ?? null },
   }));
 
   // ---- Assistants / registry ----
 
+  // Agent runtime v1 (API 2.10, docs/contracts/agent-runtime-v1.md): read-only projections and the
+  // operator disable overlay. Same scopes as the routes beside them, so no credential rotation.
+  const assistantIdSchema = {
+    params: {
+      type: "object",
+      required: ["id"],
+      properties: { id: { type: "string", minLength: 1, maxLength: MAX_ASSISTANT_ID_LENGTH } },
+    },
+  };
+  const assistantRead = { ...read.tasks, schema: assistantIdSchema };
+  const assistantWrite = { ...write, schema: assistantIdSchema };
+  const lifecycles = new RuntimeLifecycleReader(db, config);
+
+  app.get("/api/runtimes/catalog", read.tasks, () => runtimeCatalogProjection());
+
   app.get("/api/assistants", read.tasks, () =>
-    registry.list().map((a) => {
+    Promise.all(registry.list().map(async (a) => {
       // Effective headroom, not the manifest's copy: a fresh idle probe (K3)
       // supersedes a stale run-stream snapshot and vice versa, by observedAt.
       const projection = new QuotaProjection(db, now).for(a.id, a.manifestParsed);
       return {
         id: a.id,
         provider: a.provider,
+        // Config `enabled`, as it always meant. The operator overlay is `lifecycle.enablement`.
         enabled: a.enabled === 1,
         manifest: a.manifestParsed,
         manifestUpdatedAt: a.manifest_updated_at,
         quota: projection.quota,
         quotaObservations: projection.observations,
+        lifecycle: await lifecycles.withInstallation(lifecycles.of(a), a.provider),
       };
-    }),
+    })),
   );
 
-  app.post<{ Params: { id: string } }>("/api/assistants/:id/sync", write, async (req, reply) => {
+  app.get<{ Params: { id: string } }>("/api/assistants/:id/lifecycle", assistantRead, (req, reply) => {
+    const row = registry.get(req.params.id);
+    if (!row) return reply.status(404).send({ error: `Unknown assistant: ${req.params.id}` });
+    return lifecycles.withInstallation(lifecycles.of(row), row.provider);
+  });
+
+  // Overlay only (design §B.3): disable removes the assistant from FUTURE routing decisions; enable
+  // clears the overlay and nothing else, so a config-disabled assistant stays disabled. Neither
+  // touches a session already running. Idempotent: a repeat reports `changed: false`.
+  for (const [action, state] of [["disable", "disabled"], ["enable", "none"]] as const) {
+    app.post<{ Params: { id: string } }>(`/api/assistants/:id/${action}`, assistantWrite, async (req, reply) => {
+      const result = registry.setOperatorState(req.params.id, state, now);
+      if (!result) return reply.status(404).send({ error: `Unknown assistant: ${req.params.id}` });
+      // Answer from the row the write left, so the lifecycle agrees with `operatorState` even if a
+      // second writer changes the overlay before this handler reads. The manifest parse is for
+      // this row alone, after the commit: nothing the response needs can undo the write.
+      const row = registry.parsed(result.row);
+      if (result.changed) app.log.info({ assistantId: row.id, operatorState: state }, "assistant operator state changed");
+      const lifecycle = await lifecycles.withInstallation(lifecycles.of(row), row.provider);
+      return { schemaVersion: AGENT_RUNTIME_SCHEMA_VERSION, assistantId: row.id, operatorState: state, changed: result.changed, lifecycle };
+    });
+  }
+
+  // PR 4: the credential-free, quota-free conformance probe. It never calls the registered adapter,
+  // starts a generation, installs anything or writes config; it stores one version-bound row.
+  const conformance = new RuntimeConformance(db, config, registry, now, deps.conformance);
+  app.post<{ Params: { id: string } }>("/api/assistants/:id/test", assistantWrite, async (req, reply) => {
+    try {
+      const result = await conformance.test(req.params.id);
+      if (!result) return reply.status(404).send({ error: `Unknown assistant: ${req.params.id}` });
+      app.log.info({ assistantId: result.assistantId, status: result.status, recorded: result.recorded }, "runtime conformance tested");
+      const lifecycle = await lifecycles.withInstallation(result.lifecycle, result.provider);
+      return { ...result, lifecycle };
+    } catch (err) {
+      return reply.status(409).send({ error: err instanceof ConformanceBusyError ? err.message : message(err) });
+    }
+  });
+
+  app.post<{ Params: { id: string } }>("/api/assistants/:id/sync", assistantWrite, async (req, reply) => {
     try {
       return await registry.sync(req.params.id);
     } catch (err) {
@@ -532,15 +651,46 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     if (err instanceof AutopilotStartRefused) return reply.status(409).send({ error: "autopilot_start_refused", setting: err.setting, detail: err.message });
     return reply.status(400).send({ error: err instanceof Error ? err.message : String(err) });
   };
-  app.get("/api/autopilot", read.tasks, () => ({ ...autopilot.status(), windows: autopilot.windows(), attempts: autopilot.attempts(20), dispatcher: dispatcher.status() }));
+  app.get("/api/autopilot", read.tasks, () => ({ ...autopilot.status(), windows: autopilot.windows(), attempts: autopilot.attempts(20), dispatcher: dispatcher.status(), restore: restore.status() }));
+  // P0-7b (§C.5): restore state (a summary, never the report), the reconciliation, and the
+  // operator's read-back of the report, which a start after a restore requires.
+  app.get("/api/autopilot/restore", read.tasks, () => restore.status());
+  app.post("/api/autopilot/restore/reconcile", operate, async (_req, reply) => {
+    try { return await restore.reconcile(); } catch (err) {
+      if (err instanceof RestoreRefused) return reply.status(409).send({ error: err.message });
+      return reply.status(502).send({ error: `reconciliation failed: ${err instanceof Error ? err.message : String(err)}`, restore: restore.status() });
+    }
+  });
+  app.get("/api/autopilot/restore/report", operate, (req, reply) => {
+    try { return restore.readReport(operatorKid(req)); } catch (err) {
+      if (err instanceof RestoreRefused) return reply.status(404).send({ error: err.message });
+      throw err;
+    }
+  });
+  // P0-7c (§C.5): external records (a reservation or marker PR a restore found and this database
+  // did not know). Listing is read-only; dismissing one is itay's decision and needs `autopilot.operate`.
+  app.get<{ Querystring: { all?: string } }>("/api/autopilot/externals", read.tasks, (req) => ({ externals: autopilot.externals({ includeResolved: req.query.all === "1" || req.query.all === "true" }) }));
+  app.post<{ Params: { id: string }; Body: { action?: unknown; note?: unknown } }>("/api/autopilot/externals/:id/resolve", operate, (req, reply) => {
+    const id = Number(req.params.id);
+    if (!Number.isSafeInteger(id) || id <= 0) return reply.status(400).send({ error: "external record id must be a positive integer" });
+    try { const external = autopilot.resolveExternal(id, req.body?.action, req.body?.note, operatorKid(req)); dispatcher.kick(); return { external }; } catch (err) {
+      if (err instanceof ExternalNotFound) return reply.status(404).send({ error: err.message });
+      if (err instanceof ExternalInvalid) return reply.status(400).send({ error: err.message });
+      return reply.status(409).send({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
   app.post("/api/autopilot/start", operate, (req, reply) => {
-    try { const started = autopilot.start(operatorKid(req)); dispatcher.kick(); return started; } catch (err) { return autopilotError(reply, err); }
+    try { const started = autopilot.start(operatorKid(req)); dispatcher.kick(); void heartbeat?.tick(); return started; } catch (err) { return autopilotError(reply, err); }
   });
   app.post("/api/autopilot/release", operate, (_req, reply) => {
     try { const released = autopilot.release(); dispatcher.kick(); return { released, autopilot: autopilot.status() }; } catch (err) { return reply.status(409).send({ error: err instanceof Error ? err.message : String(err) }); }
   });
   // P0-6: one dispatcher tick now, the same the timer runs (selectNext, acceptance, publication).
   app.post("/api/autopilot/dispatch", operate, async () => ({ tick: await dispatcher.tick(), dispatcher: dispatcher.status(), autopilot: autopilot.status() }));
+  // A blocked attempt is final and never retried; the operator may turn it into a failed one (counts toward attemptsPerItem).
+  app.post<{ Params: { id: string } }>("/api/autopilot/attempts/:id/requeue", operate, (req, reply) => {
+    try { const attempt = autopilot.requeue(req.params.id, operatorKid(req)); dispatcher.kick(); return { attempt }; } catch (err) { return reply.status(409).send({ error: err instanceof Error ? err.message : String(err) }); }
+  });
   app.get<{ Params: { id: string } }>("/api/autopilot/attempts/:id/acceptance", read.tasks, (req) => ({ runs: acceptance?.runs(req.params.id) ?? [] }));
   app.get("/api/autopilot/publications", read.tasks, () => ({ publications: publications.list(50) }));
   app.post<{ Params: { id: string }; Body: { action?: unknown } }>("/api/autopilot/publications/:id/resolve", operate, async (req, reply) => {
@@ -559,6 +709,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     const mode = req.body?.mode ?? "now";
     if (mode !== "now" && mode !== "drain") return reply.status(400).send({ error: "mode must be now or drain" });
     const stopped = autopilot.stop(mode, "operator");
+    void heartbeat?.tick(); // a `paused` row now, so silence while stopped is never read as a gap
     // §C.2.9 `stop now` in `accepting`: stop the acceptance scope now (its poll would within a second).
     if (mode === "now") acceptance?.stopNow();
     // §C.2.9 `stop now` on a running attempt: cancel the session, which stops its scope.
@@ -568,41 +719,135 @@ export function buildServer(deps: ServerDeps): BuiltServer {
 
   // ---- Tasks ----
 
+  // ---- 2.14 (mcp-api-grants): narrow grants, idempotent create/start, Web link ----
+  // `commands.write` implies both capabilities (core `capabilityGranted`), so every existing caller
+  // passes. A caller WITHOUT `commands.write` (the MCP credential) is "narrow": it must name a repo by
+  // `mcp.repos` alias, must send an idempotency key, and may send none of the operator knobs.
+  const taskCreate = { config: { auth: { require: "tasks.create" } } } as const;
+  const taskStart = { config: { auth: { require: "tasks.start" } } } as const;
+  const idempotency = new IdempotencyStore(db, now);
+  try { idempotency.sweep(); } catch (err) { app.log.warn({ err: message(err) }, "idempotency sweep failed"); }
+  const idempotencySweep = setInterval(() => { try { idempotency.sweep(); } catch { /* next hour */ } }, 3_600_000);
+  idempotencySweep.unref();
+  app.addHook("onClose", () => clearInterval(idempotencySweep));
+  const isNarrow = (req: FastifyRequest) => !req.cred || !req.cred.capabilities.includes("commands.write");
+  const webLinkFor = (taskId: string) => (config.mcp.webOrigin ? { webLink: `${config.mcp.webOrigin}/#/missions/${taskId}` } : {});
+  const aliasFor = (repoPath: string | null | undefined) =>
+    repoPath ? Object.keys(config.mcp.repos).find((alias) => config.mcp.repos[alias] === repoPath) : undefined;
+  const refuse = (reply: FastifyReply, status: number, reason: string, error: string, extra: Record<string, unknown> = {}) =>
+    reply.status(status).send({ error, reason, ...extra });
+  const badKey = (key: unknown) => key !== undefined && (typeof key !== "string" || !IDEMPOTENCY_KEY.test(key));
+
+  /** The route the plane would take if the task started now (docs/adr/mcp-connector.md, proposal). Advisory. */
+  const buildProposal = async (taskId: string) => {
+    const routed = computeRoute(taskId);
+    const ex = routed?.explanation;
+    let compositionDigest: string | null = null;
+    if (composer) {
+      const preview = await composer.preview(taskId);
+      if (preview.ok) compositionDigest = preview.preview.compositionDigest;
+    }
+    const chosen = ex?.chosen ?? null;
+    const cut = (text: string, max: number) => (text.length > max ? `${text.slice(0, max - 1)}…` : text);
+    const ruleFired = cut(ex?.ruleFired || "no_route", 200);
+    const passed = ex?.candidates.filter((c) => c.passedFilters).length ?? 0;
+    return {
+      eligible: chosen !== null,
+      assistantId: chosen,
+      ruleFired,
+      summary: cut(redactSecrets(chosen
+        ? `Routes to ${chosen} by rule ${ruleFired}; ${passed} of ${ex!.candidates.length} assistants passed the filters.`
+        : `No eligible assistant: none of ${ex?.candidates.length ?? 0} assistants passed the filters (rule ${ruleFired}).`), 500),
+      candidates: (ex?.candidates ?? []).slice(0, 20).map((c) => ({
+        assistantId: c.assistantId, passedFilters: c.passedFilters, filterFailures: c.filterFailures.slice(0, 20).map((f) => cut(f, 200)),
+      })),
+      compositionDigest,
+    };
+  };
+
   app.post<{
-    Body: { goal?: string; constraints?: string[]; repoPath?: string; profile?: RoutingProfile; wait?: WaitInput; overrides?: TaskIntent["overrides"]; mode?: string; runAs?: string };
-  }>("/api/tasks", write, async (req, reply) => {
-    const { goal, constraints, repoPath, profile, wait, overrides, mode, runAs } = req.body ?? {};
+    Body: { goal?: string; constraints?: string[]; repoPath?: string; repo?: string; profile?: RoutingProfile; wait?: WaitInput; overrides?: TaskIntent["overrides"]; mode?: string; runAs?: string; idempotencyKey?: string; propose?: boolean };
+  }>("/api/tasks", taskCreate, async (req, reply) => {
+    const body = req.body ?? {};
+    const { goal, constraints, profile, wait, overrides, mode, idempotencyKey, propose } = body;
+    let { repoPath, runAs } = body;
+    const narrow = isNarrow(req);
+    if (narrow) {
+      const extra = Object.keys(body).filter((k) => !["goal", "constraints", "repo", "profile", "idempotencyKey", "propose"].includes(k));
+      if (extra.length > 0) return refuse(reply, 403, "narrow_credential", `this credential may not send ${extra.join(", ")}`);
+      if (idempotencyKey === undefined) return refuse(reply, 400, "invalid_input", "idempotencyKey is required for this credential");
+      if (body.repo === undefined) return refuse(reply, 400, "invalid_input", "repo (an mcp.repos alias) is required for this credential");
+    }
     if (typeof goal !== "string" || !goal.trim()) return reply.status(400).send({ error: "goal is required" });
+    if (badKey(idempotencyKey)) return refuse(reply, 400, "invalid_input", "idempotencyKey must match ^[A-Za-z0-9._:-]{16,128}$");
+    if (propose !== undefined && typeof propose !== "boolean") return refuse(reply, 400, "invalid_input", "propose must be a boolean");
+    if (body.repo !== undefined) {
+      if (repoPath !== undefined) return refuse(reply, 400, "invalid_input", "send repo or repoPath, not both");
+      if (typeof body.repo !== "string" || !Object.hasOwn(config.mcp.repos, body.repo)) {
+        return refuse(reply, 403, "repo_not_allowed", "repo is not an exposed repository alias");
+      }
+      repoPath = config.mcp.repos[body.repo];
+    }
     if (repoPath !== undefined && typeof repoPath !== "string") return reply.status(400).send({ error: "repoPath must be a string" });
     if (repoPath && !repoAllowed(repoPath)) {
       return reply.status(403).send({ error: `Repository ${repoPath} is not in this workspace's allowlist` });
     }
+    // Owner question Q1 (ADR): unset keeps today's behaviour; `mcp.runAs: agent` runs narrow creates as the agent user.
+    if (narrow && config.mcp.runAs) runAs = config.mcp.runAs;
+    const extras = () => ({ ...(aliasFor(repoPath) ? { repo: aliasFor(repoPath) } : {}), ...(idempotencyKey !== undefined ? { replayed: false } : {}) });
+    const kid = req.cred?.kid ?? "anonymous";
+    const print = fingerprint({ goal: goal.trim(), constraints, repoPath, profile, wait, overrides, mode, runAs, propose: propose === true });
+    const release = idempotencyKey !== undefined ? idempotency.claim(kid, "task.create", idempotencyKey) : () => {};
+    if (!release) return refuse(reply, 409, "idempotency_in_progress", "a request with this idempotencyKey is still being handled", { retryable: true });
     try {
-      if (wait && mode && mode !== 'single') throw new Error('K1 waits require single mode');
-      // K7 widens overrides by exactly one field: `model`, the requested
-      // SELECTOR. It is recorded as intent and never resolved here.
-      if (overrides && (typeof overrides !== 'object' || Object.keys(overrides).some(k => k !== 'assistantId' && k !== 'model') ||
-          (overrides.assistantId !== undefined && typeof overrides.assistantId !== 'string') ||
-          (overrides.model !== undefined && (typeof overrides.model !== 'string' || !overrides.model.trim())))) throw new Error('overrides accept only assistantId and model');
-      if (constraints && (!Array.isArray(constraints) || constraints.some(c => typeof c !== 'string'))) throw new Error('constraints must be strings');
-      if (profile && !['auto','preserve-quota','fastest','best-quality','lowest-tokens'].includes(profile)) throw new Error('Invalid routing profile');
-      if (wait) scheduler.validate(wait);
-      // P0-A2: an agent task is refused here, not at launch, when the host cannot keep its code
-      // away from the plane user. It needs a repository: the agent cannot reach the workspace dir.
-      if (runAs !== undefined) {
-        if (runAs !== 'agent') throw new Error('runAs accepts only "agent"');
-        if (!config.execution.agentUser) throw new Error('runAs "agent" needs execution.agentUser, which this workspace does not configure');
-        if (!repoPath) throw new Error('runAs "agent" needs a repository');
-        if (mode && mode !== 'single') throw new Error('runAs "agent" requires single mode');
+      if (idempotencyKey !== undefined) {
+        const seen = idempotency.lookup(kid, "task.create", idempotencyKey, print);
+        if (seen.kind === "conflict") return refuse(reply, 409, "idempotency_conflict", "this idempotencyKey was used with different input");
+        if (seen.kind === "replay") {
+          // A NULL answer means the process stopped after the task was created: rebuild it.
+          const first = seen.record.response ?? {
+            ...tasks.envelope(seen.record.taskId), ...extras(), ...webLinkFor(seen.record.taskId),
+            ...(propose === true ? { proposal: await buildProposal(seen.record.taskId) } : {}),
+          };
+          if (!seen.record.response) idempotency.complete(kid, "task.create", idempotencyKey, 201, first);
+          return reply.status(seen.record.statusCode ?? 201).send({ ...first, replayed: true });
+        }
       }
-      const envelope = db.transaction(() => {
-        const task = tasks.create(redactValue({ goal: goal.trim(), constraints, repoPath, profile, overrides, ...(runAs === 'agent' ? { runAs: 'agent' as const } : {}) }));
-        if (wait) scheduler.attach(task.taskId, wait);
-        return tasks.envelope(task.taskId);
-      })();
+      let envelope: TaskEnvelope;
+      try {
+        if (wait && mode && mode !== 'single') throw new Error('K1 waits require single mode');
+        // K7 widens overrides by exactly one field: `model`, the requested
+        // SELECTOR. It is recorded as intent and never resolved here.
+        if (overrides && (typeof overrides !== 'object' || Object.keys(overrides).some(k => k !== 'assistantId' && k !== 'model') ||
+            (overrides.assistantId !== undefined && typeof overrides.assistantId !== 'string') ||
+            (overrides.model !== undefined && (typeof overrides.model !== 'string' || !overrides.model.trim())))) throw new Error('overrides accept only assistantId and model');
+        if (constraints && (!Array.isArray(constraints) || constraints.some(c => typeof c !== 'string'))) throw new Error('constraints must be strings');
+        if (profile && !['auto','preserve-quota','fastest','best-quality','lowest-tokens'].includes(profile)) throw new Error('Invalid routing profile');
+        if (wait) scheduler.validate(wait);
+        // P0-A2: an agent task is refused here, not at launch, when the host cannot keep its code
+        // away from the plane user. It needs a repository: the agent cannot reach the workspace dir.
+        if (runAs !== undefined) {
+          if (runAs !== 'agent') throw new Error('runAs accepts only "agent"');
+          if (!config.execution.agentUser) throw new Error('runAs "agent" needs execution.agentUser, which this workspace does not configure');
+          if (!repoPath) throw new Error('runAs "agent" needs a repository');
+          if (mode && mode !== 'single') throw new Error('runAs "agent" requires single mode');
+        }
+        // The key record and the task row commit together: never a key without its task, or a task without its key.
+        envelope = db.transaction(() => {
+          const task = tasks.create(redactValue({ goal: goal.trim(), constraints, repoPath, profile, overrides, ...(runAs === 'agent' ? { runAs: 'agent' as const } : {}) }));
+          if (wait) scheduler.attach(task.taskId, wait);
+          if (idempotencyKey !== undefined) idempotency.record(kid, "task.create", idempotencyKey, print, task.taskId);
+          return tasks.envelope(task.taskId);
+        })();
+      } catch (err) { return reply.status(400).send({ error: message(err) }); }
       if (wait) scheduler.publish(envelope.taskId);
-      return reply.status(201).send(envelope);
-    } catch (err) { return reply.status(400).send({ error: message(err) }); }
+      const response: Record<string, unknown> = {
+        ...envelope, ...extras(), ...webLinkFor(envelope.taskId),
+        ...(propose === true ? { proposal: await buildProposal(envelope.taskId) } : {}),
+      };
+      if (idempotencyKey !== undefined) idempotency.complete(kid, "task.create", idempotencyKey, 201, response);
+      return reply.status(201).send(response);
+    } finally { release(); }
   });
 
   app.get("/api/tasks", read.tasks, () => {
@@ -637,6 +882,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
            -- K7: requested and served identity are separate facts; NULL resolved
            -- means the provider reported none, not that it matched the request.
            r.model_requested, r.model_resolved, r.model_resolved_source,
+           r.effort_reported, r.effort_reported_source,
            a.provider AS serving_provider, r.composition_revision_id
          FROM runs r ${effectiveUsageJoin("r")}
          LEFT JOIN assistants a ON a.id = r.assistant_id
@@ -646,7 +892,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     return {
       ...row,
       envelope: JSON.parse(row.envelope) as unknown,
-      runs: runs.map(({ model_requested, model_resolved, model_resolved_source, serving_provider, composition_revision_id, ...r }) => ({
+      runs: runs.map(({ model_requested, model_resolved, model_resolved_source, effort_reported, effort_reported_source, serving_provider, composition_revision_id, ...r }) => ({
         ...r,
         // M1: the immutable composition revision this run executed, or null (every pre-M1 run).
         compositionRevisionId: composition_revision_id ?? null,
@@ -656,6 +902,9 @@ export function buildServer(deps: ServerDeps): BuiltServer {
           resolvedModelId: model_resolved ?? null,
           resolvedSource: model_resolved_source ?? "unknown",
           servingProvider: serving_provider ?? null,
+          // P1-5 (API 2.18): the effort the provider reported on run.started, or null (unknown).
+          reportedEffort: effort_reported ?? null,
+          reportedEffortSource: effort_reported_source ?? "unknown",
         },
       })),
       active: orchestrator.isActive(req.params.id),
@@ -663,10 +912,18 @@ export function buildServer(deps: ServerDeps): BuiltServer {
       /** K4b: derived pool truth for the Orbital Inspector; null unless the task waits on one. */
       resourceWait: scheduler.resourceWaitStatus(req.params.id) ?? null,
       resourceClaim: scheduler.claim(req.params.id) ?? null,
+      attempts: scheduler.attemptsOf(req.params.id),
       dispatches: scheduler.dispatches(req.params.id),
       schedulerEvents: scheduler.events(req.params.id),
       schedulerEnabled: scheduler.enabled,
       intent: JSON.parse(row.intent_json) as unknown,
+      // API 2.17 (additive): what `tasks.read` alone could not reach before, so the MCP `get_task`
+      // projects them instead of guessing. The stage is the same `deriveStage` answer the task list
+      // serves; the approval is a count only (answering stays on the Web).
+      stage: stages.of(req.params.id) ?? null,
+      pendingApprovals: pendingApprovalCount(db, req.params.id),
+      verification: latestVerification(db, req.params.id),
+      ...webLinkFor(req.params.id),
     };
   });
 
@@ -692,6 +949,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
       // per request — a stored occupancy number would be stale on arrival.
       resourceWait: scheduler.resourceWaitStatus(req.params.id) ?? null,
       resourceClaim: scheduler.claim(req.params.id) ?? null,
+      attempts: scheduler.attemptsOf(req.params.id),
       schedulerEnabled: scheduler.enabled };
   });
 
@@ -746,6 +1004,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
       assetShadow,
       memoryShadow,
       db, config, tasks, registry, cooldowns, now, ...(modelCatalog ? { catalog: modelCatalog } : {}),
+      autopilotOwns: (taskId) => autopilot.owns(taskId),
       federation: registryFederation,
       bundled: new BundledComposition(db, new CockpitBundleClient(config.registry.cockpit.baseUrl, config.registry.cockpit.tokenPath), {
         enabled: config.registry.cockpit.enabled, logger: app.log,
@@ -755,6 +1014,26 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     : undefined;
   // M2 S6: wakes, run-now, failover and handoffs recompose at dispatch; settles record overruns.
   if (composer) orchestrator.dispatchComposer = composer;
+  // P0-10: the minimum morning report over one window (default: the latest that has opened). Read-only.
+  app.get<{ Querystring: { windowId?: string; format?: string } }>("/api/autopilot/report", read.tasks, (req, reply) => {
+    try {
+      const report = morningReport({
+        db, now, ...(config.autopilot.heartbeat ? { heartbeat: config.autopilot.heartbeat } : {}), ...(composer ? { accounting: composer.accounting } : {}),
+        ...(config.composer.policy.budget.maxTokens !== undefined ? { defaultMaxTokens: config.composer.policy.budget.maxTokens } : {}),
+      }, req.query.windowId ? { windowId: req.query.windowId } : {});
+      return req.query.format === "text" ? reply.type("text/plain; charset=utf-8").send(renderMorningReport(report)) : report;
+    } catch (err) {
+      if (err instanceof UnknownWindow) return reply.status(404).send({ error: "not found", windowId: err.windowId });
+      throw err;
+    }
+  });
+  // P1-2: "% of estimated scope" over the whole backlog (S=1, M=3, L=8), merged PRs counting as done. Read-only.
+  app.get<{ Querystring: { day?: string; format?: string } }>("/api/autopilot/scope", read.tasks, async (req, reply) => {
+    if (req.query.day !== undefined && !/^\d{4}-\d{2}-\d{2}$/.test(req.query.day)) return reply.status(400).send({ error: "day must be YYYY-MM-DD" });
+    const r = await dispatcher.scope(req.query.day);
+    if ("problem" in r) return reply.status(503).send({ error: r.problem });
+    return req.query.format === "text" ? reply.type("text/plain; charset=utf-8").send(renderScope(r.scope, r.day)) : r;
+  });
   // M6 S1: settles project composed sessions into asset_usage; reconcileOnBoot backfills the rest.
   orchestrator.assetTelemetry = new AssetTelemetry(db, app.log);
   // O6 S5: settles extract memory proposals from composed sessions; reconcileOnBoot backfills.
@@ -812,80 +1091,176 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     return reply.status(result.created ? 201 : 200).send(result.optIn);
   });
 
-  app.post<{ Params: { id: string }; Body: { assistantId?: AssistantId; compositionDigest?: unknown; overrides?: unknown } }>(
-    "/api/tasks/:id/start", write,
+  // ---- start (2.14: `tasks.start`, idempotencyKey, confirm, webLink) ----
+  type StartOutcome = { status: number; body: Record<string, unknown> };
+  interface StartConfirm { assistantId?: string; compositionDigest?: string | null }
+  /** What the handler threads through both start paths: the confirm check and the key record. */
+  interface StartGuard { confirm?: StartConfirm; record?: () => void; recorded: boolean; startedAt?: string }
+  const DIGEST = /^sha256:[0-9a-f]{64}$/;
+  const ASSISTANT_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+  const parseConfirm = (value: unknown): { ok: true; confirm?: StartConfirm } | { ok: false; error: string } => {
+    if (value === undefined) return { ok: true };
+    if (!value || typeof value !== "object" || Array.isArray(value)) return { ok: false, error: "confirm must be { assistantId?, compositionDigest? }" };
+    const v = value as Record<string, unknown>;
+    const keys = Object.keys(v);
+    if (keys.length === 0 || keys.some((k) => k !== "assistantId" && k !== "compositionDigest")) return { ok: false, error: "confirm must be { assistantId?, compositionDigest? } with at least one field" };
+    if (v.assistantId !== undefined && (typeof v.assistantId !== "string" || !ASSISTANT_ID.test(v.assistantId))) return { ok: false, error: "confirm.assistantId must be an assistant id" };
+    if (v.compositionDigest !== undefined && v.compositionDigest !== null && (typeof v.compositionDigest !== "string" || !DIGEST.test(v.compositionDigest))) {
+      return { ok: false, error: "confirm.compositionDigest must be null or sha256:<64 lowercase hex>" };
+    }
+    return { ok: true, confirm: v as StartConfirm };
+  };
+  const confirmMatches = (confirm: StartConfirm | undefined, chosen: string, digest: string | null) =>
+    !confirm || ((confirm.assistantId === undefined || confirm.assistantId === chosen) &&
+      (!Object.hasOwn(confirm, "compositionDigest") || (confirm.compositionDigest ?? null) === digest));
+  const routeChanged = async (taskId: string): Promise<StartOutcome> => ({
+    status: 409, body: { error: "the route changed since it was proposed; nothing started", reason: "route_changed", proposal: await buildProposal(taskId) },
+  });
+  /**
+   * The one place a start takes effect: CREATED -> ROUTING and the idempotency record commit together,
+   * then the orchestrator starts the run. A task that left CREATED meanwhile is `invalid_state`.
+   */
+  const launch = async (taskId: string, chosen: AssistantId, routingDecisionId: number, extra: () => Record<string, unknown>, guard: StartGuard,
+    composition?: StartBinding): Promise<StartOutcome> => {
+    try {
+      db.transaction(() => { tasks.transition(taskId, "ROUTING"); guard.record?.(); })();
+      guard.recorded = guard.record !== undefined;
+      guard.startedAt = now().toISOString();
+    } catch (err) {
+      const state = tasks.get(taskId)?.state;
+      return { status: 409, body: { error: message(err), reason: "invalid_state", ...(state ? { currentState: state } : {}) } };
+    }
+    try {
+      const { runId } = await orchestrator.startTask(taskId, chosen, {
+        routingDecisionRef: String(routingDecisionId),
+        ...(composition ? { composition } : {}),
+      });
+      // `extra` is read after the start: a composed binding records its attempt while the run starts.
+      return { status: 200, body: { runId, assistantId: chosen, ...extra() } };
+    } catch (err) {
+      // Worktree/adapter startup failure: park the task as FAILED with the reason.
+      const current = tasks.get(taskId);
+      if (current && current.state !== "FAILED") {
+        try { tasks.transition(taskId, "FAILED"); } catch { /* already terminal */ }
+      }
+      return { status: 500, body: { error: message(err) } };
+    }
+  };
+
+  app.post<{ Params: { id: string }; Body: unknown }>(
+    "/api/tasks/:id/start", taskStart,
     async (req, reply) => {
       const taskId = req.params.id;
       const row = tasks.get(taskId);
       if (!row) return reply.status(404).send({ error: "not found" });
-      if (row.state !== "CREATED") {
-        return reply.status(409).send({ error: `Task is ${row.state}; only CREATED tasks can start` });
+      const raw = req.body ?? {};
+      if (typeof raw !== "object" || Array.isArray(raw)) return refuse(reply, 400, "invalid_input", "body must be an object");
+      const { idempotencyKey, confirm: rawConfirm, ...rest } = raw as Record<string, unknown>;
+      if (isNarrow(req)) {
+        const extra = Object.keys(rest);
+        if (extra.length > 0) return refuse(reply, 403, "narrow_credential", `this credential may not send ${extra.join(", ")}`);
+        if (idempotencyKey === undefined) return refuse(reply, 400, "invalid_input", "idempotencyKey is required for this credential");
+        // T4/T7: the narrow credential starts only tasks in an exposed repository.
+        if (!aliasFor(row.repo_path)) return refuse(reply, 403, "repo_not_allowed", "this task is not in an exposed repository");
       }
-      // M2 S5: with the composer on, start confirms a composition. Off, nothing below it runs.
-      if (composer) return startComposed(taskId, req.body, reply);
-      const routed = computeRoute(taskId, req.body?.assistantId);
-      const chosen = routed?.explanation.chosen;
-      if (!routed || !chosen) {
-        return reply.status(422).send({ error: "No eligible assistant", explanation: routed?.explanation });
-      }
-      const { explanation, routingDecisionId } = routed;
+      if (badKey(idempotencyKey)) return refuse(reply, 400, "invalid_input", "idempotencyKey must match ^[A-Za-z0-9._:-]{16,128}$");
+      const parsedConfirm = parseConfirm(rawConfirm);
+      if (!parsedConfirm.ok) return refuse(reply, 400, "invalid_input", parsedConfirm.error);
+      const key = idempotencyKey as string | undefined;
+      const kid = req.cred?.kid ?? "anonymous";
+      const print = fingerprint({ taskId, confirm: parsedConfirm.confirm, ...rest });
+      const release = key !== undefined ? idempotency.claim(kid, "task.start", key) : () => {};
+      if (!release) return refuse(reply, 409, "idempotency_in_progress", "a request with this idempotencyKey is still being handled", { retryable: true });
       try {
-        tasks.transition(taskId, "ROUTING");
-        const { runId } = await orchestrator.startTask(taskId, chosen, {
-          routingDecisionRef: String(routingDecisionId),
-        });
-        return { runId, assistantId: chosen, explanation };
-      } catch (err) {
-        // Worktree/adapter startup failure: park the task as FAILED with the reason.
-        const current = tasks.get(taskId);
-        if (current && current.state !== "FAILED") {
-          try {
-            tasks.transition(taskId, "FAILED");
-          } catch {
-            /* already terminal */
+        if (key !== undefined) {
+          const seen = idempotency.lookup(kid, "task.start", key, print);
+          if (seen.kind === "conflict") return refuse(reply, 409, "idempotency_conflict", "this idempotencyKey was used with different input");
+          if (seen.kind === "replay") {
+            // A NULL answer means the process stopped after the transition: rebuild it from the task.
+            let first = seen.record.response;
+            if (!first) {
+              const run = db.prepare("SELECT id, assistant_id FROM runs WHERE task_id = ? ORDER BY started_at DESC LIMIT 1").get(taskId) as { id: string; assistant_id: string } | undefined;
+              first = { runId: run?.id ?? null, assistantId: run?.assistant_id ?? null, taskId, state: tasks.get(taskId)!.state, ...webLinkFor(taskId), startedAt: seen.record.createdAt };
+              idempotency.complete(kid, "task.start", key, 200, first);
+            }
+            return reply.status(seen.record.statusCode ?? 200).send({ ...first, replayed: true });
           }
         }
-        return reply.status(500).send({ error: message(err) });
-      }
+        if (row.state !== "CREATED") {
+          return refuse(reply, 409, "invalid_state", `Task is ${row.state}; only CREATED tasks can start`, { currentState: row.state, ...webLinkFor(taskId) });
+        }
+        const guard: StartGuard = {
+          ...(parsedConfirm.confirm ? { confirm: parsedConfirm.confirm } : {}),
+          ...(key !== undefined ? { record: () => idempotency.record(kid, "task.start", key, print, taskId) } : {}),
+          recorded: false,
+        };
+        // M2 S5: with the composer on, start confirms a composition. Off, nothing below it runs.
+        const out = composer ? await startComposed(taskId, rest, guard) : await startRouted(taskId, rest, guard);
+        if (out.status === 200) {
+          out.body = { ...out.body, taskId, state: tasks.get(taskId)?.state ?? "ROUTING", ...webLinkFor(taskId),
+            startedAt: guard.startedAt, ...(key !== undefined ? { replayed: false } : {}) };
+        }
+        // Only a start that took effect is recorded; a refusal changed nothing and may be retried with the key.
+        if (guard.recorded && key !== undefined) idempotency.complete(kid, "task.start", key, out.status, out.body);
+        return reply.status(out.status).send(out.body);
+      } finally { release(); }
     },
   );
+
+  /** `POST /api/tasks/:id/start` with the composer off: route, confirm, launch. */
+  const startRouted = async (taskId: string, body: Record<string, unknown>, guard: StartGuard): Promise<StartOutcome> => {
+    const routed = computeRoute(taskId, body.assistantId as AssistantId | undefined);
+    const chosen = routed?.explanation.chosen;
+    if (!routed || !chosen) {
+      return { status: 422, body: { error: "No eligible assistant", reason: "no_eligible_assistant", explanation: routed?.explanation } };
+    }
+    if (!confirmMatches(guard.confirm, chosen, null)) return routeChanged(taskId);
+    const { explanation, routingDecisionId } = routed;
+    return launch(taskId, chosen, routingDecisionId, () => ({ explanation }), guard);
+  };
 
   /**
    * `POST /api/tasks/:id/start` with the composer on (plans/m2-composer.md §2 stage 6, API 2.6).
    * Body `{ assistantId?, compositionDigest?, overrides? }`; `assistantId` is the stage-2 override.
+   * 2.14: `confirm` and `idempotencyKey` are handled by the route and arrive here as `guard`.
    *
    * - The pipeline re-runs with the same overrides. A refused override is a 400 and writes nothing.
    * - A sent `compositionDigest` that the re-run does not reproduce (or no composition at all) is
-   *   drift: 409 with the new preview. No revision and no run.
+   *   drift: 409 with the new preview. No revision and no run. With `confirm`, the same refusal is
+   *   `route_changed` with a fresh proposal.
    * - Composed: the run starts on the Harness path and the revision is persisted once the
    *   worktree identity exists, then bound to the run.
    * - No revision possible: route-only with an attempt row saying why (Q3), or 422 when
    *   `composer.requireRevision` is on. A start with a digest or overrides that the execution path
    *   cannot bind (legacy path, no repository) is refused with 422 rather than run without them.
    */
-  const startComposed = async (taskId: string, rawBody: unknown, reply: FastifyReply) => {
+  const startComposed = async (taskId: string, body: Record<string, unknown>, guard: StartGuard): Promise<StartOutcome> => {
     const c = composer!;
-    const body = (rawBody ?? {}) as Record<string, unknown>;
-    if (typeof body !== "object" || Array.isArray(body) || Object.keys(body).some((k) => !["assistantId", "compositionDigest", "overrides"].includes(k))) {
-      return reply.status(400).send({ error: "body must be { assistantId?, compositionDigest?, overrides? }" });
+    const fail = (status: number, payload: Record<string, unknown>): StartOutcome => ({ status, body: payload });
+    if (Object.keys(body).some((k) => !["assistantId", "compositionDigest", "overrides"].includes(k))) {
+      return fail(400, { error: "body must be { assistantId?, compositionDigest?, overrides?, confirm?, idempotencyKey? }" });
     }
     const { assistantId, compositionDigest } = body;
-    if (compositionDigest !== undefined && compositionDigest !== null && (typeof compositionDigest !== "string" || !/^sha256:[0-9a-f]{64}$/.test(compositionDigest))) {
-      return reply.status(400).send({ error: "compositionDigest must be sha256:<64 lowercase hex>" });
+    if (compositionDigest !== undefined && compositionDigest !== null && (typeof compositionDigest !== "string" || !DIGEST.test(compositionDigest))) {
+      return fail(400, { error: "compositionDigest must be sha256:<64 lowercase hex>" });
     }
-    if (assistantId !== undefined && typeof assistantId !== "string") return reply.status(400).send({ error: "assistantId must be a string" });
+    const confirmedDigest = typeof guard.confirm?.compositionDigest === "string" ? guard.confirm.compositionDigest : undefined;
+    if (typeof compositionDigest === "string" && confirmedDigest !== undefined && compositionDigest !== confirmedDigest) {
+      return fail(400, { error: "compositionDigest and confirm.compositionDigest disagree" });
+    }
+    if (assistantId !== undefined && typeof assistantId !== "string") return fail(400, { error: "assistantId must be a string" });
     const parsed = parseOverrides(body.overrides, registry.list().map((a) => a.id));
-    if (!parsed.ok) return reply.status(400).send({ error: parsed.error });
+    if (!parsed.ok) return fail(400, { error: parsed.error });
     let overrides = parsed.overrides;
     if (assistantId !== undefined) {
       const named = overrides?.harness_model?.assistantId;
-      if (named !== undefined && named !== assistantId) return reply.status(400).send({ error: "assistantId and overrides.harness_model.assistantId disagree" });
-      if (!registry.list().some((a) => a.id === assistantId)) return reply.status(400).send({ error: `assistantId ${assistantId} is not a configured assistant` });
+      if (named !== undefined && named !== assistantId) return fail(400, { error: "assistantId and overrides.harness_model.assistantId disagree" });
+      if (!registry.list().some((a) => a.id === assistantId)) return fail(400, { error: `assistantId ${assistantId} is not a configured assistant` });
       overrides = { ...overrides, harness_model: { ...overrides?.harness_model, assistantId } };
     }
-    const digest = typeof compositionDigest === "string" ? compositionDigest : undefined;
+    const digest = typeof compositionDigest === "string" ? compositionDigest : confirmedDigest;
     const required = config.composer.requireRevision;
-    const noRevision = (attempt: object, reason: string, extra: object = {}) => reply.status(422).send({
+    const noRevision = (attempt: object, reason: string, extra: object = {}) => fail(422, {
       error: "no composition revision for this start", reason, composition: attempt, ...extra,
     });
 
@@ -905,7 +1280,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
       }
       const routed = computeRoute(taskId, assistantId as AssistantId | undefined);
       if (!routed?.explanation.chosen) {
-        return reply.status(422).send({ error: "No eligible assistant", explanation: routed?.explanation, composition: c.recordSkippedStart(taskId, unbindable, routed?.routingDecisionId ?? null) });
+        return fail(422, { error: "No eligible assistant", reason: "no_eligible_assistant", explanation: routed?.explanation, composition: c.recordSkippedStart(taskId, unbindable, routed?.routingDecisionId ?? null) });
       }
       chosen = routed.explanation.chosen;
       routingDecisionId = routed.routingDecisionId;
@@ -913,11 +1288,12 @@ export function buildServer(deps: ServerDeps): BuiltServer {
       attempt = c.recordSkippedStart(taskId, unbindable, routingDecisionId);
     } else {
       const started = await c.start(taskId, overrides, digest);
-      if (started.kind === "refused") return reply.status(400).send({ error: started.error, reason: started.reason });
+      if (started.kind === "refused") return fail(400, { error: started.error, reason: started.reason });
       if (started.kind === "drift") {
-        return reply.status(409).send({ error: "the composition changed since it was previewed", reason: "composition_drift", preview: started.preview });
+        if (guard.confirm) return routeChanged(taskId);
+        return fail(409, { error: "the composition changed since it was previewed", reason: "composition_drift", preview: started.preview });
       }
-      if (started.kind === "no_candidate") return reply.status(422).send({ error: "No eligible assistant", explanation: started.explanation, composition: started.attempt });
+      if (started.kind === "no_candidate") return fail(422, { error: "No eligible assistant", reason: "no_eligible_assistant", explanation: started.explanation, composition: started.attempt });
       if (started.kind === "route_only" && required) return noRevision(started.attempt, started.attempt.reason ?? "no_revision", { explanation: started.explanation });
       chosen = started.assistantId;
       routingDecisionId = started.routingDecisionId;
@@ -925,20 +1301,9 @@ export function buildServer(deps: ServerDeps): BuiltServer {
       if (started.kind === "composed") binding = started.binding;
       else attempt = started.attempt;
     }
-    try {
-      tasks.transition(taskId, "ROUTING");
-      const { runId } = await orchestrator.startTask(taskId, chosen as AssistantId, {
-        routingDecisionRef: String(routingDecisionId),
-        ...(binding ? { composition: binding } : {}),
-      });
-      return { runId, assistantId: chosen, explanation, composition: binding?.attempt ?? attempt ?? null };
-    } catch (err) {
-      const current = tasks.get(taskId);
-      if (current && current.state !== "FAILED") {
-        try { tasks.transition(taskId, "FAILED"); } catch { /* already terminal */ }
-      }
-      return reply.status(500).send({ error: message(err) });
-    }
+    const actualDigest = binding ? binding.compositionDigest : null;
+    if (!confirmMatches(guard.confirm, chosen, actualDigest)) return routeChanged(taskId);
+    return launch(taskId, chosen as AssistantId, routingDecisionId, () => ({ explanation, composition: binding?.attempt ?? attempt ?? null }), guard, binding);
   };
 
   app.post<{
@@ -1028,6 +1393,73 @@ export function buildServer(deps: ServerDeps): BuiltServer {
       )
       .all(req.params.id);
     return live;
+  });
+
+  // tlm-02a: the joins between runs, requests, dispatches, routing decisions, checkpoints,
+  // handoff records and Harness envelopes, made once here so no client recomputes them. Each
+  // join names its source; `inferred` ones follow the stated rule in `inferenceRules`.
+  app.get<{ Params: { id: string } }>("/api/tasks/:id/provenance", read.sessions, (req, reply) => {
+    const provenance = taskProvenance(db, req.params.id);
+    if (!provenance) return reply.status(404).send({ error: "not found" });
+    return provenance;
+  });
+
+  // qcq-01 (API 2.15): ADVISORY run estimate and scheduling recommendation, before dispatch. Routes the
+  // task with the router's pure inputs (nothing persisted) and reads history; it never dispatches,
+  // reserves, schedules or enforces. `deadline` (ISO), `approval=required` and `assistant` (what-if) are optional.
+  const runEstimates = new RunEstimates({ db, config, tasks, registry, cooldowns, now, ...(modelCatalog ? { catalog: modelCatalog } : {}) });
+  app.get<{ Params: { id: string }; Querystring: { deadline?: string; approval?: string; assistant?: string } }>("/api/tasks/:id/estimate", read.routing, (req, reply) => {
+    const { deadline, approval, assistant } = req.query;
+    if (deadline !== undefined && !Number.isFinite(Date.parse(deadline))) return reply.status(400).send({ error: "deadline must be an ISO instant" });
+    if (approval !== undefined && approval !== "required") return reply.status(400).send({ error: "approval must be 'required' when given" });
+    if (assistant !== undefined && !registry.get(assistant)) return reply.status(400).send({ error: `unknown assistant ${assistant}` });
+    const estimate = runEstimates.forTask(req.params.id, {
+      ...(deadline !== undefined ? { deadline: new Date(deadline).toISOString() } : {}),
+      ...(approval === "required" ? { approvalRequired: true } : {}),
+      ...(assistant !== undefined ? { assistantId: assistant } : {}),
+    });
+    if (!estimate) return reply.status(404).send({ error: "not found" });
+    return estimate;
+  });
+  // qcq-02 (API 2.16): every run start stores the estimate as it stood then (record-only; nothing
+  // in dispatch reads it back). The orchestrator calls it after the run row exists and swallows failures.
+  orchestrator.estimateSnapshots = runEstimates;
+  // qcq-02: the task's stored estimates, oldest first, each joined to its run's actual once it ended.
+  app.get<{ Params: { id: string } }>("/api/tasks/:id/estimates/recorded", read.routing, (req, reply) => {
+    const recorded = runEstimates.recordedForTask(req.params.id);
+    if (!recorded) return reply.status(404).send({ error: "not found" });
+    return recorded;
+  });
+  // qcq-01: estimate accuracy, by replaying the versioned estimator over recorded actuals.
+  // qcq-02: `source=recorded` scores the estimates stored at start instead of a replay.
+  app.get<{ Querystring: { limit?: string; source?: string } }>("/api/estimates/accuracy", read.routing, (req, reply) => {
+    const limit = req.query.limit === undefined ? 50 : Number(req.query.limit);
+    if (!Number.isInteger(limit) || limit < 1 || limit > 500) return reply.status(400).send({ error: "limit must be an integer 1..500" });
+    const source = req.query.source ?? "replay";
+    if (source !== "replay" && source !== "recorded") return reply.status(400).send({ error: "source must be 'replay' or 'recorded'" });
+    return source === "recorded" ? runEstimates.recordedAccuracy(limit) : runEstimates.accuracy(limit);
+  });
+
+  // tlm-02b: GitHub issues and PRs a task belongs to. Operator links are claims (not checked
+  // against GitHub); autopilot publications are derived from their P0-5 records at read time.
+  const taskLinks = new TaskLinkService(db, now);
+  const linkError = (reply: FastifyReply, err: unknown) => {
+    if (err instanceof TaskLinkError) return reply.status(err.status).send({ error: err.code, detail: err.message });
+    throw err;
+  };
+  app.get<{ Params: { id: string } }>("/api/tasks/:id/links", read.tasks, (req, reply) => {
+    const links = taskLinks.forTask(req.params.id);
+    if (!links) return reply.status(404).send({ error: "not found" });
+    return links;
+  });
+  app.post<{ Params: { id: string }; Body: unknown }>("/api/tasks/:id/links", write, (req, reply) => {
+    try { return reply.status(201).send(taskLinks.add(req.params.id, req.body, req.cred?.kid ?? null)); } catch (err) { return linkError(reply, err); }
+  });
+  app.delete<{ Params: { id: string; linkId: string } }>("/api/tasks/:id/links/:linkId", write, (req, reply) => {
+    try { taskLinks.remove(req.params.id, req.params.linkId, req.cred?.kid ?? null); return reply.status(204).send(); } catch (err) { return linkError(reply, err); }
+  });
+  app.get<{ Querystring: { repo?: string; number?: string } }>("/api/task-links", read.tasks, (req, reply) => {
+    try { return taskLinks.forTarget(req.query.repo, req.query.number); } catch (err) { return linkError(reply, err); }
   });
 
   app.get<{ Params: { id: string } }>("/api/tasks/:id/files/handoff.md", read.tasks, (req, reply) => {
@@ -1397,7 +1829,8 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     void publications.sweep().catch((err) => app.log.error(err, "publication sweep failed"));
   }, 60_000);
   publicationSweep.unref();
-  app.addHook("onClose", async () => { clearInterval(leaseSweep); clearInterval(publicationSweep); dispatcher.stop(); scheduler.stop(); });
+  heartbeat?.start();
+  app.addHook("onClose", async () => { clearInterval(leaseSweep); clearInterval(publicationSweep); heartbeat?.stop(); dispatcher.stop(); scheduler.stop(); await dispatcher.idle(); });
   // ---- Durable session-addressed conversational input (default OFF) ----
   //
   // The whole capability is behind `sessionInput.enabled`. While it is false
@@ -1407,41 +1840,15 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   let sessionInputs: SessionInputService | undefined;
   let sessionInputRedelivery: (() => Promise<unknown>) | undefined;
   if (config.sessionInput.enabled) {
-    const fakes = new Map<string, FakeSessionInputAdapter>();
-    const lives = new Map<string, ClaudeCodeSessionInputAdapter>();
-    const resolve: SessionInputAdapterResolver = deps.sessionInputAdapters ?? ((assistantId) => {
-      // `AgentAdapter.send` is still NOT reused as the delivery seam: it has no
-      // idempotency, receipt or acknowledgement contract, and a typed method is
-      // not acceptance evidence. Claude Code gets its own adapter, which proves
-      // delivery from the CLI's own transcript; every OTHER provider still
-      // declares no session-input capability at all.
-      const row = db.prepare("SELECT provider FROM assistants WHERE id = ?").get(assistantId) as
-        | { provider: string }
-        | undefined;
-      if (row?.provider === "openai") {
-        const owner = registry.adapter(assistantId);
-        return owner instanceof CodexAdapter ? owner.sessionInput : undefined;
-      }
-      if (row?.provider === "anthropic") {
-        let adapter = lives.get(assistantId);
-        if (!adapter) {
-          const agent = registry.adapter(assistantId);
-          // Only a live-input ClaudeAdapter can be delivered to. Anything else
-          // has no capability rather than a silently faked one.
-          if (!(agent instanceof ClaudeAdapter)) return undefined;
-          adapter = new ClaudeCodeSessionInputAdapter((sessionId) => agent.liveSession(sessionId));
-          lives.set(assistantId, adapter);
-        }
-        return adapter;
-      }
-      if (row?.provider !== "fake") return undefined;
-      let adapter = fakes.get(assistantId);
-      if (!adapter) {
-        adapter = new FakeSessionInputAdapter();
-        fakes.set(assistantId, adapter);
-      }
-      return adapter;
-    });
+    // `AgentAdapter.send` is still NOT reused as the delivery seam: it has no
+    // idempotency, receipt or acknowledgement contract, and a typed method is
+    // not acceptance evidence. Which providers can deliver, and how, is each
+    // runtime descriptor's `sessionInput` binding (Claude Code, Codex, the
+    // fake); every OTHER provider declares no session-input capability at all.
+    const resolve: SessionInputAdapterResolver = deps.sessionInputAdapters ?? sessionInputResolver(
+      (assistantId) => (db.prepare("SELECT provider FROM assistants WHERE id = ?").get(assistantId) as { provider: string } | undefined)?.provider,
+      (assistantId) => registry.adapter(assistantId),
+    );
     sessionInputs = new SessionInputService(db, { workspace: config.workspace, adapters: resolve, now });
     // A previous incarnation's in-flight attempts are unknown outcomes, not
     // deliveries and not failures. Fence them before serving anything.
@@ -1618,12 +2025,12 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   if (existsSync(staticRoot)) {
     void app.register(fastifyStatic, { root: staticRoot, wildcard: false });
     app.setNotFoundHandler((req, reply) => {
-      if (req.url.split("?")[0]!.startsWith("/api/")) return reply.code(404).send({ error: "not found" });
+      if (isApiRequest(req)) return reply.code(404).send({ error: "not found" });
       return reply.sendFile("index.html");
     });
   }
 
-  return { app, registry, orchestrator, tasks, bus, checkpoints, cooldowns, telemetry, scheduler, autopilot, publications, ...(acceptance ? { acceptance } : {}), dispatcher, quotaProbes: probes, modelCatalog, registryFederation, memoryFederation, sessionInputs, sessionInputRedelivery };
+  return { app, registry, orchestrator, tasks, bus, checkpoints, cooldowns, telemetry, scheduler, autopilot, publications, ...(acceptance ? { acceptance } : {}), dispatcher, ...(heartbeat ? { heartbeat } : {}), restore, quotaProbes: probes, modelCatalog, registryFederation, memoryFederation, sessionInputs, sessionInputRedelivery, runEstimates };
 }
 
 function sseHeaders(reply: FastifyReply): void {

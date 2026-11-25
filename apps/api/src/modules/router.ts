@@ -9,10 +9,22 @@ import { recommendModel } from "./model-selection.js";
 import type { Db } from "../db/index.js";
 import { TelemetryService, taskKindOf, type AssistantScore } from "./telemetry.js";
 import { continuationProvenance } from "./context-continuation.js";
+import { conformanceBlock } from "./runtime-lifecycle.js";
 
 export interface RouteCandidate {
   id: AssistantId;
+  /** Config `enabled` (and not the excluded handoff source). */
   enabled: boolean;
+  /**
+   * The operator disable overlay (migration 051). It only removes: a candidate it marks fails a
+   * hard filter whatever `enabled` says, and its absence never adds one back.
+   */
+  operatorDisabled?: boolean;
+  /**
+   * The conformance hard filter's text (runtime-lifecycle.ts `conformanceBlock`): set only for an
+   * instance that requires version-bound conformance evidence and lacks a passing row.
+   */
+  conformanceBlocked?: string;
   manifest: CapabilityManifest | null;
 }
 
@@ -20,6 +32,12 @@ export interface RouteRequest {
   taskId: string;
   profile: RoutingProfile;
   needsRepo: boolean;
+  /**
+   * The task runs as the agent Unix user (autopilot, `tasks.run_as = 'agent'`). Only an adapter that
+   * declares `harness.agentUser` can be launched that way, so any other candidate fails a hard filter:
+   * routing it there only parks the task on `isolation_unavailable` (G15 attempts 9 and 10).
+   */
+  needsAgentUser?: boolean;
   repoPathAllowed: boolean;
   /** Assistants excluded by cooldown (failed/limited recently), with reason. */
   cooldowns: Map<string, string>;
@@ -51,12 +69,15 @@ export function route(req: RouteRequest, candidates: RouteCandidate[]): RoutingE
   const evaluated = candidates.map((c) => {
     const failures: string[] = [];
     if (!c.enabled) failures.push("disabled in workspace config");
+    if (c.operatorDisabled) failures.push("disabled by operator");
     if (!c.manifest) failures.push("no capability manifest (sync has not run)");
     if (c.manifest) {
       if (c.manifest.core.auth.state !== "ok") failures.push(`auth ${c.manifest.core.auth.state}`);
       if (req.needsRepo && !c.manifest.core.execution.filesystem) failures.push("no filesystem capability");
       if (req.needsRepo && !c.manifest.core.execution.shell) failures.push("no shell capability");
+      if (req.needsAgentUser && c.manifest.harness?.agentUser !== true) failures.push("cannot launch as the agent user");
     }
+    if (c.conformanceBlocked) failures.push(c.conformanceBlocked);
     if (req.needsRepo && !req.repoPathAllowed) failures.push("repository path not in workspace allowlist");
     const cooldown = req.cooldowns.get(c.id);
     if (cooldown) failures.push(`cooldown: ${cooldown}`);
@@ -283,7 +304,10 @@ export function routeInputs(deps: RouteDeps, taskId: string, origin: RouteOrigin
   const telemetry = new TelemetryService(deps.db);
   const scores = telemetry.scores();
   for (const [id, score] of telemetry.scores(taskKindOf(row))) scores.set(id, score);
-  const candidates = deps.registry.list().map(a => ({ id: a.id as AssistantId, enabled: a.enabled === 1 && a.id !== options.exclude, manifest: a.manifestParsed }));
+  const candidates = deps.registry.list().map(a => {
+    const conformanceBlocked = conformanceBlock(deps.db, deps.config, a);
+    return { id: a.id as AssistantId, enabled: a.enabled === 1 && a.id !== options.exclude, ...(a.operator_state === 'disabled' ? { operatorDisabled: true } : {}), ...(conformanceBlocked ? { conformanceBlocked } : {}), manifest: a.manifestParsed };
+  });
   const dispatch = options.dispatchId ? deps.db.prepare('SELECT checkpoint_id FROM dispatches WHERE dispatch_id = ? AND task_id = ?').get(options.dispatchId, taskId) as { checkpoint_id: string | null } | undefined : undefined;
   // K11 provenance: read back from the checkpoint anchor, never from a second
   // continuation-history store. Absent for every other origin.
@@ -292,6 +316,7 @@ export function routeInputs(deps: RouteDeps, taskId: string, origin: RouteOrigin
     : undefined;
   const request: RouteRequest = {
     taskId, profile: intent.profile, needsRepo: !!intent.repository,
+    ...(row.run_as === 'agent' ? { needsAgentUser: true } : {}),
     repoPathAllowed: !intent.repository || deps.config.repoAllowlist.some(p => intent.repository!.path === p || intent.repository!.path.startsWith(`${p}/`)),
     cooldowns: new Map(), scores, projections: new Map(deps.registry.list().map(a => [a.id, new QuotaProjection(deps.db, deps.now).for(a.id, a.manifestParsed)])), userOverride: options.override ?? intent.overrides?.assistantId,
     preferSame: continuation?.previousAssistantId as AssistantId | undefined,

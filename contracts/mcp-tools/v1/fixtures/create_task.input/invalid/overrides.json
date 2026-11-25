@@ -1,0 +1,8 @@
+{
+  "goal": "x",
+  "repo": "dogfood-cockpit",
+  "idempotencyKey": "c0-fixture-key-0001",
+  "overrides": {
+    "assistantId": "codex"
+  }
+}

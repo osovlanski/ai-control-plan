@@ -1,6 +1,6 @@
 import { HandoffService } from './harness/handoff.js';
 import { randomUUID } from 'node:crypto';
-import { canTransition, isTerminal, redactValue, type ContinuationIntent, type Dispatch, type DispatchOrigin, type PauseKind, type TaskState, type OnDependencyFailure, type ResourcePool, type RoutingExplanation, type SchedulerEvent, type WaitInput, type WaitCondition } from '@agent-plane/core';
+import { canTransition, isTerminal, type AssistantId, redactValue, type ContinuationIntent, type Dispatch, type DispatchOrigin, type PauseKind, type TaskState, type OnDependencyFailure, type ResourcePool, type RoutingExplanation, type SchedulerEvent, type WaitInput, type WaitCondition } from '@agent-plane/core';
 import type { Db } from '../db/index.js';
 import type { ResolvedConfig } from '../config.js';
 import type { TaskStore } from './tasks.js';
@@ -9,10 +9,13 @@ import type { QuotaProbeService } from './quota-probe.js';
 import { ScheduleService } from './schedules.js';
 import { AutopilotLaunchRefused, type AutopilotPark, type AutopilotRefusalReason } from './autopilot.js';
 import type { TaskEventBus } from './sse.js';
+import { AttemptStore, announceReleased, attemptStatuses, onClaimsReleased, type AttemptStatus, type Released } from './attempts.js';
 
 const RECHECK_MS = 60_000;
 const RECOVERY_WINDOW_MS = 60_000;
 const DEFAULT_MAX_AUTO_WAKES = 3;
+/** `created_by` of the condition a stopped manual handoff parks its task on. */
+const HANDOFF_PARK = 'handoff';
 /** A failed dependency is not the scheduler's decision to make on its own. */
 const DEFAULT_ON_DEPENDENCY_FAILURE: OnDependencyFailure = 'wait-input';
 
@@ -51,8 +54,14 @@ export class Scheduler {
   private inFlight = new Map<string, Promise<void>>();
   /** K5 recurring schedules. Shares this scheduler's timer; no second loop. */
   readonly schedules: ScheduleService;
+  /** qcq-04a: the attempt rows that own every claim (packet 2.1). */
+  private readonly attempts: AttemptStore;
   constructor(private d: SchedulerDeps) {
     this.now = d.now ?? (() => new Date());
+    this.attempts = new AttemptStore(d.db, this.now);
+    // A release made outside the scheduler (the session-terminal rule in `SessionStore.terminalize`)
+    // still hands the freed units to the next FIFO waiter, after its transaction committed.
+    onClaimsReleased(d.db, released => this.afterRelease(released));
     d.orchestrator.scheduler = this;
     d.tasks.onTerminal = taskId => this.taskTerminal(taskId);
     this.schedules = new ScheduleService({
@@ -259,12 +268,17 @@ export class Scheduler {
   assertLaunchClaim(taskId: string, dispatchId?: string): void {
     const need = this.requirement(taskId);
     if (!need) return;
-    const held = this.claim(taskId);
-    if (!held || held.resource !== need.resource || held.units < need.units) {
+    // qcq-04a (packet 2.3.2): per attempt. The start's attempt is the one bound to its dispatch; it
+    // must be `held` and hold a live claim for the requirement with at least the required units.
+    // An early check only: the provider-entry commit is authoritative.
+    const attempt = dispatchId ? this.attempts.forDispatch(dispatchId) : undefined;
+    const held = attempt ? this.attempts.claimsOf(attempt.attempt_id).find(c => c.resource === need.resource) : undefined;
+    if (!held || held.units < need.units || attempt?.state !== 'held') {
+      const owner = this.claim(taskId);
+      if (owner && owner.resource === need.resource && owner.units >= need.units && owner.dispatch_id !== dispatchId) {
+        throw new Error(`Task ${taskId} holds ${need.resource} for dispatch ${owner.dispatch_id}; ${dispatchId ? `dispatch ${dispatchId}` : 'a start that owns no dispatch'} does not own that claim`);
+      }
       throw new Error(`Task ${taskId} needs ${need.units} unit(s) of ${need.resource}; execution cannot start without a live resource claim`);
-    }
-    if (held.dispatch_id !== dispatchId) {
-      throw new Error(`Task ${taskId} holds ${need.resource} for dispatch ${held.dispatch_id}; ${dispatchId ? `dispatch ${dispatchId}` : 'a start that owns no dispatch'} does not own that claim`);
     }
   }
 
@@ -375,33 +389,42 @@ export class Scheduler {
       .get(taskId, c.generation);
   }
 
-  /** Live claim for a task, if it holds one. */
+  /**
+   * The K4b `resourceClaim` projection (packet 2.3.2): the live POOL claim of the task's single-path
+   * owner when that claim carries a `dispatch_id`, or nothing. A direct-owner or candidate claim is
+   * never projected here; it appears only in `attempts`.
+   */
   claim(taskId: string): { claim_id: number; resource: string; units: number; dispatch_id: string; claimed_at: string } | undefined {
-    return this.d.db.prepare('SELECT claim_id, resource, units, dispatch_id, claimed_at FROM resource_claims WHERE task_id = ? AND released_at IS NULL')
+    return this.d.db.prepare(`SELECT c.claim_id, c.resource, c.units, c.dispatch_id, c.claimed_at FROM resource_claims c
+      JOIN execution_attempts a ON a.attempt_id = c.attempt_id
+      WHERE c.task_id = ? AND c.released_at IS NULL AND c.dispatch_id IS NOT NULL AND a.candidate_slot = 0 AND c.resource NOT LIKE 'account:%'
+      ORDER BY c.claim_id LIMIT 1`)
       .get(taskId) as { claim_id: number; resource: string; units: number; dispatch_id: string; claimed_at: string } | undefined;
   }
 
+  /** qcq-04a: the task's open attempts, each with its slot, account, requirements and live claims. */
+  attemptsOf(taskId: string): AttemptStatus[] { return attemptStatuses(this.d.db, taskId); }
+
   /**
-   * Releases the live claim once the task no longer needs the slot, and wakes the
-   * next FIFO waiter. A terminal task never runs again, so its claim goes
-   * regardless of how its run row settled; otherwise the existing `hasOwner`
-   * ownership test is the single authority — the same one `WAITING_RESOURCE`
-   * itself is defined by. That makes leaks impossible to express rather than
-   * merely unlikely: every park, abort, cancel, settle and boot path already ends
-   * with no owner, and the timer sweep re-checks anything that missed its event.
+   * Releases what the task no longer needs, and wakes the next FIFO waiter. qcq-04a (packet 2.12):
+   * per attempt, at exactly the points K4b released before. A terminal task never runs again, so
+   * every attempt of it settles (`task_terminal_unverified`) regardless of how its run row settled;
+   * otherwise an attempt whose run, session or dispatch no longer owns execution settles at its
+   * stream's end, and a `held` one is dropped `never_entered`. Each release frees its claims in the
+   * same transaction. That makes leaks impossible to express rather than merely unlikely: every park,
+   * abort, cancel, settle and boot path already ends with no owner, and the sweep re-checks anything
+   * that missed its event.
    */
-  releaseIfIdle(taskId: string, reason: string): void {
-    const released = this.d.db.transaction((): { resource: string } | undefined => {
-      const held = this.claim(taskId);
-      if (!held) return undefined;
-      const row = this.d.tasks.get(taskId);
-      if (row && !isTerminal(row.state) && this.hasOwner(taskId)) return undefined;
-      this.d.db.prepare('UPDATE resource_claims SET released_at = ?, release_reason = ? WHERE claim_id = ? AND released_at IS NULL')
-        .run(this.iso(), reason, held.claim_id);
-      this.record(taskId, 'resource.released', undefined, held.dispatch_id, { resource: held.resource, units: held.units, reason });
-      return { resource: held.resource };
-    })();
-    if (released) { this.publish(taskId); this.notifyResource(released.resource); }
+  releaseIfIdle(taskId: string, reason: string, mode: 'runtime' | 'boot' = 'runtime'): void {
+    const released = this.d.db.transaction((): Released[] => this.attempts.settleIdle(taskId, mode, reason))();
+    this.afterRelease(released);
+  }
+
+  /** After commit: the board update and the freed pools' next waiters. */
+  private afterRelease(released: Released[]): void {
+    if (!released.length) return;
+    for (const taskId of new Set(released.map(r => r.taskId))) this.publish(taskId);
+    for (const resource of new Set(released.map(r => r.resource))) this.notifyResource(resource);
   }
 
   /**
@@ -413,10 +436,10 @@ export class Scheduler {
     queueMicrotask(() => { try { this.releaseIfIdle(taskId, reason); } catch (error) { this.d.onError?.(error); } });
   }
 
-  /** Sweeps every live claim. The bounded fallback for a release event we never got. */
-  private releaseIdleClaims(): void {
-    for (const r of this.d.db.prepare('SELECT task_id FROM resource_claims WHERE released_at IS NULL').all() as { task_id: string }[]) {
-      try { this.releaseIfIdle(r.task_id, 'sweep: no execution owner'); } catch (error) { this.d.onError?.(error); }
+  /** Sweeps every open attempt. The bounded fallback for a release event we never got. */
+  private releaseIdleClaims(mode: 'runtime' | 'boot' = 'runtime'): void {
+    for (const taskId of new Set(this.attempts.open().map(a => a.task_id))) {
+      try { this.releaseIfIdle(taskId, mode === 'boot' ? 'boot: no execution owner' : 'sweep: no execution owner', mode); } catch (error) { this.d.onError?.(error); }
     }
   }
 
@@ -552,9 +575,9 @@ export class Scheduler {
     const carriedAge = resource !== null && previous?.resource === resource && (previous.units ?? 1) === units ? previous.resourceQueuedAt : undefined;
     // The continuation intent is carried EXPLICITLY, never inherited: it describes
     // a handoff that has not happened yet, so only a path that knows the
-    // continuation is still owed (the deferral itself, or a re-park of a dispatch
-    // that never started) passes it on.
-    const continuation = resource !== null && carry?.continuation ? JSON.stringify(redactValue(carry.continuation)) : null;
+    // continuation is still owed (the deferral itself, a handoff park and its
+    // run-now re-arm, or a re-park of a dispatch that never started) passes it on.
+    const continuation = carry?.continuation ? JSON.stringify(redactValue(carry.continuation)) : null;
     this.d.db.prepare(`INSERT INTO wait_conditions(task_id,generation,state,kind,not_before,created_by,created_at,auto_wakes,history,reason,checkpoint_id,blockers,assistants,depends_on,on_dependency_failure,origin,resource,resource_units,resource_queued_at,continuation)
       VALUES(?,?,'active',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(taskId, generation, input.kind, input.notBefore!, actor, this.iso(), autoWakes, JSON.stringify(history.slice(-10)), redactValue(input.reason ?? 'Scheduled wait'), checkpointId ?? null, JSON.stringify(redactValue(blockers)), JSON.stringify(redactValue(input.kind === 'quota' ? input.assistants ?? [] : [])),
       JSON.stringify(input.kind === 'dependency' ? input.dependsOn : []), input.kind === 'dependency' ? (input.onDependencyFailure ?? DEFAULT_ON_DEPENDENCY_FAILURE) : null, origin ?? null,
@@ -609,6 +632,30 @@ export class Scheduler {
       return true;
     })();
     if (parked) { this.publish(taskId); this.arm(); this.releaseSoon(taskId, 'parked on quota'); }
+    return parked;
+  }
+
+  /**
+   * An unattended autopilot task that hit its assistant's quota has nowhere else to go (the other
+   * adapters cannot launch as the agent user), so it waits for the SAME assistant's cooldown and
+   * relaunches from the yield checkpoint. A time wait carries no handoff intent, so the grant
+   * routes without excluding the source. Bounded by the same auto-wake budget as a quota park.
+   */
+  parkSameAssistant(taskId: string, checkpointId: string, notBefore: string, reason: string): boolean {
+    const parked = this.d.db.transaction(() => {
+      if (!this.enabled || this.hasOwner(taskId) || !['LIMIT_PAUSED', 'WAITING_INPUT'].includes(this.d.tasks.get(taskId)?.state ?? '')) return false;
+      const old = this.condition(taskId);
+      const count = (old?.autoWakes ?? 0) + (old?.state === 'consumed' ? 1 : 0);
+      const history = [...(old?.history ?? []), { at: this.iso(), actor: 'failover', outcome: 'reparked', reason: 'same-assistant quota resume' }].slice(-10);
+      if (count >= (this.d.config.scheduler?.maxAutoWakes ?? DEFAULT_MAX_AUTO_WAKES)) return false;
+      this.d.db.prepare("UPDATE wait_conditions SET state = 'replaced' WHERE task_id = ? AND state = 'active'").run(taskId);
+      this.insert(taskId, { kind: 'time', notBefore, reason }, 'failover', count, history, checkpointId, [], undefined,
+        { resource: old?.resource, units: old?.units });
+      this.d.tasks.transition(taskId, 'WAITING_RESOURCE');
+      this.record(taskId, 'wait.attached', this.condition(taskId)!.generation, undefined, { origin: 'same-assistant-resume', checkpointId, reason });
+      return true;
+    })();
+    if (parked) { this.publish(taskId); this.arm(); this.releaseSoon(taskId, 'parked on same-assistant quota resume'); }
     return parked;
   }
 
@@ -715,6 +762,7 @@ export class Scheduler {
     let stateChanged = false;
     /** Set when this wake granted a claim, so the pool is re-evaluated after commit. */
     let claimedResource: string | undefined;
+    const released: Released[] = [];
     const result = this.d.db.transaction((): WakeResult => {
       const c = this.condition(taskId);
       if (!c || c.state !== 'active' || c.generation !== expectedGeneration || this.d.tasks.get(taskId)?.state !== 'WAITING_RESOURCE' || this.hasOwner(taskId)) {
@@ -759,17 +807,27 @@ export class Scheduler {
         }
       }
       const id = `dispatch_${randomUUID()}`;
+      // An attempt whose execution ended but whose settlement event was missed would otherwise still
+      // own slot 0. The same ownership test K4b's release applies; nothing owned is touched.
+      released.push(...this.attempts.settleIdle(taskId, 'runtime', 'wake: no execution owner'));
       this.d.db.prepare("UPDATE wait_conditions SET state = 'consumed', consumed_at = ?, consumed_by = ? WHERE task_id = ? AND generation = ?").run(this.iso(), actor, taskId, expectedGeneration);
+      const path = this.d.config.execution.harnessModes.single ? 'harness' : 'legacy';
       this.d.db.prepare(`INSERT INTO dispatches(dispatch_id,task_id,condition_generation,origin,execution_path,phase,created_at,updated_at,checkpoint_id)
-        VALUES(?,?,?,?,?,'reserved',?,?,?)`).run(id, taskId, expectedGeneration, c.origin ?? (actor === 'operator' ? 'run-now' : 'wake'), this.d.config.execution.harnessModes.single ? 'harness' : 'legacy', this.iso(), this.iso(), c.checkpointId ?? null);
+        VALUES(?,?,?,?,?,'reserved',?,?,?)`).run(id, taskId, expectedGeneration, c.origin ?? (actor === 'operator' ? 'run-now' : 'wake'), path, this.iso(), this.iso(), c.checkpointId ?? null);
+      // qcq-04a compat attempt (packet 2.12): written in THIS transaction, after the dispatch and
+      // before the claim, so the claim has its owner from the moment it exists.
+      const attempt = this.attempts.createHeld({ taskId, kind: 'dispatch', path, slot: 0, dispatchId: id,
+        runAs: this.d.tasks.get(taskId)?.run_as === 'agent' ? 'agent' : 'plane', queueKey: c.resourceQueuedAt ?? this.iso(),
+        requirements: c.resource ? [{ resource: c.resource, units: c.units ?? 1, queuedAt: c.resourceQueuedAt ?? this.iso() }] : [],
+        reason: 'compat: wake' });
       if (c.resource) {
         // The claim commits in THIS transaction, with the condition consume and the
         // dispatch reservation. That single boundary — plus `uq_claim_live` and the
         // capacity sum read above — is the whole over-allocation defence: two
         // concurrent wakes cannot both see the last slot free, and a crash leaves
         // either both the claim and its dispatch or neither.
-        this.d.db.prepare('INSERT INTO resource_claims(task_id,dispatch_id,generation,resource,units,claimed_at) VALUES(?,?,?,?,?,?)')
-          .run(taskId, id, expectedGeneration, c.resource!, c.units ?? 1, this.iso());
+        this.d.db.prepare('INSERT INTO resource_claims(attempt_id,task_id,dispatch_id,generation,resource,units,claimed_at) VALUES(?,?,?,?,?,?,?)')
+          .run(attempt.attempt_id, taskId, id, expectedGeneration, c.resource!, c.units ?? 1, this.iso());
         this.record(taskId, 'resource.claimed', c.generation, id, { resource: c.resource, units: c.units ?? 1,
           capacity: this.capacity(c.resource!), claimedUnitsAfter: this.claimed(c.resource!) });
         claimedResource = c.resource;
@@ -778,6 +836,7 @@ export class Scheduler {
       this.record(taskId, 'dispatch.reserved', c.generation, id, { actor });
       return { outcome: 'dispatched', dispatchId: id };
     })();
+    this.afterRelease(released);
     if (result.outcome === 'stale' && (stateChanged || result.reason.startsWith('Dependency failed'))) this.publish(taskId);
     if (result.outcome === 'dispatched') {
       // A release can free more units than the front waiter takes, and only the front
@@ -815,12 +874,102 @@ export class Scheduler {
     this.publish(taskId);
   }
 
+  /**
+   * A manual handoff that drained its source and then stopped (refused, blocked, failed) parks the
+   * task WAITING_INPUT on this row, anchored to the source's checkpoint. It is written `expired`
+   * because nothing may wake it on its own; an operator consumes it, either by `/handoff` (which
+   * continues from its checkpoint) or by `runNow`, which re-arms it where the pause allows a wait.
+   * The park keeps the handoff's intent (its excluded source and any explicit target, decision D2
+   * on #209), so a run-now routes the continuation the way the handoff would have.
+   * Called inside the orchestrator's park transaction.
+   */
+  parkHandoff(taskId: string, checkpointId: string | undefined, reason: string, intent?: ContinuationIntent): void {
+    this.d.db.prepare("UPDATE wait_conditions SET state = 'replaced' WHERE task_id = ? AND state = 'active'").run(taskId);
+    const old = this.condition(taskId);
+    this.insert(taskId, { kind: 'time', notBefore: this.iso(), reason }, HANDOFF_PARK, 0, old?.history ?? [], checkpointId, [], undefined,
+      { resource: old?.resource, units: old?.units, continuation: intent });
+    this.d.db.prepare("UPDATE wait_conditions SET state = 'expired' WHERE task_id = ? AND state = 'active'").run(taskId);
+  }
+
+  /** The handoff park a parked task still carries, i.e. the one the next `/handoff` or `runNow` consumes. */
+  handoffPark(taskId: string): WaitCondition | undefined {
+    const c = this.condition(taskId);
+    return c?.state === 'expired' && c.createdBy === HANDOFF_PARK && this.d.tasks.get(taskId)?.state === 'WAITING_INPUT' ? c : undefined;
+  }
+
+  /** A handoff that went ahead consumed its park; a later `runNow` must not re-arm it. */
+  retireHandoffPark(taskId: string, generation: number): void {
+    this.d.db.prepare("UPDATE wait_conditions SET state = 'replaced' WHERE task_id = ? AND generation = ? AND state = 'expired' AND created_by = ?")
+      .run(taskId, generation, HANDOFF_PARK);
+  }
+
+  /**
+   * A manual handoff whose own pool wake reserved a dispatch and claim and then failed before any
+   * provider start has already been refused to the operator. Rolls back that dispatch, its claim
+   * and the wait it consumed, so no later tick starts a successor nobody is waiting for. Called
+   * inside the orchestrator's park transaction, which then replaces the restored wait with its park.
+   * False when an open dispatch is not this handoff's to roll back: a start was attempted (outcome
+   * unknown, recovery decides) or a tick is driving it right now.
+   */
+  rollbackRefusedDispatch(taskId: string, reason: string): boolean {
+    const open = this.d.db.prepare("SELECT * FROM dispatches WHERE task_id = ? AND phase IN ('reserved','start_attempted')").all(taskId) as Dispatch[];
+    if (open.some(d => d.phase !== 'reserved' || this.inFlight.has(d.dispatch_id))) return false;
+    for (const d of open) {
+      const envelope = this.d.db.prepare("SELECT id, state FROM handoff_envelopes WHERE claimed_by_request_id = ?").get(d.dispatch_id) as { id: string; state: string } | undefined;
+      if (envelope?.state === 'claimed') new HandoffService(this.d.db).release(envelope.id, d.dispatch_id);
+      this.d.db.prepare('UPDATE execution_requests SET superseded = 1 WHERE id = ?').run(d.dispatch_id);
+      this.phase(d.dispatch_id, 'aborted', reason);
+      this.d.db.prepare("UPDATE wait_conditions SET state = 'active', consumed_at = NULL, consumed_by = NULL WHERE task_id = ? AND generation = ? AND state = 'consumed'")
+        .run(taskId, d.condition_generation);
+      this.record(taskId, 'dispatch.aborted', d.condition_generation, d.dispatch_id, { reason });
+      // The dispatch's attempt never entered (still `reserved`): dropped, every claim released.
+      const attempt = this.attempts.forDispatch(d.dispatch_id);
+      const released = attempt ? this.attempts.finalize(attempt, 'never_entered', reason) : [];
+      // After the caller's transaction commits, the freed units go to the next FIFO waiter.
+      for (const r of released) queueMicrotask(() => this.notifyResource(r.resource));
+    }
+    return true;
+  }
+
+  /**
+   * `runNow` on a handoff park: the same wait `/wait` would attach, from the park's anchor, carrying
+   * the park's handoff intent so the grant excludes the source and applies the explicit target (D2).
+   */
+  private rearmHandoffPark(taskId: string, park: WaitCondition): number | string {
+    try {
+      return this.d.db.transaction((): number | string => {
+        const row = this.d.tasks.get(taskId)!;
+        if (!canTransition('WAITING_INPUT', 'WAITING_RESOURCE', row.pause_kind ?? undefined)) return `Task ${taskId} is paused (${row.pause_kind}) for an operator decision; use handoff`;
+        if (!park.checkpointId) return `Task ${taskId} has no checkpoint to continue from; use handoff`;
+        if (this.hasOwner(taskId)) return 'Existing execution prevents a run-now';
+        this.insert(taskId, { kind: 'time', notBefore: this.iso(), reason: park.reason }, 'operator', park.autoWakes, park.history, park.checkpointId, [], undefined,
+          { resource: park.resource, units: park.units, continuation: park.continuation });
+        this.d.tasks.transition(taskId, 'WAITING_RESOURCE');
+        const generation = this.condition(taskId)!.generation;
+        this.record(taskId, 'wait.attached', generation, undefined, { rearmed: 'handoff park', from: park.generation });
+        return generation;
+      })();
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }
+
   runNow(taskId: string, generation = this.condition(taskId)?.generation ?? 0, confirmNoLiveOwner = false): Promise<WakeResult> {
+    const park = this.handoffPark(taskId);
+    if (park && park.generation === generation) {
+      const rearmed = this.rearmHandoffPark(taskId, park);
+      if (typeof rearmed === 'string') return Promise.resolve({ outcome: 'stale', reason: rearmed });
+      this.publish(taskId);
+      generation = rearmed;
+    }
     const ambiguous = this.dispatches(taskId).find(d => d.phase === 'start_attempted' && d.execution_path === 'legacy');
     if (ambiguous && this.d.tasks.get(taskId)?.state === 'ROUTING') {
       if (!confirmNoLiveOwner || this.inFlight.has(ambiguous.dispatch_id)) return Promise.resolve({ outcome: 'stale', reason: 'Ambiguous legacy start: reconcile the provider, then confirmNoLiveOwner to re-arm' });
       const rearmed = this.d.db.transaction(() => {
         if (this.condition(taskId)?.generation !== generation || this.d.db.prepare('SELECT 1 FROM runs WHERE task_id = ?').get(taskId)) return false;
+        // The operator's confirmation is the exit proof of the ambiguous attempt (packet 2.6.1).
+        const attempt = this.attempts.forDispatch(ambiguous.dispatch_id);
+        if (attempt) announceReleased(this.d.db, this.attempts.finalize(attempt, attempt.state === 'held' ? 'never_entered' : 'operator_confirmed', 'Operator confirmed no live execution owner'));
         this.repark(ambiguous, 'start_ambiguous');
         return true;
       })();
@@ -851,17 +1000,27 @@ export class Scheduler {
     // assistant it is moving away from steer THIS routing decision, and the
     // reason is what the receiving agent is shown. Routing itself still runs now.
     const intent = this.intent(taskId, dispatch.condition_generation);
+    let disabledStored: string | undefined;
     const routed = this.d.db.transaction(() => {
       const current = this.dispatch(id);
       if (current.routing_decision_id !== null) {
         const row = this.d.db.prepare('SELECT explanation FROM routing_decisions WHERE id = ? AND task_id = ?').get(current.routing_decision_id, taskId) as { explanation: string };
-        return { explanation: JSON.parse(row.explanation) as RoutingExplanation, routingDecisionId: current.routing_decision_id };
+        const stored = JSON.parse(row.explanation) as RoutingExplanation;
+        // Crash recovery replays a decision made before the crash. Nothing has started yet (still
+        // `reserved`), so a disable since then (workspace config or operator overlay) must win.
+        if (stored.chosen) disabledStored = this.d.orchestrator.disabledForNewStart([stored.chosen as AssistantId]);
+        return { explanation: stored, routingDecisionId: current.routing_decision_id };
       }
       const result = this.d.orchestrator.routeTask(taskId, dispatch.origin, { dispatchId: id, exclude: intent?.from, override: intent?.to });
       this.d.db.prepare('UPDATE dispatches SET routing_decision_id = ?, updated_at = ? WHERE dispatch_id = ?').run(result.routingDecisionId, this.iso(), id);
+      this.ensureDispatchAttempt(current);
       return result;
     })();
     if (this.d.boundary) await this.d.boundary('routed', this.dispatch(id));
+    if (disabledStored) {
+      // Re-park (the reason is recorded on dispatch.reparked): the successor dispatch routes afresh, and route() never picks a disabled assistant.
+      this.repark(dispatch, 'assistant_disabled'); return;
+    }
     if (!routed.explanation.chosen) {
       // Retry from current quota evidence; time waits retain their bounded fallback.
       this.repark(dispatch, 'no_candidate'); return;
@@ -914,6 +1073,18 @@ export class Scheduler {
       throw error;
     }
   }
+  /**
+   * A dispatch reserved before the upgrade with no claim got no migrated attempt (packet 2.3.1: a
+   * dispatch with neither a claim nor an entry mark gets none). Its compat attempt is written in its
+   * route transaction, before anything can call the provider.
+   */
+  private ensureDispatchAttempt(dispatch: Dispatch): void {
+    if (this.attempts.forDispatch(dispatch.dispatch_id)) return;
+    announceReleased(this.d.db, this.attempts.settleIdle(dispatch.task_id, 'runtime', 'route: no execution owner'));
+    this.attempts.createHeld({ taskId: dispatch.task_id, kind: 'dispatch', path: dispatch.execution_path, slot: 0, dispatchId: dispatch.dispatch_id,
+      runAs: this.d.tasks.get(dispatch.task_id)?.run_as === 'agent' ? 'agent' : 'plane', queueKey: dispatch.created_at, reason: 'compat: pre-upgrade dispatch' });
+  }
+
   /** The continuation intent recorded on the condition this dispatch consumed. */
   private intent(taskId: string, generation: number): ContinuationIntent | undefined {
     const r = this.d.db.prepare('SELECT continuation FROM wait_conditions WHERE task_id = ? AND generation = ?')
@@ -1023,14 +1194,16 @@ export class Scheduler {
       this.d.tasks.transition(taskId, park.kind === 'cancel' ? 'CANCELLED' : 'FAILED');
     }
     this.record(taskId, 'autopilot.parked', old?.generation, undefined, { reason, detail, park: park.kind, ...(park.kind === 'time' ? { notBefore: park.notBefore } : {}) });
-    const held = this.claim(taskId);
-    if (!held) return undefined;
-    // The dispatch that owned the claim will not run a provider: the slot goes back in THIS
-    // transaction, so no sweep can observe a refused launch still holding capacity.
-    this.d.db.prepare('UPDATE resource_claims SET released_at = ?, release_reason = ? WHERE claim_id = ? AND released_at IS NULL')
-      .run(this.iso(), `autopilot: ${reason}`, held.claim_id);
-    this.record(taskId, 'resource.released', undefined, held.dispatch_id, { resource: held.resource, units: held.units, reason: `autopilot: ${reason}` });
-    return held.resource;
+    // The slot goes back in THIS transaction, so no sweep can observe a refused launch still holding
+    // capacity. An attempt refused before the entry commit is `held` and drops `never_entered`
+    // whatever still points at it (K4b released this claim unconditionally); one whose session
+    // entered and has since ended settles like any other idle attempt (`stream_closed_unverified`).
+    const released = [
+      ...this.attempts.ofTask(taskId, true).filter(a => a.state === 'held')
+        .flatMap(a => this.attempts.finalize(a, 'never_entered', `autopilot: ${reason}`)),
+      ...this.attempts.settleIdle(taskId, 'runtime', `autopilot: ${reason}`),
+    ];
+    return released[0]?.resource;
   }
 
   /**
@@ -1101,7 +1274,7 @@ export class Scheduler {
     // A claim only ever means "this task's dispatch or session owns execution". A
     // restart that ended either one leaves the claim with nothing behind it, and the
     // sweep is the same ownership test every other release path uses.
-    this.releaseIdleClaims();
+    this.releaseIdleClaims('boot');
     if (this.enabled) await this.tick();
     // A disabled boot still has to leave the durable mark the next enable reads.
     else this.schedules.observeEnabled(false);

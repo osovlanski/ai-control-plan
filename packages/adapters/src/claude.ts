@@ -241,9 +241,21 @@ export class ClaudeAdapter implements AgentAdapter {
   ): Promise<void> {
     const emit = (e: Omit<NormalizedEvent, "runId" | "ts"> & { ts?: string }) =>
       state.queue.push({ runId: runId as RunId, ts: e.ts ?? new Date().toISOString(), ...e });
+    let ended = false;
+    const tracked = (e: Omit<NormalizedEvent, "runId" | "ts"> & { ts?: string }) => {
+      if (e.type === "run.ended") ended = true;
+      emit(e);
+    };
     try {
       for await (const msg of stream) {
-        this.mapMessage(msg, handle, state, emit);
+        this.mapMessage(msg, handle, state, tracked);
+      }
+      // A stream that ends without a `result` message has no outcome: report it, never a success
+      // (Agent Runtime Registry PR 4, conformance check: completion). An aborted stream is a cancel.
+      if (!ended) {
+        const cancelled = state.abort.signal.aborted;
+        if (!cancelled) emit({ type: "error", summary: "Claude stream ended without a result message" });
+        emit({ type: "run.ended", summary: cancelled ? "Run cancelled" : "Stream ended without a result", payload: { ok: false, reason: cancelled ? "cancelled" : "no_result" } });
       }
       state.queue.end();
     } catch (err) {

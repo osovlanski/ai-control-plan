@@ -83,7 +83,6 @@ test.describe("delivery state is visible and recoverable", () => {
 
     // The operator affordance this slice exists for: the same record, findable
     // without knowing which mission to open.
-    await page.getByRole("link", { name: "Operator mode", exact: true }).click();
     await page.getByRole("link", { name: "Traces", exact: true }).click();
     const recovery = page.getByRole("region", { name: "Delivery recovery" });
     await expect(recovery.getByText("1 message needs manual recovery.")).toBeVisible();

@@ -33,7 +33,7 @@ beforeEach(() => {
   db = openDb(join(dir, "t.db"));
   db.prepare("INSERT INTO assistants (id, provider) VALUES ('a1', 'fake')").run();
   db.prepare(
-    "INSERT INTO tasks (id, goal, envelope, created_at, updated_at) VALUES ('AG-1', 'g', '{}', 't', 't')",
+    "INSERT INTO tasks (id, goal, envelope, created_at, updated_at) VALUES ('AG-1', 'g', '{}', 't', 't'), ('AG-2', 'g', '{}', 't', 't')",
   ).run();
   store = new SessionStore(db);
 });
@@ -42,16 +42,16 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-function request(reqId: string, verification: ExecutionRequest["verification"] = []): ExecutionRequest {
+function request(reqId: string, verification: ExecutionRequest["verification"] = [], taskId = "AG-1"): ExecutionRequest {
   return {
     schemaVersion: 1,
     executionRequestId: reqId,
-    taskId: "AG-1" as TaskId,
+    taskId: taskId as TaskId,
     attempt: 1,
     assistantId: "a1" as AssistantId,
     routingDecisionRef: "rd_1",
     runSpec: {
-      taskId: "AG-1" as TaskId,
+      taskId: taskId as TaskId,
       prompt: "do it",
       workdir: "/tmp/wt",
       permissionPolicy: { mode: "auto-approve" },
@@ -77,8 +77,10 @@ function seedSession(opts: {
   to: "PREPARED" | "STARTING" | "RUNNING" | "VERIFYING" | "AWAITING_APPROVAL";
   providerSessionRef?: string;
   verification?: ExecutionRequest["verification"];
+  /** A single task has one live owner (qcq-04a attempts); a second live session needs its own task. */
+  taskId?: string;
 }): string {
-  store.recordRequest(request(opts.reqId, opts.verification));
+  store.recordRequest(request(opts.reqId, opts.verification, opts.taskId));
   const id = store.createSession(opts.reqId).sessionId as string;
   // Crash right after Prepare committed the row, before a lease was ever taken.
   if (opts.to === "PREPARED") return id;
@@ -569,7 +571,7 @@ describe("HarnessRecovery.reconcileOnBoot — crash before RUNNING (§9)", () =>
 describe("HarnessRecovery.sweepExpiredLeases", () => {
   it("recovers a session whose lease has expired and skips one holding a valid lease", async () => {
     const expired = seedSession({ reqId: "erq_sw1", to: "RUNNING", providerSessionRef: "psr_a" });
-    const held = seedSession({ reqId: "erq_sw2", to: "RUNNING", providerSessionRef: "psr_b" });
+    const held = seedSession({ reqId: "erq_sw2", to: "RUNNING", providerSessionRef: "psr_b", taskId: "AG-2" });
     db.prepare("UPDATE runs SET lease_token = 'stale', lease_expires_at = '2000-01-01T00:00:00.000Z' WHERE id = ?").run(
       expired,
     );

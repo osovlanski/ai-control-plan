@@ -49,7 +49,7 @@ describe("migrations", () => {
         (site, provider, question_set_hash, answers_json, latency_ms, mode, created_at)
         VALUES ('tool-gate', 'rules', 'test-hash', '{}', 0, 'shadow', '2026-09-24')`).run();
       const record = baseline.prepare("SELECT * FROM decision_records").get();
-      expect(migrate(baseline)).toEqual(["028_session_input.sql", "029_session_input_commands.sql", "030_approval_settled_reason.sql", "031_task_classifier.sql", "032_registry_federation.sql", "033_composition.sql", "034_composition_attempts.sql", "035_run_model_requested_source.sql", "036_usage_run_link.sql", "037_asset_usage.sql", "038_asset_shadow_log.sql", "039_memory_proposals.sql", "040_memory_shadow.sql", "041_run_harness_cli_version.sql", "042_task_run_as.sql", "043_autopilot_core.sql", "044_acceptance_runs.sql", "045_autopilot_publications.sql", "046_autopilot_reservations.sql"]);
+      expect(migrate(baseline)).toEqual(["028_session_input.sql", "029_session_input_commands.sql", "030_approval_settled_reason.sql", "031_task_classifier.sql", "032_registry_federation.sql", "033_composition.sql", "034_composition_attempts.sql", "035_run_model_requested_source.sql", "036_usage_run_link.sql", "037_asset_usage.sql", "038_asset_shadow_log.sql", "039_memory_proposals.sql", "040_memory_shadow.sql", "041_run_harness_cli_version.sql", "042_task_run_as.sql", "043_autopilot_core.sql", "044_acceptance_runs.sql", "045_autopilot_publications.sql", "046_autopilot_reservations.sql", "047_autopilot_requeue.sql", "048_autopilot_heartbeats.sql", "049_autopilot_restores.sql", "050_autopilot_external_resolutions.sql", "051_runtime_lifecycle.sql", "052_task_links.sql", "053_autopilot_work_base.sql", "054_idempotency_records.sql", "055_remote_auth.sql", "056_run_estimates.sql", "057_run_effort.sql", "058_execution_attempts.sql"]);
       // 031 adds `rules_json`; an existing record gets NULL, never a backfilled rule.
       expect(baseline.prepare("SELECT * FROM decision_records").get()).toEqual({ ...(record as object), rules_json: null });
       expect(baseline.prepare("SELECT COUNT(*) AS n FROM session_inputs").get()).toEqual({ n: 0 });
@@ -120,11 +120,15 @@ describe("migrations", () => {
       "asset_usage_m1",
       "asset_usage_sessions",
       "assistants",
+      "attempt_requirements",
       "autopilot_attempts",
       "autopilot_billing_attestations",
+      "autopilot_externals",
+      "autopilot_heartbeats",
       "autopilot_publication_duplicates",
       "autopilot_publication_mutations",
       "autopilot_publications",
+      "autopilot_restores",
       "autopilot_runtime",
       "autopilot_sessions",
       "autopilot_state",
@@ -143,11 +147,13 @@ describe("migrations", () => {
       "dispatches",
       "event_archives",
       "events",
+      "execution_attempts",
       "execution_requests",
       "execution_results",
       "guard_directives",
       "handoff_envelopes",
       "handoffs",
+      "idempotency_records",
       "memory_bundle_snapshots",
       "memory_proposal_sessions",
       "memory_proposals",
@@ -163,11 +169,16 @@ describe("migrations", () => {
       "registry_snapshot_assets",
       "registry_snapshots",
       "registry_sync_state",
+      "remote_auth_limits",
+      "remote_login_transactions",
+      "remote_sessions",
       "repository_identities",
       "repository_identity_observations",
       "resource_claims",
       "routing_decisions",
+      "run_estimates",
       "runs",
+      "runtime_conformance",
       "schedule_occurrences",
       "scheduler_events",
       "scheduler_state",
@@ -177,6 +188,7 @@ describe("migrations", () => {
       "session_input_events",
       "session_inputs",
       "task_decisions",
+      "task_links",
       "tasks",
       "usage_records",
       "verification_plan_revisions",

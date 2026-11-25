@@ -111,6 +111,12 @@ export interface RunnerDeps {
   runnerId?: string;
   /** Poll interval while a session is AWAITING_APPROVAL. */
   approvalPollMs?: number;
+  /**
+   * After the provider's `run.ended`, how long the runner keeps reading for trailing events before it stops
+   * waiting for the stream to close. A background child the agent left running keeps the provider process, and so
+   * the stream, open until the hard timeout (G15, 2026-11-18: 19 idle minutes, then a failed attempt). Default 10 s.
+   */
+  endedGraceMs?: number;
   /** `execution.maxConcurrentProviderStarts`; unset = unlimited (no queue, no trace event). */
   maxConcurrentProviderStarts?: number;
   /** Resolves the request's secret REFERENCES at the launch boundary (§3). */
@@ -216,6 +222,18 @@ export class SessionFencedError extends Error {
   }
 }
 
+/**
+ * qcq-04a: the provider-entry commit did not move the attempt to `starting`, so no provider was
+ * called. `not_owner`: this runner is not the attempt's owner (a stale lease or a duplicate caller);
+ * nothing changed. `refused`: the owner was refused; the attempt is `dropped` `never_entered`.
+ */
+export class ProviderEntryRefused extends Error {
+  constructor(readonly kind: "not_owner" | "refused", readonly reason: string) {
+    super(`provider entry ${kind === "not_owner" ? "not owned" : "refused"}: ${reason}`);
+    this.name = "ProviderEntryRefused";
+  }
+}
+
 export interface ToolGateInput {
   hook: "pre-exec" | "post-start";
   toolName: string;
@@ -238,6 +256,7 @@ export class SessionRunner {
   private readonly softThresholdPct: number;
   private readonly runnerId: string;
   private readonly approvalPollMs: number;
+  private readonly endedGrace: number;
 
   readonly starts: StartSlots;
 
@@ -247,6 +266,7 @@ export class SessionRunner {
     this.softThresholdPct = deps.softThresholdPct ?? 80;
     this.runnerId = deps.runnerId ?? `runner_${newExecutionSessionId()}`;
     this.approvalPollMs = deps.approvalPollMs ?? 20;
+    this.endedGrace = deps.endedGraceMs ?? 10_000;
   }
 
   /** Execute one request end to end. Always returns a persisted ExecutionResult (H-I3). */
@@ -326,6 +346,9 @@ export class SessionRunner {
   }
   get pollMs(): number {
     return this.approvalPollMs;
+  }
+  get endedGraceMs(): number {
+    return this.endedGrace;
   }
   static readonly UNENFORCEABLE = POLICY_UNENFORCEABLE;
 }
@@ -460,6 +483,15 @@ class RunContext {
       handle = await this.startProvider(adapter);
     } catch (err) {
       clearInterval(heartbeat);
+      if (err instanceof ProviderEntryRefused) {
+        this.releaseStartSlot();
+        // A stale lease: recovery owns this session now and its `terminalize` drops the attempt.
+        if (err.kind === "not_owner") throw new SessionFencedError(this.sessionId, err.reason);
+        if (["cancel_requested", "task_cancelled", "stop_requested"].includes(err.reason)) {
+          return this.finalize("STARTING", "CANCELLED", { cancellation: { requestedBy: "plane", at: this.iso() }, checkpoint: await this.attemptCheckpoint("cancel") });
+        }
+        return this.finalizeFailure("FAILED", { kind: "internal", retryable: false, message: err.message }, "STARTING");
+      }
       return this.finalizeFailure(
         "FAILED",
         normalizeStartError(err),
@@ -529,6 +561,11 @@ class RunContext {
     let firstEvent = true;
     let terminalPlan: TerminalPlan | undefined;
     const iter = adapter.events(handle)[Symbol.asyncIterator]();
+    // Once the provider says the run ended, the stream gets `endedGraceMs` to close on its own; a leftover
+    // background child must not hold a finished session open until the hard timeout. The provider tree is
+    // terminated when the run settles ("run ended" below), which also ends that child.
+    let graceTimer: ReturnType<typeof setTimeout> | undefined;
+    let graceUp: Promise<IteratorResult<NormalizedEvent>> | undefined;
     try {
       for (;;) {
         // Race the next event against the abort signal so a truly hung iterator
@@ -536,6 +573,7 @@ class RunContext {
         const step = await Promise.race([
           iter.next(),
           this.abort.promise.then(() => ({ done: true, value: undefined }) as IteratorResult<NormalizedEvent>),
+          ...(graceUp ? [graceUp] : []),
         ]);
         if (step.done || this.tickPlan) break;
         const event = step.value;
@@ -559,6 +597,11 @@ class RunContext {
           this.reportFirstEvent(adapter, handle);
         }
         this.observe(event);
+        if (event.type === "run.ended" && !graceUp) {
+          graceUp = new Promise((resolve) => {
+            graceTimer = setTimeout(() => resolve({ done: true, value: undefined }), this.runner.endedGraceMs);
+          });
+        }
         const gate = await this.evaluateToolGate(event, adapter);
         const directive = evaluateGuards(this.snapshot, { kind: "event", event, atMs: this.runner.clock(), gate });
         const nontrivial = directive.action !== "continue";
@@ -618,6 +661,7 @@ class RunContext {
       ]);
     } finally {
       clearInterval(heartbeat);
+      if (graceTimer) clearTimeout(graceTimer);
       void iter.return?.(undefined); // release a still-open iterator
     }
     if (this.fencedReason) throw new SessionFencedError(this.sessionId, this.fencedReason);
@@ -1344,14 +1388,17 @@ class RunContext {
         profileBroker = new SecretBroker(this.d.provisioning.resolveSecret, profileRefs);
         spec.secretEnv = { ...spec.secretEnv, ...profileBroker.resolve(profileRefs) };
       }
+      let ref: ProviderSessionRef | undefined;
       if (this.request.origin.kind === "resume") {
         const prior = this.d.store.get(this.request.origin.sessionId as string);
-        const ref = prior?.providerSessionRef;
-        if (ref && typeof adapter.resume === "function") {
-          return await adapter.resume(ref as ProviderSessionRef, spec);
-        }
+        if (prior?.providerSessionRef && typeof adapter.resume === "function") ref = prior.providerSessionRef as ProviderSessionRef;
       }
-      return await adapter.start(spec);
+      // qcq-04a (packet 2.4.1): the provider-entry commit, after every fallible preparation step
+      // (the spec, both secret resolutions, the resume reference). The adapter call is the next
+      // statement: no await, I/O or transaction between them.
+      const entry = this.d.store.enterProvider(this.sessionId, this.lease);
+      if (!entry.ok) throw new ProviderEntryRefused(entry.kind, entry.reason);
+      return ref && adapter.resume ? await adapter.resume(ref, spec) : await adapter.start(spec);
     } finally {
       broker?.dispose();
       profileBroker?.dispose();
@@ -1390,11 +1437,13 @@ class RunContext {
       case "run.started": {
         // The provider's own statement of what it is serving. Absent ⇒ unknown;
         // the requested selector is never promoted into resolved identity.
-        const payload = event.payload as { model?: string; providerSessionRef?: string; version?: string } | undefined;
+        const payload = event.payload as { model?: string; providerSessionRef?: string; version?: string; effort?: string } | undefined;
         const model = payload?.model;
         if (model) this.d.store.recordResolvedModel(this.sessionId, model, "run.started");
         // The CLI build that served the run (K13 A2): the same event, the same write-once rule.
         this.d.store.recordHarnessCliVersion(this.sessionId, payload?.version);
+        // The effort the provider says it is running at (P1-5): same event, same write-once rule.
+        this.d.store.recordReportedEffort(this.sessionId, payload?.effort);
         // A provider that learns its session id only at startup (Claude's system/init) had no
         // ref for ackHandle. Store it now, write-once: recovery offers a resume from it and
         // imported usage binds to this run by it.

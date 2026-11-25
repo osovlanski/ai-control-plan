@@ -20,7 +20,7 @@ import { generateOperateSecret, hashOperateSecret, operateSecretPath, readOperat
 import { AGENT_USER_DEFAULTS, loadConfig, worktreesRoot, type ResolvedConfig } from "../src/config.js";
 import { openDb, type Db } from "../src/db/index.js";
 import { AGENT_UNITS_DIR, reapStrayAgentUnits } from "../src/modules/harness/provider-processes.js";
-import { CommandVerifier } from "../src/modules/harness/verification-providers.js";
+import { CommandVerifier, DEFAULT_VERIFICATION_PROVIDERS } from "../src/modules/harness/verification-providers.js";
 import { createTaskWorktree } from "../src/repo/git.js";
 import { buildServer, type BuiltServer } from "../src/server.js";
 
@@ -233,13 +233,13 @@ describe("an agent task through the Harness (G21, fake provider)", () => {
     expect(result.verification?.checks.find((c) => c.kind === "tests")?.status).toBe("passed");
   });
 
-  it("is rejected at Prepare when the adapter cannot launch as the agent user", async () => {
+  it("is refused at routing when the adapter cannot launch as the agent user", async () => {
     await boot({ fakeDeclares: false });
     const taskId = (await post("/api/tasks", ordinary(), { goal: "agent task", repoPath: repo, runAs: "agent" })).json().taskId as string;
-    const { result } = await runToEnd(taskId);
-    expect(result.outcome).toBe("failed");
-    expect(result.failure?.kind).toBe("policy_unenforceable");
-    expect(result.failure?.message).toMatch(/adapter that can launch as the agent user/);
+    const started = await post(`/api/tasks/${taskId}/start`, ordinary(), { assistantId: "fake" });
+    expect(started.statusCode).toBe(422);
+    expect(started.body).toMatch(/cannot launch as the agent user/);
+    expect(db!.prepare("SELECT COUNT(*) AS n FROM runs WHERE task_id = ?").get(taskId)).toEqual({ n: 0 });
   });
 
   it("cannot start off the Harness path or as a parallel comparison", async () => {
@@ -263,6 +263,18 @@ describe("CommandVerifier", () => {
     );
     expect(outcome.status).toBe("skipped");
     expect(reached).toBe(false);
+  });
+
+  it("a registry run over required command checks still passes when they are refused (G15 sixth run)", async () => {
+    const run = await DEFAULT_VERIFICATION_PROVIDERS.run(
+      [
+        { checkId: "c1", name: "test", kind: "tests", command: "npm test", required: true },
+        { checkId: "c2", name: "lint", kind: "lint", command: "npm run lint", required: true },
+      ],
+      { authority: {} as never, worktreePath: "/nowhere", repositoryCommands: "refused", remainingMs: () => 1000 },
+    );
+    expect(run?.evaluation.passed).toBe(true);
+    expect(run?.evaluation.checks.map((c) => [c.status, c.required])).toEqual([["skipped", false], ["skipped", false]]);
   });
 });
 

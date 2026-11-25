@@ -46,7 +46,7 @@ beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "harness-runner-"));
   db = openDb(join(dir, "t.db"));
   db.prepare("INSERT INTO assistants (id, provider) VALUES ('a1','fake')").run();
-  db.prepare("INSERT INTO tasks (id, goal, envelope, created_at, updated_at) VALUES ('AG-1','g','{}','t','t')").run();
+  db.prepare("INSERT INTO tasks (id, goal, envelope, created_at, updated_at) VALUES ('AG-1','g','{}','t','t'), ('AG-2','g','{}','t','t')").run();
   store = new SessionStore(db);
   startCount = 0;
 });
@@ -149,6 +149,11 @@ const waitFor = async (pred: () => boolean, ms = 3000): Promise<void> => {
   }
 };
 
+/** qcq-04a: the execution attempt bound to a session. */
+const attemptOf = (sessionId: string) =>
+  db.prepare("SELECT state, exit_proof, entered_at, kind, candidate_slot, reason FROM execution_attempts WHERE session_id = ?").get(sessionId) as
+    { state: string; exit_proof: string | null; entered_at: string | null; kind: string; candidate_slot: number; reason: string } | undefined;
+
 describe("happy path", () => {
   it("runs to COMPLETED, persists one result, and accumulates telemetry", async () => {
     const runner = new SessionRunner(deps(countingFake()));
@@ -215,6 +220,30 @@ describe("time-based guards while the stream is stalled", () => {
     const result = await runner.run(request({ policy: { ...request().policy, timeout: { hardMs: 30 } } }));
     expect(result.outcome).toBe("timed_out");
     expect(result.terminalState).toBe("TIMED_OUT");
+  });
+});
+
+describe("a finished run whose provider process lingers (G15 fourth run: a background pnpm test held the session open for 19 minutes)", () => {
+  const lingering = (): AgentAdapter => ({
+    id: "a1" as AssistantId,
+    describe: async () => MANIFEST,
+    start: async () => ({ runId: "l1", assistantId: "a1" as AssistantId }),
+    resume: async () => ({ runId: "l1", assistantId: "a1" as AssistantId }),
+    events: async function* () {
+      const ts = () => new Date().toISOString();
+      yield { runId: "l1" as RunId, ts: ts(), type: "run.started", summary: "started" };
+      yield { runId: "l1" as RunId, ts: ts(), type: "run.ended", summary: "Run completed", payload: { ok: true } };
+      await new Promise(() => {}); // the stream never closes: a background child holds the process
+    },
+    cancel: async () => {},
+  });
+
+  it("settles from run.ended after the grace instead of waiting for the hard timeout", async () => {
+    const runner = new SessionRunner(deps(lingering(), { approvalPollMs: 5, endedGraceMs: 40 }));
+    const t0 = Date.now();
+    const result = await runner.run(request({ policy: { ...request().policy, timeout: { hardMs: 60_000 } } }));
+    expect(result.outcome).toBe("completed");
+    expect(Date.now() - t0).toBeLessThan(5_000);
   });
 });
 
@@ -1259,7 +1288,10 @@ describe("execution.maxConcurrentProviderStarts", () => {
   }
   const queueEvents = (sid: string) =>
     events(sid).filter((e) => e.type === "phase" && e.payload?.includes("provider_start_queue")).map((e) => JSON.parse(e.payload!));
-  const second = (): Partial<ExecutionRequest> => ({ executionRequestId: "erq_2" });
+  // A single task has one live owner (qcq-04a attempts): the concurrent start runs on its own task.
+  const second = (): Partial<ExecutionRequest> => ({
+    executionRequestId: "erq_2", taskId: "AG-2" as TaskId, runSpec: { ...request().runSpec, taskId: "AG-2" as TaskId },
+  });
 
   it("queues a start over the cap until the running one's first event, and traces the wait", async () => {
     const g = gatedAdapter();
@@ -1297,9 +1329,25 @@ describe("execution.maxConcurrentProviderStarts", () => {
     const resultB = await b;
     expect(resultB.terminalState).toBe("CANCELLED");
     expect(startCount).toBe(1);
+    // qcq-04a: a session-only cancel while waiting for the slot; the session-terminal rule drops it.
+    expect(attemptOf(store.forRequest("erq_2")!.sessionId as string)).toMatchObject({ state: "dropped", exit_proof: "never_entered", entered_at: null });
 
     g.open("g1");
     expect((await a).terminalState).toBe("COMPLETED");
+  });
+
+  it("a queued start whose wait is aborted (hard timeout) makes no provider call and drops its attempt (qcq-04a)", async () => {
+    const g = gatedAdapter();
+    const runner = new SessionRunner(deps(g.adapter, { maxConcurrentProviderStarts: 1, approvalPollMs: 5 }));
+    const a = runner.run(request());
+    await waitFor(() => g.opened("g1"));
+    const b = runner.run(request({ ...second(), policy: { ...request().policy, timeout: { hardMs: 40 } } }));
+    expect((await b).terminalState).toBe("TIMED_OUT");
+    expect(startCount).toBe(1);
+    expect(attemptOf(store.forRequest("erq_2")!.sessionId as string)).toMatchObject({ state: "dropped", exit_proof: "never_entered" });
+    g.open("g1");
+    expect((await a).terminalState).toBe("COMPLETED");
+    expect(attemptOf(sessionOf())).toMatchObject({ state: "live", entered_at: expect.any(String) });
   });
 
   it("unset: no queue and no trace event (unchanged default)", async () => {
@@ -1430,5 +1478,120 @@ describe("the provider CLI version on the run row (K13 A2)", () => {
   it("is not taken from the model or the session ref", async () => {
     await new SessionRunner(deps(startedAdapter([{ model: "claude-sonnet-5-5", providerSessionRef: "FAKE-ref-not-real" }]))).run(request());
     expect(versionOf()).toBeNull();
+  });
+});
+
+describe("the provider-reported effort on the run row (P1-5)", () => {
+  const effortOf = () =>
+    db.prepare("SELECT effort_reported AS v, effort_reported_source AS s FROM runs WHERE id = ?").get(sessionOf()) as {
+      v: string | null;
+      s: string | null;
+    };
+
+  function startedAdapter(payloads: Array<Record<string, unknown> | undefined>): AgentAdapter {
+    return {
+      id: "a1" as AssistantId,
+      describe: async () => MANIFEST,
+      start: async () => ({ runId: "h5", assistantId: "a1" as AssistantId }),
+      resume: async () => ({ runId: "h5", assistantId: "a1" as AssistantId }),
+      events: async function* () {
+        for (const payload of payloads) {
+          yield { runId: "h5" as RunId, ts: new Date().toISOString(), type: "run.started", summary: "started", payload };
+        }
+        yield { runId: "h5" as RunId, ts: new Date().toISOString(), type: "run.ended", summary: "done", payload: { ok: true } };
+      },
+      cancel: async () => {},
+    };
+  }
+
+  it("stores the effort run.started reported, normalized, with its source", async () => {
+    const result = await new SessionRunner(deps(startedAdapter([{ model: "fake-1", effort: " High " }]))).run(request());
+    expect(result.terminalState).toBe("COMPLETED");
+    expect(effortOf()).toEqual({ v: "high", s: "run.started" });
+  });
+
+  it("is write-once: a later run.started cannot rewrite the first report", async () => {
+    await new SessionRunner(deps(startedAdapter([{ effort: "medium" }, { effort: "max" }]))).run(request());
+    expect(effortOf()).toEqual({ v: "medium", s: "run.started" });
+  });
+
+  it.each([[{ effort: "" }], [{ effort: 3 }], [{ effort: "unknown" }], [{ effort: "high; drop table" }], [undefined]])(
+    "keeps effort unknown (NULL) for a payload that is not an effort token: %j",
+    async (payload) => {
+      await new SessionRunner(deps(startedAdapter([payload]))).run(request());
+      expect(effortOf()).toEqual({ v: null, s: null });
+    },
+  );
+
+  it("is never taken from the model, the version or the requested selector", async () => {
+    await new SessionRunner(deps(startedAdapter([{ model: "claude-opus-5-5-high", version: "2.1.238" }]))).run(request());
+    expect(effortOf()).toEqual({ v: null, s: null });
+  });
+
+  it("FakeAdapter [FAKE:EFFORT:v] marker reports an effort; without it the column stays NULL", async () => {
+    const withMarker = await new SessionRunner(deps(new FakeAdapter("a1" as AssistantId))).run(
+      request({ runSpec: { ...request().runSpec, prompt: "do it [FAKE:EFFORT:xhigh]" } }),
+    );
+    expect(withMarker.terminalState).toBe("COMPLETED");
+    expect(effortOf()).toEqual({ v: "xhigh", s: "run.started" });
+  });
+});
+
+describe("qcq-04a provider-entry commit on the Harness boundary (packet 2.4.1)", () => {
+  it("binds a held direct attempt at session insert, enters it once, and marks it live on the handle", async () => {
+    const runner = new SessionRunner(deps(countingFake()));
+    const result = await runner.run(request());
+    expect(result.terminalState).toBe("COMPLETED");
+    expect(startCount).toBe(1);
+    expect(attemptOf(sessionOf())).toMatchObject({ kind: "direct", candidate_slot: 0, state: "live", entered_at: expect.any(String) });
+    const types = (db.prepare("SELECT type FROM scheduler_events WHERE task_id = 'AG-1' ORDER BY id").all() as { type: string }[]).map((e) => e.type);
+    expect(types.filter((t) => t === "attempt.entered")).toHaveLength(1);
+  });
+
+  it("a secret resolution that throws after the precheck makes zero provider calls and drops the attempt", async () => {
+    const runner = new SessionRunner(deps(countingFake(), { secretResolver: () => { throw new Error("FAKE-vault-unavailable-not-real"); } }));
+    const result = await runner.run(request({ context: { secretRefs: ["PRIMARY_REF"] } }));
+    expect(result.terminalState).toBe("FAILED");
+    expect(startCount).toBe(0);
+    expect(attemptOf(sessionOf())).toMatchObject({ state: "dropped", exit_proof: "never_entered", entered_at: null });
+  });
+
+  it("a lease taken over during preparation reaches the commit as not_owner; recovery's terminalize drops the attempt", async () => {
+    let taken: string | undefined;
+    const runner = new SessionRunner(deps(countingFake(), {
+      // Hold the runner inside secret resolution while recovery takes the expired lease.
+      secretResolver: () => {
+        const sid = sessionOf();
+        db.prepare("UPDATE runs SET lease_expires_at = '2000-01-01T00:00:00.000Z' WHERE id = ?").run(sid);
+        taken = store.acquireLease(sid)!;
+        return "FAKE-secret-not-real";
+      },
+    }));
+    await expect(runner.run(request({ context: { secretRefs: ["PRIMARY_REF"] } }))).rejects.toThrow(/lease|fenced/i);
+    expect(startCount).toBe(0);
+    const sid = sessionOf();
+    expect(attemptOf(sid)).toMatchObject({ state: "held", entered_at: null });
+    // Recovery settles the session it now owns; the session-terminal rule drops the held attempt.
+    const session = store.get(sid)!;
+    store.terminalize(sid, {
+      expectedVersion: session.version, from: session.state as never, to: "FAILED", leaseToken: taken!, settlementOwner: "recovery",
+      result: {
+        schemaVersion: 1, sessionId: sid as never, terminalState: "FAILED", outcome: "failed", artifacts: [],
+        usage: { accounting: "none" }, checkpoint: { attempted: false, committed: false },
+        enforcement: { tools: "audit", budget: "advisory", isolation: "ambient" },
+        failure: { kind: "internal", retryable: false, message: "orphaned at recovery" },
+      } as never,
+    });
+    expect(attemptOf(sid)).toMatchObject({ state: "dropped", exit_proof: "never_entered" });
+  });
+
+  it("a duplicate caller at the store gets not_owner and leaves the entered attempt untouched", async () => {
+    store.recordRequest(request());
+    const sid = store.createSession("erq_1").sessionId as string;
+    const lease = store.acquireLease(sid)!;
+    expect(store.enterProvider(sid, lease)).toMatchObject({ ok: true });
+    const before = attemptOf(sid);
+    expect(store.enterProvider(sid, lease)).toMatchObject({ ok: false, kind: "not_owner" });
+    expect(attemptOf(sid)).toEqual(before);
   });
 });

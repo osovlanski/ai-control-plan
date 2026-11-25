@@ -1,0 +1,21 @@
+{
+  "taskId": "AG-mi8x2k1a",
+  "goal": "x",
+  "state": "WAITING_INPUT",
+  "stage": {
+    "value": "needs-you",
+    "rule": "awaiting-approval"
+  },
+  "repo": "dogfood-cockpit",
+  "webLink": "https://aos.example.invalid/#/missions/AG-mi8x2k1a",
+  "createdAt": "2026-11-21T14:00:00.000Z",
+  "updatedAt": "2026-11-21T14:05:00.000Z",
+  "pendingApprovals": 1,
+  "approvals": [
+    {
+      "id": "ap_1"
+    }
+  ],
+  "latestRun": null,
+  "verification": null
+}

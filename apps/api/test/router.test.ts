@@ -46,6 +46,20 @@ const candidate = (id: string, m: CapabilityManifest | null, enabled = true): Ro
 });
 
 describe("router", () => {
+  it("a task that runs as the agent user is never routed to an adapter that cannot launch as it (G15 attempt 10)", () => {
+    // Live: Claude passed every filter but sat at 80% of its window, so quota headroom picked Codex,
+    // which has no agent-user launch, and composition parked the task on isolation_unavailable.
+    const agentCapable = { ...manifest({ usedPercent: 80 }), harness: { agentUser: true } } as unknown as CapabilityManifest;
+    const candidates = [candidate("claude", agentCapable), candidate("codex", manifest({ usedPercent: 5 }))];
+    const plain = route(baseReq(), candidates);
+    expect(plain.chosen).toBe("codex"); // without the flag the headroom tie-break still prefers Codex
+    const agent = route(baseReq({ needsAgentUser: true }), candidates);
+    expect(agent.chosen).toBe("claude");
+    expect(agent.candidates.find((c) => c.assistantId === "codex")?.filterFailures).toContain("cannot launch as the agent user");
+    // Nothing else can run it: the task waits for the one that can, it does not fall to the one that cannot.
+    expect(route(baseReq({ needsAgentUser: true }), [candidate("codex", manifest({}))]).chosen).toBeUndefined();
+  });
+
   it("hard-filters unauthenticated, disabled, and unsynced assistants with reasons", () => {
     const result = route(baseReq(), [
       candidate("claude", manifest({ auth: "missing" })),

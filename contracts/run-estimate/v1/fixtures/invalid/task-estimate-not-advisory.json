@@ -1,0 +1,111 @@
+{
+  "taskId": "AG-mwuuxyab5",
+  "advisory": false,
+  "routing": {
+    "chosen": "fake-a",
+    "ruleFired": "user-override",
+    "whatIf": true
+  },
+  "estimate": {
+    "estimatorVersion": "run-estimate/1",
+    "advisory": true,
+    "asOf": "2030-01-06T08:00:00.651Z",
+    "subject": {
+      "assistantId": "fake-a",
+      "provider": "fake",
+      "model": null,
+      "modelSource": "assistant default",
+      "effort": null,
+      "effortSource": "not recorded in the execution identity (backlog p1-5-effort-cohorts)",
+      "taskKind": "coding"
+    },
+    "confidence": "medium",
+    "tokens": {
+      "input": {
+        "low": 1200,
+        "typical": 1200,
+        "high": 50000
+      },
+      "output": {
+        "low": 450,
+        "typical": 450,
+        "high": 5000
+      },
+      "confidence": "medium",
+      "runsWithUsage": 3,
+      "runsMissingUsage": 0
+    },
+    "durationMs": {
+      "range": {
+        "low": 52,
+        "typical": 53,
+        "high": 69
+      },
+      "confidence": "medium"
+    },
+    "waitUntilStartMs": {
+      "range": {
+        "low": 0,
+        "typical": 0,
+        "high": 0
+      },
+      "reasons": [
+        "no wait observed: quota, scheduler and account are clear"
+      ]
+    },
+    "approvalWait": {
+      "pending": 0,
+      "required": false,
+      "historicalShare": 0,
+      "historicalMs": null
+    },
+    "spend": {
+      "billing": "none",
+      "billingBasis": "provider default",
+      "apiUsd": null,
+      "apiEquivalentUsd": null,
+      "subscriptionQuota": null
+    },
+    "evidence": {
+      "cohort": "assistant+kind",
+      "sampleSize": 3,
+      "runIds": [
+        "es_00a62c9a-5d02-4fc3-8f71-9b4505c705fc",
+        "es_a1bfa227-526f-4017-a23b-84c5cdf590dc",
+        "es_0986e6bc-2ea7-48fd-96de-27b3db739a5a"
+      ],
+      "missing": [
+        "model: not pinned; cohort ignores model",
+        "effort: not recorded in the execution identity"
+      ]
+    }
+  },
+  "recommendation": {
+    "advisory": true,
+    "action": "run-now",
+    "startAt": "2030-01-06T08:00:00.651Z",
+    "window": null,
+    "expectedCompletion": {
+      "low": "2030-01-06T08:00:00.703Z",
+      "typical": "2030-01-06T08:00:00.704Z",
+      "high": "2030-01-06T08:00:00.720Z"
+    },
+    "speedWeight": 1,
+    "deadline": null,
+    "meetsDeadline": null,
+    "reasons": [
+      "working hours (Sun 10:00 Asia/Jerusalem)"
+    ],
+    "unchanged": [
+      "acceptance tests",
+      "permissions and approval mode",
+      "spend limits",
+      "dispatch and scheduling"
+    ]
+  },
+  "policy": {
+    "timezone": "Asia/Jerusalem",
+    "eveningsAllowed": false,
+    "weekendsAllowed": false
+  }
+}

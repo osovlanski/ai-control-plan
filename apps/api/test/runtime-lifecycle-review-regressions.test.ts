@@ -1,0 +1,214 @@
+import { execFile } from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { credentialPath, readCredential } from "../src/auth/credential-file.js";
+import { loadConfig } from "../src/config.js";
+import { openDb } from "../src/db/index.js";
+import { Registry } from "../src/modules/registry.js";
+import { buildServer } from "../src/server.js";
+
+const A = "fake-a";
+const B = "fake-b";
+const FAKES = { [A]: { provider: "fake" }, [B]: { provider: "fake" } };
+
+let home: string;
+let rig: ReturnType<typeof boot> | undefined;
+
+beforeEach(() => {
+  home = mkdtempSync(join(tmpdir(), "agent-plane-runtime-review-"));
+  mkdirSync(join(home, "personal"));
+});
+
+afterEach(async () => {
+  vi.restoreAllMocks();
+  try {
+    await stop();
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+function boot(assistants: Record<string, { provider: string; options?: Record<string, string> }> = FAKES) {
+  writeFileSync(join(home, "personal", "config.yaml"), JSON.stringify({
+    assistants,
+    policy: { approvalMode: "prompt-on-escalation" },
+  }));
+  const config = loadConfig({ AGENT_PLANE_HOME: home });
+  const db = openDb(config.dbPath);
+  const server = buildServer({ config, db });
+  server.registry.init();
+  const credential = readCredential(credentialPath(config.dir));
+  const headers = { authorization: `Bearer ${credential.secrets[0]!.secret}` };
+  const request = (method: "GET" | "POST", url: string, payload?: object) =>
+    server.app.inject({ method, url, headers, payload });
+  const workspace = { config, db, server, request };
+  rig = workspace;
+  return workspace;
+}
+
+async function stop() {
+  if (!rig) return;
+  const { server, db } = rig;
+  rig = undefined;
+  try {
+    await server.orchestrator.shutdown();
+    await server.app.close();
+  } finally {
+    db.close();
+  }
+}
+
+it("leaves a task RUNNING after the handoff target is disabled during source drain", async () => {
+  const { server, db, request } = boot();
+  await server.registry.sync(A);
+  await server.registry.sync(B);
+
+  const created = await request("POST", "/api/tasks", { goal: "Wait for approval [FAKE:APPROVAL]" });
+  expect(created.statusCode).toBe(201);
+  const { taskId } = created.json<{ taskId: string }>();
+  const start = await request("POST", `/api/tasks/${taskId}/start`, { assistantId: A });
+  expect(start.statusCode).toBe(200);
+  expect(server.orchestrator.isActive(taskId)).toBe(true);
+
+  // Interleave the operator request at the provider boundary, then run actual fake-provider cancel.
+  const adapter = server.registry.adapter(A);
+  const cancel = adapter.cancel.bind(adapter);
+  const disableWhileDraining = vi.spyOn(adapter, "cancel").mockImplementation(async (handle) => {
+    const disabled = await request("POST", `/api/assistants/${B}/disable`);
+    expect(disabled.statusCode).toBe(200);
+    await cancel(handle);
+  });
+
+  const handoff = await request("POST", `/api/tasks/${taskId}/handoff`, { to: B });
+  expect(disableWhileDraining).toHaveBeenCalledOnce();
+  expect(handoff.statusCode).toBe(409);
+  expect(handoff.json().error).toContain("disabled by operator");
+  expect(db.prepare("SELECT assistant_id, state FROM runs WHERE task_id = ?").all(taskId))
+    .toEqual([{ assistant_id: A, state: "ENDED_ERROR" }]);
+  expect(server.orchestrator.isActive(taskId)).toBe(false);
+  const task = await request("GET", `/api/tasks/${taskId}`);
+  expect(task.statusCode).toBe(200);
+  expect(task.json().state, "A refused handoff with zero active runs must not leave the task RUNNING")
+    .not.toBe("RUNNING");
+});
+
+it("returns contradictory operator state when a second writer enables after disable commits", async () => {
+  const { server, config, request } = boot();
+  const otherDb = openDb(config.dbPath);
+  try {
+    const otherWriter = new Registry(otherDb, config);
+    const setOperatorState = server.registry.setOperatorState.bind(server.registry);
+    // Force the interleaving after the first transaction commits and before the handler reads.
+    const disable = vi.spyOn(server.registry, "setOperatorState").mockImplementation((id, state, now) => {
+      const result = setOperatorState(id, state, now);
+      expect(result?.changed).toBe(true);
+      expect(otherWriter.setOperatorState(id, "none")?.changed).toBe(true);
+      return result;
+    });
+
+    const response = await request("POST", `/api/assistants/${A}/disable`);
+    expect(disable).toHaveBeenCalledOnce();
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    expect(body).toMatchObject({ changed: true, operatorState: "disabled" });
+    expect(body.lifecycle.enablement.operator, "Disable response lifecycle must agree with its top-level operatorState")
+      .toBe(body.operatorState);
+  } finally {
+    otherDb.close();
+  }
+});
+
+it("reports a removed assistant as effectively enabled and ready after an empty-config restart", async () => {
+  const first = boot();
+  await first.server.registry.sync(A);
+  const before = await first.request("GET", `/api/assistants/${A}/lifecycle`);
+  expect(before.statusCode).toBe(200);
+  expect(before.json()).toMatchObject({ configured: true, readiness: { ready: true } });
+  await stop();
+
+  const { server, request } = boot({});
+  expect(() => server.registry.adapter(A)).toThrow("Unknown assistant");
+  const response = await request("GET", `/api/assistants/${A}/lifecycle`);
+  expect(response.statusCode).toBe(200);
+  expect(response.json(), "A cached assistant with no configured adapter must be ineffective and unready")
+    .toMatchObject({ configured: false, enablement: { effective: false }, readiness: { ready: false } });
+});
+
+it("returns 500 after disabling a healthy assistant when another cached manifest is malformed", async () => {
+  const { server, db, request } = boot();
+  await server.registry.sync(A);
+  await server.registry.sync(B);
+  expect(db.prepare("UPDATE assistants SET manifest = ? WHERE id = ?").run("{", B).changes).toBe(1);
+
+  const response = await request("POST", `/api/assistants/${A}/disable`);
+  expect(db.prepare("SELECT operator_state FROM assistants WHERE id = ?").get(A))
+    .toEqual({ operator_state: "disabled" });
+  expect(response.statusCode, "A durably committed disable must return 200 despite another assistant's malformed manifest")
+    .toBe(200);
+});
+
+it("disables cached rows on an empty-config restart so routing and readback agree", async () => {
+  const first = boot();
+  await first.server.registry.sync(A);
+  await stop();
+
+  const { db, request } = boot({});
+  expect(db.prepare("SELECT enabled FROM assistants WHERE id = ?").get(A)).toEqual({ enabled: 0 });
+  const response = await request("GET", `/api/assistants/${A}/lifecycle`);
+  expect(response.json().enablement).toMatchObject({ config: false, effective: false });
+  expect(response.json().readiness.reasons).toContain("disabled in workspace config");
+});
+
+it("reads one assistant's lifecycle without parsing another assistant's malformed manifest", async () => {
+  const { server, db, request } = boot();
+  await server.registry.sync(A);
+  await server.registry.sync(B);
+  db.prepare("UPDATE assistants SET manifest = ? WHERE id = ?").run("{", B);
+
+  const response = await request("GET", `/api/assistants/${A}/lifecycle`);
+  expect(response.statusCode).toBe(200);
+  expect(response.json()).toMatchObject({ configured: true, readiness: { ready: true } });
+});
+
+it.each([
+  ["128 ASCII", "a".repeat(128), 200],
+  ["128 mixed code points", "a".repeat(127) + "🚀", 200],
+  ["128 supplementary code points", "🚀".repeat(128), 200],
+  ["128 URL-reserved characters", "/%?#".repeat(32), 200],
+  ["129 ASCII", "a".repeat(129), 400],
+  ["129 code points, 130 UTF-16 units", "a".repeat(128) + "🚀", 400],
+  ["129 code points, 257 UTF-16 units", "a" + "🚀".repeat(128), 400],
+  ["129 code points, 258 UTF-16 units", "🚀".repeat(129), 400],
+] as const)("validates %s on every assistant-ID route", async (_label, id, status) => {
+  const { request } = boot({ [id]: { provider: "fake" } });
+  const list = await request("GET", "/api/assistants");
+  expect(list.json()).toContainEqual(expect.objectContaining({ id }));
+  for (const action of ["lifecycle", "disable", "enable", "sync", "test"]) {
+    const response = await request(action === "lifecycle" ? "GET" : "POST", `/api/assistants/${encodeURIComponent(id)}/${action}`);
+    expect(response.statusCode, action).toBe(status);
+    if (status === 400) expect(response.json().error).toContain("128");
+  }
+});
+
+it("rejects malformed UTF-8 and oversized decoded parameters at the router", async () => {
+  const { request } = boot();
+  for (const [segment, status] of [["%ED%A0%80", 400], ["%F0%9F", 400], ["a".repeat(259), 414]] as const) {
+    const response = await request("GET", `/api/assistants/${segment}/lifecycle`);
+    expect(response.statusCode, segment).toBe(status);
+  }
+});
+
+it.skipIf(!["linux", "darwin"].includes(process.platform) || !["x64", "arm64"].includes(process.arch))(
+  "agrees with the OpenRouter SDK across packaged and legacy executable layouts", async () => {
+    await promisify(execFile)(process.execPath, ["--import", "tsx", fileURLToPath(new URL("./fixtures/openrouter-installation.mts", import.meta.url)), home], {
+      cwd: fileURLToPath(new URL("..", import.meta.url)),
+      // pnpm can add the real CLI package to Node's global require search paths.
+      env: { ...process.env, NODE_PATH: "" },
+      timeout: 60_000,
+    });
+  }, 65_000,
+);

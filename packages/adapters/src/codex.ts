@@ -72,7 +72,7 @@ export interface CodexAdapterOptions {
  *   (codexPermissions) and prompt-on-escalation is refused at start.
  */
 export class CodexAdapter implements AgentAdapter {
-  private codex: Codex;
+  private codex?: Codex;
   private readonly appServer?: CodexAppServerRuntime;
 
   get sessionInput() { return this.appServer?.sessionInput; }
@@ -84,7 +84,6 @@ export class CodexAdapter implements AgentAdapter {
     if (options.appServerInput && options.codex && Object.entries(options.codex).some(([key, value]) => key !== "codexPathOverride" && value !== undefined)) {
       throw new NotSupportedError("custom SDK options on the Codex app-server input transport");
     }
-    this.codex = new Codex(options.codex);
     if (options.appServerInput) this.appServer = new CodexAppServerRuntime(id, options.codex?.codexPathOverride);
   }
 
@@ -185,7 +184,11 @@ export class CodexAdapter implements AgentAdapter {
    */
   private codexFor(run: RunSpec): Codex {
     const launch = run.profile?.launch;
-    if (!launch || launch.harness !== "codex") return this.codex;
+    if (!launch || launch.harness !== "codex") {
+      // OpenRouter's lifecycle checks the current package layout. Its next launch must resolve it again.
+      if (this.options.provider === "openrouter") return new Codex(this.options.codex);
+      return this.codex ??= new Codex(this.options.codex);
+    }
     const secretEnv = mcpSecretEnv(run.profile, run.secretEnv);
     return new Codex({
       ...this.options.codex,
@@ -229,7 +232,12 @@ export class CodexAdapter implements AgentAdapter {
       for await (const event of events) {
         ended = this.mapEvent(event, handle, emit, state) || ended;
       }
-      if (!ended) emit({ type: "run.ended", summary: "Stream closed", payload: { ok: true } });
+      // A stream that closes without `turn.completed` or `turn.failed` has no outcome to report.
+      // It is never a success (Agent Runtime Registry PR 4, conformance check: completion).
+      if (!ended) {
+        emit({ type: "error", summary: "Codex stream closed without a terminal turn event" });
+        emit({ type: "run.ended", summary: "Stream closed without a result", payload: { ok: false, reason: "no_terminal_event" } });
+      }
       state.queue.end();
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);

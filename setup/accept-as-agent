@@ -23,6 +23,9 @@ export PATH=/usr/local/bin:/usr/bin:/bin
 AGENT=aos-agent
 GROUP=aos
 WORKTREES=/var/lib/aos/worktrees
+# Dependencies come from here (filled by the plane before the run; read-only to the agent) and
+# node + pnpm from /opt/aos-tools, both root-set-up by aos-setup. Imports are copies, never links.
+STORE=/var/lib/aos/pnpm-store
 [ "$(id -u)" = 0 ] || { echo "accept-as-agent: must run as root" >&2; exit 64; }
 mode="${1:-}"; id="${2:-}"
 [[ "$id" =~ ^[A-Za-z0-9_-]{1,64}$ ]] || { echo "accept-as-agent: bad id" >&2; exit 64; }
@@ -51,6 +54,8 @@ case "$mode" in
       /usr/bin/unshare --net -- \
       /bin/sh -c '/usr/sbin/ip link set lo up || exit 70; exec "$@"' aos-accept \
       /usr/bin/setpriv --reuid="$AGENT" --regid="$GROUP" --init-groups --no-new-privs --inh-caps=-all --bounding-set=-all -- \
-      /usr/bin/env -i HOME="$home" PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 "$@" ;;
+      /usr/bin/env -i HOME="$home" PATH=/opt/aos-tools/bin:/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 \
+      npm_config_store_dir="$STORE" npm_config_package_import_method=copy \
+      npm_config_manage_package_manager_versions=false "$@" ;;
   *) exit 64 ;;
 esac

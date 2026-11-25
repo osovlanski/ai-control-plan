@@ -1,9 +1,11 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { ensureCredential } from "./auth/credential-file.js";
+import { resolveAccounts, type ResolvedAccountsConfig } from "./modules/accounts.js";
+import { resolveRemoteAuth, type RemoteAuthConfig } from "./auth/remote/config.js";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { parse, stringify } from "yaml";
-import type { McpToolAccess, McpToolPolicy } from "@agent-plane/core";
+import { PERSONAL_SCHEDULING_POLICY, WORK_SCHEDULING_POLICY, runtimeConfigProblems, schedulingPolicyProblems, type McpToolAccess, type McpToolPolicy, type SchedulingPolicy } from "@agent-plane/core";
 
 /**
  * Workspace instance configuration (revised architecture §1).
@@ -12,7 +14,7 @@ import type { McpToolAccess, McpToolPolicy } from "@agent-plane/core";
  * provider CLIs/SDKs authenticate in place.
  */
 export interface AssistantConfig {
-  /** anthropic | openai | openrouter | cursor | bedrock | fake (dev). */
+  /** A core `RUNTIME_KINDS` provider: anthropic | openai | openrouter | cursor | bedrock | fake (dev). Checked at load. */
   provider: string;
   enabled?: boolean;
   /**
@@ -41,6 +43,11 @@ export interface WorkspaceConfig {
     host: string;
     port: number;
     auth: { bootstrapTtlSeconds: number; sessionTtlSeconds: number; rotationGraceSeconds: number };
+    /**
+     * B2: the second loopback listener for the private Web link (Tailscale Serve target). Absent = no
+     * remote listener. The local listener above is unchanged either way (D-B). See auth/remote/config.ts.
+     */
+    remote?: RemoteAuthConfig;
   };
   /** Assistant environments this workspace instance may route to. */
   assistants: Record<string, AssistantConfig>;
@@ -264,6 +271,21 @@ export interface WorkspaceConfig {
   };
   /** P0-2 (auto-copilot plan §C.2): the autopilot's bounds. Every key has a default. */
   autopilot?: Partial<ResolvedAutopilotConfig>;
+  /** 2.14 (mcp-api-grants): what the MCP connector may reach. Absent = no aliases, no Web link. */
+  mcp?: { webOrigin?: string; repos?: Record<string, string>; runAs?: "agent" };
+  /**
+   * qcq-01: the operator's hours for ADVISORY run estimates and scheduling recommendations
+   * (`GET /api/tasks/:id/estimate`). It changes no dispatch, schedule or limit. Every key has the
+   * workspace default (personal: Asia/Jerusalem, Sun–Thu 09:00–18:00, evenings and weekends not
+   * allowed until set); unknown keys are a config error.
+   */
+  scheduling?: Partial<Omit<SchedulingPolicy, "workHours" | "evening" | "weekend">> & {
+    workHours?: Partial<SchedulingPolicy["workHours"]>;
+    evening?: Partial<SchedulingPolicy["evening"]>;
+    weekend?: Partial<SchedulingPolicy["weekend"]>;
+    /** qcq-04a (packet 2.2): operator-declared provider accounts. Resolved into `ResolvedConfig.accounts`. */
+    accounts?: unknown;
+  };
 }
 
 /** The resolved autopilot block: always present. It bounds the autopilot; it never starts it. */
@@ -295,19 +317,83 @@ export interface ResolvedAutopilotConfig {
   /** P0-6: which entry of `repos` holds `docs/progress/backlog.yaml` (read at `origin/main`). */
   backlogRepo: string;
   /**
+   * The approval mode of an autopilot session that runs as the agent user. Nobody is there to answer
+   * an approval, which expires after 30 minutes and blocks the attempt (§C.2.8), so the default is
+   * `auto-approve`: the aos-agent sandbox (no network, worktree-only writes) is the boundary, not the
+   * prompt. It never loosens `policy.approvalMode: read-only`, and it applies to no other task.
+   */
+  approvalMode: "auto-approve" | "prompt-on-escalation";
+  /**
    * P0-6: the plane user's GitHub token for reservations and publications. The file must be a
    * regular file owned by the plane user with no group or other bits, and is read per request.
    * Absent = no dispatcher and no publication sweep.
    */
   github?: { tokenFile: string; apiBase?: string };
+  /**
+   * P0-7a (D-14): the external dead-man's-switch ping. `urlFile` holds the check URL (a secret of
+   * the plane user: regular file, mode 0600 or tighter, read per ping). `intervalMs` defaults to 10
+   * minutes. Absent = no ping, and the morning report says the heartbeat is not tracked.
+   */
+  heartbeat?: { urlFile: string; intervalMs: number };
+  /**
+   * P0-7b (§C.5, D-11): the database backup script's settings (`pnpm --filter @agent-plane/api
+   * backup`). `localDir` defaults to `<workspace>/backups`, `keepDays` to 7. `destination` is
+   * where each copy also goes: only `dir:/absolute/path` is built; the off-host bucket is not.
+   */
+  backup?: { localDir?: string; keepDays: number; destination?: string };
 }
 export interface AutopilotRepoConfig { github: string; path: string; base: string }
+
+/**
+ * 2.14 (mcp-api-grants, docs/adr/mcp-connector.md). `repos` maps a short alias to a path that must
+ * be EXACTLY an entry of `repoAllowlist` (the allowlist matches by prefix; an alias never does).
+ * A credential without `commands.write` creates tasks only through an alias. `webOrigin` is the
+ * private HTTPS Web origin; create/start answer `webLink: <webOrigin>/#/missions/<taskId>` only when
+ * it is set. `runAs: agent` makes every task a narrow credential creates run as the agent user;
+ * unset (the default, pending the owner's answer) keeps today's behaviour.
+ */
+export interface ResolvedMcpConfig { webOrigin?: string; repos: Record<string, string>; runAs?: "agent" }
+export const MCP_REPO_ALIAS = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+
+function resolveMcp(file: unknown, repoAllowlist: readonly string[], hasAgentUser: boolean, configPath: string): ResolvedMcpConfig {
+  const repos: Record<string, string> = Object.create(null) as Record<string, string>;
+  if (file === undefined) return { repos };
+  if (!isRecord(file)) throw new Error(`${configPath}: mcp must be a mapping`);
+  const unknown = Object.keys(file).filter((k) => !["webOrigin", "repos", "runAs"].includes(k));
+  if (unknown.length > 0) throw new Error(`${configPath}: mcp has unknown key(s): ${unknown.join(", ")}`);
+  const out: ResolvedMcpConfig = { repos };
+  if (file.webOrigin !== undefined) {
+    let url: URL;
+    try { url = new URL(String(file.webOrigin)); } catch { throw new Error(`${configPath}: mcp.webOrigin must be an https origin`); }
+    const origin = url.origin;
+    if (typeof file.webOrigin !== "string" || url.protocol !== "https:" || url.username || url.password || (file.webOrigin !== origin && file.webOrigin !== `${origin}/`)) {
+      throw new Error(`${configPath}: mcp.webOrigin must be an https origin with no path, query, fragment or credentials`);
+    }
+    out.webOrigin = origin;
+  }
+  if (file.repos !== undefined) {
+    if (!isRecord(file.repos)) throw new Error(`${configPath}: mcp.repos must be a mapping of alias to absolute path`);
+    for (const alias of Object.getOwnPropertyNames(file.repos)) {
+      const path = file.repos[alias];
+      if (!MCP_REPO_ALIAS.test(alias)) throw new Error(`${configPath}: mcp.repos alias ${JSON.stringify(alias)} must match ${MCP_REPO_ALIAS.source}`);
+      if (typeof path !== "string" || !isAbsolute(path) || resolve(path) !== path) throw new Error(`${configPath}: mcp.repos.${alias} must be an absolute, normalized path`);
+      if (!repoAllowlist.includes(path)) throw new Error(`${configPath}: mcp.repos.${alias} must be exactly an entry of repoAllowlist (prefix matches are not accepted)`);
+      repos[alias] = path;
+    }
+  }
+  if (file.runAs !== undefined) {
+    if (file.runAs !== "agent") throw new Error(`${configPath}: mcp.runAs accepts only "agent"`);
+    if (!hasAgentUser) throw new Error(`${configPath}: mcp.runAs "agent" needs execution.agentUser`);
+    out.runAs = "agent";
+  }
+  return out;
+}
 export const AUTOPILOT_DEFAULTS: Omit<ResolvedAutopilotConfig, "repos"> & { repos: Readonly<Record<string, AutopilotRepoConfig>> } = {
   pool: "oci-heavy", runtimeBudgetMs: 90 * 60_000, attemptsPerItem: 2, itemsPerWindow: 3,
   minSliceMs: 10 * 60_000, graceMs: 2 * 60_000, hostRetryMs: 2 * 60_000, attestationMaxAgeDays: 30,
-  dispatchIntervalMs: 60_000, repos: {}, backlogRepo: "ai-control-plan",
+  dispatchIntervalMs: 60_000, repos: {}, backlogRepo: "ai-control-plan", approvalMode: "auto-approve",
 };
-const AUTOPILOT_KEYS = [...Object.keys(AUTOPILOT_DEFAULTS), "github"];
+const AUTOPILOT_KEYS = [...Object.keys(AUTOPILOT_DEFAULTS), "github", "heartbeat", "backup"];
 
 function resolveAutopilot(file: unknown, configPath: string): ResolvedAutopilotConfig {
   if (file === undefined) return { ...AUTOPILOT_DEFAULTS, repos: {} };
@@ -328,6 +414,10 @@ function resolveAutopilot(file: unknown, configPath: string): ResolvedAutopilotC
   // The scope's RuntimeMaxSec is bounded by the wrapper at four hours; a longer budget could never launch.
   if (out.runtimeBudgetMs > 4 * 3_600_000) throw new Error(`${configPath}: autopilot.runtimeBudgetMs must be at most four hours`);
   if (out.graceMs >= out.minSliceMs) throw new Error(`${configPath}: autopilot.graceMs must be below autopilot.minSliceMs`);
+  if (file.approvalMode !== undefined) {
+    if (file.approvalMode !== "auto-approve" && file.approvalMode !== "prompt-on-escalation") throw new Error(`${configPath}: autopilot.approvalMode must be auto-approve or prompt-on-escalation`);
+    out.approvalMode = file.approvalMode;
+  }
   if (out.dispatchIntervalMs < 5_000) throw new Error(`${configPath}: autopilot.dispatchIntervalMs must be at least 5000`);
   if (file.repos !== undefined) {
     if (!isRecord(file.repos)) throw new Error(`${configPath}: autopilot.repos must be a mapping of backlog repo name to { github, path, base }`);
@@ -355,6 +445,27 @@ function resolveAutopilot(file: unknown, configPath: string): ResolvedAutopilotC
     if (typeof g.tokenFile !== "string" || !isAbsolute(g.tokenFile)) throw new Error(`${configPath}: autopilot.github.tokenFile must be an absolute path`);
     if (g.apiBase !== undefined && (typeof g.apiBase !== "string" || !/^https:\/\/[^/\s]+(\/[^\s]*)?$/.test(g.apiBase))) throw new Error(`${configPath}: autopilot.github.apiBase must be an https URL`);
     out.github = { tokenFile: g.tokenFile, ...(g.apiBase !== undefined ? { apiBase: g.apiBase as string } : {}) };
+  }
+  if (file.heartbeat !== undefined) {
+    const h = file.heartbeat;
+    if (!isRecord(h)) throw new Error(`${configPath}: autopilot.heartbeat must be a mapping`);
+    const extra = Object.keys(h).filter((k) => !["urlFile", "intervalMs"].includes(k));
+    if (extra.length > 0) throw new Error(`${configPath}: autopilot.heartbeat has unknown key(s): ${extra.join(", ")}`);
+    if (typeof h.urlFile !== "string" || !isAbsolute(h.urlFile)) throw new Error(`${configPath}: autopilot.heartbeat.urlFile must be an absolute path`);
+    const intervalMs = h.intervalMs ?? 10 * 60_000;
+    if (!isPositiveInteger(intervalMs) || intervalMs < 60_000) throw new Error(`${configPath}: autopilot.heartbeat.intervalMs must be an integer of at least 60000`);
+    out.heartbeat = { urlFile: h.urlFile, intervalMs };
+  }
+  if (file.backup !== undefined) {
+    const b = file.backup;
+    if (!isRecord(b)) throw new Error(`${configPath}: autopilot.backup must be a mapping`);
+    const extra = Object.keys(b).filter((k) => !["localDir", "keepDays", "destination"].includes(k));
+    if (extra.length > 0) throw new Error(`${configPath}: autopilot.backup has unknown key(s): ${extra.join(", ")}`);
+    if (b.localDir !== undefined && (typeof b.localDir !== "string" || !isAbsolute(b.localDir) || resolve(b.localDir) !== b.localDir)) throw new Error(`${configPath}: autopilot.backup.localDir must be an absolute, normalized path`);
+    const keepDays = b.keepDays ?? 7;
+    if (!isPositiveInteger(keepDays)) throw new Error(`${configPath}: autopilot.backup.keepDays must be a positive integer`);
+    if (b.destination !== undefined && (typeof b.destination !== "string" || !/^dir:\/\S*$/.test(b.destination))) throw new Error(`${configPath}: autopilot.backup.destination must be dir:/absolute/path (the off-host bucket is not built)`);
+    out.backup = { keepDays, ...(b.localDir !== undefined ? { localDir: b.localDir as string } : {}), ...(b.destination !== undefined ? { destination: b.destination as string } : {}) };
   }
   return out;
 }
@@ -484,8 +595,14 @@ export interface ResolvedComposerConfig {
   };
 }
 
-export interface ResolvedConfig extends Omit<WorkspaceConfig, "execution" | "models" | "decisions" | "sessionInput" | "registry" | "composer" | "autopilot"> {
+export interface ResolvedConfig extends Omit<WorkspaceConfig, "execution" | "models" | "decisions" | "sessionInput" | "registry" | "composer" | "autopilot" | "mcp" | "scheduling"> {
+  /** qcq-01: resolved advisory scheduling policy. `loadConfig` always sets it; absent means the workspace default. */
+  scheduling?: SchedulingPolicy;
+  /** qcq-04a: resolved `scheduling.accounts` (enforcement off only in this build). Absent means `DEFAULT_ACCOUNTS`. */
+  accounts?: ResolvedAccountsConfig;
   registry: ResolvedRegistryConfig;
+  /** Always present; empty aliases and no Web origin unless the workspace sets `mcp`. */
+  mcp: ResolvedMcpConfig;
   /** Always present: the autopilot's bounds (it is started by an operator call, never by config). */
   autopilot: ResolvedAutopilotConfig;
   /** Always present; `enabled` is false unless the workspace turns it on. */
@@ -590,6 +707,26 @@ export function workspaceName(env: NodeJS.ProcessEnv = process.env): string {
 }
 
 /**
+ * Where the active workspace's API listens and where its credential file lives, for a client on
+ * this machine (the `aos` CLI). Read-only: unlike `loadConfig` it creates no directory, default
+ * config or credential, and it validates nothing but `api.host` / `api.port`. A missing config file
+ * means the workspace defaults, which is what the plane would boot with.
+ */
+export function readApiEndpoint(env: NodeJS.ProcessEnv = process.env): { workspace: string; dir: string; host: string; port: number } {
+  const workspace = workspaceName(env);
+  const dir = join(configHome(env), workspace);
+  const configPath = join(dir, "config.yaml");
+  const defaults = defaultsFor(workspace).api;
+  if (!existsSync(configPath)) return { workspace, dir, host: defaults.host, port: defaults.port };
+  const raw: unknown = parse(readFileSync(configPath, "utf8"));
+  const api = (raw as { api?: { host?: unknown; port?: unknown } } | null)?.api;
+  const host = api?.host ?? defaults.host;
+  const port = api?.port ?? defaults.port;
+  if (typeof host !== "string" || !Number.isInteger(port)) throw new Error(`${configPath} api.host must be a string and api.port an integer`);
+  return { workspace, dir, host, port: port as number };
+}
+
+/**
  * Loads the active workspace config, creating a commented default on first boot.
  * Unknown keys are preserved-ignored; missing keys fall back to defaults so a
  * hand-edited partial file still boots.
@@ -622,12 +759,27 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ResolvedConfig
   const registry = resolveRegistry(file.registry, configPath);
   const composer = resolveComposer(file.composer, configPath);
   const autopilot = resolveAutopilot(file.autopilot, configPath);
+  // `scheduling.accounts` is its own block, not part of the advisory SchedulingPolicy contract.
+  const schedulingIsMapping = typeof file.scheduling === "object" && file.scheduling !== null && !Array.isArray(file.scheduling);
+  const { accounts: rawAccounts, ...fileScheduling } = (schedulingIsMapping ? file.scheduling : {}) as NonNullable<WorkspaceConfig["scheduling"]>;
+  const scheduling = resolveScheduling(schedulingIsMapping ? fileScheduling : file.scheduling, file.workspace ?? workspace, configPath);
   const resources = pools(file.scheduler?.resources);
+  const accounts = resolveAccounts(rawAccounts, {
+    assistants: file.assistants ?? defaults.assistants,
+    pools: Object.keys(resources),
+    schedulerEnabled: file.scheduler?.enabled ?? true,
+  }, configPath);
   const admission = resolveAdmission(file.scheduler?.admission, resources, execution.agentUser?.worktreesRoot ?? dir, configPath);
+
+  // `api.remote` is parsed strictly on its own; it never rides the permissive `...file.api` spread.
+  const { remote: rawRemote, ...fileApi } = (file.api ?? {}) as Partial<WorkspaceConfig["api"]> & { remote?: unknown };
+  const remoteProblems: string[] = [];
+  const remote = resolveRemoteAuth(rawRemote, { localPort: fileApi.port ?? defaults.api.port, configDir: dir, workspace, fileWorkspace: file.workspace }, remoteProblems);
+  if (remoteProblems.length) throw new Error(`Invalid config at ${configPath}:\n  - ${remoteProblems.join("\n  - ")}`);
 
   const config: WorkspaceConfig = {
     workspace: file.workspace ?? workspace,
-    api: { ...defaults.api, ...file.api, auth: { ...defaults.api.auth, ...file.api?.auth } },
+    api: { ...defaults.api, ...fileApi, auth: { ...defaults.api.auth, ...file.api?.auth }, ...(remote ? { remote } : {}) },
     assistants: file.assistants ?? defaults.assistants,
     repoAllowlist: file.repoAllowlist ?? defaults.repoAllowlist,
     policy: { ...defaults.policy, ...file.policy },
@@ -638,6 +790,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ResolvedConfig
   };
 
   validate(config, configPath);
+  const mcp = resolveMcp(file.mcp, config.repoAllowlist, execution.agentUser !== undefined, configPath);
   validateModels(models, configPath);
   validateDecisions(decisions, configPath, workspace);
 
@@ -649,7 +802,46 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ResolvedConfig
   }
   ensureCredential(dir);
 
-  return { ...config, execution, models, decisions, sessionInput, registry, composer, autopilot, dir, dbPath: join(dir, "agent-plane.db"), warnings };
+  return { ...config, execution, models, decisions, sessionInput, registry, composer, autopilot, mcp, scheduling, accounts, dir, dbPath: join(dir, "agent-plane.db"), warnings };
+}
+
+/** The workspace default advisory scheduling policy (qcq-01). */
+export function defaultSchedulingPolicy(workspace: string): SchedulingPolicy {
+  return workspace === "personal" ? PERSONAL_SCHEDULING_POLICY : WORK_SCHEDULING_POLICY;
+}
+
+const SCHEDULING_KEYS = ["timezone", "workDays", "workHours", "evening", "weekend", "dueSoonMs", "offHoursMinDurationMs", "accountConcurrency"];
+const WINDOW_KEYS: Record<string, string[]> = { workHours: ["start", "end"], evening: ["start", "end", "allowed"], weekend: ["start", "end", "allowed", "days"] };
+
+function resolveScheduling(file: unknown, workspace: string, configPath: string): SchedulingPolicy {
+  const d = defaultSchedulingPolicy(workspace);
+  if (file === undefined || file === null) return d;
+  if (typeof file !== "object" || Array.isArray(file)) throw new Error(`${configPath}: scheduling must be a mapping`);
+  const f = file as Record<string, unknown>;
+  const unknown = Object.keys(f).filter((k) => !SCHEDULING_KEYS.includes(k));
+  if (unknown.length > 0) throw new Error(`${configPath}: scheduling has unknown key(s): ${unknown.join(", ")}`);
+  for (const [k, keys] of Object.entries(WINDOW_KEYS)) {
+    const v = f[k];
+    if (v === undefined) continue;
+    if (typeof v !== "object" || v === null || Array.isArray(v)) throw new Error(`${configPath}: scheduling.${k} must be a mapping`);
+    const extra = Object.keys(v).filter((x) => !keys.includes(x));
+    if (extra.length > 0) throw new Error(`${configPath}: scheduling.${k} has unknown key(s): ${extra.join(", ")}`);
+  }
+  const p = file as NonNullable<WorkspaceConfig["scheduling"]>;
+  const resolved: SchedulingPolicy = {
+    ...d,
+    ...(p.timezone !== undefined ? { timezone: p.timezone } : {}),
+    ...(p.workDays !== undefined ? { workDays: p.workDays } : {}),
+    ...(p.dueSoonMs !== undefined ? { dueSoonMs: p.dueSoonMs } : {}),
+    ...(p.offHoursMinDurationMs !== undefined ? { offHoursMinDurationMs: p.offHoursMinDurationMs } : {}),
+    ...(p.accountConcurrency !== undefined ? { accountConcurrency: p.accountConcurrency } : {}),
+    workHours: { ...d.workHours, ...p.workHours },
+    evening: { ...d.evening, ...p.evening },
+    weekend: { ...d.weekend, ...p.weekend },
+  };
+  const problems = schedulingPolicyProblems(resolved);
+  if (problems.length > 0) throw new Error(`${configPath}: scheduling: ${problems.join("; ")}`);
+  return resolved;
 }
 
 /**
@@ -1121,10 +1313,10 @@ function validate(config: WorkspaceConfig, path: string): void {
   if (!modes.includes(config.policy.approvalMode)) {
     problems.push(`policy.approvalMode must be one of ${modes.join(" | ")}, got ${config.policy.approvalMode}`);
   }
+  // Provider and known option types come from core `RUNTIME_KINDS`, so a bad provider fails here
+  // with its config path instead of later at `Registry.init` (runtime registry design, PR 2).
   for (const [id, assistant] of Object.entries(config.assistants)) {
-    if (!assistant || typeof assistant.provider !== "string") {
-      problems.push(`assistants.${id} must have a provider`);
-    }
+    problems.push(...runtimeConfigProblems(id, assistant?.provider, assistant?.options));
   }
   if (typeof config.execution?.harnessModes?.single !== "boolean") {
     problems.push(

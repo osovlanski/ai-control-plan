@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-plane.local/contracts/run-estimate/v1/task-estimate.schema.json",
+  "title": "TaskEstimate",
+  "description": "Body of GET /api/tasks/:id/estimate (API 2.15). Normative text: docs/contracts/run-estimate-v1.md.",
+  "type": "object",
+  "required": [
+    "taskId",
+    "advisory",
+    "routing",
+    "estimate",
+    "recommendation",
+    "policy"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "taskId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "advisory": {
+      "const": true
+    },
+    "routing": {
+      "type": "object",
+      "required": [
+        "chosen",
+        "ruleFired",
+        "whatIf"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "chosen": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "ruleFired": {
+          "type": "string"
+        },
+        "whatIf": {
+          "type": "boolean"
+        }
+      }
+    },
+    "estimate": {
+      "$ref": "run-estimate.schema.json#/$defs/RunEstimate"
+    },
+    "recommendation": {
+      "$ref": "run-estimate.schema.json#/$defs/ScheduleRecommendation"
+    },
+    "policy": {
+      "type": "object",
+      "required": [
+        "timezone",
+        "eveningsAllowed",
+        "weekendsAllowed"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "timezone": {
+          "type": "string",
+          "minLength": 1
+        },
+        "eveningsAllowed": {
+          "type": "boolean"
+        },
+        "weekendsAllowed": {
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}

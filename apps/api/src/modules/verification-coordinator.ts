@@ -129,7 +129,8 @@ export class VerificationCoordinator implements VerificationCoordinatorPort {
       throwIfAborted(signal);
       const changedFiles = checkpoint.changedFiles;
       const worktreePath = request.context.worktree?.worktreePath;
-      const discovery = worktreePath
+      // An agent-user task's repository commands run only in the isolated acceptance runner.
+      const discovery = worktreePath && request.policy.runAs !== "agent"
         ? discoverProjectVerificationCapabilities(snapshotProjectVerification(this.authority, worktreePath))
         : { capabilities: [], warnings: [] };
       throwIfAborted(signal);
@@ -138,7 +139,9 @@ export class VerificationCoordinator implements VerificationCoordinatorPort {
       const discovered = planVerification({ changedFiles, capabilities });
       let revised = reviseVerificationPlan(initial, discovered);
       const target = request.context.worktree;
-      if (target && revised.checks.some(isProjectCheck)) {
+      // Acceptance installs offline and runs the project commands for an agent task; the plane's
+      // dependency and unchanged checks must not settle them (a blocked required check fails the run).
+      if (target && request.policy.runAs !== "agent" && revised.checks.some(isProjectCheck)) {
         if (changedFiles.length === 0 && await this.unchanged(target.worktreePath, target.baseRef)) {
           revised = settleProjectChecks(revised, SKIPPED_UNCHANGED, UNCHANGED_REASON);
         } else {

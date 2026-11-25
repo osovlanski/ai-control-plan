@@ -107,6 +107,7 @@ export interface RigOptions {
   memoryShadowScorer?: ServerDeps["memoryShadowScorer"];
   /** P0-2: the autopilot's host gate (§C.2.6). */
   autopilotHostGate?: ServerDeps["autopilotHostGate"];
+  autopilotHeartbeatFetch?: ServerDeps["autopilotHeartbeatFetch"];
   /** P0-6: any other server dependency (fake GitHub, acceptance executor, ...). */
   serverDeps?: Partial<ServerDeps>;
 }
@@ -150,6 +151,7 @@ export async function bootRig(options: RigOptions = {}): Promise<Rig> {
     ...(options.assetShadowScorer ? { assetShadowScorer: options.assetShadowScorer } : {}),
     ...(options.memoryShadowScorer ? { memoryShadowScorer: options.memoryShadowScorer } : {}),
     ...(options.autopilotHostGate ? { autopilotHostGate: options.autopilotHostGate } : {}),
+    ...(options.autopilotHeartbeatFetch ? { autopilotHeartbeatFetch: options.autopilotHeartbeatFetch } : {}),
     ...(options.serverDeps ?? {}),
   });
   built.registry.init();

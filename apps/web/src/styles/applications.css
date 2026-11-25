@@ -1,4 +1,17 @@
 /* Stable application boundaries; the existing Orbital design tokens are shared. */
+.task-routing { overflow-wrap: anywhere; }
+.task-routing > * + section, .task-routing > details,
+.task-routing > details > section {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--line);
+}
+.task-routing > section > h3 { font-size: 0.95rem; margin-bottom: 0.4rem; }
+.task-routing .mission-decision { margin: 0.9rem 0; }
+.task-routing .fine-print + .fine-print { margin-top: 0.3rem; }
+.task-routing summary { cursor: pointer; font-size: 0.875rem; }
+.task-routing .decision-evidence { margin-top: 0.8rem; }
+
 [hidden] { display: none !important; }
 .os-nav { text-decoration: none; min-height: 48px; }
 .os-nav:last-child { margin-top: 18px; }
@@ -34,3 +47,65 @@
 .delivery-recovery-text { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text); }
 .delivery-recovery-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 14px; }
 .delivery-recovery-actions .btn { margin-top: 0; }
+/* Agents app: runtime registry lifecycle, conformance test and "Add a runtime" (Registry PR 5). */
+.runtime-head { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 0.7rem; }
+.runtime-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.runtime-lifecycle { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 14px; margin: 0.7rem 0 0; font-size: 0.83rem; }
+.runtime-lifecycle dt { color: var(--text-2); }
+.runtime-lifecycle dd { margin: 0; overflow-wrap: anywhere; }
+.runtime-reasons { margin: 4px 0 0; padding-left: 1.1rem; }
+.runtime-test { margin-top: 0.8rem; padding-top: 0.7rem; border-top: 1px solid var(--line); font-size: 0.83rem; }
+.runtime-checks { overflow-x: auto; margin-top: 0.5rem; }
+.runtime-checks table { border-collapse: collapse; width: 100%; min-width: 420px; }
+.runtime-checks th, .runtime-checks td { text-align: left; padding: 4px 10px 4px 0; border-bottom: 1px solid var(--line); vertical-align: top; overflow-wrap: anywhere; }
+.runtime-checks th { color: var(--text-2); font-weight: 500; }
+.runtime-snippet { margin: 0.6rem 0 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; overflow-x: auto; font-family: var(--font-mono); font-size: 0.8rem; white-space: pre; }
+/* Guided Add a runtime: one choice per row, steps open for the chosen one. */
+.add-runtime-list { list-style: none; margin: 0.6rem 0 0; padding: 0; display: grid; gap: 8px; }
+.add-runtime-item { border: 1px solid var(--line); border-radius: 12px; padding: 6px 14px; }
+.add-runtime-choice { width: 100%; flex-wrap: wrap; align-items: center; }
+.add-runtime-panel { padding: 4px 0 10px 22px; }
+.add-steps { margin: 0; padding-left: 1.3rem; display: grid; gap: 12px; font-size: 0.85rem; }
+.add-steps p { margin: 4px 0 0; color: var(--text-2); overflow-wrap: anywhere; }
+.add-steps .runtime-actions { margin-top: 8px; }
+.add-runtime-yaml { margin-left: 0; }
+.add-runtime-yaml:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+/* Agents: one scannable row per runtime; lifecycle, test report and models open on request. */
+.agent-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; font-size: 0.85rem; }
+.agent-tally { color: var(--text-2); }
+.agent-link { margin-left: auto; background: none; border: 0; padding: 6px 0; color: var(--accent); cursor: pointer; font: inherit; }
+.agent-list { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
+.agent-list > .card { padding: 10px 14px; }
+.agent-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+.agent-toggle { display: inline-flex; align-items: baseline; gap: 8px; min-height: 36px; min-width: 0; padding: 4px 6px 4px 0; background: none; border: 0; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.agent-toggle:focus-visible, .agent-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+.agent-chevron { width: 1ch; color: var(--text-2); }
+.agent-sub { color: var(--text-2); font-size: 0.8rem; overflow-wrap: anywhere; }
+.agent-chip { padding: 1px 9px; border: 1px solid var(--line); border-radius: 999px; font-size: 0.75rem; white-space: nowrap; }
+.agent-chip[data-tone="ok"] { color: #8fd3a8; border-color: #8fd3a855; }
+.agent-chip[data-tone="warn"] { color: #f3b565; border-color: #f3b56566; }
+.agent-chip[data-tone="danger"] { color: #f07c7c; border-color: #f07c7c66; }
+.agent-chip[data-tone="muted"] { color: var(--text-2); }
+.agent-actions { margin-left: auto; }
+.agent-digest { margin: 2px 0 0 1.5ch; font-size: 0.8rem; color: var(--text-2); overflow-wrap: anywhere; }
+.agent-cooldown { margin: 4px 0 0 1.5ch; font-size: 0.85rem; color: #f3b565; }
+.agent-details { margin-top: 4px; padding-top: 4px; border-top: 1px solid var(--line); }
+@media (max-width: 760px) {
+  .runtime-lifecycle { grid-template-columns: minmax(0, 1fr); }
+  .runtime-lifecycle dd { margin-bottom: 6px; }
+  .runtime-head .runtime-actions { margin-left: 0 !important; width: 100%; }
+  .agent-actions { margin-left: 0; width: 100%; }
+  .agent-actions .btn { flex: 1 1 auto; min-height: 40px; }
+}
+/* tlm-03: task provenance. A stored key, a guess and an unknown read apart at a glance. */
+.task-provenance { overflow-wrap: anywhere; }
+.task-provenance > section + section { margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--line); }
+.task-provenance h3 { font-size: 0.95rem; margin-bottom: 0.4rem; }
+.task-provenance .prov-list { padding-left: 1.1rem; display: grid; gap: 0.8rem; }
+.task-provenance .prov-list > li > div + div { margin-top: 0.25rem; }
+.task-provenance .identity-grid { margin: 8px 0 0; gap: 10px 18px; }
+.prov-join { display: inline-block; font-family: var(--font-mono); font-size: 11px; padding: 1px 6px; border-radius: var(--r-1); border: 1px solid var(--line-strong); color: var(--text-2); }
+.prov-join--inferred { border-style: dashed; color: var(--tone-limit); }
+.prov-join--unrecorded { color: var(--text-3); }
+.prov-open { color: var(--tone-limit); }
+@media (max-width: 760px) { .task-provenance .identity-grid { grid-template-columns: 1fr; } }

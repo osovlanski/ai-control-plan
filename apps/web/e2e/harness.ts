@@ -13,7 +13,7 @@ import type { AgentAdapter, AssistantId } from "@agent-plane/core";
 import { Registry } from "../../api/src/modules/registry.js";
 import { loadConfig, type ResolvedConfig } from "../../api/src/config.js";
 import { openDb, type Db } from "../../api/src/db/index.js";
-import { buildServer, type BuiltServer } from "../../api/src/server.js";
+import { buildServer, type BuiltServer, type ServerDeps } from "../../api/src/server.js";
 import type { CatalogSource } from "../../api/src/modules/model-catalog.js";
 import type { QuotaProbeFn, ProbeOutcome } from "../../api/src/modules/quota-probe.js";
 import type { SessionInputAdapterResolver } from "../../api/src/modules/session-input.js";
@@ -28,6 +28,14 @@ import { mintBootstrapToken } from "../../api/src/auth/bootstrap-token.js";
  */
 export const composerProbe = (m: ConsoleMessage) =>
   /status of 404/.test(m.text()) && /\/api\/tasks\/[^/]+\/(compose|composition(\/budget)?)$/.test(m.location().url);
+
+/** The Overview is calm by default. Specs that read the field, inspector or register open diagnostics first. */
+export async function showDiagnostics(page: Page) {
+  const bar = page.getByRole("region", { name: "Diagnostics" });
+  const show = bar.getByRole("button", { name: "Show diagnostics" });
+  if (await show.count()) await show.click();
+  await expect(bar.getByRole("button", { name: "Hide diagnostics" })).toHaveAttribute("aria-expanded", "true");
+}
 
 export const A = "fake-a" as AssistantId;
 export const B = "fake-b" as AssistantId;
@@ -86,6 +94,8 @@ export async function boot(
    * which is what every walkthrough that is not about delivery faults wants.
    */
   sessionInputAdapters?: SessionInputAdapterResolver,
+  /** Further server seams (e.g. the demo journey's fake `autopilotGitHub`), passed through as given. */
+  serverDeps?: Partial<Omit<ServerDeps, "config" | "db" | "registry" | "now" | "quotaProbeFn">>,
 ): Promise<Harness> {
   const home = mkdtempSync(join(tmpdir(), `${prefix}-`));
   const config = loadConfig({ AGENT_PLANE_HOME: home });
@@ -105,6 +115,7 @@ export async function boot(
     config, db, registry, now: clock.now, quotaProbeFn: demoProbe(clock),
     ...(modelCatalogSources ? { modelCatalogSources } : {}),
     ...(sessionInputAdapters ? { sessionInputAdapters } : {}),
+    ...serverDeps,
   });
   built.registry.init();
   await built.registry.syncAll();
@@ -171,7 +182,7 @@ export async function boot(
       await page.clock.setFixedTime(clock.current);
       await page.goto(l.url);
       await expect(page.getByRole("navigation", { name: "System" })).toBeVisible();
-      await expect(page.getByRole("heading", { name: /Command the next wave/ })).toBeVisible();
+      await expect(page.getByRole("heading", { name: "Overview", level: 1 })).toBeVisible();
       return page;
     },
     privileged: () =>

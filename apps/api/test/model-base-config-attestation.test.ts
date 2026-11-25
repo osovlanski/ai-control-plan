@@ -40,6 +40,8 @@ let config: ResolvedConfig;
 let built: BuiltServer;
 let seq = 0;
 const now = () => CLOCK;
+/** When set, the fake AA prior is scored at this benchmark configuration (e.g. `effort=low`). */
+let benchConfiguration: string | undefined;
 
 /** A provider-official dated id that lists the alias, with an external coding prior of 0.8. */
 function source(): CatalogSource {
@@ -53,7 +55,7 @@ function source(): CatalogSource {
       const bench = {
         source: 'external:artificial-analysis' as const, tier: 'external-benchmark' as const,
         observedAt: CLOCK.toISOString(), normalizationVersion: AA_NORMALIZATION_VERSION, attribution: 'test',
-        benchmark: { release: 'intelligence-index-4.3', category: 'coding' },
+        benchmark: { release: 'intelligence-index-4.3', category: 'coding', ...(benchConfiguration ? { configuration: benchConfiguration } : {}) },
       };
       const observations: CatalogObservation[] = [
         { modelId: DATED_ID, provider: 'fake', aliases: [ALIAS], provenance: official, contextWindowTokens: 200_000 } as CatalogObservation,
@@ -193,6 +195,31 @@ describe('persisted explanation: unset, stale, future, fresh', () => {
     const rec = persisted();
     expect(codingOf(rec).prior?.value).toBe(0.8);
     expect(candidateOf(rec).advisories.join(' ')).not.toContain('prior withheld');
+  });
+
+  it('an effort-tagged prior is withheld even under a fresh attestation, and the advisory says why', async () => {
+    benchConfiguration = 'effort=low';
+    try {
+      await boot(daysBefore(2));
+      const rec = persisted();
+      expect(candidateOf(rec).identity.basis).toBe('observed-resolution');
+      expect(codingOf(rec).prior).toBeUndefined();
+      expect(candidateOf(rec).advisories.join(' ')).toContain('1 benchmark prior(s) withheld: each scores one reasoning effort');
+    } finally {
+      benchConfiguration = undefined;
+    }
+  });
+
+  it('a configuration that names no effort (the speed measurement) is not withheld', async () => {
+    benchConfiguration = 'prompt_length=medium (AA free-tier default)';
+    try {
+      await boot(daysBefore(2));
+      const rec = persisted();
+      expect(codingOf(rec).prior?.value).toBe(0.8);
+      expect(candidateOf(rec).advisories.join(' ')).not.toContain('reasoning effort');
+    } finally {
+      benchConfiguration = undefined;
+    }
   });
 
   it('a candidate whose identity is unresolved is unaffected by the attestation', async () => {

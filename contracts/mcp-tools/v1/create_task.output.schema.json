@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-plane.local/contracts/mcp-tools/v1/create_task.output.schema.json",
+  "title": "CreateTaskOutput",
+  "description": "create_task structuredContent. A replay returns the first result with `replayed: true`; read current state with get_task.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "taskId",
+    "state",
+    "repo",
+    "webLink",
+    "proposal",
+    "replayed",
+    "createdAt"
+  ],
+  "properties": {
+    "taskId": {
+      "type": "string",
+      "pattern": "^AG-[0-9a-z]{1,32}$",
+      "description": "Plane task id (`newTaskId`, packages/core/src/ids.ts)."
+    },
+    "state": {
+      "const": "CREATED"
+    },
+    "repo": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$",
+      "description": "A repository alias from the MCP service's exposed-repo map. Never a filesystem path."
+    },
+    "webLink": {
+      "type": "string",
+      "maxLength": 300,
+      "pattern": "^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?/#/missions/AG-[0-9a-z]{1,32}$",
+      "description": "Private Web link to the task: the configured HTTPS Web origin + `/#/missions/<taskId>`. Reachable only on the private network."
+    },
+    "proposal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "eligible",
+        "assistantId",
+        "ruleFired",
+        "summary",
+        "candidates",
+        "compositionDigest"
+      ],
+      "description": "The route the plane would take if the task started now, from the existing routing service (and the composer preview when the composer is on). Advisory: start_task re-routes and refuses with route_changed if `confirm` no longer matches.",
+      "properties": {
+        "eligible": {
+          "type": "boolean",
+          "description": "False when no assistant passes the filters; start_task would fail with no_eligible_assistant."
+        },
+        "assistantId": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+        },
+        "ruleFired": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500,
+          "description": "One redacted sentence explaining the choice, for the chat client to show."
+        },
+        "candidates": {
+          "type": "array",
+          "maxItems": 20,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "assistantId",
+              "passedFilters",
+              "filterFailures"
+            ],
+            "properties": {
+              "assistantId": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+              },
+              "passedFilters": {
+                "type": "boolean"
+              },
+              "filterFailures": {
+                "type": "array",
+                "maxItems": 20,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                }
+              }
+            }
+          }
+        },
+        "compositionDigest": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "description": "Composer preview digest, or null when the composer is off or produced no composition."
+        }
+      }
+    },
+    "replayed": {
+      "type": "boolean"
+    },
+    "createdAt": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,6})?Z$"
+    }
+  }
+}

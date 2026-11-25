@@ -40,6 +40,7 @@
  * Nothing here runs repository code or a provider. Git commands run as the plane user with hooks
  * off, only `fetch`, `rev-parse`, `show` and `commit-tree`.
  */
+import { summariseScope, type ScopeItem, type ScopeState, type ScopeSummary } from "./autopilot-scope.js";
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { parse as parseYaml } from "yaml";
@@ -127,10 +128,12 @@ export interface DispatchGit {
   fetch(repoPath: string, refspecs: string[]): Promise<void>;
   /** The full SHA `rev` names, or null. */
   revParse(repoPath: string, rev: string): Promise<string | null>;
+  /** The newest commit of `rev` made strictly before `before` (ISO 8601), or null. */
+  lastCommitBefore(repoPath: string, rev: string, before: string): Promise<string | null>;
   /** `git show <rev>:<path>`, or null when it does not exist. */
   show(repoPath: string, rev: string, path: string): Promise<string | null>;
   /** `git commit-tree` with the given content, fixed identity and date. Returns the SHA. */
-  commitTree(repoPath: string, input: { tree: string; parent: string; message: string; name: string; email: string; date: string }): Promise<string>;
+  commitTree(repoPath: string, input: { tree: string; parent: string; extraParents?: string[]; message: string; name: string; email: string; date: string }): Promise<string>;
 }
 
 function gitRun(repoPath: string, args: string[], opts: { input?: string; env?: Record<string, string>; timeoutMs?: number } = {}): Promise<{ code: number; stdout: string; stderr: string }> {
@@ -158,6 +161,10 @@ export function dispatchGitCli(): DispatchGit {
       const r = await gitRun(repoPath, ["rev-parse", "--verify", "--quiet", rev]);
       return r.code === 0 ? r.stdout.trim() : null;
     },
+    async lastCommitBefore(repoPath, rev, before) {
+      const r = await gitRun(repoPath, ["rev-list", "-1", `--before=${before}`, rev]);
+      return r.code === 0 && r.stdout.trim() ? r.stdout.trim() : null;
+    },
     async show(repoPath, rev, path) {
       const r = await gitRun(repoPath, ["show", `${rev}:${path}`]);
       return r.code === 0 ? r.stdout : null;
@@ -165,7 +172,7 @@ export function dispatchGitCli(): DispatchGit {
     async commitTree(repoPath, input) {
       // The date is git's raw `<epoch> +0000`, the same instant GitHub is sent as ISO 8601 UTC.
       const date = `${Math.floor(Date.parse(input.date) / 1000)} +0000`;
-      const r = await gitRun(repoPath, ["commit-tree", "--no-gpg-sign", input.tree, "-p", input.parent, "-F", "-"], {
+      const r = await gitRun(repoPath, ["commit-tree", "--no-gpg-sign", input.tree, "-p", input.parent, ...(input.extraParents ?? []).flatMap((p) => ["-p", p]), "-F", "-"], {
         input: input.message,
         env: {
           GIT_AUTHOR_NAME: input.name, GIT_AUTHOR_EMAIL: input.email, GIT_AUTHOR_DATE: date,
@@ -199,6 +206,9 @@ export interface DispatcherDeps {
   now?: () => Date;
   log?: (level: "info" | "warn" | "error", msg: string) => void;
 }
+
+/** A failed attempt, or a blocked or cancelled one the operator released, may be retried. */
+const retryable = (a: { state: string; requeuedAt?: string }): boolean => a.state === "failed" || ((a.state === "blocked" || a.state === "cancelled") && !!a.requeuedAt);
 
 export class AutopilotDispatcher {
   private readonly now: () => Date;
@@ -324,7 +334,15 @@ export class AutopilotDispatcher {
         const acceptance = this.d.acceptance;
         if (!acceptance) return drove("no acceptance runner");
         const task = a.taskId ? this.d.autopilot.taskState(a.taskId) : undefined;
-        if (a.state === "suspended" && task !== "COMPLETED") return drove("suspended with work left; the scheduler resumes it");
+        if (a.state === "suspended" && task !== "COMPLETED") {
+          // A cancelled or failed task never resumes: end the attempt so an operator can requeue it.
+          const ended = this.d.autopilot.taskEndedBeforeStart(a.id);
+          if (ended) {
+            this.log("warn", `attempt ${a.id} ${ended.state}: ${ended.reason}`);
+            return drove(`${ended.state}: ${ended.reason}`);
+          }
+          return drove("suspended with work left; the scheduler resumes it");
+        }
         if (this.busy.has(`accept:${a.id}`)) return drove("acceptance is running");
         this.runInBackground(a.id, `accept:${a.id}`, async () => {
           const out = await acceptance.accept(a.id);
@@ -342,6 +360,15 @@ export class AutopilotDispatcher {
         if (!pub || !this.d.publications.configured) return drove("no publication to drive");
         this.runInBackground(a.id, `publish:${a.id}`, () => this.d.publications.publish(pub.id));
         return drove("publication resumed");
+      }
+      case "admitted": {
+        // The task ended before any session started: nothing else will move this attempt.
+        const ended = this.d.autopilot.taskEndedBeforeStart(a.id);
+        if (ended) {
+          this.log("warn", `attempt ${a.id} ${ended.state}: ${ended.reason}`);
+          return drove(`${ended.state}: ${ended.reason}`);
+        }
+        return drove(`${a.state}: moved by the scheduler, the sweep or itay`);
       }
       default:
         return drove(`${a.state}: moved by the scheduler, the sweep or itay`);
@@ -407,6 +434,7 @@ export class AutopilotDispatcher {
     await this.git.fetch(repo.path, [`+refs/heads/${branch}:refs/remotes/origin/${branch}`]);
     const local = await this.git.revParse(repo.path, `${attempt.reservationSha}^{commit}`);
     if (local !== attempt.reservationSha) throw new Error(`reservation commit ${attempt.reservationSha} is not in ${repo.path} after the fetch`);
+    if (attempt.reservationOutcome === "reused" && !attempt.workBaseSha) attempt = await this.refreshReusedBase(attempt, repo, branch);
     const item = await this.itemAt(attempt);
     const admitted = this.d.autopilot.admit(attempt.id, {
       goal: taskGoal(attempt.itemId, item),
@@ -416,6 +444,30 @@ export class AutopilotDispatcher {
     });
     this.log("info", `admitted ${attempt.itemId} attempt ${attempt.attemptNo} as task ${admitted.taskId} (${attempt.reservationOutcome ?? "owned"})`);
     return { action: "reserved", attemptId: attempt.id, itemId: attempt.itemId, outcome: attempt.reservationOutcome ?? "owned" };
+  }
+
+  /**
+   * A reused reservation is the ref head of an earlier attempt and can be far behind the base
+   * branch: the agent would edit, and acceptance would test, a stale tree (G15 attempt 11 ran a
+   * tree six days behind main). When the reservation's parent is not the base this attempt was
+   * selected at, the task starts at a merge of that base into the reservation instead. The ref and
+   * the publication lease still name the reservation, and the merge descends from it, so the push
+   * stays a fast-forward. The reservation commit has its parent's tree, so the merge's tree is the
+   * base's tree: nothing to resolve.
+   */
+  private async refreshReusedBase(attempt: AutopilotAttempt, repo: AutopilotRepoConfig, branch: string): Promise<AutopilotAttempt> {
+    const reservation = attempt.reservationSha!;
+    const baseSha = attempt.baseSha!;
+    const parent = await this.git.revParse(repo.path, `${reservation}^`);
+    if (parent === baseSha) return attempt;
+    const tree = await this.git.revParse(repo.path, `${baseSha}^{tree}`);
+    if (!tree) throw new Error(`base ${baseSha} is not in ${repo.path}`);
+    const merge = await this.git.commitTree(repo.path, {
+      tree, parent: reservation, extraParents: [baseSha],
+      message: `Merge ${repo.base} at ${baseSha.slice(0, 12)} into ${branch}\n`, ...RESERVATION_AUTHOR, date: attempt.reservationDate!,
+    });
+    this.log("info", `${branch} reservation ${reservation.slice(0, 12)} is behind ${repo.base}; the task starts at ${merge.slice(0, 12)}`);
+    return this.d.autopilot.setWorkBase(attempt.id, merge);
   }
 
   /** Steps 3–4 of §C.2.2. Bounded: a create whose outcome stays unknown leaves the attempt `reserving` for the next tick. */
@@ -471,7 +523,7 @@ export class AutopilotDispatcher {
       return { kind: "external", detail: `${branch} was reserved by lane ${root.lane} (reservation ${root.reservationId})` };
     }
     // An earlier attempt of ours. Its ref is reused only while it holds nothing but that reservation.
-    if (earlier.state === "failed" && head === root.sha) return { kind: "owned", sha: root.sha, how: "reused" };
+    if (retryable(earlier) && head === root.sha) return { kind: "owned", sha: root.sha, how: "reused" };
     return { kind: "failed", detail: `${branch} belongs to attempt ${earlier.attemptNo} (${earlier.state}) and is at ${head}, not its reservation ${root.sha}; itay decides` };
   }
 
@@ -504,6 +556,7 @@ export class AutopilotDispatcher {
     const w = status.window;
     if (!w) return idle("no window is open");
     if (Date.parse(w.closesAt) - this.now().getTime() < this.cfg.minSliceMs) return idle("the window closes within minSliceMs");
+    if (w.exhaustedByRestore) return idle(`window ${w.id} is exhausted by restore ${w.exhaustedByRestore}; the next window admits work`);
     if (w.charged >= w.maxItems) return idle(`window count: ${w.charged} of ${w.maxItems} items already charged`);
     if (!status.billingAttestation?.current) return idle("no current billing attestation");
     if (status.settings.length > 0) return idle(`${status.settings[0]!.setting} ${status.settings[0]!.detail}`);
@@ -560,6 +613,46 @@ export class AutopilotDispatcher {
     }
   }
 
+  /**
+   * P1-2: the estimated-scope summary over every backlog item, any lane. Read-only: fetches origin/main, asks GitHub
+   * about each `os/<id>` PR, never reserves or writes. `day` (YYYY-MM-DD, UTC; default today) only sets the baseline
+   * backlog for "added today".
+   */
+  async scope(day?: string): Promise<{ day: string; backlogSha: string; scope: ScopeSummary; items: ScopeItem[] } | { problem: string }> {
+    const github = this.d.github;
+    const backlogRepo = this.cfg.repos[this.cfg.backlogRepo];
+    if (!github) return { problem: "autopilot.github.tokenFile is not configured" };
+    if (!backlogRepo) return { problem: `autopilot.repos.${this.cfg.backlogRepo} (the backlog repo) is not configured` };
+    const today = (day ?? this.now().toISOString()).slice(0, 10);
+    try {
+      await this.git.fetch(backlogRepo.path, [`+refs/heads/main:refs/remotes/origin/main`]);
+      const sha = await this.git.revParse(backlogRepo.path, "origin/main^{commit}");
+      if (!sha) return { problem: "origin/main does not resolve in the backlog repo" };
+      const text = await this.git.show(backlogRepo.path, sha, BACKLOG_PATH);
+      if (text === null) return { problem: `${BACKLOG_PATH} does not exist at origin/main` };
+      const parsed = parseBacklog(text);
+      if ("problem" in parsed) return { problem: `backlog at ${sha.slice(0, 12)}: ${parsed.problem}` };
+      const states = new Map<string, ScopeState>();
+      for (const item of parsed.items) {
+        const repo = this.cfg.repos[item.repo];
+        if (!repo) { states.set(item.id, "unknown"); continue; }
+        try {
+          const s = prState(await github.listPullsForHead(repo.github, `os/${item.id}`));
+          states.set(item.id, s === "merged" ? "done" : s === "open" ? "in review" : "remaining");
+        } catch { states.set(item.id, "unknown"); }
+      }
+      let dayStartIds: Set<string> | undefined;
+      const base = await this.git.lastCommitBefore(backlogRepo.path, sha, `${today}T00:00:00Z`);
+      const baseText = base ? await this.git.show(backlogRepo.path, base, BACKLOG_PATH) : null;
+      const baseParsed = baseText === null ? undefined : parseBacklog(baseText);
+      if (baseParsed && "items" in baseParsed) dayStartIds = new Set(baseParsed.items.map((i) => i.id));
+      const r = summariseScope(parsed.items, states, dayStartIds);
+      return { day: today, backlogSha: sha, scope: r.summary, items: r.items };
+    } catch (err) {
+      return { problem: `scope read failed: ${err instanceof Error ? err.message : String(err)}` };
+    }
+  }
+
   /** §C.3 derived status. Reads GitHub for the item's own PRs and ref, and its dependencies' PRs. */
   private async view(item: BacklogItem, items: BacklogItem[]): Promise<ItemView> {
     const v = (status: ItemView["status"], reason: string): ItemView => ({ itemId: item.id, status, reason });
@@ -573,7 +666,7 @@ export class AutopilotDispatcher {
     const last = this.d.autopilot.attemptsOfItem(item.id)[0];
 
     // The latest attempt row first (§C.3).
-    if (last && last.state !== "failed") return v(last.state === "published" ? "in review" : "blocked", `attempt ${last.attemptNo} is ${last.state}${last.reason ? ` (${last.reason})` : ""}`);
+    if (last && !retryable(last)) return v(last.state === "published" ? "in review" : "blocked", `attempt ${last.attemptNo} is ${last.state}${last.reason ? ` (${last.reason})` : ""}`);
     if (last && last.attemptNo >= this.cfg.attemptsPerItem) return v("blocked", `attempts exhausted (${last.attemptNo} of ${this.cfg.attemptsPerItem})`);
 
     const prs = await github.listPullsForHead(repo.github, branch);
@@ -581,6 +674,9 @@ export class AutopilotDispatcher {
     if (state === "merged") return v("done", `PR #${prs.find((p) => p.merged)!.number} merged`);
     if (state === "open") return v("in review", `PR #${prs.find((p) => p.state === "open")!.number} is open`);
     if (state === "closed") return v("blocked", "a closed, unmerged PR exists; needs itay");
+    // P0-7b (§C.5): a reservation the restore reconciliation could not tie to an attempt is never re-run.
+    const external = this.d.autopilot.externalReservationOf(item.id);
+    if (external) return v("blocked", `external reservation ${external} of ${branch} recorded by a restore reconciliation; never re-run, itay decides`);
 
     for (const dep of item.depends_on) {
       const depItem = items.find((i) => i.id === dep)!;
@@ -636,8 +732,11 @@ function taskGoal(itemId: string, item: BacklogItem | undefined): string {
 
 function taskConstraints(branch: string, item: BacklogItem | undefined): string[] {
   const out = [
-    `This worktree is based on the reservation commit of ${branch}. Commit your work here; the plane checkpoints, accepts and publishes it. Do not push, open PRs or change branches.`,
+    `This worktree is based on the reservation commit of ${branch}. Leave your changes in this worktree and do not run git commit (the agent user cannot write the shared object store): the plane commits, accepts and publishes them. Do not push, open PRs or change branches.`,
     "Acceptance runs offline on a read-only snapshot of your checkpoint with commands from origin/main; changing tests or acceptance commands does not change what runs.",
+    // G15, fourth run: the agent started the full `pnpm test` in a background shell and ended its turn; the session stayed open
+    // until the 30-minute limit and the attempt failed before acceptance ever ran.
+    "This session is limited to 30 minutes and the plane runs the acceptance commands itself afterwards, so do not run the full test suite or the whole acceptance gate. Run only focused tests for what you changed, in the foreground. Never start background processes (no run_in_background, no trailing &); anything still running when you finish is killed.",
   ];
   if (item?.files.length) out.push(`Expected files: ${item.files.join(", ")}.`);
   if (item?.acceptance?.commands.length) out.push(`Acceptance commands: ${item.acceptance.commands.map((c) => c.run).join(" && ")}.`);

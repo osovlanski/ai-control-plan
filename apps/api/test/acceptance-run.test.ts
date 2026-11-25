@@ -9,13 +9,14 @@
  * effect listed; a command that modifies the snapshot and restores it → blocked).
  */
 import { execFileSync, spawn } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { openDb, type Db } from "../src/db/index.js";
 import {
   AcceptanceRunner, agentAcceptanceExecutor, parseBacklogAcceptance, type AcceptanceExecutor, type AcceptanceDeps,
+  pnpmStorePrefetch,
 } from "../src/modules/acceptance-run.js";
 
 const g = (cwd: string, ...args: string[]) => execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8" }).trim();
@@ -155,6 +156,23 @@ describe("G10 acceptance outcomes", () => {
     expect(attemptState(w)).toEqual({ state: "failed", reason: "acceptance failed: command 2 exited 3: exit 3" });
   });
 
+  it("the plane prefetches dependencies into the snapshot before the commands run; a failed prefetch blocks the run (G15: pnpm install --offline had no store)", async () => {
+    const w = setup(cmds(["./check.sh", true]));
+    const seen: string[] = [];
+    const ok = await runner(w, localExecutor(), { prefetch: async (snap) => { seen.push(snap); expect(existsSync(join(snap, "check.sh"))).toBe(true); } }).accept(w.attemptId);
+    if (!ok.started) throw new Error(ok.reason);
+    expect(ok.run.state).toBe("passed");
+    expect(seen).toEqual([ok.run.snapshotPath]);
+
+    const w2 = setup(cmds(["./check.sh", true]));
+    const ex = localExecutor();
+    const bad = await runner(w2, ex, { prefetch: async () => { throw new Error("pnpm fetch exited 1: ERR_PNPM_FETCH_404"); } }).accept(w2.attemptId);
+    if (!bad.started) throw new Error(bad.reason);
+    expect(bad.run.state).toBe("blocked");
+    expect(bad.run.reason).toMatch(/acceptance could not run: pnpm fetch exited 1/);
+    expect(ex.seen).toEqual([]); // no command ran
+  });
+
   it("PASS binds the checkpoint SHA; the snapshot is fresh, read-only and removed; the writer's worktree is not consulted", async () => {
     const w = setup(cmds(
       ["./check.sh", true],
@@ -197,6 +215,62 @@ describe("G10 acceptance outcomes", () => {
     });
     const out = await runner(w).accept(w.attemptId);
     expect(out.started && out.run.state).toBe("failed");
+  });
+
+  it("opens node_modules for every workspace package, including one the backlog never named", async () => {
+    const w = setup(cmds(
+      ["touch node_modules/a apps/web/node_modules/a packages/newpkg/node_modules/a", true],
+    ), {
+      worktreeChange: (wt) => {
+        writeFileSync(join(wt, "src.txt"), "feature\n");
+        writeFileSync(join(wt, "pnpm-workspace.yaml"), "packages:\n  - apps/*\n  - packages/*\n  - '!packages/notpkg'\n");
+        for (const d of ["apps/web", "packages/newpkg", "packages/notpkg"]) {
+          mkdirSync(join(wt, d), { recursive: true });
+          writeFileSync(join(wt, d, "package.json"), "{}\n");
+        }
+      },
+    });
+    const out = await runner(w).accept(w.attemptId);
+    expect(out.started && out.run.state).toBe("passed");
+    const rec = JSON.parse((w.db.prepare("SELECT writable_json FROM acceptance_runs").get() as { writable_json: string }).writable_json) as unknown[];
+    expect(rec).toEqual(expect.arrayContaining(["node_modules", "apps/web/node_modules", "packages/newpkg/node_modules"]));
+    expect(rec).not.toContain("packages/notpkg/node_modules");
+  });
+
+  it("a tracked symlink on a declared writable path is refused, never followed", async () => {
+    const outside = mkdtempSync(join(tmpdir(), "acc-outside-"));
+    chmodSync(outside, 0o755);
+    try {
+      const w = setup(cmds(["true", true]), {
+        worktreeChange: (wt) => { writeFileSync(join(wt, "src.txt"), "feature\n"); symlinkSync(outside, join(wt, "dist")); },
+      });
+      const out = await runner(w).accept(w.attemptId);
+      expect(out.started && out.run.state).toBe("blocked");
+      expect(attemptState(w).state).toBe("blocked");
+      expect(lstatSync(outside).mode & 0o7777).toBe(0o755);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("a symlinked ancestor of a writable file is refused", async () => {
+    const outside = mkdtempSync(join(tmpdir(), "acc-outside-"));
+    chmodSync(outside, 0o755);
+    try {
+      const w = setup(cmds(["true", true]), {
+        worktreeChange: (wt) => {
+          writeFileSync(join(wt, "src.txt"), "feature\n");
+          rmSync(join(wt, "docs"), { recursive: true, force: true });
+          symlinkSync(outside, join(wt, "docs"));
+        },
+      });
+      const out = await runner(w).accept(w.attemptId);
+      expect(out.started && out.run.state).toBe("blocked");
+      expect(lstatSync(outside).mode & 0o7777).toBe(0o755);
+      expect(existsSync(join(outside, "progress"))).toBe(false);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
   });
 
   it("a failed lineage check is blocked", async () => {
@@ -336,6 +410,11 @@ describe("agent executor", () => {
     // The agent wrapper itself is unchanged: no accept mode there.
     expect(readFileSync(join(__dirname, "../../../setup/run-as-agent"), "utf8")).not.toMatch(/accept\)|unshare/);
   });
+
+  it("the agent session finds node and pnpm: run-as-agent puts the root-owned /opt/aos-tools/bin first (G15 seventh run)", () => {
+    expect(readFileSync(join(__dirname, "../../../setup/run-as-agent"), "utf8"))
+      .toMatch(/^export PATH=\/opt\/aos-tools\/bin:\/usr\/local\/bin:\/usr\/bin:\/bin$/m);
+  });
 });
 
 async function waitFor(cond: () => boolean, ms = 5_000): Promise<void> {
@@ -345,3 +424,45 @@ async function waitFor(cond: () => boolean, ms = 5_000): Promise<void> {
     await new Promise((res) => setTimeout(res, 20));
   }
 }
+
+describe("host setup for the acceptance toolchain", () => {
+  const root = join(__dirname, "..", "..", "..");
+  const read = (f: string) => readFileSync(join(root, f), "utf8");
+
+  it("aos-setup installs the pnpm the repo pins, so pnpm never tries to switch versions offline", () => {
+    const pinned = (JSON.parse(read("package.json")) as { packageManager: string }).packageManager;
+    const version = /^PNPM_VERSION=(\S+)$/m.exec(read("setup/aos-setup"))?.[1];
+    expect(`pnpm@${version}`).toBe(pinned);
+  });
+
+  it("the wrapper gives the agent the root-owned toolchain and the plane's store, and imports by copy", () => {
+    const wrapper = read("setup/accept-as-agent");
+    expect(wrapper).toContain("PATH=/opt/aos-tools/bin:");
+    expect(wrapper).toContain('npm_config_store_dir="$STORE"');
+    expect(wrapper).toContain("npm_config_package_import_method=copy");
+    expect(wrapper).toContain("npm_config_manage_package_manager_versions=false");
+    expect(read("setup/aos-setup")).toContain("/var/lib/aos/pnpm-store");
+  });
+});
+
+describe("pnpmStorePrefetch (G15 eighth run)", () => {
+  it("leaves no node_modules behind: pnpm fetch's virtual store is owned by the plane user and would break the agent's offline install", async () => {
+    const root = mkdtempSync(join(tmpdir(), "prefetch-"));
+    const bin = join(root, "bin");
+    const snapshot = join(root, "snap");
+    mkdirSync(bin); mkdirSync(snapshot);
+    // A stand-in pnpm that behaves like `pnpm fetch`: it builds node_modules/.pnpm in the cwd.
+    writeFileSync(join(bin, "pnpm"), "#!/bin/sh\nmkdir -p node_modules/.pnpm/tree-kill@1.2.2 && echo x > node_modules/.pnpm/tree-kill@1.2.2/cli.js\n");
+    chmodSync(join(bin, "pnpm"), 0o755);
+    const saved = process.env.PATH;
+    process.env.PATH = `${bin}:${saved}`;
+    try {
+      await pnpmStorePrefetch(join(root, "store"))(snapshot);
+    } finally {
+      process.env.PATH = saved;
+    }
+    expect(existsSync(join(snapshot, "node_modules"))).toBe(false);
+    expect(existsSync(join(root, "store", "v10", "projects"))).toBe(true);
+    rmSync(root, { recursive: true, force: true });
+  });
+});

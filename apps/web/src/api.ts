@@ -1,6 +1,6 @@
 import type {
   AgentSpec, AgentSpecDraft, BudgetCaps, BudgetOverrunPayload, ComposerOutcome, CompositionDecision, CompositionDecisionDraft,
-  ModelRecommendation, Schedule, ScheduleOccurrence, ScheduleOverlap, SessionSettlement, TaskConsumption, UsageAccountingMode,
+  ModelRecommendation, RunEstimate, Schedule, ScheduleRecommendation, ScheduleOccurrence, ScheduleOverlap, SessionSettlement, TaskConsumption, UsageAccountingMode,
   VerificationCheckStatus,
 } from "@agent-plane/core";
 export interface Workspace {
@@ -59,7 +59,66 @@ export interface Assistant {
       limits?: { window: string; usedPercent: number; resetsAt?: string }[];
     };
     providerDetail: Record<string, unknown>;
+    evidence?: { source: string; observedAt: string };
   } | null;
+  /** Agent runtime v1 (API 2.10+). Absent on an older plane: show nothing rather than guess. */
+  lifecycle?: AssistantLifecycle;
+}
+
+// ---- Agent runtime v1 (API 2.10/2.11, docs/contracts/agent-runtime-v1.md) ------------------------
+// Shapes mirror apps/api `runtime-lifecycle.ts` and `runtime-conformance.ts`. The browser renders
+// them as served: readiness and its reasons are the plane's, never recomputed here.
+
+/** `GET /api/runtimes/catalog`: the in-tree catalogue as data. Being listed grants nothing. */
+export interface RuntimeCatalogEntry {
+  provider: string;
+  label: string;
+  transport: "native" | "acp";
+  maturity: "verified" | "scaffold";
+  harness?: string;
+  registryAssistant?: string;
+  approvalModes: string[];
+  conformanceRequired: boolean;
+  /** Official `https://` links for the operator. The plane never fetches them. */
+  docs?: { install?: string; auth?: string };
+}
+export interface RuntimeCatalog { schemaVersion: string; descriptorVersion: number; runtimes: RuntimeCatalogEntry[] }
+
+/** Each state has its own evidence; none implies the next. */
+export interface AssistantLifecycle {
+  schemaVersion: string;
+  catalogued: boolean;
+  configured: boolean;
+  installed: { state: "present" | "missing" | "in-process" | "unknown"; version?: string; observedAt?: string };
+  auth: { state: "ok" | "expired" | "missing" | "unknown"; source?: string; observedAt?: string };
+  conformance: { required: boolean; state: "not-run" | "pass" | "fail" | "stale"; descriptorVersion: number; cliVersion?: string; checkedAt?: string };
+  enablement: { config: boolean; operator: "none" | "disabled"; operatorChangedAt?: string; effective: boolean };
+  /** Request-independent only. It is NOT "will be routed": the router decides that per task. */
+  readiness: { scope: "request-independent"; ready: boolean; reasons: string[] };
+  requestDependent: string[];
+}
+
+export interface OperatorStateChange { schemaVersion: string; assistantId: string; operatorState: "none" | "disabled"; changed: boolean; lifecycle: AssistantLifecycle }
+
+export interface ConformanceCheck {
+  name: string;
+  status: "pass" | "fail" | "unsupported" | "unavailable" | "not-run";
+  level: "build" | "host" | "provider";
+  reason: string;
+}
+/** `POST /api/assistants/:id/test`. A `pass` covers exactly the checks listed as `pass`. */
+export interface ConformanceResult {
+  schemaVersion: string;
+  assistantId: string;
+  provider: string;
+  descriptorVersion: number;
+  cliVersion?: string;
+  status: "pass" | "fail" | "unsupported";
+  reasons: string[];
+  recorded: boolean;
+  checkedAt: string;
+  checks: ConformanceCheck[];
+  lifecycle: AssistantLifecycle;
 }
 
 export interface CapabilityChange { assistant_id: string; field: string; old_value: string; new_value: string; source: string; observed_at: string }
@@ -129,6 +188,22 @@ export interface ResourceWaitStatus {
 }
 
 /** A granted K4b slot claim. */
+/** qcq-04a (API 2.19): one open execution attempt and the claims it owns. */
+export interface AttemptStatus {
+  attemptId: string;
+  kind: "dispatch" | "direct" | "candidate";
+  executionPath: "harness" | "legacy";
+  slot: number;
+  state: "queued" | "held" | "starting" | "live" | "stopping" | "ambiguous" | "settled" | "dropped";
+  assistantId: string | null;
+  dispatchId: string | null;
+  sessionId: string | null;
+  account: { key: string | null; source: string };
+  enteredAt: string | null;
+  requirements: { resource: string; units: number }[];
+  claims: { resource: string; units: number; dispatchId: string | null; claimedAt: string }[];
+}
+
 export interface ResourceClaim {
   claim_id: number;
   resource: string;
@@ -178,6 +253,7 @@ export interface TaskSummary {
 }
 
 export interface RoutingExplanation {
+  origin?: string;
   candidates: Array<{
     assistantId: string;
     passedFilters: boolean;
@@ -188,7 +264,7 @@ export interface RoutingExplanation {
   chosen?: string;
   tieBreaker?: string;
   userOverride?: string;
-  /** K13 shadow model recommendation, recorded on the decision (§4.4.3). */
+  /** K13 model recommendation, recorded on the decision (§4.4.3). */
   modelRecommendation?: ModelRecommendation;
 }
 
@@ -210,6 +286,8 @@ export interface TaskDetail {
   /** K4b: why this task waits on a pool, and the slot it holds. */
   resourceWait?: ResourceWaitStatus | null;
   resourceClaim?: ResourceClaim | null;
+  /** qcq-04a (API 2.19): the task's open execution attempts. */
+  attempts?: AttemptStatus[];
   schedulerEnabled?: boolean;
   id: string;
   goal: string;
@@ -307,6 +385,34 @@ export interface CatalogModel {
   }>;
 }
 
+// ---- Run estimate (qcq-01 API 2.15, qcq-02 API 2.16; docs/contracts/run-estimate-v1.md) ------------
+// ADVISORY reads. The web shows them as served and never recomputes a range, a confidence or a window.
+
+/** `GET /api/tasks/:id/estimate` (routing.read). */
+export interface TaskEstimate {
+  taskId: string;
+  advisory: true;
+  routing: { chosen: string | null; ruleFired: string; whatIf: boolean };
+  estimate: RunEstimate;
+  recommendation: ScheduleRecommendation;
+  policy: { timezone: string; eveningsAllowed: boolean; weekendsAllowed: boolean };
+}
+
+/** `GET /api/tasks/:id/estimates/recorded` (routing.read): what was shown at each start, beside the actual. */
+export interface RecordedEstimates {
+  taskId: string;
+  advisory: true;
+  records: Array<{
+    runId: string; assistantId: string; estimatorVersion: string; recordedAt: string;
+    estimate: RunEstimate; recommendation: ScheduleRecommendation;
+    actual: {
+      state: string; endedAt: string; durationMs: number;
+      tokens: { input: number; output: number } | null;
+      costUsd: number | null; costMethod: "measured" | "estimated" | "unknown";
+    } | null;
+  }>;
+}
+
 /** A non-2xx answer. `reason` and `body` carry what the plane said beyond the message (M2: `composer_disabled`, `composition_drift`). */
 export class ApiError extends Error {
   constructor(message: string, readonly status: number, readonly reason: string | undefined, readonly body: unknown) {
@@ -319,7 +425,8 @@ async function req<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, {
     ...init,
     credentials: "include",
-    headers: init?.body ? { "content-type": "application/json" } : undefined,
+    // B2: unsafe requests on the private Web link carry the remote session's CSRF token (empty locally).
+    headers: { ...(init?.body ? { "content-type": "application/json" } : {}), ...csrfHeaders(init?.method) },
   });
   if (!res.ok) {
     if (res.status === 401) { emitAuthExpired(); throw new AuthExpiredError(); }
@@ -423,7 +530,7 @@ async function submitSessionInput(sessionId: string, body: { clientMessageId: st
   const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/inputs`, {
     method: "POST",
     credentials: "include",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...csrfHeaders("POST") },
     body: JSON.stringify(body),
   });
   if (res.status === 401) { emitAuthExpired(); throw new AuthExpiredError(); }
@@ -456,6 +563,13 @@ export const api = {
   assistants: () => req<Assistant[]>("/api/assistants"),
   changes: () => req<CapabilityChange[]>("/api/assistants/changes"),
   syncAssistant: (id: string) => req<unknown>(`/api/assistants/${id}/sync`, { method: "POST" }),
+  runtimeCatalog: () => req<RuntimeCatalog>("/api/runtimes/catalog"),
+  /** Credential-free, quota-free conformance probe; never starts a generation. */
+  testAssistant: (id: string) => req<ConformanceResult>(`/api/assistants/${encodeURIComponent(id)}/test`, { method: "POST" }),
+  /** Operator overlay only: removes the assistant from future routing; config is never written. */
+  disableAssistant: (id: string) => req<OperatorStateChange>(`/api/assistants/${encodeURIComponent(id)}/disable`, { method: "POST" }),
+  /** Clears the operator overlay and nothing else: a config-disabled assistant stays disabled. */
+  enableAssistant: (id: string) => req<OperatorStateChange>(`/api/assistants/${encodeURIComponent(id)}/enable`, { method: "POST" }),
   runNow: (id: string, generation: number) => req(`/api/tasks/${id}/run-now`, { method: "POST", body: JSON.stringify({ generation }) }),
   schedulerStatus: () => req<SchedulerStatus>("/api/scheduler/status"),
   // K5. Queue order, backlog count and the active occurrence task all come from
@@ -490,6 +604,8 @@ export const api = {
       body: JSON.stringify(assistantId ? { overrides: { harness_model: { assistantId } } } : {}),
     }),
   composition: (id: string) => req<CompositionHistory>(`/api/tasks/${id}/composition`),
+  estimate: (id: string) => req<TaskEstimate>(`/api/tasks/${id}/estimate`),
+  recordedEstimates: (id: string) => req<RecordedEstimates>(`/api/tasks/${id}/estimates/recorded`),
   memoryShadow: (id: string) => req<MemoryShadowRead>(`/api/composition/memory-shadow?taskId=${encodeURIComponent(id)}`),
   compositionBudget: (id: string) => req<CompositionBudget>(`/api/tasks/${id}/composition/budget`),
   events: (id: string) => req<TaskEvent[]>(`/api/tasks/${id}/events`),
@@ -556,7 +672,74 @@ export const api = {
     req<SessionSummary[]>(`/api/sessions?groupId=${encodeURIComponent(groupId)}`),
   sessionsByParent: (parentTaskId: string) =>
     req<SessionSummary[]>(`/api/sessions?parentTaskId=${encodeURIComponent(parentTaskId)}`),
+  provenance: (id: string) => req<TaskProvenance>(`/api/tasks/${encodeURIComponent(id)}/provenance`),
+  taskLinks: (id: string) => req<TaskLinks>(`/api/tasks/${encodeURIComponent(id)}/links`),
 };
+
+/**
+ * tlm-02a: `GET /api/tasks/:id/provenance` (API 2.12, sessions.read), as the plane serves it.
+ * The plane makes every join and labels where it came from: a stored key, `inferred` (a fixed,
+ * stated rule in `inferenceRules`) or `unrecorded`. The Web prints the joins; it never makes one.
+ */
+export type ProvenanceJoinSource =
+  | "execution_request" | "dispatch" | "handoff_record" | "handoff_envelope" | "checkpoint" | "inferred" | "unrecorded";
+export interface ProvenanceContinuation {
+  runId: string | null; assistantId: string | null; source: ProvenanceJoinSource;
+  checkpointId: string | null; handoffId: string | null; envelopeId: string | null;
+}
+export interface RunProvenance {
+  runId: string;
+  assistantId: string;
+  executionPath: "harness" | "legacy";
+  executionRequestId: string | null;
+  attempt: number | null;
+  startedAt: string;
+  endedAt: string | null;
+  settlementOwner: string | null;
+  compositionRevisionId: string | null;
+  promptSource: "fresh" | "handoff" | "resume" | null;
+  launch: {
+    kind: "scheduler" | "handoff" | "parallel" | "operator";
+    dispatch: { id: string; origin: string; phase: string; generation: number } | null;
+    handoffTrigger: string | null;
+  };
+  routingDecision: { id: number | null; source: ProvenanceJoinSource; chosenAssistantId: string | null; at: string | null };
+  continuedFrom: ProvenanceContinuation | null;
+}
+export interface HandoffProvenance {
+  id: string;
+  record: "handoff" | "envelope_only";
+  trigger: string | null;
+  at: string;
+  checkpointId: string | null;
+  from: { runId: string | null; assistantId: string | null; source: ProvenanceJoinSource };
+  to: { runId: string | null; assistantId: string | null };
+  closed: boolean;
+  envelope: { id: string; state: string; claimedByRequestId: string | null } | null;
+  successorRoutingDecisionId: number | null;
+}
+export interface TaskProvenance {
+  taskId: string;
+  owner:
+    | { kind: "operator"; runAs: string | null }
+    | { kind: "autopilot"; runAs: string | null; attemptId: string; itemId: string; attemptNo: number; state: string };
+  mode: string;
+  runs: RunProvenance[];
+  handoffs: HandoffProvenance[];
+  /** The plane's `INFERENCE_RULES`: the stated rule each `inferred` join follows. */
+  inferenceRules: { routingDecision: string; predecessor: string };
+}
+
+/**
+ * tlm-02b: `GET /api/tasks/:id/links` (API 2.13, tasks.read). `operator` evidence is a stored
+ * claim the plane never checks against GitHub; autopilot evidence is derived at read time.
+ */
+export type TaskLinkEvidence =
+  | { source: "operator"; linkId: string; relation: "tracks" | "implements" | "closes" | "related"; note: string | null; createdBy: string | null; createdAt: string }
+  | { source: "autopilot_publication"; publicationId: string; attemptId: string; state: string; head: string; base: string; verifiedSha: string; at: string }
+  | { source: "autopilot_duplicate"; publicationId: string; attemptId: string; prState: string; at: string };
+export interface TaskLink { kind: "issue" | "pull_request"; repo: string; number: number; url: string; evidence: TaskLinkEvidence[] }
+export interface TaskLinks { taskId: string; links: TaskLink[] }
 
 export interface SessionVerification {
   sessionId: string;
@@ -741,3 +924,4 @@ export interface AssistantScore {
   errors: number;
 }
 import { AuthExpiredError, emitAuthExpired } from "./auth.js";
+import { csrfHeaders } from "./auth/remote.js";

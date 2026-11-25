@@ -5,14 +5,16 @@
  * nothing fits (invariant 7).
  */
 import type { AssetRef, McpAssetRef } from "../composition-types.js";
+import { perHarness } from "../runtime-kinds.js";
 import { mcpLaunchProblem, mcpSecretRefs } from "../provisioning.js";
 import { byCodeUnit, overrideWhy, sortedUnique, type RawCandidate, type RawFilter, type RawStage } from "./explain.js";
 import type { ComposedIntent, ComposerAsset, ComposerInputs, ComposerOptIn, Harness } from "./types.js";
 
-/** The registry's assistant vocabulary (registry v1 `compatibility.assistants`) for each harness. */
-const REGISTRY_ASSISTANT: Readonly<Record<Harness, string | undefined>> = {
-  "claude-code": "claude", codex: "codex", cursor: "cursor", bedrock: undefined,
-};
+/**
+ * The registry's assistant vocabulary (registry v1 `compatibility.assistants`) for each harness,
+ * derived from `RUNTIME_KINDS` (bedrock has none).
+ */
+export const REGISTRY_ASSISTANT: Readonly<Record<Harness, string | undefined>> = perHarness((k) => k.registryAssistant);
 /** Harnesses bundle v1 renders a skill file for (`.claude/skills/<name>/SKILL.md`). */
 const SKILL_PATH_HARNESSES: ReadonlySet<Harness> = new Set(["claude-code"]);
 /** Harnesses whose provisioning lifecycle launches MCP servers (M3 S4). */

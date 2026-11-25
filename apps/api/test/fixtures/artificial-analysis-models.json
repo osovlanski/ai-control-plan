@@ -1,14 +1,22 @@
 {
   "tier": "free",
   "intelligence_index_version": 4.1,
-  "pagination": { "page": 1, "page_size": 100, "total_pages": 1, "has_more": false },
+  "pagination": {
+    "page": 1,
+    "page_size": 100,
+    "total_pages": 1,
+    "has_more": false
+  },
   "data": [
     {
-      "id": "claude-4-1-opus",
+      "id": "f2f60e3a-e5f5-4471-acd2-9f2f29c76007",
       "name": "Claude Opus 4.1",
       "slug": "claude-4-1-opus",
       "release_date": "2025-08-05",
-      "model_creator": { "id": "anthropic", "name": "Anthropic" },
+      "model_creator": {
+        "id": "f0aa413f-e8ae-4fcd-9c48-0e049f4f3128",
+        "name": "Anthropic"
+      },
       "evaluations": {
         "artificial_analysis_intelligence_index": 74,
         "artificial_analysis_coding_index": 71,
@@ -24,11 +32,14 @@
       }
     },
     {
-      "id": "claude-4-5-sonnet",
+      "id": "91cb6144-4937-4e4e-aeda-b4341d355c10",
       "name": "Claude Sonnet 4.5",
       "slug": "claude-4-5-sonnet",
       "release_date": "2025-09-29",
-      "model_creator": { "id": "anthropic", "name": "Anthropic" },
+      "model_creator": {
+        "id": "f0aa413f-e8ae-4fcd-9c48-0e049f4f3128",
+        "name": "Anthropic"
+      },
       "evaluations": {
         "artificial_analysis_intelligence_index": 66,
         "artificial_analysis_coding_index": 66,
@@ -48,18 +59,32 @@
       "name": "Frontier X",
       "slug": "some-frontier-model",
       "release_date": null,
-      "model_creator": { "id": "acme", "name": "Acme" },
-      "evaluations": { "artificial_analysis_coding_index": 80 },
-      "performance": { "median_output_tokens_per_second": 200 }
+      "model_creator": {
+        "id": "acme",
+        "name": "Acme"
+      },
+      "evaluations": {
+        "artificial_analysis_coding_index": 80
+      },
+      "performance": {
+        "median_output_tokens_per_second": 200
+      }
     },
     {
       "id": "claude-4-5-sonnet-max",
       "name": "Claude Sonnet 4.5 (max effort)",
       "slug": "claude-4-5-sonnet-max",
       "release_date": "2025-09-29",
-      "model_creator": { "id": "anthropic", "name": "Anthropic" },
-      "evaluations": { "artificial_analysis_coding_index": 78 },
-      "performance": { "median_output_tokens_per_second": 95 }
+      "model_creator": {
+        "id": "anthropic",
+        "name": "Anthropic"
+      },
+      "evaluations": {
+        "artificial_analysis_coding_index": 78
+      },
+      "performance": {
+        "median_output_tokens_per_second": 95
+      }
     }
   ]
 }

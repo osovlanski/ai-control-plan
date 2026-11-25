@@ -1,0 +1,28 @@
+/* ux-04 navigation: one rail on every screen. Daily destinations first (Overview,
+   Missions, Agents), the system group second, About last. Narrow screens keep
+   the daily row and open the system group from More. Loaded after every other
+   stylesheet, so these rules own the rail. */
+.os-rail nav { display: flex; flex-direction: column; gap: 0; }
+.os-nav-primary, .os-nav-system { display: flex; flex-direction: column; gap: 8px; }
+.os-nav-system { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
+.os-nav-group { padding: 0 15px 2px; font-size: 10px; letter-spacing: .12em; text-transform: uppercase; color: var(--text-3); }
+.os-nav { padding-block: 11px; }
+.os-nav-primary .os-nav:last-child, .os-nav-system .os-nav:last-child { margin-top: 0; }
+.os-nav-system .os-nav:last-child { margin-top: 10px; }
+.os-nav-more { display: none; font-family: inherit; cursor: pointer; }
+.os-nav-more:focus-visible, .os-nav:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* Route changes move focus to main for screen readers; the ring there marks nothing actionable. */
+#main-content:focus { outline: none; }
+
+@media (max-width: 760px) {
+  .os-rail { display: block; padding: 8px 12px; }
+  .os-rail nav { display: block; width: 100%; }
+  .os-nav-primary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
+  .os-nav-more { display: flex; }
+  .os-nav-more.is-current { color: #f1f4ff; border-color: #5c83ed9c; background: linear-gradient(120deg, #2445938c, #282e674d); }
+  .os-nav-more[aria-expanded="true"] { border-color: var(--line-strong); }
+  .os-nav-system { display: none; margin-top: 8px; padding-top: 8px; }
+  .os-nav-system.is-open { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+  .os-nav-group { display: none; }
+  .os-nav-system .os-nav:last-child { margin-top: 0; }
+}

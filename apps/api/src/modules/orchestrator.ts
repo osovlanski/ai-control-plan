@@ -1,6 +1,6 @@
 import { SessionStore } from './harness/session-store.js';
 import { HandoffService } from './harness/handoff.js';
-import { buildExecutionRequest, composedExecutionPolicy } from './harness/control-plane-bridge.js';
+import { buildExecutionRequest, composedExecutionPolicy, stricterApproval } from './harness/control-plane-bridge.js';
 import type { ModelCatalogService } from './model-catalog.js';
 import type { ExecutionRequest, VerificationCheckResult } from '@agent-plane/core';
 import { QuotaProjection, controllingRetry } from './quota.js';
@@ -40,7 +40,7 @@ import {
   redactText,
   type ModelPrecedenceSource,
 } from "@agent-plane/core";
-import { worktreesRoot, type ResolvedConfig } from "../config.js";
+import { worktreesRoot, type ApprovalMode, type ResolvedConfig } from "../config.js";
 import type { Db } from "../db/index.js";
 import type { RepositoryIdentityRegistry } from "../repo/identity-registry.js";
 import {
@@ -56,7 +56,7 @@ import {
 import { renderCommittedHandoff, renderHandoffPrompt } from "../render/handoff.js";
 import { renderTaskPrompt } from "../render/prompt.js";
 import { ensureScratch, removeScratch, sweepScratch } from "../repo/scratch.js";
-import type { CheckpointReason, CheckpointService } from "./checkpoint.js";
+import type { Checkpoint, CheckpointReason, CheckpointService } from "./checkpoint.js";
 import type { HarnessBridge } from "./harness/control-plane-bridge.js";
 import type { AutopilotRefusalReason, AutopilotService } from "./autopilot.js";
 import { deriveEnvelopeUpdate } from "./harness/envelope-derivation.js";
@@ -67,6 +67,8 @@ import type { Registry } from "./registry.js";
 import { persistRoutingDecision, routeTask } from "./router.js";
 import { decideContextContinuation } from "./context-continuation.js";
 import { runSessionRefStored } from "./usage.js";
+import { AttemptStore, announceReleased, enterProvider } from "./attempts.js";
+import { conformanceBlock } from "./runtime-lifecycle.js";
 import type { TaskEventBus } from "./sse.js";
 import type { TaskStore } from "./tasks.js";
 import type { ProjectVerificationDiscovery } from "./project-verification.js";
@@ -101,6 +103,33 @@ export type StartTrigger = "initial" | "handoff";
 export type HandoffResult =
   | { runId: string; assistantId: string }
   | { deferred: 'resource'; resource: string; units: number };
+
+/** What one manual handoff has done so far, for the park its failure leaves behind. */
+interface HandoffAttempt {
+  /** The handoff owns the task's next transition: a throw from here on parks the task. */
+  owns: boolean;
+  /** The drained source run or Harness session. */
+  sourceRunId?: string;
+  /** The continuation anchor: the drained source's checkpoint, or the retried park's. */
+  checkpoint?: Checkpoint;
+  /** Why the handoff stopped, when that is a known pause rather than an error. */
+  pause?: PauseKind;
+  /** The assistant handed off from, and the operator's explicit target: the park keeps both (D2). */
+  from?: AssistantId;
+  to?: AssistantId;
+  /** When the source's cancel acknowledgment and drain must both have finished (M1). */
+  deadline?: number;
+  /**
+   * The source never settled and its settlement is plane-owned, so nothing but this handoff will
+   * move the task: it is parked even though the session is still live (M2).
+   */
+  stranded?: boolean;
+  /** `handoffs` rows this attempt wrote. A refusal deletes the open ones, a start closes its own (M5). */
+  records: string[];
+}
+
+/** Why a pool continuation's own grant started nothing, read from the dispatch it reserved (M3). */
+type RefusedContinuation = { refused: string; pauseKind: PauseKind };
 
 export interface StartOptions {
   trigger?: StartTrigger;
@@ -225,6 +254,10 @@ export class Orchestrator {
    * flight at once (one worktree per competing assistant).
    */
   private active = new Map<string, ActiveRun>();
+  /** Tasks with a manual handoff in flight (`handoff` is single-flight per task). */
+  private readonly handoffsInFlight = new Set<string>();
+  /** How long a manual handoff waits for its source's cancel acknowledgment and drain; injectable for tests. */
+  handoffDrainMs = 10_000;
   scheduler?: Scheduler;
   /** P0-2: set by the composition root. Absent = no task is the autopilot's. */
   autopilot?: AutopilotService;
@@ -234,6 +267,8 @@ export class Orchestrator {
   assetTelemetry?: { project(sessionId: string): unknown; backfill(): unknown };
   /** O6 S5: settled composed sessions propose memory from their last message; boot backfills. */
   memoryProposals?: { propose(sessionId: string): unknown; backfill(): unknown };
+  /** qcq-02: stores the advisory estimate as it stood when a run started. Record-only; never throws. */
+  estimateSnapshots?: { recordAtStart(runId: string, taskId: string, assistantId: string): unknown };
   /** K11 thresholds and task-level bounds; injectable for deterministic tests. */
   contextPolicy?: ContextPolicy;
   /**
@@ -367,7 +402,9 @@ export class Orchestrator {
 
   quotaPlan(taskId: string, attempt = 0) {
     const intent = JSON.parse(this.tasks.get(taskId)!.intent_json) as TaskIntent;
-    const candidates = this.registry.list().filter(a => a.enabled && a.manifestParsed &&
+    // The operator overlay removes a candidate here exactly as route() does, so a disabled
+    // assistant never makes a task look runnable (or quota-blocked) on its behalf.
+    const candidates = this.registry.list().filter(a => a.enabled && a.operator_state !== 'disabled' && a.manifestParsed && !conformanceBlock(this.db, this.config, a) &&
       (!intent.overrides?.assistantId || intent.overrides.assistantId === a.id) &&
       (!intent.repository || (a.manifestParsed.core.execution.filesystem && a.manifestParsed.core.execution.shell &&
         this.config.repoAllowlist.some(p => intent.repository!.path === p || intent.repository!.path.startsWith(`${p}/`)))));
@@ -604,6 +641,27 @@ export class Orchestrator {
     assistantId: AssistantId,
     options: StartOptions = {},
   ): Promise<{ runId: string }> {
+    // qcq-04a: a legacy start that fails before its provider-entry commit leaves its attempt `held`;
+    // the catch drops it `never_entered` (packet 2.4.1). One whose provider call threw after the
+    // commit, with no run row, settles `stream_closed_unverified` (K4b: no run row, no owner).
+    const legacy: { attemptId?: string } = {};
+    try {
+      return await this.startTaskInner(taskId, assistantId, options, legacy);
+    } catch (error) {
+      if (legacy.attemptId) {
+        try { announceReleased(this.db, this.db.transaction(() => new AttemptStore(this.db).startFailed(legacy.attemptId!, `start failed: ${message(error)}`))()); }
+        catch { /* the start's own error is the one to report */ }
+      }
+      throw error;
+    }
+  }
+
+  private async startTaskInner(
+    taskId: string,
+    assistantId: AssistantId,
+    options: StartOptions,
+    legacy: { attemptId?: string },
+  ): Promise<{ runId: string }> {
     if (!options.parallel && this.isActive(taskId)) {
       throw new Error(`Task ${taskId} already has an active run`);
     }
@@ -636,6 +694,10 @@ export class Orchestrator {
         const request = JSON.parse(saved.request_json) as ExecutionRequest;
         if (request.context.scratchPath) ensureScratch(this.config.dir, taskId);
         request.runSpec.prompt = this.dispatchPrompt(request, options);
+        // A saved request must not outlive a tightened policy: the replay never runs looser than today's baseline.
+        const mode = this.tightenedApproval(request.policy.approval.mode, taskId);
+        request.policy.approval.mode = mode;
+        request.runSpec.permissionPolicy = { ...request.runSpec.permissionPolicy, mode };
         new SessionStore(this.db).recordRequest(request); // fingerprint witnesses semantic replay
         const replayed = await this.executeDispatch(request, options);
         this.recordModelSource(taskId, replayed.runId, this.committedModelSource(request));
@@ -648,6 +710,9 @@ export class Orchestrator {
     let row = this.tasks.get(taskId);
     if (!row) throw new Error(`Unknown task ${taskId}`);
     let envelope = this.tasks.envelope(taskId);
+    // qcq-04a compat attempt (packet 2.12): a legacy direct start or candidate owns a `held` attempt
+    // before any preparation, so a cancel during the worktree await drops it and the commit refuses.
+    if (!options.dispatchId && !this.harnessRouting(taskId, options)) legacy.attemptId = this.openLegacyAttempt(taskId, assistantId, options);
 
     // Repo tasks run in an isolated worktree on branch task/<id>. A handoff
     // reuses the existing tree so the next assistant inherits the work; a
@@ -714,13 +779,13 @@ export class Orchestrator {
       // identity exists, and the request takes its policy from it, exactly as an operator start does.
       const composed = this.bindComposition(options.composition, executionTarget, taskRow.branch);
       const policy = composed
-        ? composedExecutionPolicy(composed.policy, { approvalMode: this.config.policy.approvalMode, maxRuntimeMs: this.maxRuntimeMs },
+        ? composedExecutionPolicy(composed.policy, { approvalMode: this.approvalBaseline(taskId), maxRuntimeMs: this.maxRuntimeMs },
           this.registry.manifest(assistantId)?.harness)
         : undefined;
       const launchModel = this.requestedModel(taskId, assistantId, options.routingDecisionRef, composed?.compositionRevisionId);
       const request = buildExecutionRequest({ taskId, dispatchId: options.dispatchId, assistantId, attempt, prompt, workdir, model: launchModel?.id,
         worktree: envelope.repository ? { repoPath: envelope.repository.path, branch: taskRow.branch ?? envelope.repository.branch, worktreePath: workdir, baseRef: taskRow.base_ref ?? 'HEAD' } : undefined,
-        scratchPath, target: executionTarget, approvalMode: policy?.approvalMode ?? this.config.policy.approvalMode,
+        scratchPath, target: executionTarget, approvalMode: this.effectiveApproval(taskId, policy?.approvalMode),
         // P0-2: an autopilot request is never materialised with more runtime than its attempt and
         // window had left at the early check. The final check recomputes the deadline it runs under.
         maxRuntimeMs: Math.min(policy?.maxRuntimeMs ?? this.maxRuntimeMs, autopilotLaunch?.remainingMs ?? Number.POSITIVE_INFINITY),
@@ -775,7 +840,7 @@ export class Orchestrator {
       // request's approval mode, runtime and caps come from its policy (tighten only).
       const composed = this.bindComposition(options.composition, executionTarget, taskRow.branch);
       const policy = composed
-        ? composedExecutionPolicy(composed.policy, { approvalMode: this.config.policy.approvalMode, maxRuntimeMs: this.maxRuntimeMs },
+        ? composedExecutionPolicy(composed.policy, { approvalMode: this.approvalBaseline(taskId), maxRuntimeMs: this.maxRuntimeMs },
           this.registry.manifest(assistantId)?.harness)
         : undefined;
       const launchModel = this.requestedModel(taskId, assistantId, routingDecisionRef, composed?.compositionRevisionId);
@@ -799,10 +864,10 @@ export class Orchestrator {
             : undefined,
           scratchPath,
           target: executionTarget,
-          approvalMode: policy?.approvalMode ?? this.config.policy.approvalMode,
+          approvalMode: this.effectiveApproval(taskId, policy?.approvalMode),
           maxRuntimeMs: policy?.maxRuntimeMs ?? this.maxRuntimeMs,
           routingDecisionRef,
-          verification: projectVerification.plan?.checks ?? [],
+          verification: agentVerification(projectVerification.plan?.checks ?? [], runAs),
           verificationPlan: projectVerification.plan,
           ...(runAs ? { runAs } : {}),
           ...(composed && policy ? { compositionRevisionId: composed.compositionRevisionId, budget: policy.budget } : {}),
@@ -815,10 +880,8 @@ export class Orchestrator {
       if (options.dispatchId && this.tasks.get(taskId)?.state === "ROUTING") this.tasks.transition(taskId, "RUNNING");
       // A continuation that deferred for a pool slot recorded its handoff row
       // before parking; this start is the one that closes it.
-      if (options.handoffTrigger) {
-        this.db.prepare("UPDATE handoffs SET to_run_id = ? WHERE task_id = ? AND trigger = ? AND to_run_id IS NULL")
-          .run(runId, taskId, options.handoffTrigger);
-      }
+      if (options.handoffTrigger) this.closeHandoffRecord(taskId, runId, options.handoffTrigger, options.continuation);
+      this.recordEstimate(runId, taskId, assistantId);
       return { runId };
     }
 
@@ -843,6 +906,10 @@ export class Orchestrator {
       permissionPolicy: { mode: this.config.policy.approvalMode },
       env: { redactionRules: DEFAULT_REDACTION_RULES, maxRuntimeMs: this.maxRuntimeMs },
     };
+    // qcq-04a (packet 2.4.1): the provider-entry commit, after the run spec is built; the adapter call
+    // is the next statement.
+    const entry = enterProvider(this.db, { attemptId: legacy.attemptId, path: "legacy" });
+    if (!entry.ok) throw new Error(`Provider entry ${entry.kind === "not_owner" ? "not owned" : "refused"}: ${entry.reason}`);
     const handle = priorRef
       ? await adapter.resume(priorRef, runSpec)
       : await adapter.start(runSpec);
@@ -872,6 +939,7 @@ export class Orchestrator {
         launchModel?.source ?? null,
         HARNESS_MAJOR,
       );
+    new AttemptStore(this.db).bindSession(entry.attempt.attempt_id, handle.runId, true);
     if (handle.providerSessionRef) runSessionRefStored(this.db, handle.runId);
 
     if (options.dispatchId && this.tasks.get(taskId)?.state === "ROUTING") this.tasks.transition(taskId, "RUNNING");
@@ -885,10 +953,33 @@ export class Orchestrator {
         void adapter.cancel(handle);
       }, this.maxRuntimeMs),
     };
-    this.db.prepare("UPDATE handoffs SET to_run_id = ? WHERE task_id = ? AND trigger = ? AND to_run_id IS NULL").run(handle.runId, taskId, options.handoffTrigger ?? 'wake');
+    this.closeHandoffRecord(taskId, handle.runId, options.handoffTrigger ?? 'wake', options.continuation);
     this.active.set(handle.runId, run);
     void this.consume(run);
+    this.recordEstimate(handle.runId, taskId, assistantId);
     return { runId: handle.runId };
+  }
+
+  /**
+   * qcq-04a: the compat attempt of a legacy direct start (slot 0) or candidate (the next slot), `held`
+   * with no requirement. A slot-0 predecessor whose run already ended is settled first, by the same
+   * ownership test K4b releases by. The scheduler's own check runs first, so a task it owns fails
+   * with its usual reason rather than on the slot index.
+   */
+  private openLegacyAttempt(taskId: string, assistantId: string, options: StartOptions): string {
+    if (!options.parallel && (this.tasks.get(taskId)?.state === "WAITING_RESOURCE" || this.db.prepare("SELECT 1 FROM dispatches WHERE task_id = ? AND phase IN ('reserved','start_attempted')").get(taskId))) {
+      throw new Error("Scheduler owns this task; use generation-aware run-now");
+    }
+    const attempts = new AttemptStore(this.db);
+    const runAs = this.tasks.get(taskId)?.run_as === "agent" ? "agent" as const : "plane" as const;
+    let released: ReturnType<AttemptStore["settleIdle"]> = [];
+    const attempt = this.db.transaction(() => {
+      if (!options.parallel) released = attempts.settleIdle(taskId, "runtime", "legacy start: no execution owner");
+      return attempts.createHeld({ taskId, kind: options.parallel ? "candidate" : "direct", path: "legacy",
+        slot: options.parallel ? attempts.nextCandidateSlot(taskId) : 0, runAs, assistantId, reason: "compat: legacy start" });
+    })();
+    announceReleased(this.db, released);
+    return attempt.attempt_id;
   }
 
   /**
@@ -969,22 +1060,48 @@ export class Orchestrator {
     if (d.execution_path === 'harness') {
       const result = this.harnessBridge!.startRequest(request, (result, sid) => this.settleFromResult(taskId, request.assistantId, sid, result));
       if (this.tasks.get(taskId)?.state === 'ROUTING') this.tasks.transition(taskId, 'RUNNING');
-      this.db.prepare("UPDATE handoffs SET to_run_id = ? WHERE task_id = ? AND trigger = ? AND to_run_id IS NULL").run(result.runId, taskId, trigger);
+      this.closeHandoffRecord(taskId, result.runId, trigger, options.continuation);
+      this.recordEstimate(result.runId, taskId, request.assistantId);
       return result;
     }
     const adapter = this.registry.adapter(request.assistantId);
+    // qcq-04a (packet 2.4.1): the provider-entry commit; `beforeStart` already marked the dispatch
+    // `start_attempted`. The adapter call is the next statement.
+    const entry = enterProvider(this.db, { dispatchId: request.executionRequestId, path: 'legacy' });
+    if (!entry.ok) throw new Error(`Provider entry ${entry.kind === 'not_owner' ? 'not owned' : 'refused'}: ${entry.reason}`);
     const handle = await adapter.start(request.runSpec);
     if (this.tasks.get(taskId)?.state === 'CANCELLED') await adapter.cancel(handle);
     this.db.prepare(`INSERT INTO runs(id,task_id,assistant_id,provider_session_ref,state,started_at,dispatch_id,model_requested)
       VALUES(?,?,?,?,'ACTIVE',?,?,?)`).run(handle.runId, taskId, request.assistantId, handle.providerSessionRef ?? null, new Date().toISOString(), request.executionRequestId, request.model?.id ?? null);
+    new AttemptStore(this.db).bindSession(entry.attempt.attempt_id, handle.runId, true);
     if (handle.providerSessionRef) runSessionRefStored(this.db, handle.runId);
     if (this.tasks.get(taskId)?.state === 'ROUTING') this.tasks.transition(taskId, 'RUNNING');
     const run: ActiveRun = { runId: handle.runId, taskId, assistantId: request.assistantId, adapter, handle,
       timeout: setTimeout(() => { void adapter.cancel(handle); }, request.runSpec.env?.maxRuntimeMs ?? this.maxRuntimeMs) };
-    this.db.prepare("UPDATE handoffs SET to_run_id = ? WHERE task_id = ? AND trigger = ? AND to_run_id IS NULL").run(handle.runId, taskId, trigger);
+    this.closeHandoffRecord(taskId, handle.runId, trigger, options.continuation);
     this.active.set(handle.runId, run);
     void this.consume(run);
+    this.recordEstimate(handle.runId, taskId, request.assistantId);
     return { runId: handle.runId };
+  }
+
+  /**
+   * Closes the open `handoffs` record this start continues: the one with its trigger and, for a
+   * checkpoint continuation, its anchor. A record a refused continuation left open (or one of
+   * another continuation) is never filled with this run's id (#209 M5).
+   */
+  /**
+   * qcq-02: record-only. Runs after the start committed its run row; whatever happens here, the
+   * start's result is already decided, so a defect is swallowed instead of surfacing.
+   */
+  private recordEstimate(runId: string, taskId: string, assistantId: string): void {
+    try { this.estimateSnapshots?.recordAtStart(runId, taskId, assistantId); } catch { /* advisory record only */ }
+  }
+
+  private closeHandoffRecord(taskId: string, runId: string, trigger: string, continuation: Continuation | undefined): void {
+    const checkpointId = continuation?.kind === "checkpoint" ? continuation.checkpointId : undefined;
+    this.db.prepare(`UPDATE handoffs SET to_run_id = ? WHERE task_id = ? AND trigger = ? AND to_run_id IS NULL${checkpointId ? " AND checkpoint_id = ?" : ""}`)
+      .run(runId, taskId, trigger, ...(checkpointId ? [checkpointId] : []));
   }
 
   private renderHandoffFor(taskId: string, options: StartOptions): string {
@@ -1017,6 +1134,7 @@ export class Orchestrator {
     );
     let seq = 0;
     let endedOk: boolean | undefined;
+    let awaitingApproval = false;
     try {
       for await (const event of run.adapter.events(run.handle)) {
         const safeEvent = redactEvent(event, DEFAULT_REDACTION_RULES);
@@ -1033,6 +1151,12 @@ export class Orchestrator {
         );
         await this.applyEvent(run, safeEvent);
         this.bus.publish(run.taskId, { kind: "event", event: { ...safeEvent, seq } });
+        // Task stage v1: a legacy run asking for approval, or moving on once answered, changes
+        // the stage (needs-you/awaiting-approval) with no task-state change to announce it.
+        if (event.type === "approval.requested" || awaitingApproval) {
+          awaitingApproval = event.type === "approval.requested";
+          this.publishStageIfChanged(run);
+        }
         if (quotaOf(safeEvent)) this.scheduler?.quotaObserved();
         if (event.type === "error") run.sawError = true;
         if (event.type === "run.ended") {
@@ -1221,6 +1345,17 @@ export class Orchestrator {
     const attempt = wait?.state === 'consumed' ? wait.autoWakes + 1 : 0;
     this.cooldowns.penalize(assistantId, trigger === "quota" ? "limit" : "failure", reasonText, resetsAt, attempt);
 
+    // An unattended autopilot task can only run on an agent-user-capable assistant, and a quota
+    // yield must not fail over (the source is excluded and nothing else can launch): it waits for
+    // the source's own cooldown and relaunches from the checkpoint inside the window.
+    if (trigger === "quota" && this.unattended(taskId)) {
+      const until = this.cooldowns.list().find((c) => c.assistantId === assistantId)?.until;
+      if (until && this.scheduler?.parkSameAssistant(taskId, checkpoint.id, until, `${reasonText}; resuming on ${assistantId} after its cooldown`)) {
+        this.notice(taskId, "warn", `${reasonText}. Waiting for ${assistantId}'s cooldown (until ${until}), then resuming from the checkpoint.`);
+        return;
+      }
+    }
+
     // K4b, before any routing: a task that still owes the pool a slot re-enters
     // the scheduler here, and routing is re-decided AT THE GRANT. A decision made
     // now would belong to a successor that does not exist yet, and the dispatch
@@ -1284,8 +1419,8 @@ export class Orchestrator {
         ...(recomposed?.kind === "compose" ? { composition: recomposed.composition } : {}),
       });
       this.db
-        .prepare("UPDATE handoffs SET to_run_id = ? WHERE task_id = ? AND to_run_id IS NULL")
-        .run(runId, taskId);
+        .prepare("UPDATE handoffs SET to_run_id = ? WHERE task_id = ? AND checkpoint_id = ? AND to_run_id IS NULL")
+        .run(runId, taskId, checkpoint.id);
     } catch (err) {
       const envelope = this.tasks.transition(taskId, "WAITING_INPUT", "harness_error");
       this.publishState(taskId, envelope);
@@ -1362,7 +1497,11 @@ export class Orchestrator {
 
     switch (result.outcome) {
       case "completed": {
-        if (result.verification && !result.verification.passed) {
+        if (result.verification && !result.verification.passed && row.run_as === "agent") {
+          // An unattended agent-user task has nobody to answer a `verification_failed` pause: the attempt
+          // would hold the one slot for ever. It fails, and the per-item retry rule applies.
+          tx("FAILED", verificationNotice(result.verification.checks));
+        } else if (result.verification && !result.verification.passed) {
           tx("WAITING_INPUT", verificationNotice(result.verification.checks), "verification_failed");
         } else {
           tx("COMPLETED");
@@ -1545,15 +1684,14 @@ export class Orchestrator {
    */
   private async deferResourceContinuation(
     taskId: string,
-    options: { trigger: 'manual' | 'quota' | 'failure'; reason: string; to?: AssistantId; from?: AssistantId; checkpointId?: string },
-  ): Promise<HandoffResult | undefined> {
+    options: { trigger: 'manual' | 'quota' | 'failure'; reason: string; to?: AssistantId; from?: AssistantId; checkpointId?: string; records?: string[] },
+  ): Promise<HandoffResult | RefusedContinuation | 'expired' | undefined> {
     const need = this.scheduler?.requirement(taskId);
     if (!need || !this.scheduler) return undefined;
     const from = options.from ?? (this.lastAssistant(taskId) as AssistantId | undefined);
     // The predecessor has settled by the time a continuation defers, so the run
     // this continues from is the last one recorded.
-    const fromRunId = (this.db.prepare('SELECT id FROM runs WHERE task_id = ? ORDER BY started_at DESC, rowid DESC LIMIT 1')
-      .get(taskId) as { id: string } | undefined)?.id ?? null;
+    const fromRunId = this.latestRunId(taskId) ?? null;
     const checkpointId = options.checkpointId ?? (await this.checkpoints.create(taskId, fromRunId, 'handoff')).id;
     const wake = await this.scheduler.deferForResource(taskId, {
       reason: `Continuation waiting for ${need.units} unit(s) of ${need.resource}`,
@@ -1564,15 +1702,31 @@ export class Orchestrator {
       // The pending handoff record commits with the continuation intent that
       // justifies it, so a continuation that loses the race writes neither.
       onPark: () => {
+        const id = newHandoffId();
         this.db
           .prepare('INSERT INTO handoffs (id, task_id, from_run_id, to_run_id, checkpoint_id, trigger, at) VALUES (?, ?, ?, NULL, ?, ?, ?)')
-          .run(newHandoffId(), taskId, fromRunId, checkpointId, options.trigger, new Date().toISOString());
+          .run(id, taskId, fromRunId, checkpointId, options.trigger, new Date().toISOString());
+        options.records?.push(id);
       },
     });
     if (wake?.outcome === 'dispatched') {
       const run = this.db.prepare('SELECT id, assistant_id FROM runs WHERE dispatch_id = ?').get(wake.dispatchId) as { id: string; assistant_id: string } | undefined;
       if (run) return { runId: run.id, assistantId: run.assistant_id };
+      // The grant reserved a dispatch that started nothing, and the scheduler has already settled
+      // it. The latest wait alone cannot say why, so the dispatch row does: `aborted` is a
+      // recomposition the grant blocked (`Scheduler.block`), `reparked` into a pause is routing
+      // that ran out of retries. Neither is pool capacity, and neither leaves anything to wake.
+      const row = this.tasks.get(taskId);
+      if (row?.state === 'WAITING_INPUT') {
+        const dispatch = this.scheduler.dispatch(wake.dispatchId);
+        const pauseKind = (row.pause_kind ?? 'intervention_required') as PauseKind;
+        return dispatch.phase === 'aborted'
+          ? { refused: `the continuation was granted its slot but not started: ${dispatch.reason ?? 'composition blocked'}`, pauseKind }
+          : { refused: `No eligible assistant for handoff: routing at the pool grant ran out of retries (${dispatch.reason ?? 'no candidate'}).`, pauseKind };
+      }
     }
+    // The pool can no longer grant the request: the wake expired it and parked the task for an operator.
+    if (this.scheduler.condition(taskId)?.state === 'expired') return 'expired';
     this.notice(taskId, 'info', `${options.reason} It needs ${need.units} unit(s) of ${need.resource} first, and starts as soon as the pool can grant them.`);
     return { deferred: 'resource', resource: need.resource, units: need.units };
   }
@@ -1598,19 +1752,15 @@ export class Orchestrator {
   }
 
   /**
-   * Starts a manual handoff's successor. A start that throws parks the task in WAITING_INPUT with
-   * a notice carrying the error, so it is never left in HANDING_OFF (or ROUTING) with nothing running.
+   * Starts a manual handoff's successor. A start that throws leaves a notice carrying the error;
+   * `handoff` then parks the task (`intervention_required`), so it is never left in HANDING_OFF (or
+   * ROUTING) with nothing running.
    */
   private async startHandoffSuccessor(taskId: string, assistantId: AssistantId, options: StartOptions): Promise<{ runId: string }> {
     try {
       return await this.startTask(taskId, assistantId, options);
     } catch (err) {
-      if (!this.isActive(taskId)) {
-        try {
-          this.publishState(taskId, this.tasks.transition(taskId, "WAITING_INPUT", "intervention_required"));
-        } catch { /* already moved on */ }
-        this.notice(taskId, "warn", `Handoff to ${assistantId} did not start; task parked: ${message(err)}`);
-      }
+      if (!this.isActive(taskId)) this.notice(taskId, "warn", `Handoff to ${assistantId} did not start; task parked: ${message(err)}`);
       throw err;
     }
   }
@@ -1659,10 +1809,23 @@ export class Orchestrator {
       : "";
   }
 
-  /** Manual handoff: route, checkpoint, then move the task to another assistant. */
+  /**
+   * Manual handoff: drain the source, route, checkpoint, then move the task to another assistant.
+   *
+   * One handoff per task at a time: a second one would read the first's transitional state (a
+   * successor whose start is still pending looks like a drained source) and park a live task.
+   *
+   * From the moment the handoff owns the task's next transition (its source is cancelled, it is
+   * retrying a handoff park, or it has moved the task to HANDING_OFF/ROUTING) any throw parks the
+   * task in WAITING_INPUT with a handoff park (`Scheduler.parkHandoff`) anchored to the source's
+   * checkpoint, which a later `/handoff` or `/run-now` consumes. The legacy source's `handingOff`
+   * flag is always cleared on the way out; a Harness source's `planeOwnsTerminal` mark is consumed
+   * by its own settle, so a settle that arrives after the handoff gave up still publishes nothing.
+   */
   async handoff(taskId: string, to?: AssistantId): Promise<HandoffResult> {
     const row = this.tasks.get(taskId);
     if (!row) throw new Error(`Unknown task ${taskId}`);
+    if (this.handoffsInFlight.has(taskId)) throw new Error(`Task ${taskId} already has a pending manual continuation: another handoff is in progress`);
     this.assertNoMixedOwnership(taskId);
     if (row.state === "WAITING_RESOURCE" || this.db.prepare("SELECT 1 FROM dispatches WHERE task_id = ? AND phase IN ('reserved','start_attempted')").get(taskId)) throw new Error("Scheduler owns task; use run-now");
     if (isTerminal(row.state)) {
@@ -1676,157 +1839,164 @@ export class Orchestrator {
       throw new Error(`Handoff to ${to} refused: ${to} is the source assistant, and a handoff excludes its source.${this.restartHint(taskId, to)}`);
     }
 
-    if (this.harnessOwns(taskId)) return this.harnessHandoff(taskId, to);
-
-    const current = this.soleRun(taskId);
-    const fromAssistantId = current?.assistantId ?? this.lastAssistant(taskId);
-
-    if (current) {
-      // Claim the task's next transition before cancelling, so the draining
-      // run does not race us into a terminal state.
-      current.handingOff = true;
-      await current.adapter.cancel(current.handle);
-      await this.waitUntilInactive(taskId);
+    // A retry of a parked handoff continues from the checkpoint the park holds, so the successor
+    // keeps the original source's provenance rather than a run-less checkpoint of its own. A
+    // no_candidate pause with no tagged park (one parked before #207) is repaired the same way:
+    // the retry owns the task's next transition, so a refusal re-pauses it with a park (M4).
+    const park = this.scheduler?.handoffPark(taskId);
+    const repair = !park && row.state === "WAITING_INPUT" && row.pause_kind === "no_candidate";
+    const attempt: HandoffAttempt = {
+      owns: park !== undefined || repair,
+      records: [],
+      ...(to ? { to } : {}),
+      ...(park?.checkpointId ? { checkpoint: this.checkpoints.latest(taskId, park.checkpointId) } : {}),
+    };
+    const harness = this.harnessOwns(taskId);
+    const current = harness ? undefined : this.soleRun(taskId);
+    this.handoffsInFlight.add(taskId);
+    try {
+      let fromAssistantId = this.lastAssistant(taskId);
+      attempt.deadline = Date.now() + this.handoffDrainMs;
+      if (harness) {
+        await this.drainHarnessSource(taskId, attempt);
+      } else if (current) {
+        // Claim the task's next transition before cancelling, so the draining
+        // run does not race us into a terminal state.
+        current.handingOff = true;
+        attempt.owns = true;
+        attempt.sourceRunId = current.runId;
+        fromAssistantId = current.assistantId;
+        // One deadline bounds the cancel acknowledgment and the drain together (M1): an
+        // acknowledgment that never settles must not hold the per-task handoff lock forever.
+        await this.cancelWithin(current, attempt.deadline);
+        await this.waitUntilInactive(taskId, Math.max(0, attempt.deadline - Date.now()));
+      }
+      attempt.from = fromAssistantId as AssistantId | undefined;
+      // A retry with nothing left to drain and no anchor of its own (both handoff-checkpoint writes
+      // failed, or an older park) continues from the drained source's last run, never from a
+      // run-less checkpoint that loses its provenance (M2).
+      if (attempt.owns && !attempt.sourceRunId && !attempt.checkpoint) attempt.sourceRunId = this.latestRunId(taskId);
+      return await this.continueHandoff(taskId, to, fromAssistantId, attempt, park?.generation);
+    } catch (err) {
+      if (attempt.owns) await this.parkStoppedHandoff(taskId, attempt, err);
+      throw err;
+    } finally {
+      this.handoffsInFlight.delete(taskId);
+      if (current) current.handingOff = false;
     }
+  }
+
+  /**
+   * Durable-cancels a Harness-owned task's source session under `planeOwnsTerminal` (PLAN.md
+   * 8c.3), so its detached `settleFromResult` does NOT transition the task. A session that already
+   * ended while its task is still RUNNING has a settle yet to arrive; marking it makes the handoff
+   * that settle's single owner rather than a second publisher.
+   */
+  private async drainHarnessSource(taskId: string, attempt: HandoffAttempt): Promise<void> {
+    const sid = this.harnessBridge!.liveSessionId(taskId)
+      ?? (this.tasks.get(taskId)?.state === "RUNNING" ? this.harnessBridge!.latestSessionId(taskId) : undefined);
+    if (!sid) return;
+    this.harnessBridge!.markPlaneOwnsTerminal(sid);
+    try {
+      this.harnessBridge!.requestCancel(sid);
+    } catch (err) {
+      // No cancel was requested, so the source still owns its settlement; a mark left set would
+      // make that settle publish nothing and strand the task RUNNING.
+      this.harnessBridge!.consumePlaneOwnsTerminal(sid);
+      throw err;
+    }
+    attempt.owns = true;
+    attempt.sourceRunId = sid;
+    if (!(await this.waitUntilSessionTerminal(sid, Math.max(0, (attempt.deadline ?? Date.now() + this.handoffDrainMs) - Date.now())))) {
+      // Drain stalled. planeOwnsTerminal stays SET, so the source session's eventual settlement
+      // no-ops the task (never stranded in HANDING_OFF, Codex 8c review). The handoff therefore
+      // parks it here, through the same handoff park as every other stop, anchored to the source
+      // session: a retry or run-now keeps that session's provenance (M2).
+      attempt.stranded = true;
+      attempt.pause = "harness_error";
+      this.notice(taskId, "warn", `Handoff aborted — session ${sid} did not settle in time; task parked.`);
+      throw new Error(`harness session ${sid} did not settle for handoff`);
+    }
+  }
+
+  /** The shared tail of both paths, once the source (if any) has settled. */
+  private async continueHandoff(
+    taskId: string, to: AssistantId | undefined, fromAssistantId: string | undefined,
+    attempt: HandoffAttempt, parkGeneration: number | undefined,
+  ): Promise<HandoffResult> {
+    // The drained source's checkpoint is its continuation anchor even if routing (or the pool)
+    // refuses, and a pool deferral parks on that same anchor. A run-less one is written only once
+    // the handoff will happen: left behind, it would block `/wait`.
+    if (attempt.sourceRunId) attempt.checkpoint = await this.checkpoints.create(taskId, attempt.sourceRunId, "handoff");
 
     // The source has settled, so its claim is the predecessor's to give back: a
     // task that still owes the pool a slot re-enters the wake funnel here and
     // acquires a NEW dispatch-backed claim, rather than a successor being
-    // launched on capacity a routine sweep is entitled to take away. Its own
-    // checkpoint is the continuation anchor, so it is taken before this one.
+    // launched on capacity a routine sweep is entitled to take away.
     const deferred = await this.deferResourceContinuation(taskId, {
       trigger: 'manual', to, reason: 'A manual handoff was requested by the user.',
       from: fromAssistantId as AssistantId | undefined,
+      records: attempt.records,
+      ...(attempt.checkpoint ? { checkpointId: attempt.checkpoint.id } : {}),
     });
+    if (deferred === 'expired') {
+      // The scheduler expired the request and parked the task for intervention; that park stands,
+      // and the continuation it refused leaves no open handoff record behind.
+      attempt.owns = false;
+      this.dropHandoffRecords(attempt);
+      throw new Error(`Handoff not started: the pool can no longer grant this task's resource request; task ${taskId} needs an operator decision.`);
+    }
+    if (deferred && "refused" in deferred) {
+      // The grant's own dispatch already paused the task; the park below anchors that pause (M3).
+      attempt.pause = deferred.pauseKind;
+      throw new Error(`Handoff not started: ${deferred.refused}`);
+    }
     if (deferred) return deferred;
-
-    // The cancelled run's checkpoint is its continuation anchor even if routing refuses. A run-less
-    // one is written only once the handoff will happen: left behind, it would block `/wait`.
-    let checkpoint = current ? await this.checkpoints.create(taskId, current.runId, "handoff") : undefined;
-
-    // A settled compare/race continues as ONE run (see `parallelContinuationWorktree`), so it is a
-    // single task from here: it routes and composes on the single path and settles as one run.
-    if (row.mode !== "single") this.tasks.setMode(taskId, "single");
-    // A manual handoff away from an assistant shouldn't immediately re-pick it.
-    const { explanation, routingDecisionId } = this.routeTask(taskId, "failover", { exclude: fromAssistantId, override: to });
-    if (!explanation.chosen) {
-      throw new Error(`No eligible assistant for handoff. ${this.describeHandoffWaits(taskId, explanation, fromAssistantId)}`);
-    }
-    // M2 S6: the handoff target is a changed assistant and gets a new revision with the remainder.
-    const recomposed = await this.recompose(taskId, explanation.chosen, "failover", routingDecisionId);
-    if (recomposed?.kind === "blocked") {
-      try {
-        const envelope = this.tasks.transition(taskId, "WAITING_INPUT", recomposed.pauseKind);
-        this.publishState(taskId, envelope);
-      } catch { /* already parked */ }
-      throw new Error(`Handoff to ${explanation.chosen} was not started: ${recomposed.reason}`);
-    }
-    checkpoint ??= await this.checkpoints.create(taskId, null, "handoff");
-
-    const state = this.tasks.get(taskId)!.state;
-    if (state === "RUNNING" || state === "WAITING_INPUT" || state === "LIMIT_PAUSED") {
-      if (state === "RUNNING") this.tasks.transition(taskId, "LIMIT_PAUSED");
-      this.tasks.transition(taskId, "HANDING_OFF");
-    } else if (state === "CREATED") {
-      this.tasks.transition(taskId, "ROUTING");
-    }
-
-    this.db
-      .prepare(
-        "INSERT INTO handoffs (id, task_id, from_run_id, to_run_id, checkpoint_id, trigger, at) VALUES (?, ?, ?, NULL, ?, 'manual', ?)",
-      )
-      .run(newHandoffId(), taskId, current?.runId ?? null, checkpoint.id, new Date().toISOString());
-
-    this.notice(taskId, "info", `Manual handoff to ${explanation.chosen}.`);
-    const { runId } = await this.startHandoffSuccessor(taskId, explanation.chosen, {
-      trigger: "handoff",
-      continuation: { kind: "checkpoint", checkpointId: checkpoint.id },
-      reason: "A manual handoff was requested by the user.",
-      fromAssistantId,
-      routingDecisionRef: String(routingDecisionId),
-      ...(recomposed?.kind === "compose" ? { composition: recomposed.composition } : {}),
-    });
-    this.db
-      .prepare("UPDATE handoffs SET to_run_id = ? WHERE task_id = ? AND to_run_id IS NULL")
-      .run(runId, taskId);
-    return { runId, assistantId: explanation.chosen };
-  }
-
-  /**
-   * Manual handoff for a Harness-owned task (PLAN.md 8c.3): durable-cancel the
-   * source session under `planeOwnsTerminal` so its detached `settleFromResult`
-   * does NOT transition the task, then start a fresh Harness session on the
-   * target with a handoff-rendered prompt.
-   */
-  private async harnessHandoff(taskId: string, to?: AssistantId): Promise<HandoffResult> {
-    const sid = this.harnessBridge!.liveSessionId(taskId);
-    const fromAssistantId = this.lastAssistant(taskId);
-
-    if (sid) {
-      this.harnessBridge!.markPlaneOwnsTerminal(sid);
-      this.harnessBridge!.requestCancel(sid);
-      const settled = await this.waitUntilSessionTerminal(sid);
-      if (!settled) {
-        // Drain stalled. Park the task and bail — planeOwnsTerminal stays SET so
-        // the source session's eventual settlement no-ops the task (never
-        // stranded in HANDING_OFF, Codex 8c review).
-        try {
-          const envelope = this.tasks.transition(taskId, "WAITING_INPUT", "harness_error");
-          this.publishState(taskId, envelope);
-        } catch {
-          /* already moved on */
-        }
-        this.notice(taskId, "warn", `Handoff aborted — session ${sid} did not settle in time; task parked.`);
-        throw new Error(`harness session ${sid} did not settle for handoff`);
-      }
-    }
-
-    // Same boundary as the legacy path: the source session has settled, so the
-    // predecessor's claim goes back and the successor acquires its own through
-    // the wake funnel. (Shared code, because the defect was shared.)
-    const deferred = await this.deferResourceContinuation(taskId, {
-      trigger: 'manual', to, reason: 'A manual handoff was requested by the user.',
-      from: fromAssistantId as AssistantId | undefined,
-    });
-    if (deferred) return deferred;
-
-    // Session-scoped checkpoint on the captured harness sid — the target's
-    // handoff-prompt render reads checkpoints.latest(taskId). (The runner's own
-    // cancel checkpoint would also serve; this labels one 'handoff' for parity.)
-    // As on the legacy path: a run-less checkpoint waits until routing has accepted the handoff.
-    let checkpoint = sid ? await this.checkpoints.create(taskId, sid, "handoff") : undefined;
 
     // A settled compare/race continues as ONE run (see `parallelContinuationWorktree`), so it is a
     // single task from here: it routes and composes on the single path and settles as one run.
     if (this.tasks.get(taskId)!.mode !== "single") this.tasks.setMode(taskId, "single");
+    // A manual handoff away from an assistant shouldn't immediately re-pick it.
     const { explanation, routingDecisionId } = this.routeTask(taskId, "failover", { exclude: fromAssistantId, override: to });
     if (!explanation.chosen) {
+      attempt.pause = "no_candidate";
       throw new Error(`No eligible assistant for handoff. ${this.describeHandoffWaits(taskId, explanation, fromAssistantId)}`);
     }
     // M2 S6: the handoff target is a changed assistant and gets a new revision with the remainder.
     const recomposed = await this.recompose(taskId, explanation.chosen, "failover", routingDecisionId);
+    // A retry owns only the park generation it read; `/run-now` may have consumed it (and started
+    // a successor) while this awaited. Then the task is no longer this handoff's to move.
+    const assertOwnsPark = () => {
+      if (parkGeneration === undefined || this.scheduler?.handoffPark(taskId)?.generation === parkGeneration) return;
+      attempt.owns = false;
+      throw new Error(`Handoff not started: task ${taskId} was continued by another request while this handoff was routing.`);
+    };
+    assertOwnsPark();
     if (recomposed?.kind === "blocked") {
-      try {
-        const envelope = this.tasks.transition(taskId, "WAITING_INPUT", recomposed.pauseKind);
-        this.publishState(taskId, envelope);
-      } catch { /* already parked */ }
+      attempt.pause = recomposed.pauseKind;
       throw new Error(`Handoff to ${explanation.chosen} was not started: ${recomposed.reason}`);
     }
-    checkpoint ??= await this.checkpoints.create(taskId, null, "handoff");
+    const checkpoint = attempt.checkpoint ??= await this.checkpoints.create(taskId, null, "handoff");
 
-    const state = this.tasks.get(taskId)!.state;
-    if (state === "RUNNING" || state === "WAITING_INPUT" || state === "LIMIT_PAUSED") {
-      if (state === "RUNNING") this.tasks.transition(taskId, "LIMIT_PAUSED");
-      this.tasks.transition(taskId, "HANDING_OFF");
-    } else if (state === "CREATED") {
-      this.tasks.transition(taskId, "ROUTING");
-    }
-
-    this.db
-      .prepare(
-        "INSERT INTO handoffs (id, task_id, from_run_id, to_run_id, checkpoint_id, trigger, at) VALUES (?, ?, ?, NULL, ?, 'manual', ?)",
-      )
-      .run(newHandoffId(), taskId, sid ?? null, checkpoint.id, new Date().toISOString());
+    const record = newHandoffId();
+    this.db.transaction(() => {
+      assertOwnsPark();
+      const state = this.tasks.get(taskId)!.state;
+      if (state === "RUNNING" || state === "WAITING_INPUT" || state === "LIMIT_PAUSED") {
+        if (state === "RUNNING") this.tasks.transition(taskId, "LIMIT_PAUSED");
+        this.tasks.transition(taskId, "HANDING_OFF");
+      } else if (state === "CREATED") {
+        this.tasks.transition(taskId, "ROUTING");
+      }
+      if (parkGeneration !== undefined) this.scheduler?.retireHandoffPark(taskId, parkGeneration);
+      this.db
+        .prepare(
+          "INSERT INTO handoffs (id, task_id, from_run_id, to_run_id, checkpoint_id, trigger, at) VALUES (?, ?, ?, NULL, ?, 'manual', ?)",
+        )
+        .run(record, taskId, checkpoint.runId ?? null, checkpoint.id, new Date().toISOString());
+      attempt.records.push(record);
+    })();
+    attempt.owns = true;
 
     this.notice(taskId, "info", `Manual handoff to ${explanation.chosen}.`);
     const { runId } = await this.startHandoffSuccessor(taskId, explanation.chosen, {
@@ -1837,10 +2007,77 @@ export class Orchestrator {
       routingDecisionRef: String(routingDecisionId),
       ...(recomposed?.kind === "compose" ? { composition: recomposed.composition } : {}),
     });
-    this.db
-      .prepare("UPDATE handoffs SET to_run_id = ? WHERE task_id = ? AND to_run_id IS NULL")
-      .run(runId, taskId);
+    // Only this attempt's own record names the successor (M5).
+    this.db.prepare("UPDATE handoffs SET to_run_id = ? WHERE id = ? AND to_run_id IS NULL").run(runId, record);
     return { runId, assistantId: explanation.chosen };
+  }
+
+  /**
+   * Parks a task whose handoff stopped after owning its next transition. A legacy source whose
+   * cancel threw may still be draining, so this waits for it first; from the `isActive` check to
+   * the caller's `finally` nothing awaits, so a source still running keeps its own settle (the
+   * cleared `handingOff` hands it back) and one that drained is parked here, never both.
+   */
+  private async parkStoppedHandoff(taskId: string, attempt: HandoffAttempt, err: unknown): Promise<void> {
+    // Within the handoff's own deadline: a source that did not drain by then keeps its settlement.
+    if (!attempt.stranded) {
+      await this.waitUntilInactive(taskId, Math.max(0, (attempt.deadline ?? Date.now() + this.handoffDrainMs) - Date.now())).catch(() => undefined);
+    }
+    // A source drained before its checkpoint was taken (a cancel or deferral that threw) still
+    // anchors the park; a checkpoint store that is itself failing leaves the park without one.
+    if (attempt.sourceRunId && attempt.checkpoint?.runId !== attempt.sourceRunId) {
+      attempt.checkpoint = await this.checkpoints.create(taskId, attempt.sourceRunId, "handoff").catch(() => attempt.checkpoint);
+    }
+    const row = this.tasks.get(taskId);
+    if (!row || isTerminal(row.state) || row.state === "WAITING_RESOURCE" || (this.isActive(taskId) && !attempt.stranded)) return;
+    const pauseKind = attempt.pause ?? "intervention_required";
+    const moved = row.state !== "WAITING_INPUT" || row.pause_kind !== pauseKind;
+    const envelope = this.db.transaction(() => {
+      // A dispatch this handoff's own pool wake reserved goes back with the park, in one commit,
+      // so nothing starts the successor after the operator was told 409. One a start was attempted
+      // for (or a tick is driving) is the scheduler's to settle, and the task is left to it.
+      if (this.scheduler?.rollbackRefusedDispatch(taskId, `handoff refused: ${message(err)}`) === false) return undefined;
+      // A retry that stops for a different reason re-pauses through HANDING_OFF, the one legal way
+      // from one WAITING_INPUT pause to another.
+      if (row.state === "WAITING_INPUT" && moved) this.tasks.transition(taskId, "HANDING_OFF");
+      const parked = moved ? this.tasks.transition(taskId, "WAITING_INPUT", pauseKind) : undefined;
+      // The refused continuation never happened, so its open records go with it (M5); the park
+      // keeps its intent, so a run-now excludes the same source and honours the same target (D2).
+      this.dropHandoffRecords(attempt);
+      this.scheduler?.parkHandoff(taskId, attempt.checkpoint?.id, `Handoff stopped: ${message(err)}`,
+        { trigger: "manual", ...(attempt.from ? { from: attempt.from } : {}), ...(attempt.to ? { to: attempt.to } : {}), reason: "A manual handoff was requested by the user." });
+      return parked;
+    })();
+    if (envelope) this.publishState(taskId, envelope);
+  }
+
+  /** Deletes the still-open `handoffs` rows a refused attempt wrote (M5). */
+  private dropHandoffRecords(attempt: HandoffAttempt): void {
+    for (const id of attempt.records.splice(0)) this.db.prepare("DELETE FROM handoffs WHERE id = ? AND to_run_id IS NULL").run(id);
+  }
+
+  /**
+   * Requests the legacy source's cancel and waits for its acknowledgment until `deadline`. A
+   * rejected acknowledgment throws its own error; one that never settles throws at the deadline,
+   * and its late outcome is ignored (M1).
+   */
+  private async cancelWithin(run: ActiveRun, deadline: number): Promise<void> {
+    const ack = run.adapter.cancel(run.handle);
+    let timer: NodeJS.Timeout | undefined;
+    const expired = new Promise<"expired">((resolve) => { timer = setTimeout(() => resolve("expired"), Math.max(0, deadline - Date.now())); });
+    try {
+      if ((await Promise.race([ack, expired])) === "expired") {
+        ack.catch(() => undefined);
+        throw new Error(`Handoff stopped: ${run.assistantId} did not acknowledge the cancel within ${this.handoffDrainMs}ms.`);
+      }
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** The task's most recent run or Harness session (both are `runs` rows). */
+  private latestRunId(taskId: string): string | undefined {
+    return (this.db.prepare("SELECT id FROM runs WHERE task_id = ? ORDER BY started_at DESC, rowid DESC LIMIT 1").get(taskId) as { id: string } | undefined)?.id;
   }
 
   /** `describeWaits`, with the excluded source reported as excluded rather than "disabled". */
@@ -1877,6 +2114,39 @@ export class Orchestrator {
    * Approvals carry a request id that is unique across a task's runs, so a
    * parallel comparison can have several assistants waiting at once.
    */
+  /**
+   * The workspace approval mode a launch starts from. An autopilot task that runs as the agent user has
+   * nobody to answer a prompt, so it takes `autopilot.approvalMode` (default auto-approve; the aos-agent
+   * sandbox is the boundary). `read-only` is never loosened, and no other task is affected.
+   */
+  private tightenedApproval(saved: ApprovalMode, taskId: string): ApprovalMode {
+    if (this.unattended(taskId)) return saved === "read-only" ? saved : this.approvalBaseline(taskId);
+    return stricterApproval(saved, this.approvalBaseline(taskId));
+  }
+
+  /** An autopilot task in the agent sandbox has no human to answer a prompt. */
+  private unattended(taskId: string): boolean {
+    return this.tasks.get(taskId)?.run_as === "agent" && !!this.autopilot?.owns(taskId);
+  }
+
+  /**
+   * The mode a launch runs under. Normally the stricter of the composition and the baseline. For an unattended
+   * autopilot task a composition's `prompt-on-escalation` would park the run on an approval nobody can answer
+   * (G15: 30 minutes lost), so only `read-only` may tighten it.
+   */
+  private effectiveApproval(taskId: string, composed: ApprovalMode | undefined): ApprovalMode {
+    const baseline = this.approvalBaseline(taskId);
+    if (!composed) return baseline;
+    if (this.unattended(taskId)) return composed === "read-only" ? composed : baseline;
+    return composed;
+  }
+
+  private approvalBaseline(taskId: string): ApprovalMode {
+    const workspace = this.config.policy.approvalMode;
+    if (workspace === "read-only") return workspace;
+    return this.tasks.get(taskId)?.run_as === "agent" && this.autopilot?.owns(taskId) ? this.config.autopilot.approvalMode : workspace;
+  }
+
   async respondApproval(taskId: string, requestId: string, approved: boolean): Promise<void> {
     this.assertNoMixedOwnership(taskId);
     if (this.harnessOwns(taskId)) {
@@ -1904,19 +2174,43 @@ export class Orchestrator {
       }
       throw new Error(`No session of task ${taskId} is waiting on approval ${requestId}`);
     }
-    const runs = this.runsOfTask(taskId);
-    if (runs.length === 0) throw new Error(`No active run for task ${taskId}`);
-    for (const run of runs) {
-      if (!run.adapter.send) continue;
-      try {
-        await run.adapter.send(run.handle, { kind: "approval", requestId, approved });
-        return;
-      } catch {
-        // Not this run's pending approval; try the next competitor.
+    // Legacy runs keep no approval row, so the same answer sent twice (a double tap, a second
+    // tab, a retry after a dropped response) reached the adapter twice and the second got a 409.
+    // Remember each answer the moment it is claimed, before the first await, so the repeat is an
+    // idempotent no-op and a different decision is a conflict, as on the Harness path.
+    const key = `${taskId}\u0000${requestId}`;
+    const prior = this.legacyAnswers.get(key);
+    if (prior) {
+      if (prior.approved !== approved) {
+        throw new Error(`approval ${requestId} already ${prior.approved ? "approved" : "denied"}; a ${approved ? "approved" : "denied"} answer conflicts`);
       }
+      return prior.delivery; // the same answer: wait on the one delivery, never send a second
     }
-    throw new Error(`No run of task ${taskId} is waiting on approval ${requestId}`);
+    const runs = this.runsOfTask(taskId);
+    if (runs.length === 0) {
+      for (const k of this.legacyAnswers.keys()) if (k.startsWith(`${taskId}\u0000`)) this.legacyAnswers.delete(k);
+      throw new Error(`No active run for task ${taskId}`);
+    }
+    const delivery = (async () => {
+      for (const run of runs) {
+        if (!run.adapter.send) continue;
+        try {
+          await run.adapter.send(run.handle, { kind: "approval", requestId, approved });
+          return;
+        } catch {
+          // Not this run's pending approval; try the next competitor.
+        }
+      }
+      throw new Error(`No run of task ${taskId} is waiting on approval ${requestId}`);
+    })();
+    this.legacyAnswers.set(key, { approved, delivery });
+    // A failed delivery is forgotten, so the owner can answer again once the run asks again.
+    delivery.catch(() => this.legacyAnswers.delete(key));
+    return delivery;
   }
+
+  /** Answers delivered to legacy runs, by task and request id (see respondApproval). In memory, like the runs. */
+  private readonly legacyAnswers = new Map<string, { approved: boolean; delivery: Promise<void> }>();
 
   async cancelTask(taskId: string): Promise<void> {
     this.assertNoMixedOwnership(taskId);
@@ -1958,6 +2252,13 @@ export class Orchestrator {
 
   private notice(taskId: string, level: "info" | "warn", text: string): void {
     this.bus.publish(taskId, { kind: "notice", notice: { level, text } });
+  }
+
+  private publishStageIfChanged(run: ActiveRun): void {
+    this.bus.publishIfStageChanged(run.taskId, () => {
+      const status = this.tasks.envelope(run.taskId).status;
+      return { state: status.state, phase: status.phase, assistantId: run.assistantId };
+    });
   }
 
   private publishState(taskId: string, envelope: TaskEnvelope, assistantId?: string): void {
@@ -2034,6 +2335,11 @@ export class Orchestrator {
     }
 
     if (this.db.prepare("SELECT 1 FROM dispatches WHERE task_id = ? AND phase IN ('reserved','start_attempted')").get(taskId)) throw new Error("Scheduler owns task; parallel starts are not allowed");
+    // The operator picked these candidates, so route()'s hard filters never ran on them. The two
+    // disable sources it enforces are enforced here, before the task's mode, a routing decision, a
+    // worktree, a revision or a provider exists. Read live: a later disable never stops a running run.
+    const disabled = this.disabledForNewStart(assistantIds);
+    if (disabled) throw new Error(`Cannot start a ${mode} with ${assistantIds.join(", ")}: ${disabled}`);
 
     // With the composer on, every candidate composes its own revision before anything starts, so
     // a blocked candidate (no budget left, requireRevision) starts none and leaves the task fresh.
@@ -2101,6 +2407,29 @@ export class Orchestrator {
       `${mode === "race" ? "Racing" : "Comparing"} ${assistantIds.join(" vs ")} in separate worktrees.`,
     );
     return { runs: started };
+  }
+
+  /**
+   * Why some of these explicitly chosen assistants cannot take a NEW start, or undefined when every
+   * one can: unknown, config `enabled: false`, or the operator disable overlay (migration 051) —
+   * the same disable sources as route()'s hard filters, named by cause in the given order.
+   */
+  disabledForNewStart(assistantIds: readonly AssistantId[]): string | undefined {
+    const rows = new Map(this.registry.list().map((a) => [a.id, a]));
+    const reasons: string[] = [];
+    for (const id of new Set(assistantIds)) {
+      const row = rows.get(id);
+      if (!row) { reasons.push(`${id} is not a configured assistant`); continue; }
+      const config = row.enabled !== 1;
+      const operator = row.operator_state === "disabled";
+      if (config && operator) reasons.push(`${id} is disabled in workspace config (assistants.${id}.enabled is false) and by operator (POST /api/assistants/${id}/enable clears only the operator disable)`);
+      else if (config) reasons.push(`${id} is disabled in workspace config (assistants.${id}.enabled is false)`);
+      else if (operator) reasons.push(`${id} is disabled by operator (POST /api/assistants/${id}/enable clears it)`);
+      // A runtime that requires conformance evidence fails closed here exactly as in route().
+      const conformance = conformanceBlock(this.db, this.config, row);
+      if (conformance) reasons.push(`${id}: ${conformance} (POST /api/assistants/${id}/test records it)`);
+    }
+    return reasons.length > 0 ? reasons.join("; ") : undefined;
   }
 
   /**
@@ -2407,6 +2736,16 @@ function firstResetsAt(event: NormalizedEvent): string | undefined {
  * A required check that ran and failed is a failure. Otherwise a blocked one (missing dependencies)
  * is reported as blocked, with the install command its summary carries.
  */
+/**
+ * An agent-user task never runs repository commands in the plane's session (G21): the verifier reports
+ * them `skipped`, and a required skip fails the run before acceptance, the real gate, can look at the
+ * work. So those checks are reported without being required there. Artifact checks still count.
+ */
+export function agentVerification<T extends { kind: string; required: boolean }>(checks: readonly T[], runAs: "agent" | undefined): T[] {
+  if (runAs !== "agent") return [...checks];
+  return checks.map((check) => (check.kind === "artifact_exists" ? check : { ...check, required: false }));
+}
+
 function verificationNotice(checks: VerificationCheckResult[]): string {
   const unmet = checks.filter((c) => c.required && c.status !== "passed" && !(c.status === undefined && c.passed));
   const blocked = unmet.filter((c) => c.status === "blocked");

@@ -1,7 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { boot, A, type Harness } from "./harness.js";
+import { boot, A, type Harness, showDiagnostics } from "./harness.js";
 
 let h: Harness;
 const captures = fileURLToPath(new URL("../../../docs/ui/assets/standalone-shell/", import.meta.url));
@@ -22,15 +22,18 @@ test.afterEach(async () => { await h.close(); });
 
 test("Shell route creates the same mission, retains draft, and reconciles the transcript after reload", async ({ context }) => {
   const page = await h.openApp(context);
+  await showDiagnostics(page);
   const errors: string[] = [];
   page.on("pageerror", e => errors.push(e.message));
-  await page.getByRole("link", { name: "Mission mode", exact: true }).click();
+  const nav = page.getByRole("navigation", { name: "System" });
+  await nav.getByRole("link", { name: "Missions", exact: true }).click();
   await expect(page).toHaveURL(/#\/shell$/);
+  await expect(nav.getByRole("link", { name: "Missions", exact: true })).toHaveAttribute("aria-current", "page");
   await expect(page.locator("#main-content")).toBeFocused();
   const goal = page.getByRole("textbox", { name: "What should Agentic OS do?" });
   await goal.fill("Inspect the workspace and summarize the result");
-  await page.getByRole("link", { name: "Operator mode", exact: true }).click();
-  await page.getByRole("link", { name: "Mission mode", exact: true }).click();
+  await nav.getByRole("link", { name: "Overview", exact: true }).click();
+  await nav.getByRole("link", { name: "Missions", exact: true }).click();
   await expect(goal).toHaveValue("Inspect the workspace and summarize the result");
   await page.setViewportSize({ width: 1440, height: 1000 });
   await capture(page, "new-mission-desktop");
@@ -71,6 +74,7 @@ test("Shell durable approval, identity, context evidence and responsive keyboard
   await api.post(`/api/tasks/${id}/start`, { data: { assistantId: A } });
   await expect.poll(async () => (await (await api.get(`/api/tasks/${id}/sessions`)).json())[0]?.sessionState).toBe("AWAITING_APPROVAL");
   const page = await h.openApp(context);
+  await showDiagnostics(page);
   await page.goto(`${h.origin}/#/shell/${id}`);
   await page.reload();
   const approval = page.getByRole("group", { name: "Mission approval" });
@@ -101,6 +105,7 @@ test("Shell durable approval, identity, context evidence and responsive keyboard
 
 test("Shell distinguishes loading, empty, unavailable history and failed selected reads", async ({ context }) => {
   const page = await h.openApp(context);
+  await showDiagnostics(page);
   await page.goto(`${h.origin}/#/shell`);
   await expect(page.getByText("No missions recorded yet.", { exact: true })).toBeVisible();
   await capture(page, "empty");
@@ -140,6 +145,7 @@ test("Shell reconciles after SSE reconnect and ignores unpersisted stream claims
     return route.continue();
   });
   const page = await h.openApp(context);
+  await showDiagnostics(page);
   await page.goto(`${h.origin}/#/shell/${task.taskId}`);
   await expect.poll(() => connections).toBeGreaterThanOrEqual(2);
   await expect(page.getByRole("heading", { name: "Reconcile streaming evidence", exact: true })).toBeVisible();

@@ -199,4 +199,16 @@ describe("runComposer: text guard", () => {
     const { result } = await run(baseInputs(), [{}], fakeHarnessModel(p));
     expect(stageOf(result, "harness_model").filters).toEqual([{ filter: "quota_blocked", removed: ["work-codex/example-codex-model"], reason: "quota blocked: rate_limit" }]);
   });
+
+  it("names the disable source: config (or no kind, as before), the operator overlay, or both", async () => {
+    const reasonFor = async (kinds: string[][]) => {
+      const filters = kinds.map((k) => ({ filter: "disabled" as const, assistantIds: ["work-codex"], ...(k.length ? { kinds: k } : {}) }));
+      const { result } = await run(baseInputs(), [{}], fakeHarnessModel(projection({ filters })));
+      return stageOf(result, "harness_model").filters.map((f) => f.reason);
+    };
+    expect(await reasonFor([[]])).toEqual(["disabled in workspace config"]);
+    expect(await reasonFor([["config"]])).toEqual(["disabled in workspace config"]);
+    expect(await reasonFor([["operator"]])).toEqual(["disabled by operator"]);
+    expect(await reasonFor([["config"], ["operator"]])).toEqual(["disabled in workspace config or by operator"]);
+  });
 });

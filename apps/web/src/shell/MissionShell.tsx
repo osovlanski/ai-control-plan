@@ -6,8 +6,8 @@ import { missionState, type Mission } from "../board/execution.js";
 import { describeState } from "../orbital.js";
 
 /** One persistent interaction layer, with an explicit target for every command. */
-export function MissionShell({ active, selected, snapshot, onStarted, onChanged, onOpen }: {
-  active: boolean; selected: Mission | null; snapshot: Snapshot | null;
+export function MissionShell({ active, selected, snapshot, onStarted, onChanged, onOpen, focusRequest = 0 }: {
+  active: boolean; focusRequest?: number; selected: Mission | null; snapshot: Snapshot | null;
   onStarted: (id: string) => void; onChanged: () => void; onOpen: () => void;
 }) {
   const [mode, setMode] = useState<"new" | "mission">("new");
@@ -19,7 +19,14 @@ export function MissionShell({ active, selected, snapshot, onStarted, onChanged,
       focusAfterStart.current = false;
     }
   }, [mode, selected?.id]);
-  return <section className="mission-shell command-surface" aria-label="Mission shell">
+  const surface = useRef<HTMLElement>(null);
+  // "Describe a goal" elsewhere on the page: switch to the composer and put the caret in it.
+  useEffect(() => {
+    if (!focusRequest) return;
+    setMode("new");
+    requestAnimationFrame(() => surface.current?.querySelector<HTMLTextAreaElement>(".shell-composer > textarea")?.focus());
+  }, [focusRequest]);
+  return <section ref={surface} className="mission-shell command-surface" aria-label="Mission shell">
     <div className="shell-modes" aria-label="Command target">
       <button type="button" aria-pressed={mode === "new"} onClick={() => setMode("new")}>New mission</button>
       <button ref={target} type="button" aria-pressed={mode === "mission"} disabled={!selected}

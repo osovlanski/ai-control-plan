@@ -4,16 +4,20 @@
  * turns that projection into the decision entry: candidates `<assistantId>/<modelId>`, filters
  * under fixed names with reasons written here from blocker kinds only, and the model source.
  */
+import { RUNTIME_KINDS } from "../runtime-kinds.js";
 import { overrideWhy, type RawCandidate, type RawFilter, type RawStage } from "./explain.js";
 import {
   HARNESS_FILTERS, type ComposedIntent, type ComposerInputs, type Harness, type HarnessFilterName, type HarnessModelChoice,
   type HarnessModelPort, type HarnessModelProjection,
 } from "./types.js";
 
-/** Provider → harness (§2 stage 2). A fake assistant's harness is the port's test-only option. */
-const PROVIDER_HARNESS: Readonly<Record<string, Harness>> = {
-  anthropic: "claude-code", openai: "codex", openrouter: "codex", cursor: "cursor", bedrock: "bedrock",
-};
+/**
+ * Provider → harness (§2 stage 2), derived from `RUNTIME_KINDS`. A fake assistant's harness is the
+ * port's test-only option, so the fake (no `harness` in its row) is absent here.
+ */
+const PROVIDER_HARNESS: Readonly<Record<string, Harness>> = Object.freeze(
+  Object.fromEntries(RUNTIME_KINDS.flatMap((k) => (k.harness ? [[k.provider, k.harness] as const] : []))),
+);
 
 /** The harness a provider's assistants run under, for the port; `undefined` for an unknown provider. */
 export function harnessForProvider(provider: string): Harness | undefined {
@@ -24,9 +28,12 @@ const KIND = /^[a-z][a-z0-9_-]{0,31}$/;
 const kindsOf = (kinds: readonly string[] | undefined) => [...new Set((kinds ?? []).filter((k) => KIND.test(k)))].sort();
 
 const FILTER_REASONS: Readonly<Record<HarnessFilterName, (kinds: string[]) => string>> = {
-  disabled: () => "disabled in workspace config",
+  // Kinds `config` and `operator` (the operator disable overlay); none reads as config, as before.
+  disabled: (k) => (k.includes("operator") ? (k.includes("config") ? "disabled in workspace config or by operator" : "disabled by operator") : "disabled in workspace config"),
   no_manifest: () => "no capability manifest (sync has not run)",
   auth: (k) => (k.length ? `auth ${k.join(", ")}` : "auth not ok"),
+  // Only an instance that requires version-bound conformance evidence (none shipped: G.3). Kinds are conformance states.
+  conformance: (k) => (k.length ? `conformance required: ${k.join(", ")}` : "conformance required"),
   no_filesystem: () => "no filesystem capability",
   no_shell: () => "no shell capability",
   repo_not_allowlisted: () => "repository path not in workspace allowlist",

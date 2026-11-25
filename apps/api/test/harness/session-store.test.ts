@@ -37,7 +37,7 @@ beforeEach(() => {
   db = openDb(join(dir, "t.db"));
   db.prepare("INSERT INTO assistants (id, provider) VALUES ('a1', 'fake')").run();
   db.prepare(
-    "INSERT INTO tasks (id, goal, envelope, created_at, updated_at) VALUES ('AG-1', 'g', '{}', 't', 't')",
+    "INSERT INTO tasks (id, goal, envelope, created_at, updated_at) VALUES ('AG-1', 'g', '{}', 't', 't'), ('AG-2', 'g', '{}', 't', 't')",
   ).run();
   clock = new Date("2026-01-01T00:00:00.000Z");
   store = new SessionStore(db, () => clock);
@@ -91,8 +91,9 @@ function completedResult(sessionId: string): ExecutionResult {
 }
 
 /** A PREPARED session plus the fencing lease its runner would hold. */
-function preparedWithLease(reqId = "erq_1"): { id: string; token: string } {
-  store.recordRequest(request({ executionRequestId: reqId }));
+function preparedWithLease(reqId = "erq_1", taskId = "AG-1"): { id: string; token: string } {
+  // A single task has one live owner (qcq-04a attempts): a second live session needs its own task.
+  store.recordRequest(request({ executionRequestId: reqId, taskId: taskId as TaskId, runSpec: { ...request().runSpec, taskId: taskId as TaskId } }));
   const id = store.createSession(reqId).sessionId as string;
   const token = store.acquireLease(id)!;
   return { id, token };
@@ -290,7 +291,7 @@ describe("CAS transitions under a live fencing lease (H-I12)", () => {
 
   it("voidAllLeases clears live leases and leaves terminal rows alone", () => {
     const { id, token } = preparedWithLease();
-    const { id: doneId, token: doneToken } = preparedWithLease("erq_done");
+    const { id: doneId, token: doneToken } = preparedWithLease("erq_done", "AG-2");
     driveToVerifying(doneId, doneToken);
     store.terminalize(doneId, {
       expectedVersion: 3,
@@ -504,7 +505,7 @@ describe("terminalize settles pending approvals", () => {
 describe("boot reconcile worklist", () => {
   it("liveSessions returns only non-terminal sessions", () => {
     const { id: live } = preparedWithLease("erq_live");
-    const { id: done, token } = preparedWithLease("erq_done");
+    const { id: done, token } = preparedWithLease("erq_done", "AG-2");
     driveToVerifying(done, token);
     store.terminalize(done, {
       expectedVersion: 3,

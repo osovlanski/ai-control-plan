@@ -1,5 +1,6 @@
 import { HandoffService } from './handoff.js';
 import { runSessionRefStored } from '../usage.js';
+import { AttemptStore, announceReleased, enterProvider, type EntryResult, type Released } from '../attempts.js';
 /**
  * SessionStore — durable substrate for the Execution Harness (Phase 1).
  *
@@ -28,6 +29,7 @@ import {
   canonicalRequestProjection,
   isSessionTerminal,
   newExecutionSessionId,
+  normalizeReportedEffort,
   outcomeOf,
   requestFingerprint,
 } from "@agent-plane/core";
@@ -316,7 +318,43 @@ export class SessionStore {
       if (raced) return raced;
       throw err;
     }
+    this.bindAttempt(sessionId as string, req.task_id, req.assistant_id, dispatch ? executionRequestId : undefined);
     return this.get(sessionId as string)!;
+  }
+
+  /**
+   * qcq-04a (packet 2.12): every Harness session is carried by an attempt from the moment its row
+   * exists, so the provider-entry commit has an attempt to move. A dispatch already has its compat
+   * attempt (written at the wake): the session binds to it. A direct start or a composed candidate
+   * gets its compat attempt here, `held`, with no requirement, in the session's insert transaction.
+   */
+  private bindAttempt(sessionId: string, taskId: string, assistantId: string, dispatchId: string | undefined): void {
+    const attempts = new AttemptStore(this.db, this.now);
+    const task = this.db.prepare("SELECT mode, run_as FROM tasks WHERE id = ?").get(taskId) as { mode: string; run_as: string | null };
+    const runAs = task.run_as === "agent" ? "agent" as const : "plane" as const;
+    if (dispatchId) {
+      let attempt = attempts.forDispatch(dispatchId);
+      if (!attempt) {
+        // A dispatch reserved before the upgrade with no claim (packet 2.3.1 gives it no attempt).
+        announceReleased(this.db, attempts.settleIdle(taskId, "runtime", "session: no execution owner"));
+        attempt = attempts.createHeld({ taskId, kind: "dispatch", path: "harness", slot: 0, dispatchId, runAs, assistantId, reason: "compat: pre-upgrade dispatch" });
+      }
+      attempts.bindSession(attempt.attempt_id, sessionId, false);
+      return;
+    }
+    const single = task.mode === "single";
+    // A finished predecessor in the slot is settled first, by the same ownership test K4b releases by.
+    if (single) announceReleased(this.db, attempts.settleIdle(taskId, "runtime", "session: no execution owner"));
+    attempts.createHeld({ taskId, kind: single ? "direct" : "candidate", path: "harness", slot: single ? 0 : attempts.nextCandidateSlot(taskId),
+      sessionId, runAs, assistantId, reason: "compat: Harness start" });
+  }
+
+  /**
+   * The provider-entry commit for this session (packet 2.4.1, ownership-only in qcq-04a). The
+   * runner's next statement is the adapter call, guarded by `.ok`.
+   */
+  enterProvider(sessionId: string, leaseToken: string): EntryResult {
+    return enterProvider(this.db, { sessionId, path: "harness", leaseToken }, this.now);
   }
 
   get(sessionId: string): ExecutionSession | undefined {
@@ -392,6 +430,11 @@ export class SessionStore {
       );
     }
     if (input.patch?.providerSessionRef) runSessionRefStored(this.db, sessionId);
+    // qcq-04a: the provider returned its handle (or the session reached RUNNING), so the entered
+    // attempt is `live` (packet 2.1). Never moves anything but `starting`.
+    if (input.patch?.providerStartAcked || (input.from === "STARTING" && input.to === "RUNNING")) {
+      this.db.prepare("UPDATE execution_attempts SET state = 'live', updated_at = ? WHERE session_id = ? AND state = 'starting'").run(this.iso(), sessionId);
+    }
     const origin = this.db.prepare(`SELECT er.id, er.origin_envelope_id FROM execution_requests er JOIN runs r ON r.execution_request_id = er.id WHERE r.id = ?`).get(sessionId) as { id: string; origin_envelope_id: string | null };
     if (origin?.origin_envelope_id) {
       const handoff = new HandoffService(this.db, this.now);
@@ -433,8 +476,12 @@ export class SessionStore {
     if (input.result.outcome !== outcomeOf(input.to)) {
       throw new Error(`result.outcome ${input.result.outcome} != derived ${outcomeOf(input.to)}`);
     }
+    let released: Released[] = [];
     const tx = this.db.transaction(() => {
       this.transition(sessionId, { ...input, claimSettlement: input.settlementOwner });
+      // The session-terminal rule (packet 2.1): a session that ends without the provider-entry commit
+      // drops its `held` attempt and releases its claims, in this same transaction.
+      released = new AttemptStore(this.db, this.now).sessionEnded(sessionId);
       this.db
         .prepare(
           `INSERT INTO execution_results (session_id, terminal_state, outcome, result, at)
@@ -445,6 +492,7 @@ export class SessionStore {
       input.extra?.(this.db);
     });
     tx();
+    announceReleased(this.db, released);
     this.committed(sessionId);
     return input.result;
   }
@@ -513,6 +561,22 @@ export class SessionStore {
     this.db
       .prepare("UPDATE runs SET harness_cli_version = ? WHERE id = ? AND harness_cli_version IS NULL")
       .run(version.trim(), sessionId);
+  }
+
+  /**
+   * Record the reasoning effort the PROVIDER reported on `run.started` (P1-5, migration 057).
+   * Evidence-only and write-once like `recordResolvedModel`: the first report wins, and a value
+   * that is not a short effort token is ignored so the column stays NULL (effort `unknown`)
+   * rather than holding a guess. Never called with a requested or profile-chosen effort.
+   */
+  recordReportedEffort(sessionId: string, effort: unknown): void {
+    const value = normalizeReportedEffort(effort);
+    if (value === undefined) return;
+    this.db
+      .prepare(
+        "UPDATE runs SET effort_reported = ?, effort_reported_source = 'run.started' WHERE id = ? AND effort_reported IS NULL",
+      )
+      .run(value, sessionId);
   }
 
   ackHandle(

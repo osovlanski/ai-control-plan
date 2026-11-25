@@ -2,7 +2,7 @@
  * M3 S5b: the optional `codex debug prompt-input` probe. Injected runs pin the checks; the real
  * binary from node_modules pins the probe facts. No credentials, no model request.
  */
-import { existsSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { accessSync, constants, existsSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -193,7 +193,11 @@ function pinnedCodex(): string | undefined {
     const sdk = createRequire(join(realpathSync(fileURLToPath(new URL("../node_modules/@openai/codex-sdk", import.meta.url))), "dist/index.js"));
     const cli = createRequire(sdk.resolve("@openai/codex/package.json"));
     const bin = join(dirname(cli.resolve(`@openai/codex-${process.platform}-${process.arch}/package.json`)), `vendor/${triple}/bin/codex`);
-    return existsSync(bin) ? bin : undefined;
+    // Present is not enough: where the tree cannot run a vendored native binary (the autopilot
+    // acceptance sandbox, G15 attempt 10: spawn EACCES) this check cannot run either, so it skips like a missing binary.
+    if (!existsSync(bin)) return undefined;
+    accessSync(bin, constants.X_OK);
+    return bin;
   } catch {
     return undefined;
   }

@@ -6,9 +6,12 @@ import { onAuthExpired } from "./auth.js";
 import { StandaloneShell } from "./shell/StandaloneShell.js";
 import { Catalog } from "./shell/Agents.js";
 import { ApplicationWorkspace } from "./shell/ApplicationWorkspace.js";
-import { APPLICATIONS, readRoute, useShellRoute } from "./shell/routes.js";
+import { NAVIGATION, navigationScreen, readRoute, useShellRoute } from "./shell/routes.js";
 import { ShellView } from "./shell-view/ShellView.js";
 import { useOverviewView } from "./shell-view/viewMode.js";
+import { About } from "./shell/About.js";
+
+type NavItem = { screen: string; label: string; icon: string };
 
 /** Scheduler ownership as the system health signal — read, never inferred. */
 function SystemHealth() {
@@ -40,10 +43,17 @@ function SystemHealth() {
   );
 }
 
+function NavLink({ item, current }: { item: NavItem; current: boolean }) {
+  return <a className="os-nav" href={`#/${item.screen}`} aria-current={current ? "page" : undefined}>
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d={item.icon} /></svg>
+    <span>{item.label}</span>
+  </a>;
+}
+
 export function App() {
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
   const [rawRoute] = useShellRoute();
-  // Keep the legacy route and normalize the Mission mode alias at the application boundary.
+  // Keep the legacy route and normalize the `#/mission` alias at the application boundary.
   const route = rawRoute.key === "mission" || rawRoute.key.startsWith("mission/")
     ? readRoute(`#/shell${rawRoute.key.slice("mission".length)}`) : rawRoute;
   const [view, setView] = useOverviewView();
@@ -51,8 +61,13 @@ export function App() {
   const [expired, setExpired] = useState(false);
   const main = useRef<HTMLElement>(null);
   const previousRoute = useRef(readRoute().key);
-  const application = route.screen === "mission" ? "overview" : route.screen;
-  const label = route.screen === "shell" ? "Mission" : APPLICATIONS.find(a => a.screen === application)?.label ?? "Page unavailable";
+  const current = navigationScreen(route);
+  const label = [...NAVIGATION.primary, ...NAVIGATION.system].find(n => n.screen === current)?.label ?? "Page unavailable";
+  // Narrow screens show the daily destinations; the system group opens from More.
+  const [more, setMore] = useState(false);
+  const moreButton = useRef<HTMLButtonElement>(null);
+  const inSystem = NAVIGATION.system.some(n => n.screen === current);
+  useEffect(() => { setMore(false); }, [route.key]);
 
   useEffect(() => {
     document.documentElement.classList.toggle("shell-overview", route.screen === "overview" && view === "shell");
@@ -78,19 +93,28 @@ export function App() {
   if (expired) return <div className="os-expired">
     <h1>Session expired — re-open with <code>pnpm --filter @agent-plane/api open</code></h1>
   </div>;
-  return <div className={`os-shell ${route.screen === "shell" ? "is-shell-mode" : ""}`}>
+  return <div className={`os-shell${route.screen === "shell" ? " is-shell-mode" : ""}`}>
     <a className="skip-link" href="#main-content" onClick={e => { e.preventDefault(); main.current?.focus(); }}>Skip to workspace</a>
     <div className="os-environment" aria-hidden="true" />
-    <aside className="os-rail" hidden={route.screen === "shell"}>
+    <aside className="os-rail">
       <div className="os-identity"><div className="os-mark" aria-hidden="true" />
         <div><strong>Agentic <em>OS</em></strong><span>A workspace for AI work</span></div>
       </div>
-      <nav aria-label="System">
-        {APPLICATIONS.map(n => <a key={n.screen} className="os-nav" href={`#/${n.screen}`}
-          aria-current={application === n.screen ? "page" : undefined}>
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d={n.icon} /></svg>
-          <span>{n.label}</span>
-        </a>)}
+      <nav aria-label="System" onKeyDown={e => {
+        if (e.key === "Escape" && more) { setMore(false); moreButton.current?.focus(); }
+      }}>
+        <div className="os-nav-primary">
+          {NAVIGATION.primary.map(n => <NavLink key={n.screen} item={n} current={current === n.screen} />)}
+          <button type="button" ref={moreButton} className={`os-nav os-nav-more${inSystem ? " is-current" : ""}`}
+            aria-expanded={more} aria-controls="os-nav-system" onClick={() => setMore(m => !m)}>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h.01M12 12h.01M19 12h.01" /></svg>
+            <span>More</span>
+          </button>
+        </div>
+        <div id="os-nav-system" className={`os-nav-system${more ? " is-open" : ""}`}>
+          <span className="os-nav-group" aria-hidden="true">System</span>
+          {NAVIGATION.system.map(n => <NavLink key={n.screen} item={n} current={current === n.screen} />)}
+        </div>
       </nav>
       <div className="os-rail-foot"><span>Local workspace<br />You stay in command.</span></div>
     </aside>
@@ -101,7 +125,6 @@ export function App() {
           <button type="button" aria-pressed={view === "orbit"} onClick={() => setView("orbit")}>Orbit</button>
           <button type="button" aria-pressed={view === "shell"} onClick={() => setView("shell")}>Shell</button>
         </div>}
-        <a className="btn" href={route.screen === "shell" ? "#/overview" : "#/shell"}>{route.screen === "shell" ? "Operator mode" : "Mission mode"}</a>
         {workspace && <span className="os-workspace">{workspace.workspace}</span>}
         <SystemHealth />
       </header>
@@ -119,7 +142,8 @@ export function App() {
           onBack={() => { window.location.hash = "/overview"; }} />}
         {route.screen === "agents" && <><div className="application-heading"><h1>Agents</h1>
           <p>Configured environments and their observed capabilities. Missions route automatically.</p></div><Catalog /></>}
-        {route.screen !== "overview" && route.screen !== "mission" && route.screen !== "shell" && route.screen !== "agents" &&
+        {route.screen === "about" && <About />}
+        {route.screen !== "overview" && route.screen !== "mission" && route.screen !== "shell" && route.screen !== "agents" && route.screen !== "about" &&
           <ApplicationWorkspace screen={route.screen} workspace={workspace} />}
       </main>
     </div>

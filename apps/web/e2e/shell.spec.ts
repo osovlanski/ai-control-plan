@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { boot, A, type Harness } from "./harness.js";
+import { boot, A, type Harness, showDiagnostics } from "./harness.js";
 
 let h: Harness;
 test.beforeEach(async () => {
@@ -10,13 +10,13 @@ test.beforeEach(async () => {
 });
 test.afterEach(async () => { await h.close(); });
 
-test("seven routes, keyboard focus, private draft retention, history and reload", async ({ context }) => {
+test("nine destinations, keyboard focus, private draft retention, history and reload", async ({ context }) => {
   const page = await h.openApp(context);
   const nav = page.getByRole("navigation", { name: "System" });
-  await expect(nav.getByRole("link")).toHaveCount(7);
+  await expect(nav.getByRole("link")).toHaveCount(9);
   await page.keyboard.press("Tab");
   await expect(page.getByRole("link", { name: "Skip to workspace", exact: true })).toBeFocused();
-  for (const label of ["Overview", "Agents", "Memory", "Routing", "Traces", "Tools", "Settings"]) {
+  for (const label of ["Overview", "Missions", "Agents", "Memory", "Routing", "Traces", "Tools", "Settings", "About"]) {
     await page.keyboard.press("Tab");
     await expect(nav.getByRole("link", { name: label, exact: true })).toBeFocused();
   }
@@ -47,6 +47,7 @@ test("seven routes, keyboard focus, private draft retention, history and reload"
 
 test("inline preview never executes, starts real mission in orbit, and reload preserves diagnostics", async ({ context }, info) => {
   const page = await h.openApp(context);
+  await showDiagnostics(page);
   await page.getByRole("textbox", { name: "What should Agentic OS do?" }).fill("Inspect retry behavior");
   await page.getByLabel("Mission shell").getByText("Context & constraints", { exact: true }).click();
   await page.getByRole("textbox", { name: "Constraints (one per line)", exact: true }).fill("Keep API compatibility");
@@ -81,6 +82,7 @@ for (const decision of ["Approve", "Deny"] as const) test(`shell ${decision} use
   await api.post(`/api/tasks/${id}/start`, { data: { assistantId: A } });
   await expect.poll(async () => (await (await api.get(`/api/tasks/${id}/sessions`)).json())[0]?.sessionState).toBe("AWAITING_APPROVAL");
   const page = await h.openApp(context);
+  await showDiagnostics(page);
   await page.reload();
   await page.getByRole("button", { name: /Select task: Review migration/ }).click();
   await page.getByRole("button", { name: "Selected mission", exact: true }).click();
@@ -96,13 +98,24 @@ for (const decision of ["Approve", "Deny"] as const) test(`shell ${decision} use
 
 test("responsive empty shell and failed reads stay truthful with reduced motion", async ({ context }, info) => {
   const page = await h.openApp(context);
+  await showDiagnostics(page);
   await page.emulateMedia({ reducedMotion: "reduce" });
-  await expect(page.getByRole("heading", { name: "Your first mission starts here." })).toBeVisible();
+  await expect(page.getByRole("region", { name: "Selected task inspector" }).getByRole("heading", { name: "Your first mission starts here." })).toBeVisible();
   for (const width of [1440, 1280, 900, 390, 320]) {
     await page.setViewportSize({ width, height: 900 });
     await expect(page.getByRole("button", { name: "Preview routing", exact: true })).toBeInViewport();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    for (const link of await page.getByRole("navigation", { name: "System" }).getByRole("link").all()) await expect(link).toBeInViewport();
+    const nav = page.getByRole("navigation", { name: "System" });
+    const more = nav.getByRole("button", { name: "More", exact: true });
+    // Narrow screens show the daily row; the system group is one More away.
+    if (width <= 760) {
+      await expect(nav.getByRole("link")).toHaveCount(3);
+      await more.click();
+      await expect(more).toHaveAttribute("aria-expanded", "true");
+    } else await expect(more).toBeHidden();
+    await expect(nav.getByRole("link")).toHaveCount(9);
+    for (const link of await nav.getByRole("link").all()) await expect(link).toBeInViewport();
+    if (width <= 760) { await page.keyboard.press("Escape"); await expect(more).toBeFocused(); await expect(more).toHaveAttribute("aria-expanded", "false"); }
     await page.screenshot({ path: info.outputPath(`empty-${width}.png`), fullPage: true });
   }
   expect(await page.evaluate(() => document.getAnimations().filter(a => a.playState === "running" && a.effect?.getTiming().iterations === Infinity).length)).toBe(0);
@@ -116,16 +129,17 @@ test("responsive empty shell and failed reads stay truthful with reduced motion"
 
 test("loading and unavailable discovery are explicit", async ({ context }, info) => {
   const page = await h.openApp(context);
+  await showDiagnostics(page);
   let release!: () => void;
   const gate = new Promise<void>(resolve => { release = resolve; });
   await context.route("**/api/tasks", async route => { await gate; await route.continue(); });
   await page.reload({ waitUntil: "domcontentloaded" });
   try {
-    await expect(page.getByRole("heading", { name: "Reading your workspace…" })).toBeVisible();
+    await expect(page.getByRole("region", { name: "Selected task inspector" }).getByRole("heading", { name: "Reading your workspace…" })).toBeVisible();
     await expect(page.getByRole("region", { name: "Mission register", exact: true })).toContainText("Reading mission register…");
     await page.screenshot({ path: info.outputPath("review-loading.png"), fullPage: true });
   } finally { release(); }
-  await expect(page.getByRole("heading", { name: "Your first mission starts here." })).toBeVisible();
+  await expect(page.getByRole("region", { name: "Selected task inspector" }).getByRole("heading", { name: "Your first mission starts here." })).toBeVisible();
   await context.route("**/api/assistants", route => route.fulfill({ status: 503, json: { error: "Discovery unavailable" } }));
   await page.reload();
   await expect(page.getByText(/Unavailable reads: Provider discovery/)).toBeVisible();
@@ -135,6 +149,7 @@ test("loading and unavailable discovery are explicit", async ({ context }, info)
 
 test("missing mission and routing failure report errors without execution", async ({ context }) => {
   const page = await h.openApp(context);
+  await showDiagnostics(page);
   await page.getByRole("textbox", { name: "What should Agentic OS do?" }).fill("Keep the draft if routing is unavailable");
   await context.route("**/api/tasks/*/route", route => route.fulfill({ status: 503, json: { error: "Routing temporarily unavailable" } }));
   await page.getByRole("button", { name: "Preview routing", exact: true }).click();
@@ -153,6 +168,7 @@ test("unavailable task snapshots stop motion and returning to Overview refetches
   const mission = h.built.tasks.create({ goal: "Check route ownership" });
   h.built.tasks.transition(mission.taskId, "ROUTING");
   const page = await h.openApp(context);
+  await showDiagnostics(page);
   await expect(page.locator(".orbital-body.moving")).toHaveCount(1);
   await context.route("**/api/tasks", route => route.fulfill({ status: 503, json: { error: "Snapshot unavailable" } }));
   await expect(page.getByRole("alert")).toContainText("Task refresh failed", { timeout: 10000 });

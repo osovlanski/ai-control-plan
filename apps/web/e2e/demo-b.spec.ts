@@ -42,7 +42,7 @@ import {
   type RoutingProfile,
 } from "@agent-plane/core";
 import type { CatalogObservation, CatalogSource } from "../../api/src/modules/model-catalog.js";
-import { boot, Clock, type Harness } from "./harness.js";
+import { boot, Clock, type Harness, showDiagnostics } from "./harness.js";
 
 const A = "fake-a" as AssistantId; // advertises premium-max + swift-mini
 const B = "fake-b" as AssistantId; // advertises swift-mini only
@@ -163,6 +163,7 @@ function recordCodingRun(taskId: string, assistantId: string, resolved: string):
 }
 
 test.beforeAll(async () => {
+  const clock = new Clock();
   h = await boot(
     4179,
     "demo-b",
@@ -171,10 +172,12 @@ test.beforeAll(async () => {
       [B]: { provider: "fake", accountKind: "api", options: { models: [{ id: SWIFT }] } },
       [C]: { provider: "fake", accountKind: "api", options: { models: [{ id: ALIAS }] } },
     },
-    new Clock(),
+    clock,
     (config) => {
       // K13 ships SHADOW. Demo B never flips this — the point is real evidence.
       config.models.selection.enabled = false;
+      // The scripted benchmark represents the fake provider's base configuration.
+      config.models.selection.baseConfigAttestedAt = clock.current.toISOString();
       config.execution = { harnessModes: { single: true } };
     },
     new Map(),
@@ -322,6 +325,7 @@ async function assertReferenceComposition(page: Page) {
 test("Demo B/1: deterministic SHADOW recommendation, and the provider request proves execution was untouched", async ({ context }, testInfo) => {
   const consoleErrors: string[] = [];
   const page = await h.openApp(context);
+  await showDiagnostics(page);
   page.on("console", (m) => m.type() === "error" && consoleErrors.push(m.text()));
   page.on("pageerror", (e) => consoleErrors.push(String(e)));
   await page.setViewportSize({ width: 1440, height: 900 });
@@ -359,7 +363,7 @@ test("Demo B/1: deterministic SHADOW recommendation, and the provider request pr
   // --- the operator surface ---------------------------------------------------
   const inspector = await selectAndOpenDecision(page, taskId);
   await expect(inspector.getByText("Shadow model recommendation")).toBeVisible();
-  await expect(inspector.getByText(/Current execution:/)).toContainText("unchanged");
+  await expect(inspector.locator(".decision-evidence").getByText(/Execution request:/)).toContainText("unchanged");
   await expect(inspector.getByText(/Because:/)).toBeVisible();
   await expect(inspector.getByText("external:artificial-analysis").first()).toBeVisible();
   await expect(inspector.getByText(/Identity: catalog-exact/)).toBeVisible();
@@ -497,6 +501,7 @@ test("Demo B/1: deterministic SHADOW recommendation, and the provider request pr
 test("Demo B/2: an excellent-scoring candidate that fails a hard filter cannot be recommended", async ({ context }, testInfo) => {
   const consoleErrors: string[] = [];
   const page = await h.openApp(context);
+  await showDiagnostics(page);
   page.on("console", (m) => m.type() === "error" && consoleErrors.push(m.text()));
   page.on("pageerror", (e) => consoleErrors.push(String(e)));
   await page.setViewportSize({ width: 1440, height: 900 });
@@ -566,6 +571,7 @@ test("Demo B/2: an excellent-scoring candidate that fails a hard filter cannot b
 test("Demo B/3: a runtime selector whose benchmark identity is unproven shows priorMissing, and execution still works", async ({ context }, testInfo) => {
   const consoleErrors: string[] = [];
   const page = await h.openApp(context);
+  await showDiagnostics(page);
   page.on("console", (m) => m.type() === "error" && consoleErrors.push(m.text()));
   page.on("pageerror", (e) => consoleErrors.push(String(e)));
   await page.setViewportSize({ width: 1440, height: 900 });
@@ -614,6 +620,7 @@ test("Demo B/3: a runtime selector whose benchmark identity is unproven shows pr
 test("Demo B/4: ACTUAL and SHADOW that share one model stay independently visible", async ({ context }, testInfo) => {
   const consoleErrors: string[] = [];
   const page = await h.openApp(context);
+  await showDiagnostics(page);
   page.on("console", (m) => m.type() === "error" && consoleErrors.push(m.text()));
   page.on("pageerror", (e) => consoleErrors.push(String(e)));
   await page.setViewportSize({ width: 1440, height: 900 });
@@ -691,6 +698,8 @@ test("Demo B/5: a cancelled mission never shows 'will execute' for ACTUAL", asyn
   h.built.tasks.transition(taskId, "CANCELLED");
 
   const page = await h.openApp(context);
+
+  await showDiagnostics(page);
   page.on("console", (m) => m.type() === "error" && consoleErrors.push(m.text()));
   page.on("pageerror", (e) => consoleErrors.push(String(e)));
   await page.setViewportSize({ width: 1440, height: 900 });

@@ -34,7 +34,63 @@
 // `GET /api/tasks` element and every SSE `state` frame (task-stage v1,
 // docs/contracts/task-stage-v1.md), derived in core by `deriveStage`. No new
 // route or capability; a client written before 2.9 ignores the field.
-export const CONTROL_PLANE_API_VERSION = "2.9";
+// 2.10 (additive, Agent Runtime Registry PR 3, agent-runtime v1, docs/contracts/agent-runtime-v1.md):
+// `GET /api/runtimes/catalog` and `GET /api/assistants/:id/lifecycle` (`tasks.read`), a
+// `lifecycle` field on every `GET /api/assistants` element, and the operator disable overlay
+// `POST /api/assistants/:id/disable` / `enable` (`commands.write`). Every earlier field keeps its
+// meaning (`enabled` is still config `enabled`). No new capability, so no credential rotation.
+// 2.11 (additive, Agent Runtime Registry PR 4, agent-runtime v1.1): `POST /api/assistants/:id/test`
+// (`commands.write`), the credential-free, quota-free conformance probe that writes one version-bound
+// `runtime_conformance` row; `core.auth.state` gains `unknown` (installed, sign-in not verified;
+// ineligible like every state but `ok`); a runtime that requires conformance is routed only with a
+// passing row for the observed CLI and descriptor version (no shipped runtime requires it).
+// 2.12 (additive, tlm-02a): `GET /api/tasks/:id/provenance` (`sessions.read`), the cross-record
+// joins of a task's runs, routing decisions, dispatches, checkpoints, handoff records and Harness
+// envelopes, each naming its source (`inferred` joins follow the rules the response states).
+// No earlier response changes; no new capability.
+// 2.13 (additive, tlm-02b): task links to GitHub issues and pull requests. `GET /api/tasks/:id/links`
+// and `GET /api/task-links?repo=&number=` (`tasks.read`); `POST /api/tasks/:id/links` and
+// `DELETE /api/tasks/:id/links/:linkId` (`commands.write`). Each link lists its evidence by source:
+// `operator` (a recorded claim, not checked against GitHub), or `autopilot_publication` /
+// `autopilot_duplicate` derived from the P0-5 records. No earlier response changes; no new capability.
+// 2.14 (additive, mcp-api-grants, docs/adr/mcp-connector.md): capabilities `tasks.create` and
+// `tasks.start` gate `POST /api/tasks` and `POST /api/tasks/:id/start`; `commands.write` implies
+// both, so every existing credential and browser session keeps working. Both routes take an
+// optional `idempotencyKey` (same key + same input replays the first response with `replayed: true`,
+// different input is 409 `idempotency_conflict`). Create takes `repo` (an `mcp.repos` alias mapped to
+// an exact allowlisted path) and `propose: true` (returns the route the plane would take); start
+// takes `confirm: { assistantId?, compositionDigest? }` and refuses with 409 `route_changed` when the
+// fresh route disagrees. Both answer `webLink` when `mcp.webOrigin` is configured. A credential
+// without `commands.write` must use `repo` and `idempotencyKey` and may send no other knobs. Named
+// credentials (`api-credential.<name>.json`) rotate on their own; rotating the main one leaves them.
+// 2.15 (additive, qcq-01, docs/contracts/run-estimate-v1.md): `GET /api/tasks/:id/estimate` and
+// `GET /api/estimates/accuracy` (`routing.read`). ADVISORY: a run estimate (runtime, model, effort,
+// token ranges, duration, wait until start, approval wait, API spend vs API-equivalent vs subscription
+// quota, confidence, evidence) and a scheduling recommendation over the workspace's `scheduling` hours.
+// No dispatch, budget or schedule reads them. No earlier response changes; no new capability.
+// 2.16 (additive, qcq-02, run-estimate v1 §Recorded): each run start stores the estimate as it stood
+// then (migration 056 `run_estimates`, append-only, record-only). `GET /api/tasks/:id/estimates/recorded`
+// serves them joined to each run's actual, and `GET /api/estimates/accuracy?source=recorded` scores
+// them (default `source=replay` is unchanged). No dispatch reads the stored rows; no new capability.
+// 2.17 (additive, MCP get_task follow-up to C2): `GET /api/tasks/:id` (`tasks.read`) also serves
+// `stage` (task stage v1, as on the list), `pendingApprovals` (Harness approvals still `pending`
+// plus live legacy runs whose newest event is `approval.requested`; a count, never the approval),
+// `verification` (`{ sessionId, verificationRunId, runState, passed, checks: { passed, failed,
+// skipped, blocked } }` for the latest verification run of the latest Harness session, or null) and
+// `webLink` when `mcp.webOrigin` is configured. No earlier field changes; no new capability.
+// 2.18 (additive, P1-5 effort cohorts): each run in `GET /api/tasks/:id` carries
+// `modelIdentity.reportedEffort` (the effort the provider reported on `run.started`, or null) and
+// `modelIdentity.reportedEffortSource` (`run.started` | `unknown`). In a routing decision's
+// `modelRecommendation`, each candidate's `identity.effort` is the effort its own runs bind (or
+// `unknown`), telemetry cohorts also carry `assistantId` and `effort`, and `effortPlan` records the
+// effort the routing profile would choose per assistant (shadow: no adapter receives it). No
+// earlier field changes; no new capability.
+// 2.19 (additive, qcq-04a execution attempts): `GET /api/tasks/:id` and `GET /api/tasks/:id/wait`
+// also serve `attempts`: the task's open execution attempts (`attemptId`, `kind`, `executionPath`,
+// `slot`, `state`, `assistantId`, `dispatchId`, `sessionId`, `account`, `enteredAt`, `requirements`,
+// `claims`). `resourceClaim` keeps its K4b value. Scheduler events gain `attempt.entered`,
+// `attempt.dropped` and `attempt.settled`. No dispatch outcome changes; no new capability.
+export const CONTROL_PLANE_API_VERSION = "2.19";
 export const NORMALIZED_EVENT_VERSION = "1.0";
 
 export const OBSERVABILITY_CAPABILITIES = [
@@ -66,6 +122,20 @@ export const OBSERVABILITY_CAPABILITIES = [
 export const BROWSER_OPTIONAL_CAPABILITIES = ["telemetry.read", "memory.read"] as const;
 
 export const COMMAND_CAPABILITIES = ["commands.write"] as const;
+
+// 2.14 (mcp-api-grants): narrow task commands. `commands.write` implies each of them (see
+// `capabilityGranted`), so they are only ever listed on a credential that lacks `commands.write`.
+export const TASK_COMMAND_CAPABILITIES = ["tasks.create", "tasks.start"] as const;
+export type TaskCommandCapability = (typeof TASK_COMMAND_CAPABILITIES)[number];
+
+/** The credential the MCP service holds (docs/adr/mcp-connector.md D-C): read, create, start. Nothing else. */
+export const MCP_CREDENTIAL_CAPABILITIES = ["tasks.read", ...TASK_COMMAND_CAPABILITIES] as const;
+
+/** True when `held` grants `required`. `commands.write` implies the narrow task commands. */
+export function capabilityGranted(held: readonly string[], required: string): boolean {
+  if (held.includes(required)) return true;
+  return (TASK_COMMAND_CAPABILITIES as readonly string[]).includes(required) && held.includes("commands.write");
+}
 
 // M1: `usage.write` is its own set so an importer (Cockpit M11) can post usage
 // without driving tasks, and so a browser session (which requests only

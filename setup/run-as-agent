@@ -15,7 +15,7 @@ set -euo pipefail
 umask 007
 export XDG_RUNTIME_DIR="/run/user/$(id -u)"
 export HOME="$(getent passwd "$(id -u)" | cut -d: -f6)"
-export PATH=/usr/local/bin:/usr/bin:/bin
+export PATH=/opt/aos-tools/bin:/usr/local/bin:/usr/bin:/bin
 WORKTREES=/var/lib/aos/worktrees
 mode="${1:-}"; id="${2:-}"
 [[ "$id" =~ ^[A-Za-z0-9_-]{1,64}$ ]] || { echo "run-as-agent: bad id" >&2; exit 64; }

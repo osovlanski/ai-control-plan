@@ -1,21 +1,9 @@
 import type { AgentAdapter, AssistantId, CapabilityManifest } from "@agent-plane/core";
-import {
-  BedrockAdapter,
-  ClaudeAdapter,
-  CodexAdapter,
-  CursorAdapter,
-  FakeAdapter,
-  OpenRouterCodexAdapter,
-  type BedrockOptions,
-  type CursorOptions,
-  type FakeOptions,
-  type OpenRouterOptions,
-  type AgentLauncher,
-  type ClaudeLaunchProfile,
-} from "@agent-plane/adapters";
+import type { ClaudeLaunchProfile } from "@agent-plane/adapters";
 import { agentLauncher, type ResolvedConfig } from "../config.js";
 import type { Db } from "../db/index.js";
 import { probeCapability, type CapabilityProbe } from "./capability-probe.js";
+import { createAdapter } from "./runtime-catalog.js";
 
 export interface AssistantRow {
   id: string;
@@ -24,7 +12,15 @@ export interface AssistantRow {
   enabled: number;
   manifest: string | null;
   manifest_updated_at: string | null;
+  /** Operator overlay (migration 051): `disabled`, or NULL for no operator opinion. Config `enabled` is separate. */
+  operator_state: string | null;
+  operator_state_at: string | null;
 }
+
+const ASSISTANT_COLUMNS = "SELECT id, provider, tier, enabled, manifest, manifest_updated_at, operator_state, operator_state_at FROM assistants";
+
+/** The operator overlay as the API names it. There is no operator `enabled`: the overlay can only remove. */
+export type OperatorState = "none" | "disabled";
 
 /**
  * Assistant registry: seeds instances from workspace config, holds the
@@ -49,22 +45,20 @@ export class Registry {
     for (const [id, cfg] of Object.entries(this.config.assistants)) {
       this.adapters.set(
         id,
-        createAdapter(id as AssistantId, cfg.provider, cfg.options ?? {}, this.config.sessionInput.enabled,
+        createAdapter(id as AssistantId, cfg.provider, cfg.options ?? {}, {
+          sessionInputEnabled: this.config.sessionInput.enabled,
           // server configs are checked by the CLI at launch; config only checks their shape
-          this.config.execution.providerProfile as ClaudeLaunchProfile | undefined,
-          this.config.execution.agentUser ? agentLauncher(this.config.execution.agentUser) : undefined),
+          providerProfile: this.config.execution.providerProfile as ClaudeLaunchProfile | undefined,
+          agentLauncher: this.config.execution.agentUser ? agentLauncher(this.config.execution.agentUser) : undefined,
+        }),
       );
       upsert.run(id, cfg.provider, cfg.enabled === false ? 0 : 1);
     }
     // Config removals: disable rows for assistants no longer configured.
     const known = Object.keys(this.config.assistants);
-    if (known.length > 0) {
-      this.db
-        .prepare(
-          `UPDATE assistants SET enabled = 0 WHERE id NOT IN (${known.map(() => "?").join(",")})`,
-        )
-        .run(...known);
-    }
+    this.db
+      .prepare(`UPDATE assistants SET enabled = 0${known.length > 0 ? ` WHERE id NOT IN (${known.map(() => "?").join(",")})` : ""}`)
+      .run(...known);
   }
 
   adapter(id: string): AgentAdapter {
@@ -74,13 +68,48 @@ export class Registry {
   }
 
   list(): Array<AssistantRow & { manifestParsed: CapabilityManifest | null }> {
-    const rows = this.db
-      .prepare("SELECT id, provider, tier, enabled, manifest, manifest_updated_at FROM assistants ORDER BY id")
-      .all() as AssistantRow[];
-    return rows.map((r) => ({
-      ...r,
-      manifestParsed: r.manifest ? (JSON.parse(r.manifest) as CapabilityManifest) : null,
-    }));
+    const rows = this.db.prepare(`${ASSISTANT_COLUMNS} ORDER BY id`).all() as AssistantRow[];
+    return rows.map((r) => this.parsed(r));
+  }
+
+  /** Attaches the parsed manifest. Throws on an unreadable manifest, so call it only for rows the caller needs. */
+  parsed(r: AssistantRow): AssistantRow & { manifestParsed: CapabilityManifest | null } {
+    return { ...r, manifestParsed: r.manifest ? (JSON.parse(r.manifest) as CapabilityManifest) : null };
+  }
+
+  /**
+   * One row as `list()` returns it, or `undefined` for an id the registry has never seen. Reads
+   * and parses only that row: another assistant's unreadable cached manifest is not this one's.
+   */
+  get(id: string): (AssistantRow & { manifestParsed: CapabilityManifest | null }) | undefined {
+    const row = this.db.prepare(`${ASSISTANT_COLUMNS} WHERE id = ?`).get(id) as AssistantRow | undefined;
+    return row && this.parsed(row);
+  }
+
+  /**
+   * Sets or clears the operator disable overlay (Agent Runtime Registry design §B.3). Idempotent:
+   * a request for the state the row already has changes nothing and records nothing. A change
+   * appends a `capability_changes` row `operator.state`. Only the overlay is written: config
+   * `enabled`, options and manifests are untouched, so clearing the overlay can never enable what
+   * config disables, and an in-flight session is never touched (the overlay affects routing only).
+   * `undefined` for an unknown assistant.
+   *
+   * `row` is the assistant as this transaction left it. A caller that answers from it reports the
+   * state it wrote, not whatever a concurrent writer committed a moment later.
+   */
+  setOperatorState(id: string, state: OperatorState, now: () => Date = () => new Date()): { changed: boolean; row: AssistantRow } | undefined {
+    return this.db.transaction(() => {
+      const before = this.db.prepare(`${ASSISTANT_COLUMNS} WHERE id = ?`).get(id) as AssistantRow | undefined;
+      if (!before) return undefined;
+      const current: OperatorState = before.operator_state === "disabled" ? "disabled" : "none";
+      if (current === state) return { changed: false, row: before };
+      const at = now().toISOString();
+      this.db.prepare("UPDATE assistants SET operator_state = ?, operator_state_at = ? WHERE id = ?").run(state === "disabled" ? "disabled" : null, at, id);
+      this.db
+        .prepare("INSERT INTO capability_changes (assistant_id, field, old_value, new_value, source, observed_at) VALUES (?, 'operator.state', ?, ?, 'manual', ?)")
+        .run(id, current, state, at);
+      return { changed: true, row: this.db.prepare(`${ASSISTANT_COLUMNS} WHERE id = ?`).get(id) as AssistantRow };
+    })();
   }
 
   manifest(id: string): CapabilityManifest | null {
@@ -129,7 +158,13 @@ export class Registry {
     const probe = await this.capabilityProbe(provider, this.config.assistants[id]?.options ?? {});
     const previous = this.db.prepare("SELECT fingerprint,details FROM capability_probes WHERE assistant_id=?").get(id) as { fingerprint: string; details: string } | undefined;
     const previousDetails = previous ? JSON.parse(previous.details) as Record<string, unknown> : undefined;
-    const changed = !previous || previous.fingerprint !== probe.fingerprint || !this.manifest(id);
+    // The probe sees the CLI, not this workspace's launch settings. An adapter's declared
+    // capabilities depend on them too (`execution.agentUser` makes the Claude adapter declare
+    // `harness.agentUser`), so a change there re-describes it. A row from before this field
+    // reads as "not configured", so an unchanged workspace is not re-described.
+    const agentConfigured = this.config.execution.agentUser !== undefined;
+    const changed = !previous || previous.fingerprint !== probe.fingerprint || !this.manifest(id)
+      || (previousDetails?.agentLauncher === true) !== agentConfigured;
     let manifest = this.manifest(id);
     if (changed) {
       // describe() IS the runtime probe and outranks anything scraped from local
@@ -154,7 +189,7 @@ export class Registry {
     }
     this.db.prepare(`INSERT INTO capability_probes (assistant_id,fingerprint,details,observed_at) VALUES (?,?,?,?)
       ON CONFLICT(assistant_id) DO UPDATE SET fingerprint=excluded.fingerprint,details=excluded.details,observed_at=excluded.observed_at`)
-      .run(id, probe.fingerprint, JSON.stringify(probe), now);
+      .run(id, probe.fingerprint, JSON.stringify({ ...probe, agentLauncher: agentConfigured }), now);
     const insert = this.db.prepare("INSERT INTO quota_snapshots (assistant_id,window,used_percent,resets_at,source,observed_at) VALUES (?,?,?,?,?,?)");
     for (const limit of manifest?.core.limits ?? []) insert.run(id, limit.window, limit.usedPercent, limit.resetsAt ?? null, limit.source, limit.observedAt);
     return { changed, manifest };
@@ -185,36 +220,6 @@ export class Registry {
         "SELECT assistant_id, field, old_value, new_value, source, observed_at FROM capability_changes ORDER BY id DESC LIMIT ?",
       )
       .all(limit);
-  }
-}
-
-function createAdapter(
-  id: AssistantId,
-  provider: string,
-  options: Record<string, unknown> = {},
-  sessionInputEnabled = false,
-  profile?: ClaudeLaunchProfile,
-  launcher?: AgentLauncher,
-): AgentAdapter {
-  switch (provider) {
-    case "anthropic":
-      return new ClaudeAdapter(id, undefined, { liveInput: sessionInputEnabled, ...(profile ? { profile } : {}), ...(launcher ? { agentLauncher: launcher } : {}) });
-    case "openai":
-      return new CodexAdapter(id, { appServerInput: sessionInputEnabled && options.appServerInput === true });
-    case "openrouter":
-      return new OpenRouterCodexAdapter(id, options as OpenRouterOptions);
-    case "cursor":
-      return new CursorAdapter(id, options as CursorOptions);
-    case "bedrock":
-      // Bedrock hosts YOUR agent: the runtime ARN is configuration, not
-      // something the plane can discover (review §2.4).
-      return new BedrockAdapter(id, options as BedrockOptions);
-    case "fake":
-      return new FakeAdapter(id, undefined, options as FakeOptions);
-    default:
-      throw new Error(
-        `Unsupported provider "${provider}" for assistant ${id} (supported: anthropic, openai, openrouter, cursor, bedrock, fake)`,
-      );
   }
 }
 

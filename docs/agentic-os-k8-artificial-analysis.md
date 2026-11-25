@@ -284,13 +284,13 @@ misattribution) and useless. A third-party mirror seen 2026-11-06 lists only
 ### 17.2 Grounding rule: the map is edited only from the refresh's own list
 
 Every refresh now records, in its `model_catalog_refresh.detail` count line, a
-bounded **grounding list**: up to `AA_DIAGNOSTIC_LIMIT` (50) unmatched rows whose
+bounded **grounding list**: up to `AA_DIAGNOSTIC_LIMIT` (200; it was 50 until 2026-11-19, which hid 18 of the first 68 Anthropic rows) unmatched rows whose
 creator is Anthropic (by `model_creator.id`, `.slug` or `.name`), each as
 `{ id, slug, name }`, plus up to 5 distinct Anthropic `model_creator.id`s.
 Example shape:
 
 ```
-4 page(s); 726 rows: 0 mapped, 726 unmatched; anthropic unmatched 12 (listed 12, cap 50) creatorIds=["…"] rows=[{"id":"…","slug":"claude-opus-5-5","name":"…"}, …]
+4 page(s); 726 rows: 0 mapped, 726 unmatched; anthropic unmatched 12 (listed 12, cap 200) creatorIds=["…"] rows=[{"id":"…","slug":"claude-opus-5-5","name":"…"}, …]
 ```
 
 Only those three identifier fields are copied, each single-line and capped at
@@ -304,14 +304,19 @@ Rules for the next `AA_MODEL_MAP` change:
    `creatorIds`. A slug, a display name, a mirror or a doc example is never
    a source for `aaId`. Read the list with `GET /api/models` → `refreshes`
    or straight from `model_catalog_refresh`.
-2. **AA's plain slug is the max-effort row.** For the 5.5 generation AA lists
-   `claude-opus-5-5` as the **max**-effort configuration and the other efforts
-   as `-xhigh` / `-high` / `-medium` / `-low` suffixed rows (same for
-   `claude-sonnet-5-5`). The un-suffixed slug is therefore not a "base" model.
-   Map it to a catalog identity only with the effort the plane actually runs
-   recorded in the `evidence` string (K13 Q3: `baseConfigAttestedAt`). Never
-   map it on the "base, non-effort" reasoning the 4.x entries used.
-3. **Nothing is removed or guessed meanwhile.** The 4.x entries stay as they
+2. **AA's plain slug is the max-effort row, and every effort is its own row.**
+   For the 5.x generations AA lists `claude-opus-5-5` as the **max**-effort
+   configuration and the other efforts as `-xhigh` / `-high` / `-medium` / `-low`
+   suffixed rows (same for `claude-sonnet-5-5`, `claude-opus-5`, `claude-sonnet-5`,
+   `claude-fable-5-1`). Decision (itay, 2026-11-19): **one map entry per effort row**.
+   Each entry carries `effort`; its priors record `provenance.benchmark.configuration
+   = "effort=<x>"` (the speed prior adds it after its own configuration). K13 withholds
+   every effort-tagged prior and says so in the candidate's advisories: a run records
+   no effort (§17a), so no row can be shown to describe it, and attaching several
+   efforts of one model to one entry would blend them. The scores are stored and
+   attributed, readable in `/api/models`, and attach to a run only once an effort
+   dimension exists. Never map an un-suffixed slug as a "base" model.
+3. **Nothing is removed or guessed meanwhile.** The 4.x slug-guess entries stay as they
    are. They are unverified, can only produce unmatched rows (the id-exact join
    and the creator gate rule out a false positive), and are replaced or removed
    in the grounded change, not before.
@@ -402,3 +407,16 @@ All in `apps/api/test/artificial-analysis.test.ts` unless noted.
   normalization-version handling per §4.4.3.
 - Gated activation (`models.selection.enabled`). Until then, running the same
   task before and after K8 chooses the same assistant/model — pinned by test 21.
+
+## 17b. Grounded effort rows (2026-11-19)
+
+The first grounded map copies 21 rows from the live grounding list (Anthropic
+creator id recorded there): Sonnet 4.5 (Non-reasoning, one untagged row) and 20 effort rows: Fable 5.1 (5 efforts), Opus 5.5 (max, low), Opus 5
+(max, xhigh, high, low), Sonnet 5.5 (5), Sonnet 5 (max, xhigh, high, low). Not mapped
+yet, on purpose:
+
+- Opus 5.5 medium/high/xhigh, Opus 5 medium and Sonnet 5 medium: their ids were in the
+  18 rows the old 50-row cap cut off. They are added from the next refresh's list.
+- Fable 5.2 and Haiku 5.5: no seeded catalog entry exists (Haiku 5.5 is deliberately
+  unpriced), and an AA prior is dropped when no entry exists.
+- The other 4.x rows (Opus 4.1, Haiku 4.5 and the reasoning rows): Opus 4.1 and Haiku 4.5 were among the 18 hidden rows; the reasoning rows have no seeded identity to carry them.

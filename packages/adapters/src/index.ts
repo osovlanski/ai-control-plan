@@ -1,8 +1,10 @@
 export { ClaudeAdapter, agentLaunch, profileSettings, provisionedOptions, stopAgentUnit, type AgentLauncher, type ClaudeAdapterOptions, type ClaudeLaunchProfile } from "./claude.js";
+export { codexSdkBinary } from "./codex-sdk-binary.js";
 export { CodexAdapter, type CodexAdapterOptions } from "./codex.js";
 export { codexConfigArgs, codexProfileConfig, probeCodexProfile, type CodexProbeOptions, type CodexProbeResult, type CodexProbeRun } from "./codex-probe.js";
 export { OpenRouterCodexAdapter, type OpenRouterOptions } from "./openrouter.js";
-export { CursorAdapter, CursorSchemaError, mapCursorLine, calibrateFromSamples, type CursorOptions } from "./cursor.js";
+export { CursorAdapter, CursorSchemaError, CURSOR_CANCEL_GRACE_MS, cursorAuth, mapCursorLine, calibrateFromSamples, type CursorOptions } from "./cursor.js";
+export { HOST_LEVEL_CLAIMS, UNIT_PROVEN_CLAIMS, classifyClaims, harnessClaims, type HarnessClaim } from "./conformance-evidence.js";
 export { BedrockAdapter, parseAgentOutput, type BedrockOptions } from "./bedrock.js";
 export { FakeAdapter, parseMemoryMarker, type FakeScript, type FakeOptions, type FakeHarness } from "./fake.js";
 export { EventQueue } from "./event-queue.js";

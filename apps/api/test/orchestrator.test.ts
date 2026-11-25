@@ -10,6 +10,7 @@ import { CheckpointService } from "../src/modules/checkpoint.js";
 import { CooldownStore } from "../src/modules/cooldown.js";
 import { effectiveUsageJoin, effectiveUsageSql } from "../src/modules/harness/state-vocab.js";
 import type { Orchestrator } from "../src/modules/orchestrator.js";
+import { agentVerification } from "../src/modules/orchestrator.js";
 import { Registry } from "../src/modules/registry.js";
 import { TaskEventBus, type TaskStreamPayload } from "../src/modules/sse.js";
 import { TaskStore } from "../src/modules/tasks.js";
@@ -240,3 +241,17 @@ async function waitFor(predicate: () => boolean, timeoutMs = 5000): Promise<void
     expect(persisted).not.toContain("hunter2");
     expect(persisted).not.toContain("abcdefghijklmnop");
   });
+
+describe("agentVerification (G15 fifth run)", () => {
+  const checks = [
+    { kind: "tests", required: true },
+    { kind: "typecheck", required: true },
+    { kind: "artifact_exists", required: true },
+  ];
+  it("makes repository-command checks non-required for an agent-user task, keeps artifact checks", () => {
+    expect(agentVerification(checks, "agent").map((c) => c.required)).toEqual([false, false, true]);
+  });
+  it("leaves every other task's checks untouched", () => {
+    expect(agentVerification(checks, undefined)).toEqual(checks);
+  });
+});

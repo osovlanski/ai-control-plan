@@ -9,7 +9,7 @@
 import { test, expect } from "@playwright/test";
 import type { AssistantId } from "@agent-plane/core";
 import { FakeAdapter } from "@agent-plane/adapters";
-import { boot, A, B, composerProbe, type Harness } from "./harness.js";
+import { boot, A, B, composerProbe, showDiagnostics, type Harness } from "./harness.js";
 
 const SLOW = "fake-slow" as AssistantId;
 let h: Harness;
@@ -99,6 +99,15 @@ test("reference screenshots: active workspace, quota wait, laptop, mobile", asyn
     page.on("pageerror", (e) => consoleErrors.push(e.message));
   });
   const page = await h.openApp(context);
+  // 0. The calm default: one current mission, one next action, diagnostics closed.
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await expect(page.getByRole("region", { name: "Current mission" })).toBeVisible();
+  await shot("0-calm-default", page);
+  await shot("0-calm-default-full", page, true);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await shot("0-calm-mobile", page);
+  await shot("0-calm-mobile-full", page, true);
+  await showDiagnostics(page);
   const inspector = page.getByRole("region", { name: "Selected task inspector" });
   const select = async (id: string) => {
     await page.getByRole("button", { name: new RegExp(id) }).first().click();

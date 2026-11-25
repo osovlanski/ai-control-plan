@@ -39,6 +39,7 @@ import { parse as parseYaml } from "yaml";
 import type { AgentUserConfig, ResolvedAutopilotConfig } from "../config.js";
 import type { Db } from "../db/index.js";
 import { commitCheckpoint } from "../repo/git.js";
+import { restoreInsideWindow } from "./autopilot.js";
 
 const execFileP = promisify(execFile);
 
@@ -154,6 +155,10 @@ async function trackedPaths(snapshot: string): Promise<string[]> {
 
 /** Tracked tree read-only; the declared writable paths (created if absent) group-writable, setgid. */
 function lockDown(snapshot: string, writable: readonly string[], writableFiles: readonly string[] = []): void {
+  // The snapshot is the agent's committed tree: a tracked symlink on a declared path would make
+  // chmod/mkdir below act on whatever it points at, as the plane's user. Refuse, never follow.
+  assertNoSymlinkOnPath(snapshot, writable);
+  assertNoSymlinkOnPath(snapshot, writableFiles.map((f) => f.split("/").slice(0, -1).join("/")).filter(Boolean));
   const walk = (dir: string): void => {
     for (const name of readdirSync(dir)) {
       const p = join(dir, name);
@@ -171,7 +176,7 @@ function lockDown(snapshot: string, writable: readonly string[], writableFiles: 
     const parts = w.split("/");
     for (let i = 1; i <= parts.length; i++) {
       const p = join(snapshot, ...parts.slice(0, i));
-      if (!existsSync(p)) {
+      if (!lexists(p)) {
         withOwnerWrite(join(snapshot, ...parts.slice(0, i - 1)), () => mkdirSync(p));
         chmodSync(p, i === parts.length ? 0o2770 : 0o2550);
       }
@@ -195,11 +200,67 @@ function lockDown(snapshot: string, writable: readonly string[], writableFiles: 
     const parts = f.split("/");
     for (let i = 1; i < parts.length; i++) {
       const dir = join(snapshot, ...parts.slice(0, i));
-      if (!existsSync(dir)) { withOwnerWrite(join(snapshot, ...parts.slice(0, i - 1)), () => mkdirSync(dir)); chmodSync(dir, 0o2550); }
+      if (!lexists(dir)) { withOwnerWrite(join(snapshot, ...parts.slice(0, i - 1)), () => mkdirSync(dir)); chmodSync(dir, 0o2550); }
     }
     const target = join(WRITABLE_FILES_DIR, f.replaceAll("/", "__"));
     const up = "../".repeat(parts.length - 1);
     withOwnerWrite(join(snapshot, ...parts.slice(0, -1)), () => symlinkSync(up + target, p));
+  }
+}
+
+function lstatOrUndefined(p: string) { try { return lstatSync(p); } catch { return undefined; } }
+function lexists(p: string): boolean {
+  try { lstatSync(p); return true; } catch { return false; }
+}
+
+/**
+ * `node_modules` directories a workspace install must be able to create: the root one plus one per
+ * workspace package. Derived from the snapshot's own `pnpm-workspace.yaml` (a new package must not
+ * need a backlog edit before acceptance can install it). Only real directories that hold a tracked
+ * `package.json` and sit on a path with no symlink qualify, and only the `node_modules` below them
+ * opens, never the package itself. No workspace file: nothing derived.
+ */
+export function workspaceNodeModules(snapshot: string): string[] {
+  let globs: string[];
+  try {
+    const doc = parseYaml(readFileSync(join(snapshot, "pnpm-workspace.yaml"), "utf8")) as { packages?: unknown } | null;
+    if (!doc || !Array.isArray(doc.packages)) return [];
+    globs = doc.packages.filter((g): g is string => typeof g === "string");
+  } catch {
+    return [];
+  }
+  const re = (g: string) => new RegExp(`^${g.replace(/^\.\//, "").replace(/\/+$/, "").split("/").map((seg) => seg === "**" ? ".*" : seg.replace(/[.+^${}()|[\]\\?]/g, "\\$&").replace(/\*/g, "[^/]+")).join("/")}$`);
+  const include = globs.filter((g) => !g.startsWith("!") && !g.includes("..") && !isAbsolute(g)).map(re);
+  const exclude = globs.filter((g) => g.startsWith("!") && !g.includes("..")).map((g) => re(g.slice(1)));
+  const found: string[] = [];
+  const walk = (rel: string, depth: number): void => {
+    if (depth > 4) return;
+    let names: string[];
+    try { names = readdirSync(join(snapshot, rel)); } catch { return; }
+    for (const name of names) {
+      if (name === "node_modules" || name === ".git" || name === WRITABLE_FILES_DIR) continue;
+      const r = rel ? `${rel}/${name}` : name;
+      const st = lstatOrUndefined(join(snapshot, r));
+      if (!st?.isDirectory()) continue; // symlinks are neither followed nor matched
+      if (include.some((x) => x.test(r)) && !exclude.some((x) => x.test(r)) && lexists(join(snapshot, r, "package.json"))) found.push(r);
+      walk(r, depth + 1);
+    }
+  };
+  walk("", 0);
+  return ["node_modules", ...found.sort().map((r) => `${r}/node_modules`)];
+}
+
+/** Every existing component of each relative path must be a real directory (or the leaf, a real file or dir), never a symlink. */
+function assertNoSymlinkOnPath(root: string, relPaths: readonly string[]): void {
+  for (const rel of relPaths) {
+    const parts = rel.split("/").filter(Boolean);
+    for (let i = 1; i <= parts.length; i++) {
+      const p = join(root, ...parts.slice(0, i));
+      let st;
+      try { st = lstatSync(p); } catch { break; } // absent from here on: the plane creates it
+      if (st.isSymbolicLink()) throw new Error(`declared writable path ${rel} crosses a symlink at ${parts.slice(0, i).join("/")}`);
+      if (i < parts.length && !st.isDirectory()) throw new Error(`declared writable path ${rel} crosses a non-directory at ${parts.slice(0, i).join("/")}`);
+    }
   }
 }
 
@@ -295,6 +356,40 @@ export function agentAcceptanceExecutor(agent: Pick<AgentUserConfig, "sudo" | "w
   };
 }
 
+/**
+ * The production prefetch: `pnpm fetch` of the snapshot's lockfile into `storeDir`, as the plane user.
+ * The store is then readable by the agent group and read-only to it, except `v10/projects`, where pnpm
+ * registers each project it installs (it fails with EACCES if it cannot; measured). Acceptance imports by
+ * copy, so no store file is ever hard-linked into a tree the agent can write.
+ */
+export function pnpmStorePrefetch(storeDir: string, timeoutMs = 15 * 60_000): (snapshot: string) => Promise<void> {
+  return (snapshot) => new Promise((resolve, reject) => {
+    const projects = join(storeDir, "v10", "projects");
+    try { mkdirSync(projects, { recursive: true }); chmodSync(projects, 0o2770); } catch (err) { return reject(new Error(`pnpm store ${storeDir} is not usable: ${err instanceof Error ? err.message : String(err)}`)); }
+    const child = spawn("pnpm", ["fetch", "--store-dir", storeDir], {
+      cwd: snapshot, stdio: ["ignore", "ignore", "pipe"],
+      env: { ...process.env, npm_config_manage_package_manager_versions: "false", CI: "true" },
+    });
+    let tail = "";
+    child.stderr?.on("data", (b: Buffer) => { tail = (tail + b.toString("utf8")).slice(-2_000); });
+    const timer = setTimeout(() => child.kill("SIGKILL"), timeoutMs);
+    timer.unref();
+    child.on("error", (err) => { clearTimeout(timer); reject(new Error(`pnpm fetch could not start: ${err.message}`)); });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (code !== 0) return reject(new Error(`pnpm fetch exited ${code}: ${tail.trim().split("\n").slice(-3).join(" | ")}`));
+      // `pnpm fetch` also builds a virtual store in <snapshot>/node_modules/.pnpm, owned by the plane user.
+      // The agent user's offline install would then find it "up to date" and fail to chmod its bins
+      // (EPERM, G15 eighth run). Only the store is wanted from the fetch: the install makes node_modules.
+      try { rmSync(join(snapshot, "node_modules"), { recursive: true, force: true }); } catch (err) { return reject(new Error(`could not clear ${snapshot}/node_modules after pnpm fetch: ${err instanceof Error ? err.message : String(err)}`)); }
+      // Readable by the agent group; the plane user stays the only writer.
+      const chmod = spawn("chmod", ["-R", "a+rX,go-w", "--", join(storeDir, "v10", "files"), join(storeDir, "v10", "index")], { stdio: "ignore" });
+      chmod.on("error", () => resolve());
+      chmod.on("close", () => resolve());
+    });
+  });
+}
+
 /* -------------------------------------------------------------- runner -- */
 
 export type AcceptanceRunState = "preparing" | "running" | "passed" | "failed" | "blocked" | "cut" | "crashed";
@@ -328,6 +423,12 @@ export interface AcceptanceDeps {
   agentIdle?: () => { ok: true } | { ok: false; detail: string };
   /** TEST-ONLY: accept an executor that does not declare itself offline. */
   allowOnlineExecutor?: boolean;
+  /**
+   * §C.2.7 step 4: "dependencies come from the store the plane prepared before the run". Called with the
+   * fresh snapshot, as the plane user (which has the network the run lacks), before the tree is locked down.
+   * A throw blocks the run: `pnpm install --offline` could not succeed without it.
+   */
+  prefetch?: (snapshot: string) => Promise<void>;
 }
 
 interface RunRow {
@@ -435,15 +536,17 @@ export class AcceptanceRunner {
 
     // §C.2.3 deadline, recomputed; acceptance is charged to the attempt's budget.
     const nowMs = this.now().getTime();
-    const window = this.db.prepare("SELECT id, closes_at FROM autopilot_windows WHERE opens_at <= ? AND closes_at > ? ORDER BY opens_at DESC LIMIT 1")
-      .get(this.iso(), this.iso()) as { id: string; closes_at: string } | undefined;
+    const window = this.db.prepare("SELECT id, opens_at, closes_at FROM autopilot_windows WHERE opens_at <= ? AND closes_at > ? ORDER BY opens_at DESC LIMIT 1")
+      .get(this.iso(), this.iso()) as { id: string; opens_at: string; closes_at: string } | undefined;
     const remainingBudget = attempt.runtime_budget_ms - this.usedMs(attemptId);
     if (remainingBudget <= 0) {
       this.setAttempt(attemptId, "failed", "budget_exhausted: no runtime left for acceptance");
       return notStarted("budget_exhausted");
     }
     const closesMs = window ? Date.parse(window.closes_at) : 0;
-    if (!window || closesMs - nowMs < this.d.bounds.minSliceMs) {
+    // P0-7b (§C.5): a window open when a restore was detected is exhausted; acceptance runs as the agent too.
+    const exhausted = window ? restoreInsideWindow(this.db, window.opens_at, window.closes_at) : undefined;
+    if (!window || exhausted || closesMs - nowMs < this.d.bounds.minSliceMs) {
       // G25: acceptance that would cross the close is not started; the attempt waits for the next window.
       this.setAttempt(attemptId, "suspended", "window_closed: acceptance waits for the next window");
       return notStarted("window_closed");
@@ -466,7 +569,7 @@ export class AcceptanceRunner {
     } else if (!task.worktree_path || !task.repo_path) {
       problem = "the task has no worktree to checkpoint";
     } else {
-      try { sha = (await commitCheckpoint(task.worktree_path, `aos checkpoint: item ${attempt.item_id}`)) ?? undefined; } catch (err) { problem = `checkpoint commit failed: ${err instanceof Error ? err.message : String(err)}`; }
+      try { sha = (await commitCheckpoint(task.worktree_path, `aos checkpoint: item ${attempt.item_id}`, { confined: task.repo_path })) ?? undefined; } catch (err) { problem = `checkpoint commit failed: ${err instanceof Error ? err.message : String(err)}`; }
       if (!problem && !sha) problem = "checkpoint commit produced no SHA";
     }
     if (!problem && !attempt.reservation_sha) problem = "the attempt has no reservation SHA; lineage cannot be checked";
@@ -504,7 +607,14 @@ export class AcceptanceRunner {
     try {
       mkdirSync(this.d.snapshotsRoot, { recursive: true });
       await git(task.repo_path!, ["worktree", "add", "--detach", snapshot, sha!]);
-      lockDown(snapshot, spec.writable, spec.writableFiles);
+      await this.d.prefetch?.(snapshot);
+      const derived = workspaceNodeModules(snapshot).filter((w) => !spec.writable.includes(w) && !lstatOrUndefined(join(snapshot, w))?.isSymbolicLink());
+      const writable = [...spec.writable, ...derived];
+      if (derived.length > 0) {
+        this.db.prepare("UPDATE acceptance_runs SET writable_json = ? WHERE id = ?")
+          .run(JSON.stringify([...writable, ...spec.writableFiles.map((file) => ({ file }))]), runId);
+      }
+      lockDown(snapshot, writable, spec.writableFiles);
       const paths = await trackedPaths(snapshot);
       const before = hashTrackedTree(snapshot, paths);
       this.db.prepare("UPDATE acceptance_runs SET state = 'running', tree_before = ? WHERE id = ?").run(before.hash, runId);

@@ -5,6 +5,7 @@ import type { AssistantId, QuotaObservation } from '@agent-plane/core';
 import type { Db } from '../db/index.js';
 import type { ResolvedConfig } from '../config.js';
 import type { Registry } from './registry.js';
+import { runtimeFor, type QuotaProbeKind } from './runtime-catalog.js';
 
 /** One attempt per assistant per window; `status()` reports the age. */
 export const PROBE_INTERVAL_MS = 15 * 60_000;
@@ -49,12 +50,19 @@ export type QuotaProbeFn = (provider: string, options: Record<string, unknown>) 
  * capability, so `reportsLimits` (which describes the run stream) is untouched.
  */
 export async function probeQuota(provider: string, options: Record<string, unknown> = {}): Promise<ProbeOutcome> {
-  if (provider === 'anthropic') return probeClaudeUsage(options);
+  // Which probe a provider has is `RuntimeDescriptor.quotaProbe` in the runtime catalogue; the
+  // implementations stay here, next to the endpoint pin.
+  const kind = runtimeFor(provider)?.quotaProbe;
+  if (kind) return QUOTA_PROBES[kind](options);
   // The Codex app-server RPC `account/rateLimits/read` is observed in Omarchy's
   // script but absent from the documented App Server page; unsupported until it
   // is verified against a running app-server rather than faked here.
   return { status: 'unsupported', buckets: [], detail: `no verified idle quota endpoint for ${provider}` };
 }
+
+const QUOTA_PROBES: Readonly<Record<QuotaProbeKind, (options: Record<string, unknown>) => Promise<ProbeOutcome>>> = {
+  'claude-oauth-usage': (options) => probeClaudeUsage(options),
+};
 
 /** The OAuth token is read into a local: never returned, logged or persisted. */
 async function probeClaudeUsage(options: Record<string, unknown>): Promise<ProbeOutcome> {

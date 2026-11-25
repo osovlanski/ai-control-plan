@@ -119,6 +119,7 @@ class FlakyGit implements DispatchGit {
   }
   revParse(repoPath: string, rev: string) { return this.real.revParse(repoPath, rev); }
   show(repoPath: string, rev: string, path: string) { return this.real.show(repoPath, rev, path); }
+  lastCommitBefore(repoPath: string, rev: string, before: string) { return this.real.lastCommitBefore(repoPath, rev, before); }
   commitTree(repoPath: string, input: Parameters<DispatchGit["commitTree"]>[1]) { return this.real.commitTree(repoPath, input); }
 }
 
@@ -141,13 +142,13 @@ function localExecutor(): AcceptanceExecutor {
   };
 }
 
-interface Item { id: string; depends_on?: string[]; lane?: string; night?: boolean; run?: string }
+interface Item { id: string; depends_on?: string[]; lane?: string; night?: boolean; run?: string; notes?: string }
 const backlogYaml = (items: Item[]) => [
   "version: 1", "items:",
   ...items.flatMap((i) => [
     `  - id: ${i.id}`, `    title: "Do ${i.id}"`, `    phase: "test"`, `    repo: ai-control-plan`, `    size: S`,
     `    depends_on: [${(i.depends_on ?? []).join(", ")}]`, `    files: ["${i.id}.txt"]`, `    lane: ${i.lane ?? "oci-loop"}`, `    profile: auto`, `    night: ${i.night ?? true}`,
-    `    notes: "Write ${i.id}.txt."`,
+    `    notes: "${i.notes ?? `Write ${i.id}.txt.`}"`,
     `    acceptance:`, `      commands:`, `        - { run: "${i.run ?? `test -f ${i.id}.txt`}", replaySafe: true }`, `      writable: ["out"]`,
   ]),
 ].join("\n") + "\n";
@@ -181,6 +182,7 @@ async function boot(items: Item[]): Promise<Rig> {
       chmodSync(join(tree, "profiles"), 0o2750);
       config.execution.agentUser = { ...AGENT_USER_DEFAULTS, profilesRoot: join(tree, "profiles"), worktreesRoot: join(tree, "worktrees") };
       config.scheduler = { ...config.scheduler!, resources: { "oci-heavy": 1 } };
+      config.policy.approvalMode = "prompt-on-escalation"; // the workspace prompts; an unattended autopilot session must not
       config.autopilot.repos = { "ai-control-plan": { github: REPO, path: repo, base: "main" } };
       // origin: a bare repository holding main with the backlog on it.
       const bare = join(root, "origin.git");
@@ -437,6 +439,70 @@ describe("lineage and recovery (G23, G24)", () => {
   });
 });
 
+describe("approvals of an unattended session", () => {
+  const approvalOf = (taskId: string) => {
+    const rows = rig!.db.prepare("SELECT request_json FROM execution_requests WHERE task_id = ? AND superseded = 0").all(taskId) as Array<{ request_json: string }>;
+    expect(rows.length).toBeGreaterThan(0);
+    return rows.map((r) => (JSON.parse(r.request_json) as { policy: { approval: { mode: string } } }).policy.approval.mode);
+  };
+
+  it("an autopilot launch as the agent user is approval-free, though the workspace prompts (first live run: the approval expired and blocked the attempt)", async () => {
+    await boot([{ id: "item-a" }]);
+    expect(rig!.config.policy.approvalMode).toBe("prompt-on-escalation");
+    open();
+    await dispatcher().tick();
+    const a = ap().currentAttempt()!;
+    expect(rig!.built.tasks.get(a.taskId!)!.run_as).toBe("agent");
+    await runTask(a.taskId!);
+    expect(approvalOf(a.taskId!)).toEqual(["auto-approve"]);
+    ap().stop("now", "test"); // nothing may start behind the teardown
+    await dispatcher().tick();
+    await dispatcher().idle();
+  });
+
+  it("a composition that asks for prompt-on-escalation cannot park an unattended run on a prompt nobody answers (second live run)", async () => {
+    await boot([{ id: "item-a" }]);
+    for (const risk of ["low", "normal", "high"] as const) rig!.config.composer.policy.riskPermission[risk] = "prompt-on-escalation";
+    open();
+    await dispatcher().tick();
+    const a = ap().currentAttempt()!;
+    await runTask(a.taskId!);
+    expect(approvalOf(a.taskId!)).toEqual(["auto-approve"]);
+    ap().stop("now", "test");
+    await dispatcher().tick();
+    await dispatcher().idle();
+  });
+
+  it("the task constraints tell the agent the plane runs acceptance and background processes are not allowed (G15 fourth run)", async () => {
+    await boot([{ id: "item-a" }]);
+    open();
+    await dispatcher().tick();
+    const a = ap().currentAttempt()!;
+    const row = rig!.db.prepare("SELECT envelope FROM tasks WHERE id = ?").get(a.taskId!) as { envelope: string };
+    expect(row.envelope).toMatch(/do not run the full test suite/i);
+    expect(row.envelope).toMatch(/Never start background processes/);
+    expect(row.envelope).toMatch(/do not run git commit/i);
+    ap().stop("now", "test");
+    await dispatcher().tick();
+    await dispatcher().idle();
+  });
+
+  it("autopilot.approvalMode: prompt-on-escalation keeps the workspace prompt", async () => {
+    await boot([{ id: "item-a" }]);
+    rig!.config.autopilot.approvalMode = "prompt-on-escalation";
+    open();
+    await dispatcher().tick();
+    const a = ap().currentAttempt()!;
+    const done = reaches(rig!.built, a.taskId!, ["COMPLETED", "FAILED", "CANCELLED", "WAITING_INPUT"]);
+    await rig!.built.scheduler.tick();
+    await done;
+    expect(approvalOf(a.taskId!)).toEqual(["prompt-on-escalation"]);
+    ap().stop("now", "test");
+    await dispatcher().tick();
+    await dispatcher().idle();
+  });
+});
+
 describe("retries", () => {
   /** Attempt 1 runs, acceptance fails (no item-a.txt), `duringAcceptance` runs, and the loop then moves on by itself. */
   async function failFirstAttempt(duringAcceptance?: () => void): Promise<string> {
@@ -457,6 +523,126 @@ describe("retries", () => {
     const second = ap().currentAttempt()!;
     expect(second).toMatchObject({ attemptNo: 2, state: "admitted", reservationOutcome: "reused", reservationSha: first });
     expect(gh.refCreates.map((c) => c.answer)).toEqual(["201", "422"]);
+  });
+
+  it("a retry whose reused reservation is behind main works on a merge of the new main, and the lease stays on the reservation (G15 attempt 11)", async () => {
+    // Live: every retry reused a six-day-old reservation, so the agent edited and acceptance tested a stale tree.
+    await boot([{ id: "item-a" }]);
+    let moved = "";
+    const first = await failFirstAttempt(() => { moved = advanceOrigin(); });
+    const second = ap().currentAttempt()!;
+    expect(second).toMatchObject({ attemptNo: 2, reservationOutcome: "reused", reservationSha: first, baseSha: moved });
+    const base = rig!.built.autopilot.baseCommitOf(second.taskId!)!;
+    expect(base).not.toBe(first);
+    expect(second.workBaseSha).toBe(base);
+    const planeClone = rig!.config.repoAllowlist[0]!;
+    const parents = git(planeClone, "rev-list", "--parents", "-n", "1", base).split(" ").slice(1);
+    expect(parents).toEqual([first, moved]);
+    expect(git(planeClone, "rev-parse", `${base}^{tree}`)).toBe(git(planeClone, "rev-parse", `${moved}^{tree}`));
+    // The ref was not touched, so the later push stays a fast-forward from the reservation.
+    expect(bareRef("os/item-a")).toBe(first);
+  });
+
+  it("a reused reservation that is not behind main needs no merge base", async () => {
+    await boot([{ id: "item-a" }]);
+    await failFirstAttempt();
+    expect(ap().currentAttempt()).toMatchObject({ attemptNo: 2, reservationOutcome: "reused" });
+    expect(ap().currentAttempt()!.workBaseSha).toBeUndefined();
+  });
+
+  it("a quota yield on an unattended task waits for the same assistant's cooldown and resumes, instead of dead-ending (G15 attempt 12)", async () => {
+    // Live: Claude hit its limit 4 s into the session; the failover excluded the source, nothing else
+    // could launch as the agent user, and the task sat in WAITING_INPUT/no_candidate for ever.
+    await boot([{ id: "item-a", notes: "Write item-a.txt. [FAKE:LIMIT]" }]);
+    open();
+    await dispatcher().tick();
+    const a = ap().currentAttempt()!;
+    await rig!.built.scheduler.tick(); // the pool grants the slot and the fake hits its limit
+    const deadline = Date.now() + 10_000;
+    while (!rig!.db.prepare("SELECT 1 FROM cooldowns WHERE assistant_id = 'fake-claude'").get() && Date.now() < deadline) await new Promise((r) => setTimeout(r, 25));
+    while (rig!.db.prepare("SELECT state FROM tasks WHERE id = ?").get(a.taskId) && ["RUNNING", "LIMIT_PAUSED"].includes((rig!.db.prepare("SELECT state FROM tasks WHERE id = ?").get(a.taskId) as { state: string }).state) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 25));
+    expect(rig!.db.prepare("SELECT state, pause_kind FROM tasks WHERE id = ?").get(a.taskId)).toMatchObject({ state: "WAITING_RESOURCE" });
+    const until = (rig!.db.prepare("SELECT until FROM cooldowns WHERE assistant_id = 'fake-claude'").get() as { until: string }).until;
+    expect(rig!.built.scheduler.condition(a.taskId!)).toMatchObject({ kind: "time", notBefore: until });
+    // Before the cooldown ends nothing starts; after it, the same assistant resumes from the checkpoint and completes.
+    await rig!.built.scheduler.tick();
+    expect(rig!.db.prepare("SELECT state FROM tasks WHERE id = ?").get(a.taskId)).toMatchObject({ state: "WAITING_RESOURCE" });
+    instant = Date.parse(until) + 1000;
+    const done = reaches(rig!.built, a.taskId!, ["COMPLETED", "WAITING_INPUT", "FAILED", "CANCELLED"]);
+    await rig!.built.scheduler.tick();
+    expect(await done).toBe("COMPLETED");
+  });
+
+  it("a task that fails before any session started ends its attempt instead of holding the slot (first live run)", async () => {
+    // Live, the launch was refused ("requires an adapter that can launch as the agent user"): the
+    // task went FAILED with no session, so nothing settled and the attempt stayed `admitted`.
+    await boot([{ id: "item-a" }]);
+    open();
+    await dispatcher().tick();
+    const a = ap().currentAttempt()!;
+    expect(a).toMatchObject({ state: "admitted", attemptNo: 1 });
+    expect(await dispatcher().tick()).toMatchObject({ action: "drove", state: "admitted" }); // a healthy wait is left alone
+    // The end state a refused launch leaves (the scheduler owns the transition, so set it directly).
+    rig!.db.prepare("UPDATE tasks SET state = 'FAILED' WHERE id = ?").run(a.taskId);
+    const out = await dispatcher().tick();
+    expect(out).toMatchObject({ action: "drove", attemptId: a.id, state: "failed", detail: expect.stringContaining("failed before a session started") });
+    expect(ap().attempt(a.id)).toMatchObject({ state: "failed", reason: "task failed before a session started" });
+    // The retry rule applies as for any failure: attempt 2 reuses the untouched reservation.
+    await dispatcher().tick();
+    expect(ap().currentAttempt()).toMatchObject({ attemptNo: 2, state: "admitted", reservationOutcome: "reused", reservationSha: a.reservationSha });
+  });
+
+  it("a suspended attempt whose task an operator cancelled ends as cancelled, so it can be requeued (G15 attempt 9)", async () => {
+    // Live: a quota yield parked the task as `composition_unavailable` (attempt `suspended`), a release
+    // could not help, and cancelling the task left the attempt suspended for ever.
+    await boot([{ id: "item-a" }]);
+    open();
+    await dispatcher().tick();
+    const a = ap().currentAttempt()!;
+    rig!.db.prepare("UPDATE autopilot_attempts SET state = 'suspended', reason = 'composition_unavailable' WHERE id = ?").run(a.id);
+    expect(await dispatcher().tick()).toMatchObject({ action: "drove", state: "suspended" }); // a live parked task is left alone
+    rig!.db.prepare("UPDATE tasks SET state = 'CANCELLED' WHERE id = ?").run(a.taskId);
+    const out = await dispatcher().tick();
+    expect(out).toMatchObject({ action: "drove", attemptId: a.id, state: "cancelled", detail: expect.stringContaining("cancelled while suspended") });
+    ap().requeue(a.id, "op_test");
+    await dispatcher().tick();
+    expect(ap().currentAttempt()).toMatchObject({ attemptNo: 2 });
+  });
+
+  it("a blocked attempt is not retried until the operator requeues it, and the retry still counts", async () => {
+    await boot([{ id: "item-a" }]);
+    open();
+    await dispatcher().tick();
+    const a = ap().currentAttempt()!;
+    expect(ap().approvalRefused(a.taskId!, "expired")).toBe(true);
+    expect(ap().attempt(a.id)).toMatchObject({ state: "blocked", reason: "approval expired" });
+    expect(await dispatcher().tick()).toEqual({ action: "idle", reason: "no item is queued or retryable" });
+    expect(() => ap().requeue("apa_missing", "op")).toThrow(/unknown attempt/);
+    expect(ap().requeue(a.id, "op_test")).toMatchObject({ state: "blocked", requeuedBy: "op_test" }); // still final
+    expect(() => ap().requeue(a.id, "op_test")).toThrow(/already requeued/);
+    await dispatcher().tick();
+    expect(ap().currentAttempt()).toMatchObject({ attemptNo: 2, state: "admitted", reservationOutcome: "reused", reservationSha: a.reservationSha });
+    expect(() => ap().requeue(ap().currentAttempt()!.id, "op_test")).toThrow(/only a blocked or cancelled attempt/);
+    ap().stop("now", "test");
+    await dispatcher().tick();
+    await dispatcher().idle();
+  });
+
+  it("a cancelled attempt (an operator freed a parked task) is retried only after a requeue", async () => {
+    await boot([{ id: "item-a" }]);
+    open();
+    await dispatcher().tick();
+    const a = ap().currentAttempt()!;
+    rig!.db.prepare("UPDATE tasks SET state = 'CANCELLED' WHERE id = ?").run(a.taskId);
+    await dispatcher().tick();
+    expect(ap().attempt(a.id)).toMatchObject({ state: "cancelled" });
+    expect(await dispatcher().tick()).toEqual({ action: "idle", reason: "no item is queued or retryable" });
+    ap().requeue(a.id, "op_test");
+    await dispatcher().tick();
+    expect(ap().currentAttempt()).toMatchObject({ attemptNo: 2, state: "admitted", reservationOutcome: "reused" });
+    ap().stop("now", "test");
+    await dispatcher().tick();
+    await dispatcher().idle();
   });
 
   it("a failed attempt's ref that carries pushed work is left for itay, and attempts run out", async () => {
@@ -500,6 +686,9 @@ describe("config and the GitHub token file", () => {
     expect(() => load(`  github: { tokenFile: rel }`)).toThrow(/absolute/);
     expect(() => load(`  github: { tokenFile: /t, apiBase: "http://evil" }`)).toThrow(/https/);
     expect(() => load(`  dispatchIntervalMs: 10`)).toThrow(/at least 5000/);
+    expect(load(`  attemptsPerItem: 3`).autopilot.approvalMode).toBe("auto-approve");
+    expect(load(`  approvalMode: prompt-on-escalation`).autopilot.approvalMode).toBe("prompt-on-escalation");
+    expect(() => load(`  approvalMode: read-only`)).toThrow(/auto-approve or prompt-on-escalation/);
   });
 
   it("reads the token only from a private regular file of this user, as an auth error otherwise", async () => {
@@ -543,5 +732,27 @@ describe("config and the GitHub token file", () => {
     replies.push(json(201, { sha: "c".repeat(40) }));
     expect(await client.createCommit("o/r", { tree: "t".repeat(40), parent: "p".repeat(40), message: "m\n", name: "n", email: "e@x.invalid", date: "2030-01-01T00:00:00Z" })).toBe("c".repeat(40));
     expect(calls.at(-1)!.body).toMatchObject({ parents: ["p".repeat(40)], author: { date: "2030-01-01T00:00:00Z" }, committer: { date: "2030-01-01T00:00:00Z" } });
+  });
+});
+
+describe("P1-2 estimated scope", () => {
+  it("weighs every lane by S/M/L points, counts merged PRs as done, and reads the day's added scope from the backlog history", async () => {
+    await boot([{ id: "item-a" }, { id: "item-b" }, { id: "item-c", lane: "manual-cloud" }]);
+    const pr = (id: string, state: "open" | "closed", merged: boolean): PullRequest => ({ number: 1, state, merged, body: "", headRef: `os/${id}`, headSha: "x", baseRef: "main" });
+    gh.prs.push(pr("item-a", "closed", true), pr("item-b", "open", false));
+    const res = await rig!.built.app.inject({ method: "GET", url: "/api/autopilot/scope?day=2000-01-01", headers: rig!.auth() });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as { scope: Record<string, unknown>; items: Array<{ id: string; state: string }> };
+    expect(body.items.map((i) => [i.id, i.state])).toEqual([["item-a", "done"], ["item-b", "in review"], ["item-c", "remaining"]]);
+    expect(body.scope).toMatchObject({ estimate: true, totalPoints: 3, donePoints: 1, inReviewPoints: 1, remainingPoints: 1, percentDone: 33, done: 1, inReview: 1, remaining: 1, unknown: [], unsized: [] });
+    // No commit precedes 2000-01-01: no baseline, so no addedToday claim.
+    expect(body.scope.addedToday).toBeUndefined();
+    // A later day has the whole backlog as its baseline: nothing added.
+    const tomorrow = new Date(Date.now() + 36 * 3600_000).toISOString().slice(0, 10);
+    const later = (await rig!.built.app.inject({ method: "GET", url: `/api/autopilot/scope?day=${tomorrow}`, headers: rig!.auth() })).json() as { scope: { addedToday: { ids: string[]; points: number } } };
+    expect(later.scope.addedToday).toEqual({ ids: [], points: 0 });
+    const text = await rig!.built.app.inject({ method: "GET", url: "/api/autopilot/scope?format=text", headers: rig!.auth() });
+    expect(text.body).toContain("33% done — 1 of 3 points");
+    expect((await rig!.built.app.inject({ method: "GET", url: "/api/autopilot/scope?day=tomorrow", headers: rig!.auth() })).statusCode).toBe(400);
   });
 });

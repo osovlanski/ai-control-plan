@@ -128,7 +128,7 @@ it('assistant pins survive replacement, block fallback, and retry with a bounded
   await s.runNow(id); await s.runNow(id);
   expect(built.tasks.get(id)).toMatchObject({ state: 'WAITING_INPUT', pause_kind: 'no_candidate', intent_json: originalIntent });
   expect(b).not.toHaveBeenCalled();
-  expect(s.events(id).at(-1)?.payload.autoWakes).toBe(3);
+  expect(s.events(id).filter((e) => !e.type.startsWith('attempt.')).at(-1)?.payload.autoWakes).toBe(3);
 });
 
 it('enforces open-dispatch uniqueness and stores no resolved choices on waits', async () => {
@@ -330,7 +330,7 @@ it.each([false,true])('cancel after started keeps the dispatch and reaches its e
   vi.spyOn(adapter,'cancel').mockImplementation(async handle=>{await original(handle);cancelled.resolve();});
   await s.runNow(id); await awaitingApproval.promise; expect(s.dispatches(id)[0]!.phase).toBe('started');
   await s.cancel(id); await cancelled.promise;
-  expect(built.tasks.get(id)?.state).toBe('CANCELLED'); expect(s.events(id).at(-1)!.type).toBe('wait.cancelled');
+  expect(built.tasks.get(id)?.state).toBe('CANCELLED'); expect(s.events(id).filter((e) => !e.type.startsWith('attempt.')).at(-1)!.type).toBe('wait.cancelled');
   if(harness) expect((db.prepare('SELECT cancel_requested FROM runs WHERE task_id = ?').get(id) as {cancel_requested:number}).cancel_requested).toBe(1);
 });
 

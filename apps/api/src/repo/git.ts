@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
-import { chmodSync, lstatSync, mkdirSync, readdirSync, realpathSync } from "node:fs";
-import { isAbsolute, join, resolve } from "node:path";
+import { chmodSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync } from "node:fs";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
 
 const run = promisify(execFile);
@@ -8,6 +8,47 @@ const run = promisify(execFile);
 async function git(repo: string, args: string[]): Promise<string> {
   const { stdout } = await run("git", ["-C", repo, ...args], { maxBuffer: 10 * 1024 * 1024 });
   return stdout.trim();
+}
+
+/**
+ * Git on a worktree an untrusted agent can write. The worktree's `.git` is a pointer file inside that
+ * tree, so `git -C <worktree>` would follow whatever the agent wrote there: hooks, fsmonitor and
+ * config then run as the plane's user. Instead the git dir is resolved from the plane-owned main
+ * repository's own `worktrees/<n>/gitdir` records, handed to git through GIT_DIR, and hooks, fsmonitor
+ * and system/global config are switched off.
+ */
+export function trustedWorktreeGitDir(commonDir: string, worktreePath: string): string {
+  const want = join(realpathSync(worktreePath), ".git");
+  const root = join(commonDir, "worktrees");
+  for (const name of readdirSync(root)) {
+    try {
+      const recorded = readFileSync(join(root, name, "gitdir"), "utf8").trim();
+      if (join(realpathSync(dirname(resolve(root, name, recorded))), ".git") === want) return join(root, name);
+    } catch { /* an unreadable record is not a match */ }
+  }
+  throw new Error(`no plane-owned git dir is registered for worktree ${worktreePath}`);
+}
+
+async function confinedGit(repoPath: string, worktreePath: string, args: string[]): Promise<string> {
+  const commonRaw = (await git(repoPath, ["rev-parse", "--path-format=absolute", "--git-common-dir"]));
+  const gitDir = trustedWorktreeGitDir(realpathSync(commonRaw), worktreePath);
+  const { stdout } = await run(
+    "git",
+    ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", ...args],
+    {
+      cwd: realpathSync(worktreePath),
+      maxBuffer: 10 * 1024 * 1024,
+      env: { ...process.env, GIT_DIR: gitDir, GIT_WORK_TREE: realpathSync(worktreePath), GIT_CONFIG_NOSYSTEM: "1", GIT_OPTIONAL_LOCKS: "0" },
+    },
+  );
+  return stdout.trim();
+}
+
+/** `confined` names the plane-owned main repository when the worktree belongs to an agent task. */
+export interface ConfinedOpt { confined?: string }
+
+function wtGit(worktreePath: string, args: string[], opt?: ConfinedOpt): Promise<string> {
+  return opt?.confined ? confinedGit(opt.confined, worktreePath, args) : git(worktreePath, args);
 }
 
 export interface GitRepositoryIdentityObservation {
@@ -114,13 +155,13 @@ export async function attachWorktree(repoPath: string, branch: string, path: str
 }
 
 /** Diffstat of the task branch against its base (for checkpoints/handoff). */
-export async function worktreeDiffStat(worktreePath: string, baseRef: string): Promise<string> {
-  return git(worktreePath, ["diff", "--stat", baseRef]);
+export async function worktreeDiffStat(worktreePath: string, baseRef: string, opt?: ConfinedOpt): Promise<string> {
+  return wtGit(worktreePath, ["diff", "--stat", baseRef], opt);
 }
 
 /** Paths changed on the task branch since its base, committed or not. */
-export async function worktreeChangedFiles(worktreePath: string, baseRef: string): Promise<string[]> {
-  const out = await git(worktreePath, ["diff", "--name-only", baseRef]);
+export async function worktreeChangedFiles(worktreePath: string, baseRef: string, opt?: ConfinedOpt): Promise<string[]> {
+  const out = await wtGit(worktreePath, ["diff", "--name-only", baseRef], opt);
   return out ? out.split("\n").filter(Boolean) : [];
 }
 
@@ -129,19 +170,19 @@ export async function worktreeChangedFiles(worktreePath: string, baseRef: string
  * or null when the tree is clean (a checkpoint with nothing new is not an error —
  * the envelope snapshot still has value).
  */
-export async function commitCheckpoint(worktreePath: string, message: string): Promise<string | null> {
-  await git(worktreePath, ["add", "-A"]);
-  const staged = await git(worktreePath, ["diff", "--cached", "--name-only"]);
-  if (!staged) return git(worktreePath, ["rev-parse", "HEAD"]);
+export async function commitCheckpoint(worktreePath: string, message: string, opt?: ConfinedOpt): Promise<string | null> {
+  await wtGit(worktreePath, ["add", "-A"], opt);
+  const staged = await wtGit(worktreePath, ["diff", "--cached", "--name-only"], opt);
+  if (!staged) return wtGit(worktreePath, ["rev-parse", "HEAD"], opt);
   try {
-    await git(worktreePath, ["commit", "-q", "-m", message]);
+    await wtGit(worktreePath, ["commit", "-q", "--no-verify", "-m", message], opt);
   } catch (error) {
     // Concurrent completion/manual checkpoints may race after staging; if the
     // other checkpoint committed the same tree, this checkpoint still points
     // at that durable state.
-    if (await isDirty(worktreePath)) throw error;
+    if ((await wtGit(worktreePath, ["status", "--porcelain"], opt)) !== "") throw error;
   }
-  return git(worktreePath, ["rev-parse", "HEAD"]);
+  return wtGit(worktreePath, ["rev-parse", "HEAD"], opt);
 }
 
 export async function removeTaskWorktree(repoPath: string, worktreePath: string): Promise<void> {

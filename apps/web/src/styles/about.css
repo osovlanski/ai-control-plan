@@ -1,0 +1,37 @@
+.about-page { max-width: 1060px; padding: 12px 0 32px; }
+.about-page p { color: var(--text-2); line-height: 1.75; max-width: 76ch; }
+.about-intro { max-width: 780px; margin-bottom: 36px; }
+.about-intro h1 { margin-top: 12px; }
+.about-intro p + p { font-size: 16px; margin-top: 18px; }
+.about-section { padding: 30px 0; border-top: 1px solid var(--line-strong); }
+.about-section h2 { font-size: clamp(22px, 2.5vw, 28px); font-weight: 500; letter-spacing: -.02em; margin: 10px 0 12px; }
+.about-page h3 { font-size: 18px; font-weight: 500; margin-bottom: 8px; }
+.about-comparison { width: 100%; border-collapse: collapse; margin-top: 24px; text-align: left; table-layout: fixed; }
+.about-comparison caption { text-align: left; color: var(--text-3); font-size: 13px; padding-bottom: 12px; }
+.about-comparison th, .about-comparison td { padding: 18px 20px; border-bottom: 1px solid var(--line); vertical-align: top; overflow-wrap: anywhere; }
+.about-comparison thead { background: var(--surface-2); }
+.about-comparison th { font-weight: 500; }
+.about-comparison th:first-child { width: 29%; }
+.about-comparison tbody th { color: var(--text-2); }
+.about-comparison strong { display: block; font-weight: 500; margin-bottom: 6px; }
+.about-lifecycle { list-style: none; padding: 0; margin: 26px 0 0; display: grid; gap: 0; }
+.about-lifecycle li { display: grid; grid-template-columns: 42px minmax(0, 1fr); gap: 18px; padding-bottom: 24px; }
+.about-lifecycle li:last-child { padding-bottom: 0; }
+.about-step { font-family: var(--font-mono); color: var(--accent); border-top: 2px solid var(--accent); padding-top: 8px; }
+.about-capabilities { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; margin-top: 26px; }
+.about-capabilities > section { padding: 24px; background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--r-2); }
+.about-status { display: block; font-size: 12px; line-height: 1.6; margin-bottom: 12px; }
+.about-status-implemented { color: var(--tone-complete); }
+.about-status-gated, .about-status-planned { color: var(--tone-human); }
+.about-footer { padding-top: 26px; border-top: 1px solid var(--line-strong); }
+.about-footer nav { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 18px; }
+.about-footer .btn { text-decoration: none; min-height: 44px; }
+@media (max-width: 760px) {
+  .about-page { padding-top: 0; }
+  .about-section { padding: 24px 0; }
+  .about-comparison th, .about-comparison td { padding: 14px 8px; }
+  .about-comparison th:first-child { width: 34%; }
+  .about-capabilities { grid-template-columns: minmax(0, 1fr); gap: 16px; }
+  .about-capabilities > section { padding: 20px; }
+  .about-lifecycle li { gap: 12px; grid-template-columns: 32px minmax(0, 1fr); }
+}

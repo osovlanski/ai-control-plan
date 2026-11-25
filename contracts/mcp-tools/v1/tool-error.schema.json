@@ -1,0 +1,193 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-plane.local/contracts/mcp-tools/v1/tool-error.schema.json",
+  "title": "ToolError",
+  "description": "The object a tool result with isError true carries as JSON in content[1].text (not as structuredContent, which clients validate against the success outputSchema). Transport and auth failures are HTTP errors, not tool errors.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "code",
+    "message",
+    "retryable"
+  ],
+  "properties": {
+    "code": {
+      "enum": [
+        "invalid_input",
+        "repo_not_allowed",
+        "not_found",
+        "idempotency_conflict",
+        "idempotency_in_progress",
+        "invalid_state",
+        "route_changed",
+        "no_eligible_assistant",
+        "rate_limited",
+        "plane_unavailable",
+        "internal"
+      ]
+    },
+    "message": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 500
+    },
+    "retryable": {
+      "type": "boolean"
+    },
+    "retryAfterSeconds": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 3600
+    },
+    "currentState": {
+      "enum": [
+        "CREATED",
+        "ROUTING",
+        "RUNNING",
+        "WAITING_RESOURCE",
+        "WAITING_INPUT",
+        "LIMIT_PAUSED",
+        "HANDING_OFF",
+        "COMPLETED",
+        "FAILED",
+        "CANCELLED"
+      ],
+      "description": "Task state (TASK_STATES, packages/core/src/state-machine.ts)."
+    },
+    "webLink": {
+      "type": "string",
+      "maxLength": 300,
+      "pattern": "^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?/#/missions/AG-[0-9a-z]{1,32}$",
+      "description": "Private Web link to the task: the configured HTTPS Web origin + `/#/missions/<taskId>`. Reachable only on the private network."
+    },
+    "proposal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "eligible",
+        "assistantId",
+        "ruleFired",
+        "summary",
+        "candidates",
+        "compositionDigest"
+      ],
+      "description": "The route the plane would take if the task started now, from the existing routing service (and the composer preview when the composer is on). Advisory: start_task re-routes and refuses with route_changed if `confirm` no longer matches.",
+      "properties": {
+        "eligible": {
+          "type": "boolean",
+          "description": "False when no assistant passes the filters; start_task would fail with no_eligible_assistant."
+        },
+        "assistantId": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+        },
+        "ruleFired": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500,
+          "description": "One redacted sentence explaining the choice, for the chat client to show."
+        },
+        "candidates": {
+          "type": "array",
+          "maxItems": 20,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "assistantId",
+              "passedFilters",
+              "filterFailures"
+            ],
+            "properties": {
+              "assistantId": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+              },
+              "passedFilters": {
+                "type": "boolean"
+              },
+              "filterFailures": {
+                "type": "array",
+                "maxItems": 20,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                }
+              }
+            }
+          }
+        },
+        "compositionDigest": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "description": "Composer preview digest, or null when the composer is off or produced no composition."
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "code": {
+            "const": "route_changed"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "proposal": true
+        },
+        "required": [
+          "proposal"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "code": {
+            "const": "rate_limited"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "retryAfterSeconds": true
+        },
+        "required": [
+          "retryAfterSeconds"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "code": {
+            "const": "invalid_state"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "currentState": true
+        },
+        "required": [
+          "currentState"
+        ]
+      }
+    }
+  ]
+}

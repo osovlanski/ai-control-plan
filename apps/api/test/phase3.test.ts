@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { loadConfig } from "../src/config.js";
+import { AGENT_USER_DEFAULTS, loadConfig } from "../src/config.js";
 import { openDb } from "../src/db/index.js";
 import { Registry } from "../src/modules/registry.js";
 import { EventRetention } from "../src/modules/retention.js";
@@ -34,6 +34,27 @@ describe("Phase 3 jobs", () => {
     expect(registry.recentChanges()).not.toEqual(
       expect.arrayContaining([expect.objectContaining({ field: "core.models" })]),
     );
+    db.close();
+  });
+  it("re-describes when execution.agentUser is added or removed, though the probe is unchanged", async () => {
+    // The first live autopilot run failed with "requires an adapter that can launch as the agent user":
+    // the assistant's stored manifest predated the setting, and an unchanged probe never refreshed it.
+    const { db, config } = setup();
+    const probe = async () => ({ fingerprint: "same", version: "1.0", authState: "ok" as const, models: ["fake-1"], configHash: "same" });
+    const plain = new Registry(db, config, probe); plain.init();
+    await plain.syncChanged("personal-fake"); await plain.syncChanged("personal-fake");
+    const withAgent = { ...config, execution: { ...config.execution, agentUser: { ...AGENT_USER_DEFAULTS } } };
+    const configured = new Registry(db, withAgent, probe); configured.init();
+    const describe = vi.spyOn(configured.adapter("personal-fake"), "describe");
+    await configured.syncChanged("personal-fake");
+    expect(describe).toHaveBeenCalledTimes(1);
+    await configured.syncChanged("personal-fake");
+    expect(describe).toHaveBeenCalledTimes(1);
+    // Removing it re-describes once more; an unchanged workspace never did.
+    const removed = new Registry(db, config, probe); removed.init();
+    const describeAgain = vi.spyOn(removed.adapter("personal-fake"), "describe");
+    await removed.syncChanged("personal-fake"); await removed.syncChanged("personal-fake");
+    expect(describeAgain).toHaveBeenCalledTimes(1);
     db.close();
   });
   it("gzip-archives old terminal-task events transactionally", () => {
