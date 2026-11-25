@@ -73,12 +73,18 @@ CREATE INDEX idx_requirement_resource ON attempt_requirements(resource, attempt_
 CREATE TEMP TABLE qcq_abort (msg TEXT NOT NULL);
 CREATE TEMP TRIGGER qcq_abort_raise BEFORE INSERT ON qcq_abort BEGIN SELECT RAISE(ABORT, NEW.msg); END;
 
--- A run row still owns execution when it has not ended by any vocabulary: no `ended_at`, no legacy
--- end state, no terminal session state, and its task is not terminal (K4b releases at task terminal).
+-- A run row has not ended when no vocabulary says so: no `ended_at`, no legacy end state, no
+-- terminal session state. This decides rows 1 and 2 for a dispatch-bound run whatever its task's
+-- state (#264 review finding 3: a cancelled task's open run with a released claim is row 1).
+CREATE TEMP VIEW qcq_unended_runs AS
+SELECT r.id FROM runs r
+ WHERE r.ended_at IS NULL AND r.state NOT IN ('ENDED_OK','ENDED_ERROR','CANCELLED')
+   AND (r.execution_request_id IS NULL OR COALESCE(r.session_state, '') NOT IN ('COMPLETED','FAILED','CANCELLED','TIMED_OUT','YIELDED'));
+-- An unmatched run (no dispatch row carries it) gets an attempt only while its task is not
+-- terminal (K4b releases at task terminal).
 CREATE TEMP VIEW qcq_open_runs AS
 SELECT r.id FROM runs r JOIN tasks t ON t.id = r.task_id
- WHERE r.ended_at IS NULL AND r.state NOT IN ('ENDED_OK','ENDED_ERROR','CANCELLED')
-   AND (r.execution_request_id IS NULL OR COALESCE(r.session_state, '') NOT IN ('COMPLETED','FAILED','CANCELLED','TIMED_OUT','YIELDED'))
+ WHERE r.id IN (SELECT id FROM qcq_unended_runs)
    AND t.state NOT IN ('COMPLETED','FAILED','CANCELLED');
 
 -- Every dispatch that has a claim row or an entry mark. A dispatch with neither gets no attempt.
@@ -89,7 +95,7 @@ SELECT d.dispatch_id, d.task_id, d.execution_path, d.phase, d.created_at AS disp
        EXISTS (SELECT 1 FROM scheduler_events e WHERE e.dispatch_id = d.dispatch_id AND e.type = 'dispatch.aborted'
                  AND json_extract(e.payload, '$.reason') = 'Operator confirmed no live execution owner') AS confirmed,
        c.claim_id, c.released_at AS claim_released_at, c.resource, c.units, c.claimed_at,
-       r.id AS run_id, r.started_at AS run_started_at, r.id IN (SELECT id FROM qcq_open_runs) AS run_open, r.assistant_id AS run_assistant
+       r.id AS run_id, r.started_at AS run_started_at, r.id IN (SELECT id FROM qcq_unended_runs) AS run_open, r.assistant_id AS run_assistant
   FROM dispatches d
   LEFT JOIN resource_claims c ON c.dispatch_id = d.dispatch_id
   LEFT JOIN runs r ON r.dispatch_id = d.dispatch_id
@@ -295,6 +301,7 @@ CREATE TRIGGER trg_claim_no_delete BEFORE DELETE ON resource_claims
 BEGIN SELECT RAISE(ABORT, 'claim history is never deleted'); END;
 
 DROP VIEW qcq_open_runs;
+DROP VIEW qcq_unended_runs;
 DROP TABLE qcq_src;
 DROP TABLE qcq_rows;
 DROP TABLE qcq_attempts;

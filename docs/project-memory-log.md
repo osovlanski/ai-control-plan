@@ -1066,3 +1066,12 @@ Migration 041 adds `runs.harness_cli_version` (TEXT NULL, forward only, no backf
 - Every provider entry goes through `enterProvider` (ownership-only in 04a) at the three credentialed boundaries; `apps/api/test/qcq-04a-allowlist.test.ts` pins the call inventory with the type checker. A new adapter call site fails that test until it is guarded and listed.
 - API 2.19: `attempts` on `GET /api/tasks/:id` and the task wait read; `resourceClaim` keeps its K4b value. `scheduler_events` gains `attempt.entered`, `attempt.dropped`, `attempt.settled`.
 - `scheduling.accounts` parses with `enforce: false` only; `ACCOUNT_ENFORCEMENT_READY` is false until qcq-04d. Where 04a differs from the review packet, packet section 8.1 says why (notably: a pre-upgrade single task with extra open runs keeps them as owners on later slots instead of aborting the upgrade).
+
+## qcq-04a review fixes (2026-11-25, Codex review of #264: FAIL; fixes in their own PR)
+
+- At boot a legacy run row (no `execution_request_id`) is never an execution owner, whatever its `ended_at`: the boot sweep settles its attempt `boot_unverified` on every task state. Boot reconcile still ends only the runs of running tasks.
+- A dispatch with no attempt gets its compat attempt on a replayed saved route too, and `beforeStart` ensures one before marking `start_attempted`. Operator run-now with `confirmNoLiveOwner` looks for a run of the ambiguous dispatch itself (`runs.dispatch_id`), not any run of the task.
+- A legacy start that fails after the adapter returned a handle cancels the handle, ends its run row and drains the stream (10 s) before settling; an undrained one is `ambiguous`. Attempt and claim reasons are redacted (`redactText`) before they are written.
+- `Scheduler.publish` sends the newest non-`attempt.*` scheduler event, so `attempt.*` rows are history only on the live stream.
+- Migration 059 (`059_attempt_guards.sql`): owner move by task or slot is guarded, claim `claim_id`/`claimed_at`/`generation` are immutable, and an insert that would REPLACE a claim is refused. Migration 058 was edited for the terminal-task row-1 case: a box that already applied 058 keeps its one-time classification.
+- `ackHandle` marks the session's `starting` attempt `live` in the same transaction (packet 8.1 note 5).

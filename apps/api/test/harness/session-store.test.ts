@@ -319,7 +319,12 @@ describe("start-intent / start-ack markers (§9)", () => {
     expect(() => store.ackHandle(id, "provref" as ProviderSessionRef, { expectedVersion: 1, leaseToken: "wrong" })).toThrow(
       SessionCasConflictError,
     );
+    // #264 review (section 8.1 note 5): the entered attempt is `live` at the handle, not at the first event.
+    expect(store.enterProvider(id, token)).toMatchObject({ ok: true });
+    const attemptState = () => (db.prepare("SELECT state FROM execution_attempts WHERE session_id = ?").get(id) as { state: string }).state;
+    expect(attemptState()).toBe("starting");
     const afterHandle = store.ackHandle(id, "provref" as ProviderSessionRef, { expectedVersion: 1, leaseToken: token });
+    expect(attemptState()).toBe("live");
     expect(afterHandle.providerSessionRef).toBe("provref");
     expect(afterHandle.providerStartAcked).toBe(false);
     expect(afterHandle.version).toBe(2);

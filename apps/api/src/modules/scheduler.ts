@@ -280,6 +280,12 @@ export class Scheduler {
       }
       throw new Error(`Task ${taskId} needs ${need.units} unit(s) of ${need.resource}; execution cannot start without a live resource claim`);
     }
+    // #264 review: every requirement the attempt carries, not only the task wait's pool (2.3.2).
+    const claims = this.attempts.claimsOf(attempt.attempt_id);
+    for (const r of this.attempts.requirements(attempt.attempt_id)) {
+      const units = claims.filter(c => c.resource === r.resource).reduce((n, c) => n + c.units, 0);
+      if (units < r.units) throw new Error(`Task ${taskId} needs ${r.units} unit(s) of ${r.resource}; execution cannot start without a live resource claim`);
+    }
   }
 
   /**
@@ -551,7 +557,10 @@ export class Scheduler {
   publish(taskId: string): void {
     if (this.d.db.inTransaction) return;
     this.d.bus.publish(taskId, { kind: 'state', state: { state: this.d.tasks.get(taskId)!.state, wait: this.condition(taskId), schedulerEnabled: this.enabled } });
-    const event = this.events(taskId).at(-1);
+    // #264 review finding 6: qcq-04a's `attempt.*` rows are durable history only. The live stream
+    // keeps its pre-04a outcome, the newest scheduler event of every other kind: a settlement row
+    // written after its release must not displace `resource.released`.
+    const event = [...this.events(taskId)].reverse().find((e) => !e.type.startsWith('attempt.'));
     if (event) this.d.bus.publish(taskId, { kind: 'scheduler', scheduler: event });
   }
   private hasOwner(taskId: string): boolean {
@@ -966,7 +975,9 @@ export class Scheduler {
     if (ambiguous && this.d.tasks.get(taskId)?.state === 'ROUTING') {
       if (!confirmNoLiveOwner || this.inFlight.has(ambiguous.dispatch_id)) return Promise.resolve({ outcome: 'stale', reason: 'Ambiguous legacy start: reconcile the provider, then confirmNoLiveOwner to re-arm' });
       const rearmed = this.d.db.transaction(() => {
-        if (this.condition(taskId)?.generation !== generation || this.d.db.prepare('SELECT 1 FROM runs WHERE task_id = ?').get(taskId)) return false;
+        // #264 review finding 4: the evidence that refuses is a run row of THIS dispatch. A run of an
+        // earlier dispatch (an ended handoff predecessor) is not execution of the ambiguous start.
+        if (this.condition(taskId)?.generation !== generation || this.d.db.prepare('SELECT 1 FROM runs WHERE dispatch_id = ?').get(ambiguous.dispatch_id)) return false;
         // The operator's confirmation is the exit proof of the ambiguous attempt (packet 2.6.1).
         const attempt = this.attempts.forDispatch(ambiguous.dispatch_id);
         if (attempt) announceReleased(this.d.db, this.attempts.finalize(attempt, attempt.state === 'held' ? 'never_entered' : 'operator_confirmed', 'Operator confirmed no live execution owner'));
@@ -1009,6 +1020,9 @@ export class Scheduler {
         // Crash recovery replays a decision made before the crash. Nothing has started yet (still
         // `reserved`), so a disable since then (workspace config or operator overlay) must win.
         if (stored.chosen) disabledStored = this.d.orchestrator.disabledForNewStart([stored.chosen as AssistantId]);
+        // #264 review finding 1: a replayed decision needs its attempt as much as a fresh one does
+        // (a claimless dispatch reserved before the upgrade has none).
+        this.ensureDispatchAttempt(current);
         return { explanation: stored, routingDecisionId: current.routing_decision_id };
       }
       const result = this.d.orchestrator.routeTask(taskId, dispatch.origin, { dispatchId: id, exclude: intent?.from, override: intent?.to });
@@ -1044,6 +1058,8 @@ export class Scheduler {
           if (this.d.boundary) await this.d.boundary('materialized', this.dispatch(id));
           this.d.db.transaction(() => {
             if (this.dispatch(id).phase !== 'reserved' || this.d.tasks.get(taskId)?.state !== 'ROUTING') throw new Error('Dispatch no longer owns task');
+            // Belt and braces for finding 1: `start_attempted` is never committed without an attempt.
+            this.ensureDispatchAttempt(this.dispatch(id));
             this.phase(id, 'start_attempted');
             this.record(taskId, 'dispatch.start_attempted', dispatch.condition_generation, id);
           })();
