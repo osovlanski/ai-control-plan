@@ -18,7 +18,7 @@ import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { isTerminal, redactText, redactValue, type TaskState } from "@agent-plane/core";
 import type { Db } from "../db/index.js";
-import { attemptUnit, exitEvidence, type UnitLane } from "./exit-evidence.js";
+import { attemptUnit, exitEvidence, type UnitLane, type UnitOwner } from "./exit-evidence.js";
 
 export type AttemptState = "queued" | "held" | "starting" | "live" | "stopping" | "ambiguous" | "settled" | "dropped";
 export type AttemptKind = "dispatch" | "direct" | "candidate";
@@ -62,6 +62,10 @@ export interface AttemptRow {
   stop_requested_at: string | null;
   provider_unit: string | null;
   provider_unit_seen_at: string | null;
+  /** #268 review: the plane incarnation that ran the entry commit (`plane_incarnations`). */
+  entered_incarnation: string | null;
+  /** #268 review: the manager the unit was assigned under (JSON `UnitOwner`). */
+  provider_unit_owner: string | null;
   exit_proof: ExitProof | null;
   exit_proof_at: string | null;
   occupies_account: string | null;
@@ -124,23 +128,38 @@ export function currentBootId(): string {
 }
 
 /**
- * What this plane incarnation knows about its own attempts, per database handle. A reopened
- * database (a restart) starts empty, so an attempt not entered here belongs to a dead
- * incarnation: its spawn path is closed and it can be settled by `boot_unverified`.
+ * What this plane incarnation knows about its own attempts, per database handle. Each handle is
+ * one incarnation with a durable id (`plane_incarnations`, written at its first entry commit), so
+ * another connection or a restarted plane can tell a live incarnation from a dead one (#268 review
+ * finding 2) instead of reading every attempt it did not enter itself as dead.
  */
 interface Incarnation {
-  /** Attempts whose entry commit ran in this incarnation. */
-  entered: Set<string>;
-  /** The adapter's `spawnClosed` for each attempt this incarnation started a provider for. */
+  id: string;
+  /**
+   * Attempts entered here whose provider event stream has not closed yet: the adapter call is
+   * unsettled, or its stream is still open (#268 review finding 5). Until it closes, nothing reads
+   * the attempt's provider as gone without a unit proof.
+   */
+  streams: Set<string>;
+  /** The adapter's `spawnClosed` for each attempt this incarnation started a provider for, until the attempt is final. */
   spawns: Map<string, () => boolean>;
+  /** Attempts of a dead incarnation whose populated unit this one already asked to stop. */
+  stopsIssued: Set<string>;
   watchers: Map<string, ReturnType<typeof setInterval>>;
   stopEvidenceMs: number;
   watchMs: number;
 }
 const incarnations = new WeakMap<Db, Incarnation>();
+/** This process's incarnations by id, so a second handle in the same process sees the first as live while it is open. */
+const processIncarnations = new Map<string, WeakRef<Db>>();
 function incarnation(db: Db): Incarnation {
   let inc = incarnations.get(db);
-  if (!inc) incarnations.set(db, (inc = { entered: new Set(), spawns: new Map(), watchers: new Map(), stopEvidenceMs: DEFAULT_STOP_EVIDENCE_MS, watchMs: DEFAULT_EXIT_WATCH_MS }));
+  if (!inc) {
+    inc = { id: `inc_${randomUUID()}`, streams: new Set(), spawns: new Map(), stopsIssued: new Set(), watchers: new Map(),
+      stopEvidenceMs: DEFAULT_STOP_EVIDENCE_MS, watchMs: DEFAULT_EXIT_WATCH_MS };
+    incarnations.set(db, inc);
+    processIncarnations.set(inc.id, new WeakRef(db));
+  }
   return inc;
 }
 /** Test and host tuning of the exit-proof timings for this database's plane. */
@@ -155,6 +174,23 @@ export function configureExitProofs(db: Db, opts: { stopEvidenceMs?: number; wat
  */
 export function registerSpawn(db: Db, attemptId: string, closed: () => boolean): void {
   incarnation(db).spawns.set(attemptId, closed);
+}
+
+/**
+ * #268 review finding 5: the provider's event stream of an attempt entered here has closed (its
+ * iterator finished or failed, or the provider call rejected). Until then a unitless attempt is
+ * not settled by `stream_closed_unverified`, however its session or run ended. Settles the attempt
+ * if nothing else holds it, and announces what that released.
+ */
+export function providerStreamClosed(db: Db, attemptId: string, now: () => Date = () => new Date()): void {
+  const inc = incarnation(db);
+  if (!inc.streams.delete(attemptId) || !db.open) return;
+  const released = db.transaction(() => {
+    const store = new AttemptStore(db, now);
+    const a = store.get(attemptId);
+    return a ? store.settleEntered(a, "provider event stream closed") : [];
+  })();
+  announceReleased(db, released);
 }
 
 /**
@@ -178,7 +214,9 @@ export function watchExit(db: Db, attemptId: string, now: () => Date = () => new
         return !ENTERED_STATES.includes(after.state) || after.state === "ambiguous";
       })();
       announceReleased(db, released);
-      if (done) { clearInterval(timer); inc.watchers.delete(attemptId); inc.spawns.delete(attemptId); }
+      // The watch stops at `ambiguous` (the sweep keeps reading it), but the spawn-closed report
+      // stays until the attempt is final: `finalize` drops it (#268 review finding 8).
+      if (done) { clearInterval(timer); inc.watchers.delete(attemptId); }
     } catch {
       // A transient read or lock failure: the next tick, or the scheduler's sweep, tries again.
     }
@@ -424,6 +462,8 @@ export class AttemptStore {
     const changed = this.db.prepare(`UPDATE execution_attempts SET state = ?, exit_proof = ?, exit_proof_at = ?, final_at = ?, updated_at = ?, reason = ?
       WHERE attempt_id = ? AND state = ?`).run(state, finalProof, at, at, at, redactText(reason), a.attempt_id, a.state).changes;
     if (!changed) return [];
+    const inc = incarnation(this.db);
+    inc.streams.delete(a.attempt_id); inc.spawns.delete(a.attempt_id); inc.stopsIssued.delete(a.attempt_id);
     const released = this.releaseClaims(a, reason);
     this.event(a.task_id, state === "dropped" ? "attempt.dropped" : "attempt.settled", a.dispatch_id,
       { attemptId: a.attempt_id, proof: finalProof, reason, slot: a.candidate_slot });
@@ -445,6 +485,7 @@ export class AttemptStore {
   startFailed(attemptId: string, reason: string): Released[] {
     const a = this.get(attemptId);
     if (a?.state === "held") return this.finalize(a, "never_entered", reason);
+    incarnation(this.db).streams.delete(attemptId); // the call rejected: it holds no stream
     if ((a?.state === "starting" || a?.state === "stopping") && !a.session_id) return this.finalize(a, "stream_closed_unverified", reason);
     return [];
   }
@@ -458,7 +499,10 @@ export class AttemptStore {
   abandonedStart(attemptId: string, reason: string, drained: boolean): Released[] {
     const a = this.get(attemptId);
     if (!a || (a.state !== "starting" && a.state !== "live")) return [];
-    if (drained) return this.finalize(a, "stream_closed_unverified", reason);
+    if (drained) {
+      incarnation(this.db).streams.delete(attemptId);
+      return this.finalize(a, "stream_closed_unverified", reason);
+    }
     const at = this.iso();
     const changed = this.db.prepare("UPDATE execution_attempts SET state = 'ambiguous', reason = ?, updated_at = ? WHERE attempt_id = ? AND state = ?")
       .run(redactText(reason), at, a.attempt_id, a.state).changes;
@@ -488,12 +532,58 @@ export class AttemptStore {
    */
   streamClosed(runId: string): Released[] {
     const a = this.forSession(runId);
-    return a ? this.settleEntered(a, "event stream closed") : [];
+    if (!a) return [];
+    incarnation(this.db).streams.delete(a.attempt_id);
+    return this.settleEntered(a, "event stream closed");
   }
 
   /** Whether this plane incarnation ran the attempt's entry commit. */
   enteredHere(attemptId: string): boolean {
-    return incarnation(this.db).entered.has(attemptId);
+    return this.get(attemptId)?.entered_incarnation === incarnation(this.db).id;
+  }
+
+  /**
+   * Who holds an entered attempt's provider (#268 review finding 2): this incarnation, another one
+   * that is still running (another connection in this process, or a plane process whose pid still
+   * has the start time it recorded on this boot), or a dead one. Pre-migration rows record none and
+   * read as dead, as before. A process whose start time cannot be read is taken as alive: nothing
+   * proves it gone.
+   */
+  incarnationOf(a: AttemptRow): "here" | "alive" | "dead" {
+    const inc = incarnation(this.db);
+    if (!a.entered_incarnation) return "dead";
+    if (a.entered_incarnation === inc.id) return "here";
+    const local = processIncarnations.get(a.entered_incarnation)?.deref();
+    if (local?.open) return "alive";
+    const row = this.db.prepare("SELECT pid, proc_start, boot_id FROM plane_incarnations WHERE incarnation_id = ?")
+      .get(a.entered_incarnation) as { pid: number; proc_start: string | null; boot_id: string } | undefined;
+    if (!row) return "dead";
+    const ev = exitEvidence(this.db);
+    const boot = ev.bootId();
+    if (row.boot_id !== "unavailable" && boot !== "unavailable" && row.boot_id !== boot) return "dead";
+    // This process's own pid: a handle it opened is in the map above, so any other is gone.
+    if (row.pid === process.pid) return "dead";
+    const start = ev.processStart(row.pid);
+    if (start === null) return "dead";
+    if (start === "unreadable" || row.proc_start === null) return "alive";
+    return start === row.proc_start ? "alive" : "dead";
+  }
+
+  /** The manager the attempt's unit was assigned under, as recorded at entry. */
+  private unitOwnerOf(a: AttemptRow): UnitOwner | undefined {
+    if (!a.provider_unit_owner) return undefined;
+    try { return JSON.parse(a.provider_unit_owner) as UnitOwner; } catch { return undefined; }
+  }
+
+  /** The recorded manager of an attempt's unit, for the operator's stop. */
+  unitOwner(attemptId: string): UnitOwner | undefined {
+    const a = this.get(attemptId);
+    return a ? this.unitOwnerOf(a) : undefined;
+  }
+
+  /** This incarnation's provider stream for the attempt is still open. */
+  private streamOpen(a: AttemptRow): boolean {
+    return incarnation(this.db).streams.has(a.attempt_id);
   }
 
   /**
@@ -539,10 +629,18 @@ export class AttemptStore {
     const a = this.get(attemptId);
     if (!a) return { ok: false, code: "unknown" };
     if (!OWNER_STATES.includes(a.state)) return { ok: false, code: "not_open" };
-    if (a.provider_unit && exitEvidence(this.db).readUnit(a.provider_unit, a.run_as === "agent" ? "agent" : "plane") === "populated") {
+    if (a.provider_unit && exitEvidence(this.db).readUnit(a.provider_unit, a.run_as === "agent" ? "agent" : "plane", this.unitOwnerOf(a)) === "populated") {
       return { ok: false, code: "unit_populated", unit: a.provider_unit };
     }
-    if (a.state === "live" && this.owned(a, this.enteredHere(a.attempt_id) ? "runtime" : "boot")) return { ok: false, code: "attempt_live" };
+    if (a.state !== "held") {
+      const who = this.incarnationOf(a);
+      // Another live plane holds it, or this one is still in its provider call or stream (#268
+      // review finding 6: a `starting` attempt whose runner awaits its handle). `ambiguous` is the
+      // operator's to settle: its stream outlived every proof.
+      if (who === "alive") return { ok: false, code: "attempt_live" };
+      if (who === "here" && a.state !== "ambiguous" && this.streamOpen(a)) return { ok: false, code: "attempt_live" };
+      if (a.state === "live" && this.owned(a, who === "here" ? "runtime" : "boot")) return { ok: false, code: "attempt_live" };
+    }
     const released = this.finalize(a, a.state === "held" ? "never_entered" : "operator_confirmed", reason);
     return { ok: true, released, attempt: this.get(attemptId)! };
   }
@@ -574,51 +672,65 @@ export class AttemptStore {
   }
 
   /**
-   * The proof test for one entered attempt (packet 2.6.1, 2.8.2 rows 10 to 16). Inside the
-   * caller's transaction. Returns the claims it released.
+   * The proof test for one entered attempt (packet 2.6.1, 2.8.2 rows 10 to 16, with the #268
+   * review fixes). Inside the caller's transaction. Returns the claims it released.
    *
+   * - An attempt another live incarnation entered is that incarnation's to settle: nothing here.
    * - `host_rebooted`: an attempt entered by another incarnation on another boot.
-   * - With a unit: populated registers it (`provider_unit_seen_at`) and holds; empty, or absent once
-   *   registered, is `cgroup_empty`; absent and never registered is `unscoped_exit` only when the
-   *   spawn path is closed (this incarnation's adapter reports it, or the spawning incarnation is
-   *   dead) and the launcher scan, then a second read, find nothing.
-   * - Without a unit: the end of the execution's stream, which K4b's ownership test reads
-   *   (`stream_closed_unverified`), or `boot_unverified` when the owning incarnation is dead.
+   * - With a unit, read under the manager recorded at entry: populated registers it
+   *   (`provider_unit_seen_at`) and holds (a dead incarnation's is asked to stop, once per
+   *   attempt, whatever state it is in); unreadable holds; empty or absent is `cgroup_empty` only
+   *   once registered. Never registered, empty or absent is `unscoped_exit` only when the spawn
+   *   path is closed (this incarnation's adapter reports it, or the spawning incarnation is dead)
+   *   and the launcher scan, then a second read, find nothing.
+   * - Without a unit: the end of the execution's stream. This incarnation's own attempt waits for
+   *   its provider stream to really close; then K4b's ownership test (`stream_closed_unverified`),
+   *   or `boot_unverified` when the owning incarnation is dead.
    */
   settleEntered(a: AttemptRow, reason: string): Released[] {
     if (!ENTERED_STATES.includes(a.state)) return [];
     const ev = exitEvidence(this.db);
-    const here = this.enteredHere(a.attempt_id);
+    const who = this.incarnationOf(a);
+    if (who === "alive") return [];
+    const here = who === "here";
     const boot = ev.bootId();
     if (!here && a.entered_boot_id && a.entered_boot_id !== "unavailable" && boot !== "unavailable" && a.entered_boot_id !== boot) {
       return this.finalize(a, "host_rebooted", reason);
     }
     if (a.provider_unit) {
       const lane: UnitLane = a.run_as === "agent" ? "agent" : "plane";
-      const state = ev.readUnit(a.provider_unit, lane);
+      const owner = this.unitOwnerOf(a);
+      const state = ev.readUnit(a.provider_unit, lane, owner);
       if (state === "populated") {
-        if (!a.provider_unit_seen_at) {
-          this.db.prepare("UPDATE execution_attempts SET provider_unit_seen_at = ?, updated_at = ? WHERE attempt_id = ? AND provider_unit_seen_at IS NULL").run(this.iso(), this.iso(), a.attempt_id);
-        }
-        // A dead incarnation's provider still running: recovery terminates its tree (2.8.2 row 13).
-        if (!here && (a.state === "starting" || a.state === "live")) {
-          this.requestStop(a, "boot: provider of a dead incarnation still running");
-          const unit = a.provider_unit;
-          queueMicrotask(() => { void ev.stopUnit(unit, lane); watchExit(this.db, a.attempt_id, this.now); });
-          return [];
+        this.markSeen(a);
+        // A dead incarnation's provider still running: recovery terminates its tree (2.8.2 row 13),
+        // also when that incarnation had already moved it to `stopping` or `ambiguous` (finding 7).
+        if (!here) {
+          if (a.state === "starting" || a.state === "live") this.requestStop(a, "boot: provider of a dead incarnation still running");
+          const inc = incarnation(this.db);
+          if (!inc.stopsIssued.has(a.attempt_id)) {
+            inc.stopsIssued.add(a.attempt_id);
+            const unit = a.provider_unit;
+            queueMicrotask(() => { void ev.stopUnit(unit, lane, owner); watchExit(this.db, a.attempt_id, this.now); });
+          }
         }
         return this.awaitProof(this.get(a.attempt_id)!);
       }
-      // A unit that exists has been registered by systemd; empty means every process in it is gone.
-      if (state === "empty" || (state === "absent" && a.provider_unit_seen_at)) return this.finalize(a, "cgroup_empty", reason);
-      if (state === "absent") {
-        const spawnClosed = here ? incarnation(this.db).spawns.get(a.attempt_id)?.() === true : true;
-        if (spawnClosed && !ev.launcherAlive(a.attempt_id) && ev.readUnit(a.provider_unit, lane) === "absent") {
-          return this.finalize(a, "unscoped_exit", reason);
-        }
+      // A search or read the plane could not complete proves nothing (finding 3).
+      if (state === "unreadable") return this.awaitProof(a);
+      // Registered, then empty or gone: every process in it has exited.
+      if (a.provider_unit_seen_at) return this.finalize(a, "cgroup_empty", reason);
+      // Never seen populated (finding 1): a scope can exist empty before systemd moves the launcher
+      // into it, so empty is no more an exit than absent is.
+      const spawnClosed = here ? incarnation(this.db).spawns.get(a.attempt_id)?.() === true : true;
+      if (spawnClosed && !ev.launcherAlive(a.attempt_id, owner)) {
+        const again = ev.readUnit(a.provider_unit, lane, owner);
+        if (again === "absent" || again === "empty") return this.finalize(a, "unscoped_exit", reason);
+        if (again === "populated") this.markSeen(a);
       }
       return this.awaitProof(a);
     }
+    if (here && this.streamOpen(a)) return this.awaitProof(a);
     if (this.owned(a, here ? "runtime" : "boot")) return this.awaitProof(a);
     // An attempt that ever held an account claim is never settled by a weak proof (2.6.1,
     // `trg_attempt_weak_proof`). Unreachable once `enforce: true` requires strong exit evidence of
@@ -626,6 +738,13 @@ export class AttemptStore {
     // failing the session's terminal transaction.
     if (a.account_key || this.heldAccount(a.attempt_id)) return this.awaitProof(a);
     return this.finalize(a, here ? "stream_closed_unverified" : "boot_unverified", reason);
+  }
+
+  /** The unit read populated: registered by systemd, so its later absence proves exit. */
+  private markSeen(a: AttemptRow): void {
+    if (a.provider_unit_seen_at) return;
+    const at = this.iso();
+    this.db.prepare("UPDATE execution_attempts SET provider_unit_seen_at = ?, updated_at = ? WHERE attempt_id = ? AND provider_unit_seen_at IS NULL").run(at, at, a.attempt_id);
   }
 
   /**
@@ -726,11 +845,21 @@ export class AttemptStore {
     if (unit !== undefined && (a.execution_path !== "harness" || unit !== attemptUnit(a.attempt_id, a.run_as === "agent" ? "agent" : "plane"))) {
       return notOwner(`unit ${unit} is not attempt ${a.attempt_id}'s`);
     }
-    const boot = exitEvidence(this.db).bootId();
-    this.db.prepare(`UPDATE execution_attempts SET state = 'starting', entered_at = ?, entered_boot_id = ?, provider_unit = ?, updated_at = ?,
-        session_id = COALESCE(session_id, ?)
-      WHERE attempt_id = ? AND state = 'held'`).run(nowIso, boot === "unavailable" ? currentBootId() : boot, unit ?? null, nowIso, ctx.sessionId ?? null, a.attempt_id);
-    incarnation(this.db).entered.add(a.attempt_id);
+    const ev = exitEvidence(this.db);
+    const boot = ev.bootId();
+    const enteredBoot = boot === "unavailable" ? currentBootId() : boot;
+    const inc = incarnation(this.db);
+    // In this transaction, every entry: a rolled-back first entry must not leave the row unwritten.
+    const start = ev.processStart(process.pid);
+    this.db.prepare("INSERT OR IGNORE INTO plane_incarnations (incarnation_id, pid, proc_start, boot_id, started_at) VALUES (?, ?, ?, ?, ?)")
+      .run(inc.id, process.pid, start === null || start === "unreadable" ? null : start, enteredBoot, nowIso);
+    // The manager the unit is assigned under, so recovery reads and stops it there (finding 4).
+    const owner = unit ? ev.unitOwner(a.run_as === "agent" ? "agent" : "plane") : undefined;
+    this.db.prepare(`UPDATE execution_attempts SET state = 'starting', entered_at = ?, entered_boot_id = ?, entered_incarnation = ?, provider_unit = ?,
+        provider_unit_owner = ?, updated_at = ?, session_id = COALESCE(session_id, ?)
+      WHERE attempt_id = ? AND state = 'held'`).run(nowIso, enteredBoot, inc.id, unit ?? null, owner ? JSON.stringify(owner) : null, nowIso, ctx.sessionId ?? null, a.attempt_id);
+    // Open until the runner reports the provider call settled and its event stream closed.
+    inc.streams.add(a.attempt_id);
     this.event(a.task_id, "attempt.entered", a.dispatch_id, { attemptId: a.attempt_id, path: a.execution_path, slot: a.candidate_slot, ...(unit ? { unit } : {}) });
     return { ok: true, attempt: this.get(a.attempt_id)! };
   }

@@ -1089,3 +1089,10 @@ Migration 041 adds `runs.harness_cli_version` (TEXT NULL, forward only, no backf
 - With enforcement on (tests only: set `config.accounts`), `account:<group>` capacity is the group limit, and a legacy start with an account key is refused `account_requires_harness` (task `WAITING_INPUT` `intervention_required`).
 - An account claim needs a strong proof: tests give fake members a unit with `Object.defineProperty(adapter, "scopedSpawn", { value: true })` plus `FakeExitEvidence` (absent unit at stream end = `unscoped_exit`). A unitless account attempt goes `ambiguous`, never a weak proof.
 - Two schedulers on one DB both hear releases; a test that builds its own scheduler must `built.scheduler.stop()` first (stop now unlistens). Packet section 8.3.
+
+## qcq-04b part 1 review fixes (2026-11-26, Codex review of #268: FAIL; fixes in their own PR)
+
+- Migration 060: `execution_attempts.entered_incarnation` + `plane_incarnations` (pid, proc start, boot_id) and `provider_unit_owner`. `AttemptStore.incarnationOf` is here / alive / dead; an attempt a live incarnation (another open handle in this process, or a live pid with its recorded start time) entered is left alone. Pre-060 rows read as dead.
+- `cgroup_empty` needs prior registration; incomplete cgroup or `/proc` reads are `unreadable` / launcher alive; reads and stops use the recorded owner; the launcher scan knows the configured wrapper.
+- A unitless attempt waits for its provider stream to really close (`providerStreamClosed`, legacy `legacyCall`, `settleRun`, abandon drain), not the session or run end. confirm-stopped refuses while that stream is open. Dead-incarnation populated units are stopped once in any entered state; the spawn report survives `ambiguous`.
+- Tests: `apps/api/test/qcq-04b-part1-review.test.ts` (17, all fail on #268's code). A test inserting an entered attempt with `entered_incarnation` NULL gets a dead incarnation. Packet 8.2 note 10.

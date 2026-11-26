@@ -288,7 +288,8 @@ describe("operator confirmation (test 5 r5, API 2.20)", () => {
 
       const stop = await built.app.inject({ method: "POST", url: `/api/attempts/${id}/stop-unit`, headers: auth });
       expect(stop.json()).toEqual({ attemptId: id, unit, stopRequested: true });
-      expect(ev.stopped).toEqual([unit]);
+      // The sweep's recovery stop of the dead incarnation's populated unit (#268 review finding 7), then the operator's.
+      expect(ev.stopped).toEqual([unit, unit]);
 
       ev.units.set(unit, "absent");
       const ok = await built.app.inject({ method: "POST", url: `/api/attempts/${id}/confirm-stopped`, headers: auth });

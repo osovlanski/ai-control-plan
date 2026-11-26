@@ -67,7 +67,7 @@ import type { Registry } from "./registry.js";
 import { persistRoutingDecision, routeTask } from "./router.js";
 import { decideContextContinuation } from "./context-continuation.js";
 import { runSessionRefStored } from "./usage.js";
-import { AttemptStore, announceReleased, enterProvider } from "./attempts.js";
+import { AttemptStore, announceReleased, enterProvider, providerStreamClosed } from "./attempts.js";
 import { conformanceBlock } from "./runtime-lifecycle.js";
 import type { TaskEventBus } from "./sse.js";
 import type { TaskStore } from "./tasks.js";
@@ -688,6 +688,9 @@ export class Orchestrator {
     let timer: ReturnType<typeof setTimeout> | undefined;
     await Promise.race([drain, new Promise<void>((r) => { timer = setTimeout(r, LEGACY_ABANDON_DRAIN_MS); timer.unref?.(); })]);
     if (timer) clearTimeout(timer);
+    // #268 review finding 5: the attempt's stream is closed only once the drain ends, which may be
+    // after this bounded wait; then it meets its proof test again.
+    void drain.then(() => { try { providerStreamClosed(this.db, attemptId); } catch { /* the sweep re-reads it */ } });
     if (dispatch) return;
     const store = new AttemptStore(this.db);
     if (drained) announceReleased(this.db, this.db.transaction(() => store.abandonedStart(attemptId, `${reason}; provider cancelled and its stream ended`, true))());
@@ -948,9 +951,7 @@ export class Orchestrator {
     // is the next statement.
     const entry = enterProvider(this.db, { attemptId: legacy.attemptId, path: "legacy" });
     if (!entry.ok) throw new Error(`Provider entry ${entry.kind === "not_owner" ? "not owned" : "refused"}: ${entry.reason}`);
-    const handle = priorRef
-      ? await adapter.resume(priorRef, runSpec)
-      : await adapter.start(runSpec);
+    const handle = await this.legacyCall(entry.attempt.attempt_id, priorRef ? adapter.resume(priorRef, runSpec) : adapter.start(runSpec));
     legacy.started = { adapter, handle, attemptId: entry.attempt.attempt_id };
 
     // A legacy provider start may resolve after cancellation committed.
@@ -1109,7 +1110,7 @@ export class Orchestrator {
     // `start_attempted`. The adapter call is the next statement.
     const entry = enterProvider(this.db, { dispatchId: request.executionRequestId, path: 'legacy' });
     if (!entry.ok) throw new Error(`Provider entry ${entry.kind === 'not_owner' ? 'not owned' : 'refused'}: ${entry.reason}`);
-    const handle = await adapter.start(request.runSpec);
+    const handle = await this.legacyCall(entry.attempt.attempt_id, adapter.start(request.runSpec));
     legacy.started = { adapter, handle, attemptId: entry.attempt.attempt_id, dispatch: true };
     if (this.tasks.get(taskId)?.state === 'CANCELLED') await adapter.cancel(handle);
     this.db.prepare(`INSERT INTO runs(id,task_id,assistant_id,provider_session_ref,state,started_at,dispatch_id,model_requested)
@@ -1125,6 +1126,20 @@ export class Orchestrator {
     void this.consume(run);
     this.recordEstimate(handle.runId, taskId, request.assistantId);
     return { runId: handle.runId };
+  }
+
+  /**
+   * #268 review finding 5: a legacy provider call. One that rejected returned no stream, so its
+   * attempt's stream is closed (and it meets its proof test: a dispatch's stays with the
+   * dispatch's ambiguity). One that resolved has its stream closed by `settleRun` or the abandon drain.
+   */
+  private async legacyCall(attemptId: string, call: Promise<RunHandle>): Promise<RunHandle> {
+    try {
+      return await call;
+    } catch (error) {
+      try { providerStreamClosed(this.db, attemptId); } catch { /* the start's own error is the one to report */ }
+      throw error;
+    }
   }
 
   /**

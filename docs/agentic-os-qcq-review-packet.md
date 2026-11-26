@@ -1731,11 +1731,12 @@ trigger tests. Where part 1 and the sections above differ:
    `unreadable`, and `unreadable` proves nothing.
 3. **Proof order** (`AttemptStore.settleEntered`): `host_rebooted` first, for an attempt another
    incarnation entered on a different, known `boot_id`. Then, with a unit: `populated` registers
-   it (`provider_unit_seen_at`) and holds; `empty`, or `absent` once registered, is `cgroup_empty`
-   (an existing empty unit counts too, because systemd created it). `absent` and never registered is
-   `unscoped_exit` only when the spawn path is closed, the launcher scan finds nothing, and a second
-   read is still `absent`. Without a unit, the end of the stream (`stream_closed_unverified`), or
-   `boot_unverified` for a dead incarnation's attempt.
+   it (`provider_unit_seen_at`) and holds; `empty` or `absent` once registered is `cgroup_empty`.
+   Never registered, `empty` or `absent` is `unscoped_exit` only when the spawn path is closed, the
+   launcher scan finds nothing, and a second read is still `empty` or `absent` (an empty scope may
+   exist before systemd moves the launcher into it: #268 review, note 10). Without a unit, the end of
+   the provider stream (`stream_closed_unverified`), or `boot_unverified` for a dead incarnation's
+   attempt.
 4. **Spawn path.** In this incarnation, the runner registers the adapter's `spawnClosed` once its
    start call settled; until then the path is open. For the Claude adapter, `spawnClosed` is true
    when the query stream has ended and the CLI either never spawned, exited, or failed to spawn. The
@@ -1760,6 +1761,40 @@ trigger tests. Where part 1 and the sections above differ:
 9. **Not exercised here.** The real scope on a systemd host (OCI), and the agent wrapper's stop on
    that host. The cgroup and `/proc` reads are tested against fake trees, and the Claude adapter's
    `systemd-run` argv against a recording stub.
+10. **Review fixes (#268 Codex review, FAIL, fixed in their own PR).** One regression test per finding
+    in `apps/api/test/qcq-04b-part1-review.test.ts`.
+    1. *Registration first.* `cgroup_empty` needs `provider_unit_seen_at`. A never-registered empty
+       unit is treated like an absent one (note 3).
+    2. *Incarnation identity.* Migration 060 records, per entry, the plane incarnation
+       (`entered_incarnation`, a row in `plane_incarnations` with pid, `/proc/<pid>/stat` start time
+       and `boot_id`). `AttemptStore.incarnationOf` answers here, alive or dead. Another open handle
+       in this process, or another process whose pid still has the recorded start time on this boot,
+       is alive, and its attempts are left to it (the sweep and confirm-stopped do nothing). A start
+       time the plane cannot read is alive. A different boot, a gone pid, a reused pid, or this
+       process's own pid with no open handle is dead. Rows from before 060 read as dead, as before.
+    3. *Incomplete reads prove nothing.* A cgroup search that hits a stat or readdir error other than
+       ENOENT/ENOTDIR is `unreadable`, and a launcher scan that cannot read some process's argv
+       reports the launcher alive.
+    4. *Launch-time manager.* Entry records `provider_unit_owner` (`{ uid, user?, group?, wrapper? }`,
+       `ExitEvidence.unitOwner(lane)`). Reads, the launcher scan and stops (recovery and
+       `stop-unit`) use it, not today's agent user. The scan matches `run-as-agent`, the recorded
+       wrapper and the configured wrapper, by basename or full path.
+    5. *The provider stream decides.* Entry opens the attempt's provider stream in this incarnation.
+       It closes when the adapter call rejects, an iterator `next()` finishes or fails, or
+       `return()` settles: the runner reports it through `providerStreamClosed`, the legacy path at
+       `settleRun`, `startFailed`, a rejected call (`legacyCall`) and the abandon drain, even a late
+       one. While it is open, a unitless attempt is never settled `stream_closed_unverified`: a
+       legacy dispatch cancelled with `adapter.start` pending, and a session that ended on the
+       `run.ended` grace, both hold their claims until the stream closes. A stream that never closes
+       goes `ambiguous` after `stopEvidenceMs`. After an early return (cancel after start, profile or
+       isolation failure) the runner drains the stream once the provider tree is terminated.
+    6. *confirm-stopped.* Refused `attempt_live` while this incarnation's stream is open on a
+       `starting`, `live` or `stopping` attempt, or while another live incarnation holds it.
+       `ambiguous` stays the operator's.
+    7. *Recovery stop.* A dead incarnation's populated unit is stopped in any entered state
+       (`stopping` and `ambiguous` too), once per attempt and incarnation.
+    8. *Spawn report.* The exit watch stops at `ambiguous`, but the spawn-closed report stays until
+       the attempt is final (`finalize` drops it), so a later `unscoped_exit` is still provable.
 
 ### 8.3 qcq-04b part 2a as built
 

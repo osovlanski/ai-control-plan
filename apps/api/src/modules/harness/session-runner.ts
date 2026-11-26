@@ -324,6 +324,9 @@ export class SessionRunner {
         // already-exited provider reports "gone".
         ctx.releaseStartSlot();
         await this.deps.processes?.terminate(sessionId, "run ended");
+        // #268 review finding 5: an early return never read the stream; the provider is
+        // terminated now, so a stream that closes promptly is reported before `done` resolves.
+        await Promise.race([ctx.closeProviderStream(), new Promise<void>((r) => setImmediate(r))]);
         await ctx.disposeProfile(); // M3: after the provider is gone, never before
         store.releaseLease(sessionId, lease);
       }
@@ -385,6 +388,21 @@ class RunContext {
   private proc: ProviderProcess | undefined;
   private launchAtMs = 0;
   private releaseStart: (() => void) | null = null;
+  /**
+   * #268 review finding 5: the provider stream of this session's entered attempt. Its close is
+   * reported to the attempt only once it really closed: the call rejected, an `iter.next()`
+   * finished or failed, or `iter.return()` settled. A session can end (the `run.ended` grace, a
+   * cancel, an early failure) while it is still open, and its attempt must not settle on that.
+   */
+  private stream: {
+    attemptId: string;
+    adapter: AgentAdapter;
+    handle?: RunHandle;
+    iter?: AsyncIterator<NormalizedEvent>;
+    inFlight?: Promise<IteratorResult<NormalizedEvent>>;
+    ended?: boolean;
+    closing?: Promise<void>;
+  } | undefined;
   private lastSilenceReportMs = 0;
   private procExitReported = false;
   /** F2: set once the lease is refused; the run unwinds and recovery owns the result. */
@@ -561,6 +579,7 @@ class RunContext {
     let firstEvent = true;
     let terminalPlan: TerminalPlan | undefined;
     const iter = adapter.events(handle)[Symbol.asyncIterator]();
+    if (this.stream) this.stream.iter = iter;
     // Once the provider says the run ended, the stream gets `endedGraceMs` to close on its own; a leftover
     // background child must not hold a finished session open until the hard timeout. The provider tree is
     // terminated when the run settles ("run ended" below), which also ends that child.
@@ -570,8 +589,9 @@ class RunContext {
       for (;;) {
         // Race the next event against the abort signal so a truly hung iterator
         // (a stalled provider) still yields to a tick-driven timeout/cancel.
+        const next = this.trackNext(iter.next());
         const step = await Promise.race([
-          iter.next(),
+          next,
           this.abort.promise.then(() => ({ done: true, value: undefined }) as IteratorResult<NormalizedEvent>),
           ...(graceUp ? [graceUp] : []),
         ]);
@@ -662,7 +682,8 @@ class RunContext {
     } finally {
       clearInterval(heartbeat);
       if (graceTimer) clearTimeout(graceTimer);
-      void iter.return?.(undefined); // release a still-open iterator
+      // Release a still-open iterator, and report the stream closed once it is (finding 5).
+      void this.closeProviderStream();
     }
     if (this.fencedReason) throw new SessionFencedError(this.sessionId, this.fencedReason);
     terminalPlan ??= this.tickPlan;
@@ -904,6 +925,44 @@ class RunContext {
       cancellation: terminalPlan.kind === "cancel" ? { requestedBy: terminalPlan.by, at: this.iso() } : undefined,
       checkpoint: cp,
     });
+  }
+
+  /** Records the in-flight `next()` and whether it finished the stream. */
+  private trackNext(next: Promise<IteratorResult<NormalizedEvent>>): Promise<IteratorResult<NormalizedEvent>> {
+    const s = this.stream;
+    if (!s) return next;
+    s.inFlight = next;
+    next.then((r) => { if (s.inFlight === next) s.inFlight = undefined; if (r.done) s.ended = true; },
+      () => { if (s.inFlight === next) s.inFlight = undefined; s.ended = true; });
+    return next;
+  }
+
+  /**
+   * #268 review finding 5: reports this session's provider stream closed to its attempt once it
+   * really is. A stream that already finished reports at once (before the session's terminal
+   * transition, so that settles the attempt as before). Otherwise the in-flight `next()` is awaited,
+   * then `iter.return()`, or for an iterator without one the stream is drained (the session no
+   * longer reads it). Never awaited by a caller for longer than a tick: a hung provider stays
+   * unproven, and its attempt goes `ambiguous` past `stopEvidenceMs`. Idempotent.
+   */
+  closeProviderStream(): Promise<void> {
+    const s = this.stream;
+    if (!s) return Promise.resolve();
+    if (s.closing) return s.closing;
+    s.closing = (async () => {
+      try {
+        if (s.ended || !s.handle) return;
+        const iter = s.iter ?? s.adapter.events(s.handle)[Symbol.asyncIterator]();
+        if (s.inFlight && (await s.inFlight).done) return;
+        if (iter.return) { await iter.return(undefined); return; }
+        for (;;) { if ((await iter.next()).done) return; }
+      } catch {
+        // A stream that failed, or an adapter that no longer knows the run, is closed.
+      } finally {
+        try { this.d.store.providerStreamClosed(s.attemptId); } catch { /* the sweep re-reads the attempt */ }
+      }
+    })();
+    return s.closing;
   }
 
   releaseStartSlot(): void {
@@ -1406,6 +1465,8 @@ class RunContext {
       const entry = this.d.store.enterProvider(this.sessionId, this.lease, unit);
       if (!entry.ok) throw new ProviderEntryRefused(entry.kind, entry.reason);
       const call = ref && adapter.resume ? adapter.resume(ref, spec) : adapter.start(spec);
+      const stream: NonNullable<RunContext["stream"]> = { attemptId: entry.attempt.attempt_id, adapter };
+      this.stream = stream;
       // qcq-04b: the spawn-closed report the `unscoped_exit` proof reads. Open while the call is
       // unsettled; a call that rejected spawned nothing this process still holds.
       if (unit) {
@@ -1413,7 +1474,15 @@ class RunContext {
         void call.then((h) => { settled = { handle: h }; }, () => { settled = {}; });
         this.d.store.registerSpawn(entry.attempt.attempt_id, () => !!settled && (settled.handle ? adapter.spawnClosed?.(settled.handle) ?? false : true));
       }
-      return await call;
+      try {
+        stream.handle = await call;
+      } catch (err) {
+        // A call that rejected returned no stream: closed.
+        stream.ended = true;
+        void this.closeProviderStream();
+        throw err;
+      }
+      return stream.handle;
     } finally {
       broker?.dispose();
       profileBroker?.dispose();

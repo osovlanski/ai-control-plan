@@ -461,7 +461,8 @@ export class Scheduler {
     if (!a.provider_unit) return { ok: false, code: 'no_unit' };
     if (!['starting', 'live', 'stopping', 'ambiguous'].includes(a.state)) return { ok: false, code: 'not_open' };
     this.d.db.transaction(() => this.attempts.requestStop(a, 'operator stopped the unit'))();
-    await exitEvidence(this.d.db).stopUnit(a.provider_unit, a.run_as === 'agent' ? 'agent' : 'plane');
+    // Under the manager the unit was assigned under at entry, not today's configuration (#268 review).
+    await exitEvidence(this.d.db).stopUnit(a.provider_unit, a.run_as === 'agent' ? 'agent' : 'plane', this.attempts.unitOwner(attemptId));
     // The proof follows on the next read: the exit watch, or the sweep.
     this.releaseIfIdle(a.task_id, 'operator stopped the unit');
     return { ok: true, unit: a.provider_unit };

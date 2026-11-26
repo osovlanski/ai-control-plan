@@ -1,6 +1,6 @@
 import { HandoffService } from './handoff.js';
 import { runSessionRefStored } from '../usage.js';
-import { AttemptStore, announceReleased, enterProvider, registerSpawn, watchExit, type AttemptRow, type EntryResult, type Released } from '../attempts.js';
+import { AttemptStore, announceReleased, enterProvider, providerStreamClosed, registerSpawn, watchExit, type AttemptRow, type EntryResult, type Released } from '../attempts.js';
 /**
  * SessionStore — durable substrate for the Execution Harness (Phase 1).
  *
@@ -368,6 +368,11 @@ export class SessionStore {
   /** qcq-04b: the adapter's spawn-closed report for an entered attempt with a unit. */
   registerSpawn(attemptId: string, closed: () => boolean): void {
     registerSpawn(this.db, attemptId, closed);
+  }
+
+  /** #268 review finding 5: the attempt's provider call settled and its event stream has closed. */
+  providerStreamClosed(attemptId: string): void {
+    providerStreamClosed(this.db, attemptId, this.now);
   }
 
   /** The attempt carrying this session, if any. */
