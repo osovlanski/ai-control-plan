@@ -349,7 +349,8 @@ export class PublicationService {
     this.sleep = d.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
   }
 
-  get configured(): boolean { return !!this.d.github && !!this.d.git; }
+  /** A GitHub client is what a publication needs; with no injected git port the CLI one is used (G15: production never injects one). */
+  get configured(): boolean { return !!this.d.github; }
   private iso(): string { return this.now().toISOString(); }
   private github(): PublicationGitHub { if (!this.d.github) throw new PublicationRefused("no GitHub client is configured for publications"); return this.d.github; }
   private git(): PublicationGit { return this.d.git ?? gitCli(); }
