@@ -11,6 +11,10 @@ import { AutopilotLaunchRefused, type AutopilotPark, type AutopilotRefusalReason
 import type { TaskEventBus } from './sse.js';
 import { AttemptStore, announceReleased, attemptStatuses, onClaimsReleased, type AttemptStatus, type Released } from './attempts.js';
 import { exitEvidence } from './exit-evidence.js';
+import { DEFAULT_ACCOUNTS, accountConfigHash, accountKey, accountLimit, type ResolvedAccountsConfig } from './accounts.js';
+
+/** R's outcome (qcq-04b, packet 2.4). */
+type Reservation = { outcome: 'held' } | { outcome: 'waiting'; reason: string } | { outcome: 'refused' };
 
 const RECHECK_MS = 60_000;
 const RECOVERY_WINDOW_MS = 60_000;
@@ -57,12 +61,14 @@ export class Scheduler {
   readonly schedules: ScheduleService;
   /** qcq-04a: the attempt rows that own every claim (packet 2.1). */
   private readonly attempts: AttemptStore;
+  private passScheduled = false;
+  private readonly unlisten: () => void;
   constructor(private d: SchedulerDeps) {
     this.now = d.now ?? (() => new Date());
     this.attempts = new AttemptStore(d.db, this.now);
     // A release made outside the scheduler (the session-terminal rule in `SessionStore.terminalize`)
     // still hands the freed units to the next FIFO waiter, after its transaction committed.
-    onClaimsReleased(d.db, released => this.afterRelease(released));
+    this.unlisten = onClaimsReleased(d.db, released => this.afterRelease(released));
     d.orchestrator.scheduler = this;
     d.tasks.onTerminal = taskId => this.taskTerminal(taskId);
     this.schedules = new ScheduleService({
@@ -110,6 +116,8 @@ export class Scheduler {
    * dispatch, no arithmetic on a value that was never a number.
    */
   private capacity(resource: string): number | undefined {
+    // qcq-04b (packet 2.2): an account key's capacity is its group's limit, only while enforcement is on.
+    if (resource.startsWith('account:')) return this.accounts.enforce ? accountLimit(this.accounts, resource) : undefined;
     const resources = this.d.config.scheduler?.resources;
     if (!resources || !Object.prototype.hasOwnProperty.call(resources, resource)) return undefined;
     const declared: unknown = (resources as Record<string, unknown>)[resource];
@@ -121,6 +129,15 @@ export class Scheduler {
     return ((this.d.db.prepare('SELECT COALESCE(SUM(units),0) AS units FROM resource_claims WHERE resource = ? AND released_at IS NULL')
       .get(resource) as { units: number }).units);
   }
+  /**
+   * qcq-04b (packet 2.5.3): units in use = live claims plus what in-flight reservations (W to R) are
+   * known to need, so the gap between a wake and its route never lets a second wake take the slot.
+   */
+  private inUse(resource: string, exceptAttempt?: string): number {
+    return this.claimed(resource) + this.attempts.pendingUnits(resource, exceptAttempt);
+  }
+  /** `scheduling.accounts`. Tests set `config.accounts` directly: the enforcement seam of packet 2.12. */
+  private get accounts(): ResolvedAccountsConfig { return this.d.config.accounts ?? DEFAULT_ACCOUNTS; }
 
   /**
    * The one readiness rule (CR-34): may this requirement compete for pool units
@@ -455,6 +472,7 @@ export class Scheduler {
     if (!released.length) return;
     for (const taskId of new Set(released.map(r => r.taskId))) this.publish(taskId);
     for (const resource of new Set(released.map(r => r.resource))) this.notifyResource(resource);
+    this.schedulePass();
   }
 
   /**
@@ -468,7 +486,8 @@ export class Scheduler {
 
   /** Sweeps every open attempt. The bounded fallback for a release event we never got. */
   private releaseIdleClaims(mode: 'runtime' | 'boot' = 'runtime'): void {
-    for (const taskId of new Set(this.attempts.open().map(a => a.task_id))) {
+    const queued = this.attempts.queuedInOrder().map(a => a.task_id);
+    for (const taskId of new Set([...this.attempts.open().map(a => a.task_id), ...queued])) {
       try { this.releaseIfIdle(taskId, mode === 'boot' ? 'boot: no execution owner' : 'sweep: no execution owner', mode); } catch (error) { this.d.onError?.(error); }
     }
   }
@@ -497,7 +516,7 @@ export class Scheduler {
     if (actor !== 'operator' && front && front.taskId !== c.taskId) {
       return { outcome: 'wait', reason: `Resource ${resource}: task ${front.taskId} is ahead in the wait queue` };
     }
-    const claimedUnits = this.claimed(resource);
+    const claimedUnits = this.inUse(resource);
     if (capacity - claimedUnits < units) {
       return { outcome: 'wait', reason: `Resource ${resource}: ${capacity - claimedUnits} of ${capacity} units free, ${units} needed` };
     }
@@ -595,7 +614,7 @@ export class Scheduler {
   }
   private insert(taskId: string, input: WaitInput, actor: string, autoWakes = 0, history: WaitCondition['history'] = [], checkpointId?: string, blockers: WaitCondition['blockers'] = [], origin?: DispatchOrigin,
     /** A resource requirement (and its deferred continuation intent) carried forward. */
-    carry?: { resource?: string; units?: number; continuation?: ContinuationIntent }): void {
+    carry?: { resource?: string; units?: number; continuation?: ContinuationIntent; attemptId?: string; queuedAt?: string }): void {
     const previous = this.condition(taskId);
     const generation = (previous?.generation ?? 0) + 1;
     const resource = (input.kind === 'resource' ? input.resource : carry?.resource) ?? null;
@@ -605,16 +624,16 @@ export class Scheduler {
     // waited with across a quota re-park, a continuation or a recovery re-park. A
     // different request is a new one and starts now. `created_at` below is
     // untouched and still means when THIS condition was written.
-    const carriedAge = resource !== null && previous?.resource === resource && (previous.units ?? 1) === units ? previous.resourceQueuedAt : undefined;
+    const carriedAge = carry?.queuedAt ?? (resource !== null && previous?.resource === resource && (previous.units ?? 1) === units ? previous.resourceQueuedAt : undefined);
     // The continuation intent is carried EXPLICITLY, never inherited: it describes
     // a handoff that has not happened yet, so only a path that knows the
     // continuation is still owed (the deferral itself, a handoff park and its
     // run-now re-arm, or a re-park of a dispatch that never started) passes it on.
     const continuation = carry?.continuation ? JSON.stringify(redactValue(carry.continuation)) : null;
-    this.d.db.prepare(`INSERT INTO wait_conditions(task_id,generation,state,kind,not_before,created_by,created_at,auto_wakes,history,reason,checkpoint_id,blockers,assistants,depends_on,on_dependency_failure,origin,resource,resource_units,resource_queued_at,continuation)
-      VALUES(?,?,'active',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(taskId, generation, input.kind, input.notBefore!, actor, this.iso(), autoWakes, JSON.stringify(history.slice(-10)), redactValue(input.reason ?? 'Scheduled wait'), checkpointId ?? null, JSON.stringify(redactValue(blockers)), JSON.stringify(redactValue(input.kind === 'quota' ? input.assistants ?? [] : [])),
+    this.d.db.prepare(`INSERT INTO wait_conditions(task_id,generation,state,kind,not_before,created_by,created_at,auto_wakes,history,reason,checkpoint_id,blockers,assistants,depends_on,on_dependency_failure,origin,resource,resource_units,resource_queued_at,continuation,attempt_id)
+      VALUES(?,?,'active',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(taskId, generation, input.kind, input.notBefore!, actor, this.iso(), autoWakes, JSON.stringify(history.slice(-10)), redactValue(input.reason ?? 'Scheduled wait'), checkpointId ?? null, JSON.stringify(redactValue(blockers)), JSON.stringify(redactValue(input.kind === 'quota' ? input.assistants ?? [] : [])),
       JSON.stringify(input.kind === 'dependency' ? input.dependsOn : []), input.kind === 'dependency' ? (input.onDependencyFailure ?? DEFAULT_ON_DEPENDENCY_FAILURE) : null, origin ?? null,
-      resource, units, resource === null ? null : carriedAge ?? this.iso(), continuation);
+      resource, units, resource === null ? null : carriedAge ?? this.iso(), continuation, carry?.attemptId ?? null);
   }
   attach(taskId: string, input: WaitInput): WaitCondition {
     input = this.validate(input);
@@ -795,6 +814,7 @@ export class Scheduler {
     let stateChanged = false;
     /** Set when this wake granted a claim, so the pool is re-evaluated after commit. */
     let claimedResource: string | undefined;
+    let passWanted = false;
     const released: Released[] = [];
     const result = this.d.db.transaction((): WakeResult => {
       const c = this.condition(taskId);
@@ -802,6 +822,9 @@ export class Scheduler {
         return { outcome: 'stale', reason: 'Condition generation or task ownership changed' };
       }
       if (actor !== 'operator' && Date.parse(c.notBefore) > this.now().getTime()) return { outcome: 'stale', reason: 'Condition is not due' };
+      // qcq-04b (packet 2.5.2): a wait whose attempt already has its route is granted by the pass (G),
+      // never consumed by a wake.
+      if (this.conditionAttempt(taskId, c.generation)) { passWanted = true; return { outcome: 'stale', reason: 'Attempt waits for the grant pass' }; }
       if (c.kind === 'dependency' && actor !== 'operator') {
         // The same `dependencyStatus` truth `resourceReady` reads; this branch adds
         // the side effects (the record and the failure transition) that a readiness
@@ -847,29 +870,20 @@ export class Scheduler {
       const path = this.d.config.execution.harnessModes.single ? 'harness' : 'legacy';
       this.d.db.prepare(`INSERT INTO dispatches(dispatch_id,task_id,condition_generation,origin,execution_path,phase,created_at,updated_at,checkpoint_id)
         VALUES(?,?,?,?,?,'reserved',?,?,?)`).run(id, taskId, expectedGeneration, c.origin ?? (actor === 'operator' ? 'run-now' : 'wake'), path, this.iso(), this.iso(), c.checkpointId ?? null);
-      // qcq-04a compat attempt (packet 2.12): written in THIS transaction, after the dispatch and
-      // before the claim, so the claim has its owner from the moment it exists.
-      const attempt = this.attempts.createHeld({ taskId, kind: 'dispatch', path, slot: 0, dispatchId: id,
-        runAs: this.d.tasks.get(taskId)?.run_as === 'agent' ? 'agent' : 'plane', queueKey: c.resourceQueuedAt ?? this.iso(),
-        requirements: c.resource ? [{ resource: c.resource, units: c.units ?? 1, queuedAt: c.resourceQueuedAt ?? this.iso() }] : [],
-        reason: 'compat: wake' });
-      if (c.resource) {
-        // The claim commits in THIS transaction, with the condition consume and the
-        // dispatch reservation. That single boundary — plus `uq_claim_live` and the
-        // capacity sum read above — is the whole over-allocation defence: two
-        // concurrent wakes cannot both see the last slot free, and a crash leaves
-        // either both the claim and its dispatch or neither.
-        this.d.db.prepare('INSERT INTO resource_claims(attempt_id,task_id,dispatch_id,generation,resource,units,claimed_at) VALUES(?,?,?,?,?,?,?)')
-          .run(attempt.attempt_id, taskId, id, expectedGeneration, c.resource!, c.units ?? 1, this.iso());
-        this.record(taskId, 'resource.claimed', c.generation, id, { resource: c.resource, units: c.units ?? 1,
-          capacity: this.capacity(c.resource!), claimedUnitsAfter: this.claimed(c.resource!) });
-        claimedResource = c.resource;
-      }
+      // W (qcq-04b, packet 2.5.2): the attempt is created `queued`, its route in flight. No claim: the
+      // reservation in the route transaction (R) writes it once the route is fixed. Its known
+      // requirement (the pool) counts as in use from now, so no other wake can take the slot.
+      const queuedAt = c.resourceQueuedAt ?? c.createdAt;
+      this.attempts.createQueued({ taskId, dispatchId: id, path,
+        runAs: this.d.tasks.get(taskId)?.run_as === 'agent' ? 'agent' : 'plane', queueKey: queuedAt,
+        requirements: c.resource ? [{ resource: c.resource, units: c.units ?? 1, queuedAt }] : [], reason: 'wake' });
+      if (c.resource) claimedResource = c.resource;
       this.d.tasks.transition(taskId, 'ROUTING');
       this.record(taskId, 'dispatch.reserved', c.generation, id, { actor });
       return { outcome: 'dispatched', dispatchId: id };
     })();
     this.afterRelease(released);
+    if (passWanted) this.schedulePass();
     if (result.outcome === 'stale' && (stateChanged || result.reason.startsWith('Dependency failed'))) this.publish(taskId);
     if (result.outcome === 'dispatched') {
       // A release can free more units than the front waiter takes, and only the front
@@ -1041,6 +1055,8 @@ export class Scheduler {
     // reason is what the receiving agent is shown. Routing itself still runs now.
     const intent = this.intent(taskId, dispatch.condition_generation);
     let disabledStored: string | undefined;
+    /** R's outcome for this dispatch's attempt (packet 2.4), decided in the route transaction. */
+    let reservation: Reservation = { outcome: 'held' };
     const routed = this.d.db.transaction(() => {
       const current = this.dispatch(id);
       if (current.routing_decision_id !== null) {
@@ -1052,13 +1068,22 @@ export class Scheduler {
         // #264 review finding 1: a replayed decision needs its attempt as much as a fresh one does
         // (a claimless dispatch reserved before the upgrade has none).
         this.ensureDispatchAttempt(current);
+        if (stored.chosen && !disabledStored) reservation = this.reserveInTx(current, stored.chosen, current.routing_decision_id);
         return { explanation: stored, routingDecisionId: current.routing_decision_id };
       }
       const result = this.d.orchestrator.routeTask(taskId, dispatch.origin, { dispatchId: id, exclude: intent?.from, override: intent?.to });
       this.d.db.prepare('UPDATE dispatches SET routing_decision_id = ?, updated_at = ? WHERE dispatch_id = ?').run(result.routingDecisionId, this.iso(), id);
       this.ensureDispatchAttempt(current);
+      if (result.explanation.chosen) reservation = this.reserveInTx(this.dispatch(id), result.explanation.chosen, result.routingDecisionId);
       return result;
     })();
+    const reserved = reservation as Reservation; // assigned inside the transaction callback
+    if (reserved.outcome !== 'held') {
+      // The re-park (resource_wait) or the refusal (account_requires_harness) committed with the route.
+      this.publish(taskId);
+      if (reserved.outcome === 'waiting') this.schedulePass();
+      return;
+    }
     if (this.d.boundary) await this.d.boundary('routed', this.dispatch(id));
     if (disabledStored) {
       // Re-park (the reason is recorded on dispatch.reparked): the successor dispatch routes afresh, and route() never picks a disabled assistant.
@@ -1118,6 +1143,184 @@ export class Scheduler {
       throw error;
     }
   }
+  /**
+   * R, the launch reservation (qcq-04b, packet 2.4 steps 2 to 5), inside the route transaction. The
+   * dispatch's `queued` attempt gets its route and account; then either every requirement is granted
+   * (claims, `held`) or none is, and the dispatch re-parks `resource_wait` with the attempt kept. A
+   * replayed route whose attempt is already `held` (G granted it, or a compat attempt) changes nothing.
+   */
+  private reserveInTx(dispatch: Dispatch, chosen: string, routingDecisionId: number): Reservation {
+    const attempt = this.attempts.forDispatch(dispatch.dispatch_id);
+    if (!attempt || attempt.state !== 'queued') return { outcome: 'held' };
+    const identity = this.accounts.enforce ? accountKey(this.accounts, chosen, attempt.run_as) : { key: null, source: 'none' as const, limit: null };
+    if (identity.key && attempt.execution_path === 'legacy') {
+      this.refuseAccountInTx(dispatch, attempt.attempt_id, identity.key);
+      return { outcome: 'refused' };
+    }
+    this.attempts.setRoute(attempt.attempt_id, { routingDecisionId, assistantId: chosen,
+      account: { key: identity.key, source: identity.source, hash: accountConfigHash(this.accounts, identity) } });
+    const blocked = this.grantBlocker(attempt.attempt_id);
+    if (blocked) {
+      this.resourceWaitInTx(dispatch, attempt.attempt_id, blocked);
+      return { outcome: 'waiting', reason: blocked };
+    }
+    this.grantInTx(attempt.attempt_id, dispatch.dispatch_id, dispatch.condition_generation, dispatch.task_id);
+    return { outcome: 'held' };
+  }
+
+  /**
+   * Why this attempt cannot be granted now, or undefined when it can (packet 2.5.1): a requirement
+   * without enough free units, or one an attempt ahead of it in the global order is waiting for.
+   */
+  private grantBlocker(attemptId: string, closed: ReadonlySet<string> = new Set(), free?: Map<string, number>): string | undefined {
+    const a = this.attempts.get(attemptId)!;
+    for (const r of this.attempts.requirements(attemptId)) {
+      const capacity = this.capacity(r.resource);
+      if (capacity === undefined) return `Resource ${r.resource} is not declared`;
+      if (closed.has(r.resource)) return `Resource ${r.resource}: an earlier attempt is waiting for it`;
+      const available = free?.get(r.resource) ?? capacity - this.inUse(r.resource, attemptId);
+      if (available < r.units) return `Resource ${r.resource}: ${Math.max(0, available)} of ${capacity} units free, ${r.units} needed`;
+      // Strict FIFO across attempts: an older routed attempt that needs this resource and is ready goes first.
+      const ahead = this.attempts.queuedInOrder().find(o => o.attempt_id !== attemptId && o.routing_decision_id !== null && o.dispatch_id === null
+        && (o.queue_key < a.queue_key || (o.queue_key === a.queue_key && o.task_id < a.task_id))
+        && this.attempts.requirements(o.attempt_id).some(x => x.resource === r.resource) && this.attemptReady(o));
+      if (ahead) return `Resource ${r.resource}: task ${ahead.task_id} is ahead in the wait queue`;
+    }
+    return undefined;
+  }
+
+  /** A routed `queued` attempt competes when its wait is active and ready (the K4b readiness rule). */
+  private attemptReady(a: { attempt_id: string; task_id: string }): boolean {
+    const c = this.condition(a.task_id);
+    return !!c && c.state === 'active' && this.conditionAttempt(a.task_id, c.generation) === a.attempt_id && this.resourceReady(c).ready;
+  }
+
+  private conditionAttempt(taskId: string, generation: number): string | undefined {
+    return (this.d.db.prepare('SELECT attempt_id FROM wait_conditions WHERE task_id = ? AND generation = ?').get(taskId, generation) as { attempt_id: string | null } | undefined)?.attempt_id ?? undefined;
+  }
+
+  /** Grants every requirement of the attempt to this dispatch (R or G). Claims first become visible here. */
+  private grantInTx(attemptId: string, dispatchId: string, generation: number, taskId: string): void {
+    for (const claim of this.attempts.grant(attemptId, dispatchId, generation)) {
+      this.record(taskId, 'resource.claimed', generation, dispatchId, { resource: claim.resource, units: claim.units,
+        capacity: this.capacity(claim.resource), claimedUnitsAfter: this.claimed(claim.resource), attemptId });
+    }
+  }
+
+  /**
+   * R's no-grant branch (packet 2.5.3), in R's own transaction: the dispatch re-parks `resource_wait`
+   * without spending a wake, the attempt stays `queued` with its route and `queue_key`, and a new
+   * `resource` wait names it. G binds it to a fresh dispatch later.
+   */
+  private resourceWaitInTx(dispatch: Dispatch, attemptId: string, reason: string): void {
+    const taskId = dispatch.task_id;
+    this.releaseDispatchInTx(dispatch, 'resource_wait');
+    this.attempts.unbindQueued(attemptId);
+    const old = this.condition(taskId)!;
+    const reqs = this.attempts.requirements(attemptId);
+    const pool = reqs.find(r => !r.resource.startsWith('account:')) ?? reqs[0]!;
+    const history = [...old.history, { at: this.iso(), actor: 'scheduler', outcome: 'reparked', reason: `resource_wait: ${reason}` }].slice(-10);
+    this.insert(taskId, { kind: 'resource', notBefore: this.iso(), reason: `resource_wait: ${reason}`, resource: pool.resource, units: pool.units },
+      'scheduler', old.autoWakes, history, old.checkpointId, [], old.origin,
+      { resource: pool.resource, units: pool.units, continuation: old.continuation, attemptId, queuedAt: pool.queuedAt });
+    this.d.tasks.transition(taskId, 'WAITING_RESOURCE');
+    this.record(taskId, 'dispatch.reparked', dispatch.condition_generation, dispatch.dispatch_id, { reason: 'resource_wait', detail: reason, autoWakes: old.autoWakes, attemptId });
+  }
+
+  /**
+   * The Harness-only rule (packet 2.2, itay 2026-11-24): with enforcement on, an account requirement
+   * on the legacy path is refused. Nothing is held and nothing starts; the task needs the operator.
+   */
+  private refuseAccountInTx(dispatch: Dispatch, attemptId: string, key: string): void {
+    const taskId = dispatch.task_id;
+    this.releaseDispatchInTx(dispatch, 'account_requires_harness');
+    this.attempts.dropQueued(attemptId, `account_requires_harness: ${key} is enforced and this start runs on the legacy path`);
+    const old = this.condition(taskId);
+    this.d.tasks.transition(taskId, 'WAITING_INPUT', 'intervention_required');
+    this.record(taskId, 'dispatch.reparked', dispatch.condition_generation, dispatch.dispatch_id,
+      { reason: 'account_requires_harness', account: key, autoWakes: old?.autoWakes ?? 0 });
+  }
+
+  /** The dispatch gives up the task (re-park or refusal): its handoff claim and request are released. */
+  private releaseDispatchInTx(dispatch: Dispatch, reason: string): void {
+    const claim = this.d.db.prepare("SELECT id, state FROM handoff_envelopes WHERE claimed_by_request_id = ?").get(dispatch.dispatch_id) as { id: string; state: string } | undefined;
+    if (claim?.state === 'claimed') new HandoffService(this.d.db).release(claim.id, dispatch.dispatch_id);
+    this.d.db.prepare('UPDATE execution_requests SET superseded = 1 WHERE id = ?').run(dispatch.dispatch_id);
+    this.phase(dispatch.dispatch_id, 'reparked', reason);
+  }
+
+  /** One grant pass per event-loop turn, however many events asked for one (packet 2.5.1). */
+  private schedulePass(): void {
+    if (this.passScheduled || !this.enabled) return;
+    this.passScheduled = true;
+    queueMicrotask(() => {
+      this.passScheduled = false;
+      void this.grantPass().catch(error => this.d.onError?.(error));
+    });
+  }
+
+  /**
+   * G, the grant pass (qcq-04b, packet 2.5.1 and 2.5.2). Every `queued` dispatch attempt in the
+   * global order, in one immediate transaction. A pending one (W to R) closes its known resources; a
+   * routed, ready one is granted when every requirement is free and open, otherwise it closes them.
+   * A granted attempt gets a fresh `reserved` dispatch carrying its route, its claims and the task's
+   * move to ROUTING, in that order; the dispatch then launches on the route it waited for.
+   */
+  async grantPass(): Promise<string[]> {
+    const granted = this.d.db.transaction((): string[] => {
+      const closed = new Set<string>();
+      const free = new Map<string, number>();
+      const freeOf = (r: string) => { if (!free.has(r)) free.set(r, (this.capacity(r) ?? 0) - this.inUse(r)); return free.get(r)!; };
+      const out: string[] = [];
+      for (const a of this.attempts.queuedInOrder()) {
+        const reqs = this.attempts.requirements(a.attempt_id);
+        if (a.account_source === 'pending' && a.dispatch_id) { for (const r of reqs) closed.add(r.resource); continue; }
+        if (a.routing_decision_id === null || a.dispatch_id !== null || !this.attemptReady(a)) continue;
+        for (const r of reqs) freeOf(r.resource);
+        const blocked = reqs.some(r => closed.has(r.resource) || this.capacity(r.resource) === undefined || freeOf(r.resource) < r.units)
+          || reqs.some(r => { const front = this.queue(r.resource)[0]; return front !== undefined && front.taskId !== a.task_id; });
+        if (blocked) { for (const r of reqs) closed.add(r.resource); continue; }
+        const id = this.grantWaitingInTx(a.attempt_id);
+        if (!id) continue;
+        for (const r of reqs) free.set(r.resource, freeOf(r.resource) - r.units);
+        out.push(id);
+      }
+      return out;
+    }).immediate();
+    for (const id of granted) {
+      const d = this.dispatch(id);
+      this.publish(d.task_id);
+      if (this.d.boundary) await this.d.boundary('reserved', d);
+      void this.continueDispatch(id).catch(error => this.d.onError?.(error));
+    }
+    return granted;
+  }
+
+  /** G for one single-path attempt, in the order packet 2.5.2 fixes. Returns the new dispatch id. */
+  private grantWaitingInTx(attemptId: string): string | undefined {
+    const a = this.attempts.get(attemptId)!;
+    const taskId = a.task_id;
+    const c = this.condition(taskId);
+    if (!c || c.state !== 'active' || this.d.tasks.get(taskId)?.state !== 'WAITING_RESOURCE' || this.hasOwner(taskId)) return undefined;
+    const id = `dispatch_${randomUUID()}`;
+    // 1. The effective path, as R checks it: an account requirement on the legacy path is refused.
+    const account = this.attempts.requirements(attemptId).find(r => r.resource.startsWith('account:'));
+    // 2. Consume the wait; 3. the reserved dispatch carrying the attempt's route.
+    this.d.db.prepare("UPDATE wait_conditions SET state = 'consumed', consumed_at = ?, consumed_by = 'grant' WHERE task_id = ? AND generation = ?").run(this.iso(), taskId, c.generation);
+    this.d.db.prepare(`INSERT INTO dispatches(dispatch_id,task_id,condition_generation,origin,execution_path,phase,routing_decision_id,created_at,updated_at,checkpoint_id)
+      VALUES(?,?,?,?,?,'reserved',?,?,?,?)`).run(id, taskId, c.generation, c.origin ?? 'wake', a.execution_path, a.routing_decision_id, this.iso(), this.iso(), c.checkpointId ?? null);
+    if (account && a.execution_path === 'legacy') {
+      this.d.tasks.transition(taskId, 'ROUTING');
+      this.refuseAccountInTx(this.dispatch(id), attemptId, account.resource);
+      return undefined;
+    }
+    // 4. bind and hold, then the claims with that dispatch; 5. the task moves to ROUTING.
+    this.grantInTx(attemptId, id, c.generation, taskId);
+    this.d.tasks.transition(taskId, 'ROUTING');
+    this.record(taskId, 'dispatch.reserved', c.generation, id, { actor: 'grant', attemptId });
+    return id;
+  }
+
   /**
    * A dispatch reserved before the upgrade with no claim got no migrated attempt (packet 2.3.1: a
    * dispatch with neither a claim nor an entry mark gets none). Its compat attempt is written in its
@@ -1325,7 +1528,7 @@ export class Scheduler {
     else this.schedules.observeEnabled(false);
   }
   startTimer(): void { this.stopped = false; this.arm(); }
-  stop(): void { this.stopped = true; if (this.timer) clearTimeout(this.timer); this.timer = undefined; }
+  stop(): void { this.stopped = true; this.unlisten(); if (this.timer) clearTimeout(this.timer); this.timer = undefined; }
   /**
    * Absolute deadline of the bounded fallback sweep. It advances because a TICK
    * happened, never because `arm` was called: `arm` runs on attach, publish,
@@ -1385,6 +1588,7 @@ export class Scheduler {
     this.schedules.drain();
     // Bounded re-evaluation: a missed release event costs one tick, never a hang.
     this.releaseIdleClaims();
+    await this.grantPass().catch(error => this.d.onError?.(error));
     for (const d of this.d.db.prepare("SELECT * FROM dispatches WHERE phase = 'reserved'").all() as Dispatch[]) {
       void this.continueDispatch(d.dispatch_id).catch(error => this.d.onError?.(error));
     }
