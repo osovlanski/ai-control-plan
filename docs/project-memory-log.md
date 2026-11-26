@@ -1095,3 +1095,9 @@ Migration 041 adds `runs.harness_cli_version` (TEXT NULL, forward only, no backf
 - **New contract `contracts/autopilot-state/v1`** (`docs/contracts/autopilot-state-v1.md`): `GET /api/autopilot/state` (`tasks.read`) serves a versioned, redacted snapshot of the autopilot, projected only in core `projectAutopilotState` from the readers behind `GET /api/autopilot` (which keeps its own unversioned shape for the web UI). The body is validated against the schema before it leaves (500 on mismatch). Cockpit vendors it SHA-pinned for `cockpit-autopilot-view`.
 - Redaction: paths, refs, SHAs, backup names and the restore report are left out; free text passes `redactText`, then `token=`/`auth=` values, URLs (`[url]`) and absolute or `~/` paths (`[path]`) are replaced; `/api/...` routes are kept. The shared core rules do not catch a bare `token=value`; the autopilot redactor adds that rule locally.
 - The contract types live in core as plain TypeScript; validation is ajv in `apps/api` like every other contract (core has no runtime dependencies, so no zod).
+
+## 2026-11-26 — qcq-06 S2 pure parent estimate in core (PROPOSED until merged)
+
+- itay accepted the plan's section 9 defaults (2026-11-26). S2 adds `packages/core/src/parent-estimate.ts` (`parent-estimate/1`), pure, no route, no migration, no API change; `run-estimate/1` is untouched.
+- **Decision (clarifies Q7):** a part has a status. `no-evidence` nulls the totals and is named in `totals.missing`; planning under operator-authored decomposition is `not-applicable`, left out of the sum and named in `warnings`. Otherwise every stage A total would be null.
+- **Decision (clarifies 4.3):** a `failure` handoff row classifies a run as a retry even when Harness `origin.kind` is `handoff`.
