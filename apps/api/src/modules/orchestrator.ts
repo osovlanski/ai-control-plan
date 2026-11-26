@@ -1239,7 +1239,7 @@ export class Orchestrator {
     // Run / adapter / DB side effects stay here for the legacy path.
     switch (event.type) {
       case "run.started": {
-        const payload = event.payload as { providerSessionRef?: string; model?: string } | undefined;
+        const payload = event.payload as { providerSessionRef?: string; model?: string; version?: unknown } | undefined;
         if (payload?.providerSessionRef) {
           this.db.prepare("UPDATE runs SET provider_session_ref = ? WHERE id = ?").run(payload.providerSessionRef, run.runId);
           runSessionRefStored(this.db, run.runId);
@@ -1249,6 +1249,13 @@ export class Orchestrator {
         if (payload?.model) {
           this.db.prepare("UPDATE runs SET model_resolved = ?, model_resolved_source = 'run.started' WHERE id = ? AND model_resolved IS NULL")
             .run(payload.model, run.runId);
+        }
+        // The CLI build that served the run (K13 A2), same write-once evidence rule as the
+        // Harness path (SessionStore.recordHarnessCliVersion): a blank or non-string version
+        // leaves the column NULL rather than holding a guess.
+        if (typeof payload?.version === "string" && payload.version.trim() !== "") {
+          this.db.prepare("UPDATE runs SET harness_cli_version = ? WHERE id = ? AND harness_cli_version IS NULL")
+            .run(payload.version.trim(), run.runId);
         }
         break;
       }
