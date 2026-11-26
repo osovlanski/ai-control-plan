@@ -312,7 +312,7 @@ items:
     profile: best-quality
     night: false
     source: "itay 2026-11-21 spec item 4; vNext 10–13 subtasks (parent_task_id has no producer)"
-    notes: "An estimate of a parent is the sum over its subtasks plus measured overhead, each with its own evidence."
+    notes: "An estimate of a parent is the sum over its subtasks plus measured overhead, each with its own evidence. Design: docs/agentic-os-qcq-06-plan.md (PROPOSED 2026-11-26): operator-created subtasks first, advisory breakdown read, slices S1-S7; no code before itay answers its section 9 questions."
 
   - id: qcq-07-provider-qualification
     title: "Qualify a new provider: conformance, fake acceptance suite, then one budgeted paid run"
