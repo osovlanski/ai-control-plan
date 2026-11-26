@@ -1,0 +1,43 @@
+{
+  "schemaVersion": "1.0",
+  "observedAt": "2030-01-01T23:00:00.000Z",
+  "status": "stopped",
+  "stopReason": "restore",
+  "startedBy": null,
+  "updatedAt": "2030-01-01T23:00:00.000Z",
+  "window": null,
+  "nextWindowOpensAt": null,
+  "windows": [],
+  "billingAttestation": null,
+  "settingProblems": [
+    {
+      "setting": "execution.agentUser",
+      "detail": "must be set: autopilot providers run as the agent user"
+    }
+  ],
+  "currentAttempt": null,
+  "recentAttempts": [],
+  "dispatcher": {
+    "problems": [
+      "autopilot.github.tokenFile is not configured"
+    ],
+    "inFlight": [],
+    "selection": [],
+    "lastTick": null
+  },
+  "restore": {
+    "pending": true,
+    "reconciling": false,
+    "restoreId": "apr_1",
+    "detectedAt": "2030-01-01T23:00:00.000Z",
+    "reconciledAt": null,
+    "reconcileError": null,
+    "reportComplete": null,
+    "reportReadCurrent": null,
+    "startBlockedBy": {
+      "setting": "restore.reconcile",
+      "detail": "restore apr_1: this database was restored; no reconciliation report exists yet. Run POST /api/autopilot/restore/reconcile"
+    }
+  },
+  "openExternals": 2
+}

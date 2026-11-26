@@ -1,0 +1,41 @@
+{
+  "schemaVersion": "1.0",
+  "observedAt": "2030-01-01T23:00:00.000Z",
+  "status": "stopped",
+  "stopReason": null,
+  "startedBy": null,
+  "updatedAt": "2030-01-01T23:00:00.000Z",
+  "window": null,
+  "nextWindowOpensAt": null,
+  "windows": [],
+  "billingAttestation": null,
+  "settingProblems": [
+    {
+      "setting": "execution.agentUser",
+      "detail": "must be set: autopilot providers run as the agent user"
+    }
+  ],
+  "currentAttempt": null,
+  "recentAttempts": [],
+  "dispatcher": {
+    "problems": [
+      "autopilot.github.tokenFile is not configured"
+    ],
+    "inFlight": [],
+    "selection": [],
+    "lastTick": null
+  },
+  "restore": {
+    "pending": false,
+    "reconciling": false,
+    "restoreId": null,
+    "detectedAt": null,
+    "reconciledAt": null,
+    "reconcileError": null,
+    "reportComplete": null,
+    "reportReadCurrent": null,
+    "startBlockedBy": null
+  },
+  "openExternals": 0,
+  "token": "FAKE-token-not-real"
+}

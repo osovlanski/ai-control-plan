@@ -1,0 +1,121 @@
+{
+  "schemaVersion": "1.0",
+  "observedAt": "2030-01-01T23:00:00.000Z",
+  "status": "running",
+  "stopReason": null,
+  "startedBy": "k_operator",
+  "updatedAt": "2030-01-01T23:00:00.000Z",
+  "window": {
+    "id": "apw_1",
+    "opensAt": "2030-01-01T22:59:00.000Z",
+    "closesAt": "2030-01-02T07:00:00.000Z",
+    "maxItems": 3,
+    "charged": 1,
+    "exhaustedByRestore": false
+  },
+  "nextWindowOpensAt": null,
+  "windows": [
+    {
+      "id": "apw_1",
+      "opensAt": "2030-01-01T22:59:00.000Z",
+      "closesAt": "2030-01-02T07:00:00.000Z",
+      "maxItems": 3,
+      "charged": 1,
+      "exhaustedByRestore": false
+    }
+  ],
+  "billingAttestation": {
+    "attestedAt": "2030-01-01T23:00:00.000Z",
+    "expiresAt": "2030-01-08T23:00:00.000Z",
+    "current": true
+  },
+  "settingProblems": [],
+  "currentAttempt": {
+    "id": "apa_1",
+    "itemId": "cockpit-autopilot-view",
+    "attemptNo": 1,
+    "state": "running",
+    "final": false,
+    "reason": null,
+    "repo": "ai-control-plan",
+    "taskId": "task_1",
+    "runtimeBudgetMs": 3600000,
+    "runtimeUsedMs": 120000,
+    "deadlineAt": "2030-01-02T00:00:00.000Z",
+    "deadlineBound": "budget",
+    "createdAt": "2030-01-01T23:00:00.000Z",
+    "updatedAt": "2030-01-01T23:00:00.000Z",
+    "finalAt": null,
+    "requeuedAt": null
+  },
+  "recentAttempts": [
+    {
+      "id": "apa_1",
+      "itemId": "cockpit-autopilot-view",
+      "attemptNo": 1,
+      "state": "running",
+      "final": false,
+      "reason": null,
+      "repo": "ai-control-plan",
+      "taskId": "task_1",
+      "runtimeBudgetMs": 3600000,
+      "runtimeUsedMs": 120000,
+      "deadlineAt": "2030-01-02T00:00:00.000Z",
+      "deadlineBound": "budget",
+      "createdAt": "2030-01-01T23:00:00.000Z",
+      "updatedAt": "2030-01-01T23:00:00.000Z",
+      "finalAt": null,
+      "requeuedAt": null
+    },
+    {
+      "id": "apa_0",
+      "itemId": "demo-journey",
+      "attemptNo": 1,
+      "state": "published",
+      "final": true,
+      "reason": "published",
+      "repo": "ai-control-plan",
+      "taskId": "task_1",
+      "runtimeBudgetMs": 3600000,
+      "runtimeUsedMs": 120000,
+      "deadlineAt": null,
+      "deadlineBound": null,
+      "createdAt": "2030-01-01T23:00:00.000Z",
+      "updatedAt": "2030-01-01T23:00:00.000Z",
+      "finalAt": "2030-01-01T23:00:00.000Z",
+      "requeuedAt": null
+    }
+  ],
+  "dispatcher": {
+    "problems": [],
+    "inFlight": [
+      "accept:apa_9"
+    ],
+    "selection": [
+      {
+        "itemId": "cockpit-autopilot-view",
+        "status": "running",
+        "reason": "attempt 1 running"
+      }
+    ],
+    "lastTick": {
+      "at": "2030-01-01T23:00:00.000Z",
+      "action": "reserved",
+      "itemId": "cockpit-autopilot-view",
+      "attemptId": "apa_1",
+      "detail": "created"
+    }
+  },
+  "restore": {
+    "pending": false,
+    "reconciling": false,
+    "restoreId": null,
+    "detectedAt": null,
+    "reconciledAt": null,
+    "reconcileError": null,
+    "reportComplete": null,
+    "reportReadCurrent": null,
+    "startBlockedBy": null
+  },
+  "openExternals": 0
+}
