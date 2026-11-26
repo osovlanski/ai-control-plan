@@ -42,11 +42,11 @@ function item(id: string, over: Record<string, string> = {}, acceptance = ACCEPT
 const doc = (...items: string[]) => `version: 1\nitems:\n${items.join("")}`;
 
 describe("backlog-check", () => {
-  it("passes on the committed backlog and every oci-loop item there has acceptance", () => {
+  it("passes on the committed backlog (any oci-loop item there has acceptance; zero is valid when all shipped)", () => {
     const r = run([]);
     expect(r.err).toBe("");
     expect(r.code).toBe(0);
-    expect(r.out).toMatch(/^backlog-check: PASS, \d+ items \(oci-loop [1-9]\d*, /);
+    expect(r.out).toMatch(/^backlog-check: PASS, \d+ items \(oci-loop \d+, /);
   });
 
   it("passes a minimal valid backlog", () => {

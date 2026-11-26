@@ -10,7 +10,7 @@
 # - lane owner: only itay can do it (a host step, a secret, a login or a decision).
 # - Acceptance commands come from this file at origin/main, never from the task worktree.
 #
-# Reconciled ai-control-plan on 2026-11-24 at 4997dc474e5541293092266d89ee6a535a8d1ed2.
+# Reconciled ai-control-plan on 2026-11-26 at b4fae0a74e586957294492ac7611595ded36b6d5.
 version: 1
 items:
   # ── Stage 3: the first autonomous loop ──────────────────────────────────────────────
@@ -182,7 +182,7 @@ items:
     profile: best-quality
     night: false
     source: "plan §F stage 5"
-    notes: "Capture effort in the execution identity before attaching effort-tagged AA priors. Keep assistant-aware cohorts and effort selection under the existing item."
+    notes: "Shipped in #259 (API 2.18, migration 057): effort in the execution identity, assistant- and effort-aware cohorts, effort-tagged AA priors. Open: the profile effort plan (modelRecommendation.effortPlan) is recorded in SHADOW only; applying it needs adapter flags verified against each CLI and K13 activation."
 
   - id: p1-8-jev-shadow
     title: "Jev shadow site for cheap decisions (needs D-7 spend answer)"
@@ -195,80 +195,6 @@ items:
     profile: auto
     night: false
     source: "plan §F stage 5; decision D-7 open"
-
-  # ── Small, verified defects: first-loop candidates ──────────────────────────────────
-  - id: legacy-run-cli-version
-    title: "Legacy orchestrator path records runs.harness_cli_version"
-    phase: "K13 follow-up"
-    repo: ai-control-plan
-    size: S
-    depends_on: []
-    files: ["apps/api/src/modules/orchestrator.ts", "apps/api/test/**"]
-    lane: oci-loop
-    profile: auto
-    night: true
-    source: "K13 P2 finding (PR #162); verified 2026-11-13: only harness/session-store.ts writes the column"
-    notes: "model-selection.ts falls back to the run.started event for legacy runs; with this fix the fallback stops being load-bearing."
-    acceptance:
-      commands:
-        - { run: "pnpm install --offline --frozen-lockfile", replaySafe: true, timeoutSec: 600 }
-        - { run: "pnpm typecheck", replaySafe: true, timeoutSec: 900 }
-        - { run: "pnpm lint", replaySafe: true, timeoutSec: 900 }
-        - { run: "pnpm test", replaySafe: true, timeoutSec: 2700 }
-      writable: &plane-writable
-        - "node_modules"
-        - "apps/api/node_modules"
-        - "apps/web/node_modules"
-        - "packages/core/node_modules"
-        - "packages/adapters/node_modules"
-        - "apps/cli/node_modules"
-        - "apps/mcp/node_modules"
-        - "eval/node_modules"
-      drive: "A legacy-path (harnessModes.single false) fake-provider run whose run.started carries a CLI version leaves runs.harness_cli_version set."
-
-  - id: memory-stale-boundary
-    title: "Cockpit memory Garden: stale means older than staleDays, as the memory v1 contract says"
-    phase: "O6 follow-up"
-    repo: cockpit
-    size: S
-    depends_on: []
-    files: ["memoryGarden.ts", "memoryGarden.test.ts"]
-    lane: oci-loop
-    profile: auto
-    night: true
-    source: "O6 S2 review finding (cockpit #49); verified 2026-11-13: memoryGarden.ts skips only ageDays < staleDays, so exactly staleDays is stale"
-    notes: "README says 'longer than staleDays' too. Contract-text alignment, no contract change."
-    acceptance:
-      commands:
-        - { run: "npm ci --offline --no-audit --no-fund", replaySafe: true, timeoutSec: 600 }
-        - { run: "npm test", replaySafe: false, timeoutSec: 1800 }
-        - { run: "npm run build", replaySafe: true, timeoutSec: 600 }
-      writable: &cockpit-writable
-        - "node_modules"
-        - ".generated"
-        - { file: "memory-garden-status.json" }
-        - { file: "retro-action-status.json" }
-      drive: "A memory file aged exactly staleDays is not reported stale; staleDays + 1 is."
-
-  - id: cockpit-tests-out-of-root
-    title: "Cockpit server tests write their status files to a temp dir, not the repo root"
-    phase: "hermetic tests follow-up"
-    repo: cockpit
-    size: S
-    depends_on: []
-    files: ["server.test.ts", "actionStatus.ts", "testHermeticEnv.ts"]
-    lane: oci-loop
-    profile: auto
-    night: true
-    source: "P0-9 drive 2026-11-13: npm test on a fresh checkout leaves memory-garden-status.json and retro-action-status.json in the repo root"
-    notes: "Once fixed, drop both files from the cockpit writable lists here."
-    acceptance:
-      commands:
-        - { run: "npm ci --offline --no-audit --no-fund", replaySafe: true, timeoutSec: 600 }
-        - { run: "npm test", replaySafe: false, timeoutSec: 1800 }
-        - { run: "npm run build", replaySafe: true, timeoutSec: 600 }
-      writable: *cockpit-writable
-      drive: "git status --ignored on a fresh checkout after npm test lists only node_modules and .generated."
 
   # ── Cockpit ─────────────────────────────────────────────────────────────────────────
   - id: cockpit-autopilot-view
@@ -349,32 +275,6 @@ items:
   # cooldowns, K4b resource pools, cron schedules with timezones, the autopilot window.
   # Kept under their existing ids: p1-5-effort-cohorts (effort in the execution identity),
   # p1-8-jev-shadow (Jev shadow evaluation), p1-6-scorecard (OS-vs-solo comparison).
-  - id: qcq-03-estimate-schema
-    title: "Publish the run-estimate v1 JSON Schema for Cockpit"
-    phase: "Quality, Cost & Quota"
-    repo: ai-control-plan
-    size: S
-    depends_on: []
-    files: ["contracts/run-estimate/v1/**", "docs/contracts/run-estimate-v1.md"]
-    lane: manual-cloud
-    profile: auto
-    night: false
-    source: "docs/contracts/run-estimate-v1.md; schema for Cockpit vendoring"
-    notes: "Publish a JSON Schema for the shipped run-estimate v1 contract so Cockpit can vendor it from a pinned commit."
-
-  - id: qcq-03-estimate-surfaces
-    title: "Vendor run-estimate v1 and show estimates in Cockpit"
-    phase: "Quality, Cost & Quota"
-    repo: cockpit
-    size: M
-    depends_on: [qcq-03-estimate-schema]
-    files: ["contracts/run-estimate/**", "controlPlane.ts", "public/**"]
-    lane: manual-cloud
-    profile: auto
-    night: false
-    source: "itay 2026-11-21 spec item 2 (shown before dispatch); Web and CLI shipped in #249"
-    notes: "Vendor the run-estimate v1 contract and JSON Schema with a VENDORED.json manifest pinned to a control-plane commit. Show the served estimate and recommendation, with API spend, API-equivalent and subscription quota labelled separately."
-
   - id: qcq-04-account-concurrency
     title: "Shared per-account concurrency limit across tasks, compare/race, autopilot and retries"
     phase: "Quality, Cost & Quota"
