@@ -1096,3 +1096,9 @@ Migration 041 adds `runs.harness_cli_version` (TEXT NULL, forward only, no backf
 - `cgroup_empty` needs prior registration; incomplete cgroup or `/proc` reads are `unreadable` / launcher alive; reads and stops use the recorded owner; the launcher scan knows the configured wrapper.
 - A unitless attempt waits for its provider stream to really close (`providerStreamClosed`, legacy `legacyCall`, `settleRun`, abandon drain), not the session or run end. confirm-stopped refuses while that stream is open. Dead-incarnation populated units are stopped once in any entered state; the spawn report survives `ambiguous`.
 - Tests: `apps/api/test/qcq-04b-part1-review.test.ts` (17, all fail on #268's code). A test inserting an entered attempt with `entered_incarnation` NULL gets a dead incarnation. Packet 8.2 note 10.
+
+## 2026-11-26 — autopilot-state v1 contract, API 2.21 (SHIPPED)
+
+- **New contract `contracts/autopilot-state/v1`** (`docs/contracts/autopilot-state-v1.md`): `GET /api/autopilot/state` (`tasks.read`) serves a versioned, redacted snapshot of the autopilot, projected only in core `projectAutopilotState` from the readers behind `GET /api/autopilot` (which keeps its own unversioned shape for the web UI). The body is validated against the schema before it leaves (500 on mismatch). Cockpit vendors it SHA-pinned for `cockpit-autopilot-view`.
+- Redaction: paths, refs, SHAs, backup names and the restore report are left out; free text passes `redactText`, then `token=`/`auth=` values, URLs (`[url]`) and absolute or `~/` paths (`[path]`) are replaced; `/api/...` routes are kept. The shared core rules do not catch a bare `token=value`; the autopilot redactor adds that rule locally.
+- The contract types live in core as plain TypeScript; validation is ajv in `apps/api` like every other contract (core has no runtime dependencies, so no zod).

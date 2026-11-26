@@ -57,6 +57,7 @@ import { BundledComposition, CockpitBundleClient } from "./modules/bundle-reques
 import { morningReport, renderMorningReport, UnknownWindow } from "./modules/autopilot-report.js";
 import { AutopilotHeartbeat, type HeartbeatFetch } from "./modules/autopilot-heartbeat.js";
 import { AutopilotRestore, detectRestore, RestoreRefused } from "./modules/autopilot-restore.js";
+import { registerAutopilotStateRoute } from "./modules/autopilot-state.js";
 import { ComposerService, parseOverrides, type StartAttempt, type StartBinding } from "./modules/composer/service.js";
 import { createArtificialAnalysisSource } from "./modules/artificial-analysis.js";
 import { QuotaProjection } from "./modules/quota.js";
@@ -652,6 +653,7 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     return reply.status(400).send({ error: err instanceof Error ? err.message : String(err) });
   };
   app.get("/api/autopilot", read.tasks, () => ({ ...autopilot.status(), windows: autopilot.windows(), attempts: autopilot.attempts(20), dispatcher: dispatcher.status(), restore: restore.status() }));
+  registerAutopilotStateRoute(app, read.tasks, { autopilot, dispatcher, restore, now }); // autopilot state v1, API 2.21
   // P0-7b (§C.5): restore state (a summary, never the report), the reconciliation, and the
   // operator's read-back of the report, which a start after a restore requires.
   app.get("/api/autopilot/restore", read.tasks, () => restore.status());
