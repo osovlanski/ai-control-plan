@@ -207,7 +207,10 @@ describe('K4b resource slots', () => {
     expect(built.tasks.get(id)?.state).toBe('CANCELLED');
     // No provider run was ever recorded for the cancelled task.
     expect(db.prepare('SELECT * FROM runs WHERE task_id = ?').all(id)).toHaveLength(0);
-    expect(claimRows(id)[0]).toMatchObject({ released_at: expect.any(String) });
+    // qcq-04b (packet 2.13 item 2): the claim is written after routing, so a cancel at `reserved`
+    // leaves no claim row at all, and a `dropped` attempt that never held anything.
+    expect(claimRows(id)).toHaveLength(0);
+    expect(db.prepare('SELECT state, exit_proof FROM execution_attempts WHERE task_id = ?').all(id)).toEqual([{ state: 'dropped', exit_proof: 'never_entered' }]);
     // The slot went to the next waiter rather than staying stranded; that task ran
     // to completion and handed it back in turn.
     expect(s.dispatches(waiter)[0]).toMatchObject({ phase: 'started' });
@@ -221,8 +224,11 @@ describe('K4b resource slots', () => {
     const id = rtask(s);
     const a = vi.spyOn(built.registry.adapter(A), 'start');
     await expect(s.runNow(id)).rejects.toThrow('crash');
-    // Claim and dispatch committed together; the crash is after both.
-    expect(claims().map(c => c.task_id)).toEqual([id]);
+    // qcq-04b (packet 2.13 item 3): the crash at the reservation boundary leaves a `reserved`
+    // dispatch and its `queued` attempt with no live claim; the route transaction claims on recovery.
+    expect(claims()).toHaveLength(0);
+    expect(db.prepare('SELECT state, account_source FROM execution_attempts WHERE task_id = ?').all(id)).toEqual([{ state: 'queued', account_source: 'pending' }]);
+    expect(s.dispatches(id)).toEqual([expect.objectContaining({ phase: 'reserved' })]);
     await built.orchestrator.reconcileOnBoot();
     const recovered = scheduler(); const done = settled(id);
     await recovered.reconcileOnBoot(); await done; await drain();
@@ -767,7 +773,9 @@ describe.each([['legacy', false], ['harness', true]] as const)('K4b manual hando
     const slot: { holder?: string } = {};
     let release!: () => void;
     const slotHeld = new Promise<void>(resolve => { release = resolve; });
-    const s = scheduler(async (phase, d) => { if (phase === 'reserved' && d.task_id === slot.holder) await slotHeld; });
+    // qcq-04b (packet 2.13 item 1): the claim is written by the reservation in the route transaction,
+    // so the holder is parked just after it (`routed`), where it owns both its dispatch and its claim.
+    const s = scheduler(async (phase, d) => { if (phase === 'routed' && d.task_id === slot.holder) await slotHeld; });
 
     const runner = rtask(s, { goal: 'continue [FAKE:LIMIT]' });
     const paused = settled(runner, ['WAITING_INPUT']);

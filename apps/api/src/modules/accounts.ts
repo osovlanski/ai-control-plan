@@ -8,6 +8,8 @@
  * false. 04d flips the constant.
  */
 
+import { createHash } from "node:crypto";
+
 /** The build gate. Config load is its only reader (packet 2.12). */
 export const ACCOUNT_ENFORCEMENT_READY = false;
 
@@ -131,4 +133,26 @@ export function accountKey(cfg: ResolvedAccountsConfig, assistantId: string, run
   }
   if (cfg.defaultLimit !== null) return { key: `account:fallback:${runAs}:${assistantId}`, source: "fallback", limit: cfg.defaultLimit };
   return { key: null, source: "none", limit: null };
+}
+
+/**
+ * The limit of an account key under this config (packet 2.2), or undefined when the key names no
+ * account it defines: an undeclared group, or a fallback key with `defaultLimit` null.
+ */
+export function accountLimit(cfg: ResolvedAccountsConfig, key: string): number | undefined {
+  if (!key.startsWith("account:")) return undefined;
+  const rest = key.slice("account:".length);
+  if (rest.startsWith("fallback:")) return cfg.defaultLimit ?? undefined;
+  return cfg.groups[rest]?.limit;
+}
+
+/**
+ * `account_config_hash` (packet 2.2): a hash of the definition the key was resolved from, so a commit
+ * or a boot can tell a regrouped or re-limited account from the one the attempt was queued under.
+ */
+export function accountConfigHash(cfg: ResolvedAccountsConfig, identity: AccountIdentity): string | null {
+  if (!identity.key) return null;
+  const rest = identity.key.slice("account:".length);
+  const def = identity.source === "fallback" ? { fallback: cfg.defaultLimit } : cfg.groups[rest] ?? null;
+  return createHash("sha256").update(JSON.stringify({ key: identity.key, def })).digest("hex").slice(0, 16);
 }

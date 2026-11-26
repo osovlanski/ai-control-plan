@@ -1760,3 +1760,60 @@ trigger tests. Where part 1 and the sections above differ:
 9. **Not exercised here.** The real scope on a systemd host (OCI), and the agent wrapper's stop on
    that host. The cgroup and `/proc` reads are tested against fake trees, and the Claude adapter's
    `systemd-run` argv against a recording stub.
+
+### 8.3 qcq-04b part 2a as built
+
+Part 2 ships in three PRs. Part 2a is W, R and G with the grant pass (2.5) and the Harness-only
+refusal (2.2) on the scheduler's single-path dispatch (a wake, then `Scheduler.start`). Part 2b brings
+direct `/start` and autopilot through R and adds the full commit (account re-resolve, autopilot
+check, deadline `D`, 2.4.1). Part 2c is the launch barrier, boot order and classification (2.8).
+Account enforcement stays refused at config load (`ACCOUNT_ENFORCEMENT_READY` false). The tests turn
+it on by setting `config.accounts` directly, the seam of 2.12. Where part 2a and the sections above
+differ:
+
+1. **W writes no claim.** The wake consumes the condition, inserts the `reserved` dispatch and creates
+   the attempt `queued`, with `account_source = 'pending'`, bound to that dispatch. Its known
+   requirement is the condition's pool. Units in use are live claims plus the requirements of
+   pending attempts (`Scheduler.inUse`), so the gap between W and R never lets a second wake take a
+   slot. The gate W applies is K4b's `resourceGate` (readiness, FIFO front, free units), with
+   `inUse` in place of `claimed`.
+2. **R is in the route transaction.** It runs in both the fresh route and the replayed one. It
+   resolves the account for (chosen assistant, `runAs`) only while `accounts.enforce` is on;
+   otherwise the key is null and `account_key` stays NULL. On the legacy path, an account key refuses
+   with `account_requires_harness`: the attempt is `dropped` (`never_entered`), the dispatch is
+   re-parked with that reason, and the task goes to `WAITING_INPUT` `intervention_required`. Otherwise R
+   writes the route and the account requirement (`queued_at` = the attempt's `queue_key`), then
+   grants every requirement or none. With no grant, the dispatch re-parks `resource_wait` without
+   spending a wake. The attempt stays `queued` with its route, unbound from the dispatch, and a new
+   `resource` wait names it (`wait_conditions.attempt_id`). Its resource is the pool if there is
+   one, otherwise the account key. A replayed route whose attempt is already `held` changes nothing.
+3. **G.** `Scheduler.grantPass` walks every `queued` dispatch attempt in the order (`queue_key`,
+   `task_id`, `candidate_slot`) in one immediate transaction. A pending attempt closes its known
+   resources. A routed, ready attempt is granted when every requirement has free units, none is
+   closed and it is at its resource's K4b queue front. Otherwise it closes them. G's transaction order
+   is 2.5.2's: path recheck, consume the wait, insert the `reserved` dispatch carrying the attempt's
+   `routing_decision_id`, bind and `held`, claims with that dispatch, task `WAITING_RESOURCE` →
+   `ROUTING`, then `dispatch.reserved`. The dispatch then goes through `start`'s replay branch, so it
+   launches on the route it waited for. G runs on every release, on every tick, and when a wake
+   reaches a wait that names an attempt. Such a wake never consumes that wait.
+4. **Enforcement off is K4b.** There is one requirement (the pool). W gates as today and R always
+   grants, so who runs, and in what order, is unchanged. Only the claim moves after routing
+   (2.13 items 1 to 3). Two resource-slots tests changed for that reason:
+   - A cancel between reservation and start finds no claim, and the attempt is `dropped`
+     (`never_entered`).
+   - A restart at the reservation boundary finds a `queued` pending attempt and no claim before
+     reconcile.
+
+   The handoff helpers park at `routed` instead of `reserved`.
+5. **An account attempt without a unit.** 2.2 requires strong exit evidence for every member before
+   `enforce: true` loads. That config check lands with the gate (04d); behind the test seam it is
+   not applied. So `settleEntered` never offers a weak proof to an attempt that has an `account_key`
+   or ever held an account claim. Instead it waits (`ambiguous` after `stopEvidenceMs`, claims held)
+   for a strong proof or the operator. Without this, `trg_attempt_weak_proof` would fail the
+   session's terminal transaction and park the task `harness_error`.
+6. **Scheduler.stop** also removes the scheduler's release listener, so a stopped scheduler no longer
+   reacts to releases. The tests that build their own scheduler stop the server's first.
+7. **Not in 2a.** Direct `/start`, autopilot and compare/race candidates still take the 04a path:
+   their attempt is created `held` at the start and is pool-only. The wake budget's re-route
+   compare-and-set (2.5.3), the full commit, the boot-time re-resolve and first-enable
+   reconciliation are 2b and 2c.

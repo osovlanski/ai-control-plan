@@ -179,27 +179,28 @@ describe("the commit at the store (packet 2.4.1)", () => {
   });
 });
 
-describe("compat attempt at the wake (packet 2.12)", () => {
-  it("writes dispatch, then attempt, then claim in one transaction, and a failed claim write leaves none of them", async () => {
+describe("the wake and the reservation (qcq-04b, packet 2.5.2; was the 04a compat attempt)", () => {
+  it("W writes the dispatch and a queued attempt with no claim; R claims in the route transaction, and a failed claim write commits no route", async () => {
     await boot();
     const s = scheduler();
     const id = task(HOLD);
     s.attach(id, { kind: "resource", resource: "gpu", reason: "needs a slot" });
     db.exec("CREATE TEMP TRIGGER qcq_fail_claim BEFORE INSERT ON resource_claims BEGIN SELECT RAISE(ABORT, 'claim store unavailable'); END");
     await s.wake(id, 1, "timer").catch(() => undefined);
+    await drain();
     errors = errors.filter((e) => !/claim store unavailable/.test(String(e)));
-    expect(db.prepare("SELECT COUNT(*) n FROM dispatches WHERE task_id = ?").get(id)).toEqual({ n: 0 });
-    expect(attempts(id)).toEqual([]);
-    expect(s.condition(id)).toMatchObject({ state: "active", generation: 1 });
+    // W committed: the dispatch and its queued attempt, route in flight, holding nothing.
+    const dispatchId = s.dispatches(id)[0]!.dispatch_id;
+    expect(s.dispatches(id)).toEqual([expect.objectContaining({ phase: "reserved", routing_decision_id: null })]);
+    expect(attempts(id)).toEqual([expect.objectContaining({ kind: "dispatch", state: "queued", dispatch_id: dispatchId })]);
+    expect(db.prepare("SELECT COUNT(*) n FROM resource_claims WHERE task_id = ?").get(id)).toEqual({ n: 0 });
 
     db.exec("DROP TRIGGER qcq_fail_claim");
-    // Immediate foreign keys: the claim's attempt row must already exist when the claim is written.
+    // Immediate foreign keys: the claim's attempt and dispatch rows must already exist when it is written.
     db.pragma("defer_foreign_keys = OFF");
-    await s.wake(id, 1, "timer"); await drain();
+    await s.tick(); await drain();
     const [row] = attempts(id);
-    expect(row).toMatchObject({ kind: "dispatch", candidate_slot: 0 });
-    const dispatchId = s.dispatches(id)[0]!.dispatch_id;
-    expect(row!.dispatch_id).toBe(dispatchId);
+    expect(row).toMatchObject({ kind: "dispatch", candidate_slot: 0, state: "live", dispatch_id: dispatchId });
     expect(db.prepare("SELECT attempt_id, dispatch_id, generation, resource, units FROM resource_claims WHERE task_id = ?").all(id))
       .toEqual([{ attempt_id: row!.attempt_id, dispatch_id: dispatchId, generation: 1, resource: "gpu", units: 1 }]);
     expect(db.prepare("SELECT resource, units FROM attempt_requirements WHERE attempt_id = ?").all(row!.attempt_id)).toEqual([{ resource: "gpu", units: 1 }]);

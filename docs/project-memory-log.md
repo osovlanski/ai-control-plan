@@ -1082,3 +1082,10 @@ Migration 041 adds `runs.harness_cli_version` (TEXT NULL, forward only, no backf
 - Strong proofs: `cgroup_empty`, `unscoped_exit`, `host_rebooted`, `operator_confirmed`. A task's terminal transition no longer releases an entered attempt; the stream end does (no unit) or the cgroup does (unit). Unproven 65 s after a stop or the execution's end: `ambiguous` plus `attempt.stop_unconfirmed`.
 - The host reader is `SystemExitEvidence`, installed only in `apps/api/src/index.ts`; `buildServer` and tests default to no evidence (no unit). Tests use `FakeExitEvidence` via `setExitEvidence(db, ...)` and `configureExitProofs` for timings. `AGENT_PLANE_PROVIDER_SCOPES=off` disables units.
 - API 2.20: `POST /api/attempts/:id/confirm-stopped` (409 `unit_populated` with a stop link) and `POST /api/attempts/:id/stop-unit`. Packet section 8.2 records where part 1 differs from the packet.
+
+## qcq-04b part 2a W, R and G (2026-11-26)
+
+- A wake no longer claims: it creates the dispatch attempt `queued` (`account_source = 'pending'`); R in `Scheduler.start`'s route transaction grants (claims, `held`) or re-parks `resource_wait` without spending a wake, keeping the routed attempt for the grant pass (`Scheduler.grantPass`). Pending requirements count as in use (`Scheduler.inUse`).
+- With enforcement on (tests only: set `config.accounts`), `account:<group>` capacity is the group limit, and a legacy start with an account key is refused `account_requires_harness` (task `WAITING_INPUT` `intervention_required`).
+- An account claim needs a strong proof: tests give fake members a unit with `Object.defineProperty(adapter, "scopedSpawn", { value: true })` plus `FakeExitEvidence` (absent unit at stream end = `unscoped_exit`). A unitless account attempt goes `ambiguous`, never a weak proof.
+- Two schedulers on one DB both hear releases; a test that builds its own scheduler must `built.scheduler.stop()` first (stop now unlistens). Packet section 8.3.

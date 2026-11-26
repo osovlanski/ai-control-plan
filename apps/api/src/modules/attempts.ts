@@ -254,6 +254,11 @@ export class AttemptStore {
     return (this.db.prepare("SELECT resource, units, queued_at FROM attempt_requirements WHERE attempt_id = ? ORDER BY resource")
       .all(attemptId) as { resource: string; units: number; queued_at: string }[]).map((r) => ({ resource: r.resource, units: r.units, queuedAt: r.queued_at }));
   }
+  /** Whether the attempt ever held an account claim (the `trg_attempt_weak_proof` predicate). */
+  private heldAccount(attemptId: string): boolean {
+    return !!this.db.prepare("SELECT 1 FROM resource_claims WHERE attempt_id = ? AND resource LIKE 'account:%'").get(attemptId);
+  }
+
   /** Every live claim of one attempt (packet 2.3.2 `claimsOf`). */
   claimsOf(attemptId: string): LiveClaim[] {
     return this.db.prepare(`SELECT claim_id, attempt_id, task_id, dispatch_id, generation, resource, units, claimed_at
@@ -296,6 +301,94 @@ export class AttemptStore {
       this.db.prepare("INSERT INTO attempt_requirements (attempt_id, resource, units, queued_at) VALUES (?, ?, ?, ?)").run(id, r.resource, r.units, r.queuedAt);
     }
     return this.get(id)!;
+  }
+
+  /**
+   * W (packet 2.5.2): a dispatch attempt created `queued` by the wake, bound to the `reserved`
+   * dispatch, its route in flight (`account_source = 'pending'`). It holds nothing; its known
+   * requirements (the wait's pool) count as in use until the reservation grants or re-parks it.
+   */
+  createQueued(input: { taskId: string; dispatchId: string; path: ExecutionPath; runAs: "plane" | "agent"; queueKey: string; requirements: Requirement[]; reason?: string }): AttemptRow {
+    const id = `att_${randomUUID()}`;
+    const at = this.iso();
+    this.db.prepare(`INSERT INTO execution_attempts (attempt_id, task_id, kind, execution_path, dispatch_id, candidate_slot, run_as,
+        account_source, queue_key, state, created_at, updated_at, reason)
+      VALUES (?, ?, 'dispatch', ?, ?, 0, ?, 'pending', ?, 'queued', ?, ?, ?)`)
+      .run(id, input.taskId, input.path, input.dispatchId, input.runAs, input.queueKey, at, at, redactText(input.reason ?? "wake"));
+    for (const r of input.requirements) {
+      this.db.prepare("INSERT INTO attempt_requirements (attempt_id, resource, units, queued_at) VALUES (?, ?, ?, ?)").run(id, r.resource, r.units, r.queuedAt);
+    }
+    return this.get(id)!;
+  }
+
+  /**
+   * R (packet 2.4 step 3): fixes the attempt's route and its account. The account requirement joins
+   * the known ones at the attempt's own `queue_key`, which never changes.
+   */
+  setRoute(attemptId: string, route: { routingDecisionId: number; assistantId: string; account: { key: string | null; source: string; hash: string | null; units?: number } }): AttemptRow {
+    const a = this.get(attemptId)!;
+    this.db.prepare(`UPDATE execution_attempts SET routing_decision_id = ?, assistant_id = ?, account_key = ?, account_source = ?, account_config_hash = ?, updated_at = ?
+      WHERE attempt_id = ? AND state = 'queued'`).run(route.routingDecisionId, route.assistantId, route.account.key, route.account.source, route.account.hash, this.iso(), attemptId);
+    this.db.prepare("DELETE FROM attempt_requirements WHERE attempt_id = ? AND resource LIKE 'account:%'").run(attemptId);
+    if (route.account.key) {
+      this.db.prepare("INSERT INTO attempt_requirements (attempt_id, resource, units, queued_at) VALUES (?, ?, ?, ?)").run(attemptId, route.account.key, route.account.units ?? 1, a.queue_key);
+    }
+    return this.get(attemptId)!;
+  }
+
+  /**
+   * Units of `resource` that `pending` attempts (a route in flight, W to R) are known to need. They
+   * count as in use, so a second wake cannot take a slot an in-flight reservation is about to claim
+   * (packet 2.5.1 rule 4, 2.5.3 "the gap").
+   */
+  pendingUnits(resource: string, exceptAttempt?: string): number {
+    return (this.db.prepare(`SELECT COALESCE(SUM(r.units), 0) AS n FROM attempt_requirements r
+      JOIN execution_attempts a ON a.attempt_id = r.attempt_id
+      JOIN dispatches d ON d.dispatch_id = a.dispatch_id
+      WHERE r.resource = ? AND a.state = 'queued' AND a.account_source = 'pending' AND d.phase = 'reserved' AND a.attempt_id != ?`)
+      .get(resource, exceptAttempt ?? "") as { n: number }).n;
+  }
+
+  /**
+   * R or G (packet 2.5.2): grants every requirement of a `queued` attempt bound to `dispatchId`. The
+   * attempt moves to `held` first, so `trg_claim_account_harness` sees its owner, then each claim is
+   * inserted with that dispatch. Inside the caller's transaction.
+   */
+  grant(attemptId: string, dispatchId: string, generation: number | null): LiveClaim[] {
+    const at = this.iso();
+    const moved = this.db.prepare("UPDATE execution_attempts SET state = 'held', dispatch_id = ?, updated_at = ? WHERE attempt_id = ? AND state = 'queued'")
+      .run(dispatchId, at, attemptId).changes;
+    if (!moved) throw new Error(`attempt ${attemptId} is not queued`);
+    const a = this.get(attemptId)!;
+    for (const r of this.requirements(attemptId)) {
+      this.db.prepare("INSERT INTO resource_claims (attempt_id, task_id, dispatch_id, generation, resource, units, account_source, claimed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+        .run(attemptId, a.task_id, dispatchId, generation, r.resource, r.units, r.resource.startsWith("account:") ? a.account_source : null, at);
+    }
+    return this.claimsOf(attemptId);
+  }
+
+  /** R's no-grant branch (packet 2.5.3): the attempt keeps its route and `queue_key`, unbound from the re-parked dispatch. */
+  unbindQueued(attemptId: string): void {
+    this.db.prepare("UPDATE execution_attempts SET dispatch_id = NULL, updated_at = ? WHERE attempt_id = ? AND state = 'queued'").run(this.iso(), attemptId);
+  }
+
+  /** A `queued` attempt that will never be granted (a cancel, a refusal, a re-park that replaced it). It held nothing. */
+  dropQueued(attemptId: string, reason: string): void {
+    const a = this.get(attemptId);
+    if (a?.state !== "queued") return;
+    const at = this.iso();
+    const changed = this.db.prepare(`UPDATE execution_attempts SET state = 'dropped', exit_proof = 'never_entered', exit_proof_at = ?, final_at = ?, updated_at = ?, reason = ?
+      WHERE attempt_id = ? AND state = 'queued'`).run(at, at, at, redactText(reason), attemptId).changes;
+    if (changed) this.event(a.task_id, "attempt.dropped", a.dispatch_id, { attemptId, proof: "never_entered", reason, slot: a.candidate_slot });
+  }
+
+  /**
+   * G's worklist (packet 2.5.1): every `queued` dispatch attempt, in the global order. Routed ones
+   * wait on a condition naming them; pending ones are in the W to R gap.
+   */
+  queuedInOrder(): AttemptRow[] {
+    return this.db.prepare(`SELECT * FROM execution_attempts WHERE state = 'queued' AND kind = 'dispatch'
+      ORDER BY queue_key, task_id, candidate_slot`).all() as AttemptRow[];
   }
 
   /** Binds the session or run row that carries this attempt. A legacy run row is the provider's handle: `starting` becomes `live`. */
@@ -527,6 +620,11 @@ export class AttemptStore {
       return this.awaitProof(a);
     }
     if (this.owned(a, here ? "runtime" : "boot")) return this.awaitProof(a);
+    // An attempt that ever held an account claim is never settled by a weak proof (2.6.1,
+    // `trg_attempt_weak_proof`). Unreachable once `enforce: true` requires strong exit evidence of
+    // every member (2.2, with the gate); behind the test seam it waits for the operator instead of
+    // failing the session's terminal transaction.
+    if (a.account_key || this.heldAccount(a.attempt_id)) return this.awaitProof(a);
     return this.finalize(a, here ? "stream_closed_unverified" : "boot_unverified", reason);
   }
 
@@ -570,6 +668,13 @@ export class AttemptStore {
     const task = this.db.prepare("SELECT state FROM tasks WHERE id = ?").get(taskId) as { state: string } | undefined;
     const terminal = !task || isTerminal(task.state as TaskState);
     const released: Released[] = [];
+    // A `queued` attempt holds nothing. It is dropped once nothing will ever grant it: its task is
+    // terminal, or neither a `reserved` dispatch nor an active wait names it (packet 2.13 item 2).
+    for (const q of this.db.prepare("SELECT * FROM execution_attempts WHERE task_id = ? AND state = 'queued'").all(taskId) as AttemptRow[]) {
+      const waiting = this.db.prepare(`SELECT 1 FROM dispatches WHERE dispatch_id = ? AND phase = 'reserved'
+        UNION ALL SELECT 1 FROM wait_conditions WHERE attempt_id = ? AND state = 'active'`).get(q.dispatch_id ?? "", q.attempt_id);
+      if (terminal || !waiting) this.dropQueued(q.attempt_id, reason);
+    }
     for (const a of this.ofTask(taskId, true)) {
       if (a.state === "held") {
         if (terminal || !this.owned(a, mode)) released.push(...this.finalize(a, "never_entered", reason));
