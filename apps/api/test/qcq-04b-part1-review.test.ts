@@ -106,9 +106,11 @@ function gated(opts: { scoped?: boolean; onStart?: (spec: RunSpec) => void } = {
  * An entered attempt as some other incarnation left it. `incarnation`: an id with a
  * `plane_incarnations` row (`pid`, `procStart`), or none (a pre-migration row: dead).
  */
-function entered(d: Db, over: { runAs?: "plane" | "agent"; seen?: boolean; state?: string; owner?: object; incarnation?: { id: string; pid: number; procStart: string | null } } = {}): string {
+function entered(d: Db, over: { runAs?: "plane" | "agent"; seen?: boolean; state?: string; owner?: object | null; incarnation?: { id: string; pid: number; procStart: string | null } } = {}): string {
   const id = `att_${Math.random().toString(36).slice(2, 10)}`;
   const lane = over.runAs ?? "plane";
+  // The manager the fake reports for the lane, as an entry records it; `owner: null` is a pre-060 row.
+  if (over.owner === undefined) over = { ...over, owner: ev.owners[lane] };
   const unit = attemptUnit(id, lane);
   if (over.incarnation) {
     d.prepare("INSERT OR IGNORE INTO plane_incarnations (incarnation_id, pid, proc_start, boot_id, started_at) VALUES (?, ?, ?, 'boot-fake-1', 't')")

@@ -885,15 +885,13 @@ export class SessionStore {
    * live session's lease is conservatively void (§9). Terminal rows are left
    * untouched — nothing will ever write them again.
    */
-  voidAllLeases(): number {
+  voidAllLeases(keep: (sessionId: string) => boolean = () => false): number {
     const placeholders = SESSION_TERMINAL_STATES.map(() => "?").join(", ");
-    const info = this.db
-      .prepare(
-        `UPDATE runs SET lease_token = NULL, lease_expires_at = NULL
-         WHERE lease_token IS NOT NULL AND session_state NOT IN (${placeholders})`,
-      )
-      .run(...SESSION_TERMINAL_STATES);
-    return info.changes;
+    const ids = (this.db
+      .prepare(`SELECT id FROM runs WHERE lease_token IS NOT NULL AND session_state NOT IN (${placeholders})`)
+      .all(...SESSION_TERMINAL_STATES) as { id: string }[]).map((r) => r.id).filter((id) => !keep(id));
+    const clear = this.db.prepare("UPDATE runs SET lease_token = NULL, lease_expires_at = NULL WHERE id = ?");
+    return this.db.transaction(() => ids.reduce((n, id) => n + clear.run(id).changes, 0))();
   }
 
   private iso(): string {

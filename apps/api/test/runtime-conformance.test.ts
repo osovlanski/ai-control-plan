@@ -14,6 +14,9 @@ import { buildServer, type BuiltServer } from "../src/server.js";
 import { credentialPath, readCredential, rotateCredential } from "../src/auth/credential-file.js";
 import { validateConformanceResult } from "../src/agent-runtime-contract.js";
 import { RUNTIME_CATALOG } from "../src/modules/runtime-catalog.js";
+
+// Each test builds a server; the 5 s default timed out on a slow reviewer machine (#272 review).
+vi.setConfig({ testTimeout: 30_000 });
 import { deriveLifecycle } from "../src/modules/runtime-lifecycle.js";
 import type { ConformanceResult, RuntimeConformanceOptions } from "../src/modules/runtime-conformance.js";
 

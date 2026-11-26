@@ -18,7 +18,7 @@ import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { isTerminal, redactText, redactValue, type TaskState } from "@agent-plane/core";
 import type { Db } from "../db/index.js";
-import { attemptUnit, exitEvidence, type UnitLane, type UnitOwner } from "./exit-evidence.js";
+import { attemptUnit, exitEvidence, type UnitLane, type UnitOwner, type UnitState } from "./exit-evidence.js";
 
 export type AttemptState = "queued" | "held" | "starting" | "live" | "stopping" | "ambiguous" | "settled" | "dropped";
 export type AttemptKind = "dispatch" | "direct" | "candidate";
@@ -177,6 +177,47 @@ export function registerSpawn(db: Db, attemptId: string, closed: () => boolean):
 }
 
 /**
+ * Recovery stops a dead incarnation's provider once per attempt per incarnation (#272 review): the
+ * boot reaper and the proof test both ask here, and only the first gets true.
+ */
+export function claimRecoveryStop(db: Db, attemptId: string): boolean {
+  const inc = incarnation(db);
+  if (inc.stopsIssued.has(attemptId)) return false;
+  inc.stopsIssued.add(attemptId);
+  return true;
+}
+/** A recovery stop that could not be issued: the next proof test may try again. */
+function unclaimRecoveryStop(db: Db, attemptId: string): void {
+  incarnation(db).stopsIssued.delete(attemptId);
+}
+
+/**
+ * The boot reaper's view of one recorded agent unit id (the attempt id, or a pre-attempt session
+ * id): the attempt's recorded unit owner, and whether this incarnation may stop it now. An attempt
+ * a live incarnation holds is never stopped by recovery.
+ */
+export function recoveryStopFor(db: Db, unitId: string): { attempt: boolean; stop: boolean; owner?: UnitOwner } {
+  const store = new AttemptStore(db);
+  const a = store.get(unitId);
+  if (!a || !a.provider_unit) return { attempt: false, stop: true };
+  if (store.incarnationOf(a) === "alive") return { attempt: true, stop: false };
+  const owner = store.unitOwner(a.attempt_id);
+  return { attempt: true, stop: claimRecoveryStop(db, a.attempt_id), ...(owner ? { owner } : {}) };
+}
+
+/**
+ * #272 review: a Harness session whose entered attempt another live plane incarnation holds. Boot
+ * recovery leaves it (its lease, its state) to that incarnation. A session that has not entered yet
+ * needs no such guard: its entry commit requires a current lease, so a voided one is refused
+ * (`not_owner`) and the runner unwinds before any provider starts.
+ */
+export function heldByLiveIncarnation(db: Db, sessionId: string): boolean {
+  const store = new AttemptStore(db);
+  const a = store.forSession(sessionId);
+  return !!a && ENTERED_STATES.includes(a.state) && store.incarnationOf(a) === "alive";
+}
+
+/**
  * #268 review finding 5: the provider's event stream of an attempt entered here has closed (its
  * iterator finished or failed, or the provider call rejected). Until then a unitless attempt is
  * not settled by `stream_closed_unverified`, however its session or run ended. Settles the attempt
@@ -194,9 +235,9 @@ export function providerStreamClosed(db: Db, attemptId: string, now: () => Date 
 }
 
 /**
- * Re-reads an entered attempt with a unit until it is final (or `ambiguous`, which the sweep
- * keeps checking): registration while the provider runs, then the proof once it has gone.
- * Unref'd; stops itself when the database closes.
+ * Re-reads an entered attempt until it is final (or `ambiguous`, which the sweep keeps checking):
+ * with a unit, registration while the provider runs, then the proof once it has gone; without one,
+ * the stop deadline. Unref'd; stops itself when the database closes.
  */
 export function watchExit(db: Db, attemptId: string, now: () => Date = () => new Date()): void {
   const inc = incarnation(db);
@@ -208,7 +249,9 @@ export function watchExit(db: Db, attemptId: string, now: () => Date = () => new
       const done = db.transaction(() => {
         const store = new AttemptStore(db, now);
         const a = store.get(attemptId);
-        if (!a || !ENTERED_STATES.includes(a.state) || a.state === "ambiguous" || !a.provider_unit) return true;
+        // Unitless attempts too (#272 review): an attempt whose stream outlived its execution must
+        // reach `ambiguous` with no scheduler running the sweep.
+        if (!a || !ENTERED_STATES.includes(a.state) || a.state === "ambiguous") return true;
         released.push(...store.settleEntered(a, "exit watch"));
         const after = store.get(attemptId)!;
         return !ENTERED_STATES.includes(after.state) || after.state === "ambiguous";
@@ -530,11 +573,13 @@ export class AttemptStore {
    * The legacy stream-end point (packet 2.13 item 4): `settleRun` wrote the run's `ended_at` after
    * the adapter's event stream drained. A legacy run never has a unit, so this is its release.
    */
-  streamClosed(runId: string): Released[] {
+  streamClosed(runId: string, closed = true): Released[] {
     const a = this.forSession(runId);
     if (!a) return [];
-    incarnation(this.db).streams.delete(a.attempt_id);
-    return this.settleEntered(a, "event stream closed");
+    // A run whose consumer failed with its stream still open (#272 review) keeps the stream until
+    // the cancel-and-drain reports it (`providerStreamClosed`).
+    if (closed) incarnation(this.db).streams.delete(a.attempt_id);
+    return this.settleEntered(a, closed ? "event stream closed" : "run ended with its event stream open");
   }
 
   /** Whether this plane incarnation ran the attempt's entry commit. */
@@ -661,7 +706,12 @@ export class AttemptStore {
     const since = a.stop_requested_at ?? this.executionEndedAt(a);
     if (!since) return [];
     const waited = this.now().getTime() - Date.parse(since);
-    if (waited < incarnation(this.db).stopEvidenceMs) return [];
+    if (waited < incarnation(this.db).stopEvidenceMs) {
+      // Re-read until the deadline whatever runs the sweep (#272 review: scheduling disabled).
+      const id = a.attempt_id;
+      queueMicrotask(() => watchExit(this.db, id, this.now));
+      return [];
+    }
     const at = this.iso();
     const changed = this.db.prepare("UPDATE execution_attempts SET state = 'ambiguous', updated_at = ? WHERE attempt_id = ? AND state = ?").run(at, a.attempt_id, a.state).changes;
     if (changed) {
@@ -699,20 +749,34 @@ export class AttemptStore {
     }
     if (a.provider_unit) {
       const lane: UnitLane = a.run_as === "agent" ? "agent" : "plane";
-      const owner = this.unitOwnerOf(a);
-      const state = ev.readUnit(a.provider_unit, lane, owner);
+      let owner = this.unitOwnerOf(a);
+      let state: UnitState;
+      if (owner) {
+        state = ev.readUnit(a.provider_unit, lane, owner);
+      } else {
+        // A pre-060 row records no manager (#272 review). Only a populated read under today's
+        // manager tells anything (and records it); empty or absent there may be the wrong
+        // manager's view of a unit that still runs under the one it was assigned under.
+        const current = ev.unitOwner(lane);
+        const read = current ? ev.readUnit(a.provider_unit, lane, current) : "unreadable";
+        if (read !== "populated" || !current) return this.awaitProof(a);
+        this.recordOwner(a, current);
+        owner = current;
+        state = read;
+      }
       if (state === "populated") {
         this.markSeen(a);
         // A dead incarnation's provider still running: recovery terminates its tree (2.8.2 row 13),
         // also when that incarnation had already moved it to `stopping` or `ambiguous` (finding 7).
         if (!here) {
           if (a.state === "starting" || a.state === "live") this.requestStop(a, "boot: provider of a dead incarnation still running");
-          const inc = incarnation(this.db);
-          if (!inc.stopsIssued.has(a.attempt_id)) {
-            inc.stopsIssued.add(a.attempt_id);
-            const unit = a.provider_unit;
-            queueMicrotask(() => { void ev.stopUnit(unit, lane, owner); watchExit(this.db, a.attempt_id, this.now); });
+          const db = this.db, now = this.now, id = a.attempt_id, unit = a.provider_unit, stopOwner = owner;
+          if (claimRecoveryStop(db, id)) {
+            queueMicrotask(() => {
+              void ev.stopUnit(unit, lane, stopOwner).then((issued) => { if (!issued) unclaimRecoveryStop(db, id); }, () => unclaimRecoveryStop(db, id));
+            });
           }
+          queueMicrotask(() => watchExit(db, id, now));
         }
         return this.awaitProof(this.get(a.attempt_id)!);
       }
@@ -738,6 +802,12 @@ export class AttemptStore {
     // failing the session's terminal transaction.
     if (a.account_key || this.heldAccount(a.attempt_id)) return this.awaitProof(a);
     return this.finalize(a, here ? "stream_closed_unverified" : "boot_unverified", reason);
+  }
+
+  /** A pre-060 attempt's unit read populated under today's manager: that is its manager from now on. */
+  private recordOwner(a: AttemptRow, owner: UnitOwner): void {
+    this.db.prepare("UPDATE execution_attempts SET provider_unit_owner = ?, updated_at = ? WHERE attempt_id = ? AND provider_unit_owner IS NULL")
+      .run(JSON.stringify(owner), this.iso(), a.attempt_id);
   }
 
   /** The unit read populated: registered by systemd, so its later absence proves exit. */
@@ -774,7 +844,11 @@ export class AttemptStore {
       if (d.phase === "reserved" || d.phase === "start_attempted") return true;
       return d.session_id ? this.runOwns(d.session_id, mode) : false;
     }
-    return mode === "runtime";
+    if (a.state === "held") return mode === "runtime";
+    // An entered direct or candidate start with no run row yet is owned only while this
+    // incarnation still holds its provider stream (#272 review: an abandoned start whose drain
+    // ended after the bounded wait must settle, not stay owned by a start that is long gone).
+    return mode === "runtime" && this.incarnationOf(a) === "here" && this.streamOpen(a);
   }
 
   /**

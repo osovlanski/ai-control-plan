@@ -951,7 +951,7 @@ export class Orchestrator {
     // is the next statement.
     const entry = enterProvider(this.db, { attemptId: legacy.attemptId, path: "legacy" });
     if (!entry.ok) throw new Error(`Provider entry ${entry.kind === "not_owner" ? "not owned" : "refused"}: ${entry.reason}`);
-    const handle = await this.legacyCall(entry.attempt.attempt_id, priorRef ? adapter.resume(priorRef, runSpec) : adapter.start(runSpec));
+    const handle = await this.legacyCall(entry.attempt.attempt_id, () => priorRef ? adapter.resume(priorRef, runSpec) : adapter.start(runSpec));
     legacy.started = { adapter, handle, attemptId: entry.attempt.attempt_id };
 
     // A legacy provider start may resolve after cancellation committed.
@@ -1110,7 +1110,7 @@ export class Orchestrator {
     // `start_attempted`. The adapter call is the next statement.
     const entry = enterProvider(this.db, { dispatchId: request.executionRequestId, path: 'legacy' });
     if (!entry.ok) throw new Error(`Provider entry ${entry.kind === 'not_owner' ? 'not owned' : 'refused'}: ${entry.reason}`);
-    const handle = await this.legacyCall(entry.attempt.attempt_id, adapter.start(request.runSpec));
+    const handle = await this.legacyCall(entry.attempt.attempt_id, () => adapter.start(request.runSpec));
     legacy.started = { adapter, handle, attemptId: entry.attempt.attempt_id, dispatch: true };
     if (this.tasks.get(taskId)?.state === 'CANCELLED') await adapter.cancel(handle);
     this.db.prepare(`INSERT INTO runs(id,task_id,assistant_id,provider_session_ref,state,started_at,dispatch_id,model_requested)
@@ -1132,10 +1132,11 @@ export class Orchestrator {
    * #268 review finding 5: a legacy provider call. One that rejected returned no stream, so its
    * attempt's stream is closed (and it meets its proof test: a dispatch's stays with the
    * dispatch's ambiguity). One that resolved has its stream closed by `settleRun` or the abandon drain.
+   * The call is made here, so an adapter that throws synchronously is a rejected call too (#272 review).
    */
-  private async legacyCall(attemptId: string, call: Promise<RunHandle>): Promise<RunHandle> {
+  private async legacyCall(attemptId: string, call: () => Promise<RunHandle>): Promise<RunHandle> {
     try {
-      return await call;
+      return await call();
     } catch (error) {
       try { providerStreamClosed(this.db, attemptId); } catch { /* the start's own error is the one to report */ }
       throw error;
@@ -1192,8 +1193,17 @@ export class Orchestrator {
     let seq = 0;
     let endedOk: boolean | undefined;
     let awaitingApproval = false;
+    // #272 review: only the stream's own end or failure closes it. A failure while recording an
+    // event leaves the provider's stream open: it is cancelled and drained before the attempt's
+    // stream is reported closed (`drainUnconsumed`).
+    const iter = run.adapter.events(run.handle)[Symbol.asyncIterator]();
+    let streamEnded = false;
     try {
-      for await (const event of run.adapter.events(run.handle)) {
+      for (;;) {
+        let step: IteratorResult<NormalizedEvent>;
+        try { step = await iter.next(); } catch (err) { streamEnded = true; throw err; }
+        if (step.done) { streamEnded = true; break; }
+        const event = step.value;
         const safeEvent = redactEvent(event, DEFAULT_REDACTION_RULES);
         seq += 1;
         insertEvent.run(
@@ -1224,24 +1234,41 @@ export class Orchestrator {
       endedOk = false;
       run.sawError = true;
       seq += 1;
-      insertEvent.run(
-        run.runId,
-        seq,
-        new Date().toISOString(),
-        "error",
-        null,
-        redactText(err instanceof Error ? err.message : String(err), DEFAULT_REDACTION_RULES),
-        null,
-        null,
-      );
+      try {
+        insertEvent.run(
+          run.runId,
+          seq,
+          new Date().toISOString(),
+          "error",
+          null,
+          redactText(err instanceof Error ? err.message : String(err), DEFAULT_REDACTION_RULES),
+          null,
+          null,
+        );
+      } catch { /* the run still settles below */ }
     } finally {
       clearTimeout(run.timeout);
       this.active.delete(run.runId);
       const ok = endedOk ?? false;
-      void this.settleRun(run, ok).catch(() => {
+      if (!streamEnded) this.drainUnconsumed(run, iter);
+      void this.settleRun(run, ok, streamEnded).catch(() => {
         // Settling is best-effort: a shutting-down process must not raise here.
       });
     }
+  }
+
+  /**
+   * #272 review: the consumer stopped with the provider's stream still open. Cancel the provider,
+   * read its stream to the end (discarding it), and only then report the attempt's stream closed.
+   * Unbounded on purpose: a stream that never ends leaves the attempt `ambiguous` past its deadline.
+   */
+  private drainUnconsumed(run: ActiveRun, iter: AsyncIterator<NormalizedEvent>): void {
+    const attemptId = new AttemptStore(this.db).forSession(run.runId)?.attempt_id;
+    void (async () => {
+      try { await run.adapter.cancel(run.handle); } catch { /* still drained below */ }
+      try { for (;;) { if ((await iter.next()).done) break; } } catch { /* a failed stream is closed */ }
+      if (attemptId) { try { providerStreamClosed(this.db, attemptId); } catch { /* the sweep re-reads it */ } }
+    })();
   }
 
   /** Envelope derivation from the event stream (review §3.6: agent reports enrich, events carry). */
@@ -1322,14 +1349,14 @@ export class Orchestrator {
 
 
   /** Decides what happens after a run's stream drains: finish, or fail over. */
-  private async settleRun(run: ActiveRun, ok: boolean): Promise<void> {
+  private async settleRun(run: ActiveRun, ok: boolean, streamEnded = true): Promise<void> {
     // qcq-04b (packet 2.13 item 4): the stream has drained, so a legacy run (never a unit) is released
     // here, in the transaction that writes its end, not at the task's terminal transition.
     const released = this.db.transaction(() => {
       this.db
         .prepare("UPDATE runs SET state = ?, ended_at = ? WHERE id = ?")
         .run(ok ? "ENDED_OK" : "ENDED_ERROR", new Date().toISOString(), run.runId);
-      return new AttemptStore(this.db).streamClosed(run.runId);
+      return new AttemptStore(this.db).streamClosed(run.runId, streamEnded);
     })();
     announceReleased(this.db, released);
 

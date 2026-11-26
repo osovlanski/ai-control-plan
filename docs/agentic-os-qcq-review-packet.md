@@ -1773,7 +1773,7 @@ trigger tests. Where part 1 and the sections above differ:
        time the plane cannot read is alive. A different boot, a gone pid, a reused pid, or this
        process's own pid with no open handle is dead. Rows from before 060 read as dead, as before.
     3. *Incomplete reads prove nothing.* A cgroup search that hits a stat or readdir error other than
-       ENOENT/ENOTDIR is `unreadable`, and a launcher scan that cannot read some process's argv
+       ENOENT (ENOTDIR included, round 2) is `unreadable`, and a launcher scan that cannot read some process's argv
        reports the launcher alive.
     4. *Launch-time manager.* Entry records `provider_unit_owner` (`{ uid, user?, group?, wrapper? }`,
        `ExitEvidence.unitOwner(lane)`). Reads, the launcher scan and stops (recovery and
@@ -1795,6 +1795,43 @@ trigger tests. Where part 1 and the sections above differ:
        (`stopping` and `ambiguous` too), once per attempt and incarnation.
     8. *Spawn report.* The exit watch stops at `ambiguous`, but the spawn-closed report stays until
        the attempt is final (`finalize` drops it), so a later `unscoped_exit` is still provable.
+
+11. **Review fixes, round 2 (#272 Codex review, FAIL, fixed on the same branch).** One regression
+    test per reproduced failure in `apps/api/test/qcq-04b-part1-review-r2.test.ts` (16, all fail on
+    the first fix). Codex did not reproduce findings 1, 6 and 8.
+    1. *Pre-060 rows (4).* An attempt with no recorded `provider_unit_owner` is read under today's
+       manager, but only a populated read counts: it records that manager and carries on. Empty,
+       absent or unreadable proves nothing (the unit may live under the manager it was assigned
+       under, which a renamed agent user no longer is), so the attempt waits.
+    2. *Stops (4, 7).* `ExitEvidence.stopUnit` resolves true only when a command was issued. The
+       wrapper is the recorded one (`agentStopLauncher`), also with `execution.agentUser` removed;
+       the plane lane never stops another uid's unit. `Scheduler.stopUnit` issues first, and
+       answers 409 `stop_unavailable` (nothing moved) when no manager could be asked. The boot
+       reaper always runs, stops through the recorded owner, and shares `claimRecoveryStop` with the
+       proof test, so one attempt is stopped once per incarnation; a stop that was not issued is
+       claimed again on the next proof test. A unit id with no attempt is stopped as before.
+    3. *Legacy stream (5).* `consume` iterates by hand: only the iterator's own end or failure marks
+       the stream closed. A failure while recording an event cancels the run and drains the stream in
+       the background, reporting `providerStreamClosed` when it ends (`streamClosed(runId, false)`
+       keeps the stream open meanwhile). An entered direct or candidate start with no run row is
+       owned only while this incarnation holds its stream, so a drain that ends after the abandon
+       deadline settles the attempt instead of leaving it `ambiguous`. `legacyCall` takes a thunk,
+       so a synchronous throw from `adapter.start` is a rejected call.
+    4. *Harness stream (5).* `closeProviderStream` asks `return()` at once, beside any pending
+       `next()`. The stream is closed when that `next()` finishes or fails, or `return()` settles
+       without a yielded value (`done !== false`) or fails. Otherwise it is read to its end. A close
+       that races the provider call waits for the handle. A synchronous `adapter.start` throw is a
+       rejected call (`callOf`). The exit watch now also covers unitless attempts, and `awaitProof`
+       starts it, so a held-open stream reaches `ambiguous` (and the operator can confirm it)
+       without a scheduler sweep.
+    5. *Overlapping boot (2).* `HarnessRecovery.reconcileOnBoot` skips, and `voidAllLeases` keeps the
+       lease of, a session whose entered attempt a live incarnation holds (`liveElsewhere`, wired to
+       `heldByLiveIncarnation`). A session that has not entered needs no guard: the entry commit
+       requires a current lease. A zombie or dead process (`/proc/<pid>/stat` state `Z` or `X`)
+       counts as gone.
+    6. *Reads (3).* ENOTDIR is incomplete everywhere (cgroup search, launcher scan, start time).
+    7. The two runtime-conformance tests that timed out at 5 s on a slow machine now run with a 30 s
+       timeout.
 
 ### 8.3 qcq-04b part 2a as built
 

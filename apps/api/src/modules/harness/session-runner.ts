@@ -398,6 +398,8 @@ class RunContext {
     attemptId: string;
     adapter: AgentAdapter;
     handle?: RunHandle;
+    /** The provider call, so a close that races it waits for its handle (or its rejection). */
+    call?: Promise<RunHandle>;
     iter?: AsyncIterator<NormalizedEvent>;
     inFlight?: Promise<IteratorResult<NormalizedEvent>>;
     ended?: boolean;
@@ -940,10 +942,13 @@ class RunContext {
   /**
    * #268 review finding 5: reports this session's provider stream closed to its attempt once it
    * really is. A stream that already finished reports at once (before the session's terminal
-   * transition, so that settles the attempt as before). Otherwise the in-flight `next()` is awaited,
-   * then `iter.return()`, or for an iterator without one the stream is drained (the session no
-   * longer reads it). Never awaited by a caller for longer than a tick: a hung provider stays
-   * unproven, and its attempt goes `ambiguous` past `stopEvidenceMs`. Idempotent.
+   * transition, so that settles the attempt as before). Otherwise (#272 review) `iter.return()` is
+   * asked at once, beside any `next()` still in flight, since a `return()` may be what unblocks it.
+   * The stream is closed when that `next()` finishes the stream or fails, or `return()` settles
+   * without yielding (`done !== false`) or fails. If neither closed it (a `return()` that yields a
+   * cleanup event), the stream is read to its end. Never awaited by a caller for longer than a
+   * tick: a hung provider stays unproven, and its attempt goes `ambiguous` past `stopEvidenceMs`.
+   * Idempotent.
    */
   closeProviderStream(): Promise<void> {
     const s = this.stream;
@@ -951,10 +956,22 @@ class RunContext {
     if (s.closing) return s.closing;
     s.closing = (async () => {
       try {
-        if (s.ended || !s.handle) return;
+        if (s.ended) return;
+        if (!s.handle) {
+          if (!s.call) return;
+          s.handle = await s.call; // a rejected call holds no stream (the catch below)
+        }
+        if (s.ended) return;
         const iter = s.iter ?? s.adapter.events(s.handle)[Symbol.asyncIterator]();
-        if (s.inFlight && (await s.inFlight).done) return;
-        if (iter.return) { await iter.return(undefined); return; }
+        const signals: Promise<boolean>[] = [];
+        if (s.inFlight) signals.push(s.inFlight.then((r) => r.done === true, () => true));
+        if (iter.return) signals.push(Promise.resolve(iter.return(undefined)).then((r) => r?.done !== false, () => true));
+        const closed = await new Promise<boolean>((resolve) => {
+          let left = signals.length;
+          if (!left) return resolve(false);
+          for (const sig of signals) void sig.then((c) => { if (c) resolve(true); else if (--left === 0) resolve(false); });
+        });
+        if (closed) return;
         for (;;) { if ((await iter.next()).done) return; }
       } catch {
         // A stream that failed, or an adapter that no longer knows the run, is closed.
@@ -1464,8 +1481,10 @@ class RunContext {
       // statement: no await, I/O or transaction between them.
       const entry = this.d.store.enterProvider(this.sessionId, this.lease, unit);
       if (!entry.ok) throw new ProviderEntryRefused(entry.kind, entry.reason);
-      const call = ref && adapter.resume ? adapter.resume(ref, spec) : adapter.start(spec);
-      const stream: NonNullable<RunContext["stream"]> = { attemptId: entry.attempt.attempt_id, adapter };
+      // An adapter that throws synchronously is a rejected call (#272 review), never an open stream.
+      const call = callOf(() => ref && adapter.resume ? adapter.resume(ref, spec) : adapter.start(spec));
+      const stream: NonNullable<RunContext["stream"]> = { attemptId: entry.attempt.attempt_id, adapter, call };
+      call.catch(() => undefined); // observed below; a close that races it must not leave it unhandled
       this.stream = stream;
       // qcq-04b: the spawn-closed report the `unscoped_exit` proof reads. Open while the call is
       // unsettled; a call that rejected spawned nothing this process still holds.
@@ -2127,4 +2146,9 @@ function interruptedVerification(kind: "cancelled" | "deadline"): VerificationRu
     }]),
     artifacts: [],
   };
+}
+
+/** A provider call as a promise: a synchronous throw is a rejection (#272 review). */
+function callOf<T>(call: () => Promise<T>): Promise<T> {
+  try { return Promise.resolve(call()); } catch (err) { return Promise.reject(err); }
 }

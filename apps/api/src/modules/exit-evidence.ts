@@ -57,8 +57,12 @@ export interface ExitEvidence {
    * that entered an attempt: null when no such process exists, `unreadable` when it cannot be told.
    */
   processStart(pid: number): string | null | "unreadable";
-  /** Stops the unit (the operator's stop) under `owner`'s manager. Resolves once asked; never throws. */
-  stopUnit(unit: string, lane: UnitLane, owner?: UnitOwner): Promise<void>;
+  /**
+   * Stops the unit under `owner`'s manager (the recorded launch-time identity, else today's
+   * configuration). Resolves true once a stop command was issued, false when none could be: no
+   * manager the plane can reach (another uid on the plane lane, no agent identity at all). Never throws.
+   */
+  stopUnit(unit: string, lane: UnitLane, owner?: UnitOwner): Promise<boolean>;
 }
 
 /** The unit an attempt's provider runs in, on its lane. */
@@ -74,8 +78,17 @@ export const NO_EXIT_EVIDENCE: ExitEvidence = {
   launcherAlive: () => true,
   bootId: () => "unavailable",
   processStart: () => "unreadable",
-  stopUnit: async () => {},
+  stopUnit: async () => false,
 };
+
+/** The agent wrapper a stop goes through: the recorded launch-time identity, else today's configuration. */
+export function agentStopLauncher(owner: UnitOwner | undefined, configured: Pick<AgentUserConfig, "user" | "sudo" | "wrapper" | "group"> | undefined):
+  { sudo: string; user: string; group: string; wrapper: string } | undefined {
+  if (owner?.user && owner.wrapper) {
+    return { sudo: configured?.sudo ?? "/usr/bin/sudo", user: owner.user, group: owner.group ?? configured?.group ?? "aos", wrapper: owner.wrapper };
+  }
+  return configured ? { sudo: configured.sudo, user: configured.user, group: configured.group, wrapper: configured.wrapper } : undefined;
+}
 
 const registry = new WeakMap<Db, ExitEvidence>();
 /** Installs the host's evidence reader for this database's plane. */
@@ -240,6 +253,8 @@ export class SystemExitEvidence implements ExitEvidence {
       const stat = readFileSync(join(this.procRoot, String(pid), "stat"), "utf8");
       // The command name (field 2) is parenthesised and may hold spaces: fields resume after its last ')'.
       const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+      // Field 3: an exited process awaiting its parent's reap (Z) or dead (X) runs nothing (#272 review).
+      if (fields[0] === "Z" || fields[0] === "X") return null;
       return fields[19] ?? "unreadable"; // field 22 overall
     } catch (err) {
       return isGone(err) ? null : "unreadable";
@@ -254,29 +269,28 @@ export class SystemExitEvidence implements ExitEvidence {
     }
   }
 
-  stopUnit(unit: string, lane: UnitLane, owner?: UnitOwner): Promise<void> {
-    if (!/^aos-(att|run)-[A-Za-z0-9_-]{1,64}\.scope$/.test(unit)) return Promise.resolve();
-    // The recorded launch-time agent identity, falling back to today's configuration.
-    const configured = this.opts.agentUser;
-    const agent = owner?.user && owner.wrapper && configured
-      ? { ...configured, user: owner.user, group: owner.group ?? configured.group, wrapper: owner.wrapper }
-      : configured;
-    const [cmd, args] = lane === "plane"
-      ? ["systemctl", ["--user", "stop", unit]]
-      : agent
-        ? [agent.sudo, ["-n", "-u", agent.user, "-g", agent.group, "--", agent.wrapper, "stop", unit.replace(/^aos-run-/, "").replace(/\.scope$/, "")]]
-        : [undefined, []];
-    if (!cmd) return Promise.resolve();
+  stopUnit(unit: string, lane: UnitLane, owner?: UnitOwner): Promise<boolean> {
+    if (!/^aos-(att|run)-[A-Za-z0-9_-]{1,64}\.scope$/.test(unit)) return Promise.resolve(false);
+    let cmd: string, args: string[];
+    if (lane === "plane") {
+      // `systemctl --user` reaches only this process's own manager: a unit recorded under another
+      // uid cannot be stopped from here (#272 review).
+      if (owner && owner.uid !== this.planeUid) return Promise.resolve(false);
+      [cmd, args] = ["systemctl", ["--user", "stop", unit]];
+    } else {
+      const agent = agentStopLauncher(owner, this.opts.agentUser);
+      if (!agent) return Promise.resolve(false);
+      [cmd, args] = [agent.sudo, ["-n", "-u", agent.user, "-g", agent.group, "--", agent.wrapper, "stop", unit.replace(/^aos-run-/, "").replace(/\.scope$/, "")]];
+    }
     return new Promise((done) => {
       try {
-        const child = spawn(cmd, args as string[], { stdio: "ignore", ...(lane === "agent" ? { env: { PATH: "/usr/local/bin:/usr/bin:/bin", LANG: "C.UTF-8" } } : {}) });
-        const timer = setTimeout(() => { child.kill("SIGKILL"); done(); }, 10_000);
+        const child = spawn(cmd, args, { stdio: "ignore", ...(lane === "agent" ? { env: { PATH: "/usr/local/bin:/usr/bin:/bin", LANG: "C.UTF-8" } } : {}) });
+        const timer = setTimeout(() => { child.kill("SIGKILL"); done(true); }, 10_000);
         timer.unref();
-        const end = () => { clearTimeout(timer); done(); };
-        child.on("error", end);
-        child.on("exit", end);
+        child.on("error", () => { clearTimeout(timer); done(false); });
+        child.on("exit", () => { clearTimeout(timer); done(true); });
       } catch {
-        done();
+        done(false);
       }
     });
   }
@@ -296,10 +310,13 @@ export function launcherArgv(argv: string[], attemptId: string, wrappers: string
   return false;
 }
 
-/** The path no longer exists (ENOENT, or ESRCH for a process that just exited). */
+/**
+ * The path no longer exists (ENOENT, or ESRCH for a process that just exited). Every other error,
+ * ENOTDIR included, leaves the read incomplete (#272 review).
+ */
 function isGone(err: unknown): boolean {
   const code = (err as NodeJS.ErrnoException)?.code;
-  return code === "ENOENT" || code === "ESRCH" || code === "ENOTDIR";
+  return code === "ENOENT" || code === "ESRCH";
 }
 /** A directory, nothing there, or a path the plane may not inspect. */
 function statKind(path: string): "dir" | "none" | "unreadable" {
@@ -344,5 +361,11 @@ export class FakeExitEvidence implements ExitEvidence {
   processStart(pid: number): string | null | "unreadable" { return this.processes.get(pid) ?? null; }
   /** The owner each stop was asked under, beside `stopped`. */
   readonly stopOwners: (UnitOwner | undefined)[] = [];
-  async stopUnit(unit: string, _lane?: UnitLane, owner?: UnitOwner): Promise<void> { this.stopped.push(unit); this.stopOwners.push(owner); }
+  /** Whether a stop can be issued; false models a host with no reachable manager. */
+  stoppable = true;
+  async stopUnit(unit: string, _lane?: UnitLane, owner?: UnitOwner): Promise<boolean> {
+    if (!this.stoppable) return false;
+    this.stopped.push(unit); this.stopOwners.push(owner);
+    return true;
+  }
 }

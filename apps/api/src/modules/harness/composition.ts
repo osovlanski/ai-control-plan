@@ -25,7 +25,8 @@ import { EventRecorder } from "./event-recorder.js";
 import { snapshotQuota } from "./quota-snapshot.js";
 import { ProviderProcessTracker, markIncarnation, reapStrayAgentUnits, reapStrayProviders } from "./provider-processes.js";
 import { stopAgentUnit } from "@agent-plane/adapters";
-import { agentLauncher } from "../../config.js";
+import { heldByLiveIncarnation, recoveryStopFor } from "../attempts.js";
+import { agentStopLauncher } from "../exit-evidence.js";
 import { HarnessRecovery } from "./recovery.js";
 import { SessionRunner, type RunnerDeps } from "./session-runner.js";
 import { SessionStore } from "./session-store.js";
@@ -118,14 +119,21 @@ export function buildHarnessComposition(deps: HarnessCompositionDeps): HarnessCo
     verification: verificationStore,
     shouldTerminalizeOnRecovery: (sessionId) => shouldTerminalizeOnRecovery(db, config, sessionId),
     processes,
+    liveElsewhere: (sessionId) => heldByLiveIncarnation(db, sessionId),
     reapStrays: () => {
       bootSweepPending = true; // only reconcileOnBoot reaps, and it sweeps profiles last
       // P0-A2: agent-user units first. They are not this user's to signal, so they are stopped
       // by name through the wrapper; the process reap below then finds their sudo parents gone.
+      // #272 review: an attempt's unit is stopped through the wrapper recorded at its entry (also
+      // once `execution.agentUser` is gone), and only once: the proof test's recovery stop that
+      // follows at the scheduler's boot sweep sees this one and does not repeat it.
       const agent = config.execution.agentUser;
-      const units = agent
-        ? reapStrayAgentUnits(config.dir, (unit) => stopAgentUnit(agentLauncher(agent), unit), { log: deps.onInfo })
-        : Promise.resolve([]);
+      const units = reapStrayAgentUnits(config.dir, (unit) => {
+        const target = recoveryStopFor(db, unit);
+        if (!target.stop) return Promise.resolve();
+        const launcher = agentStopLauncher(target.owner, agent);
+        return launcher ? stopAgentUnit({ ...launcher, executable: agent?.executable ?? "" }, unit) : Promise.resolve();
+      }, { log: deps.onInfo });
       return units.then(() => reapStrayProviders(config.dir, { log: deps.onInfo }));
     },
     sweepProfiles: () => {
