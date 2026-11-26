@@ -130,12 +130,15 @@ ParentEstimate {
 }
 
 OverheadPart {
+  status: "observed" | "no-evidence" | "not-applicable",
   method: string,                  // e.g. "extra-runs-per-task/1"
-  expectedCount: { mean: number, share: number } | null,  // per child
+  confidence: EstimateConfidence,
+  expectedCount: { mean: number, share: number | null } | null,  // share is null once summed over children
   durationMs: EstimateRange | null,
   tokens: { input: EstimateRange | null, output: EstimateRange | null },
+  costUsd: EstimateRange | null,
   sampleSize: number,
-  evidence: { taskIds: string[], runIds: string[], records: string[] },
+  evidence: { taskIds: string[], runIds: string[] },   // verification: runIds are verification run ids
   missing: string[],
 }
 ```
@@ -150,8 +153,11 @@ runs' own records) and its estimate is still shown, as the recorded read does to
   would answer it at `asOf`. No new cohort logic.
 - **Tokens and API spend** add up across children and overhead parts. A sum of quartile ranges is
   not a quartile of the sum; the doc and the field name say so (`sum of p25`, `sum of p50`,
-  `sum of p75`), and confidence is the lowest part's. If any child or part is `null`, the total is
-  `null` and `missing` names which (Q7). A partial total is never shown as the total.
+  `sum of p75`), and confidence is the lowest part's. If any child or any part with
+  status `no-evidence` is `null`, the total is `null` and `totals.missing` names which (Q7). A
+  partial total is never shown as the total. A part with status `not-applicable` (planning under
+  operator-authored decomposition, section 4.4) is not a gap in the evidence: it is left out of
+  the sum and named in `warnings`. Without this rule every stage A total would be `null` forever.
 - **Subscription quota** is not summed: a run's share of a quota is not observable (qcq-01 rule).
   The breakdown repeats the parent's proposed assistant's `subscriptionQuota` once.
 - **Duration**: `serial` is the sum. `criticalPath` is the longest path through the children's
@@ -170,7 +176,7 @@ and every later run is classified once, by the first rule that matches:
 
 | Class | Rule (durable record) |
 |---|---|
-| handoff | a `handoffs` row with `to_run_id` = the run and `trigger` in `manual`, `quota`, `harness`, `context`, `wake`; or Harness `origin.kind` = `handoff` |
+| handoff | a `handoffs` row with `to_run_id` = the run and `trigger` in `manual`, `quota`, `harness`, `context`, `wake`; or Harness `origin.kind` = `handoff` without a `failure` trigger (an explicit failure row is stronger evidence than the origin and makes it a retry) |
 | retry | a `handoffs` row with `trigger = 'failure'`; or the previous run ended `ENDED_ERROR` and this run is `origin.kind` `fresh` or `resume` |
 | other | anything else (for example an operator restart after `ENDED_OK`) |
 
@@ -186,8 +192,8 @@ the breakdown, before any parent has ended.
 
 ### 4.4 Planning overhead
 
-- Stage A (operator decomposition): `null`, `missing: ["operator-authored decomposition: planning
-  time and tokens are not observed"]`. The time between parent creation and the last child
+- Stage A (operator decomposition): status `not-applicable`, all figures `null`, `missing:
+  ["operator-authored decomposition: planning time and tokens are not observed"]`. The time between parent creation and the last child
   creation is **not** used: it measures the operator, not the plan.
 - Stage B (planner proposals): the producing run's duration and settled tokens, as quartiles over
   past accepted proposals in the planner's cohort.
