@@ -41,12 +41,20 @@ interface ClaudeRunState {
   /** Present only in live-input mode (see `ClaudeAdapterOptions.liveInput`). */
   live?: LiveInputChannel;
   /** The CLI process this adapter spawned for the run (kernel liveness, F1/F2). */
-  process?: { child: ChildProcess; spawnedAt: string; stderrTail: string };
+  /** `failed`: the spawn itself errored (no 'exit' follows), so nothing of it runs. */
+  process?: { child: ChildProcess; spawnedAt: string; stderrTail: string; failed?: boolean };
   /** P0-A2: set when this run launches as the agent user. */
   agent?: AgentRun;
   /** The verified profile this run launched with (M3), judged against `system/init` (S5). */
   profile?: VerifiedProfile;
+  /** qcq-04b: the plane-lane cgroup scope this run launches in (`RunSpec.scope`). */
+  scope?: string;
 }
+
+/** A transient unit name the plane hands us: argv-safe, and only ever one of ours. */
+const SCOPE_UNIT = /^aos-att-[A-Za-z0-9_-]{1,64}$/;
+/** How many ended runs `spawnClosed` remembers. */
+const CLOSED_RUNS_KEPT = 512;
 
 /** Bounded stderr tail kept for provider error events (the SDK keeps its own only for its default spawn). */
 const STDERR_TAIL_CHARS = 2_048;
@@ -87,6 +95,13 @@ const FILE_MUTATING_TOOLS: Record<string, { pathKey: string; kind: string }> = {
  */
 export class ClaudeAdapter implements AgentAdapter {
   private runs = new Map<string, ClaudeRunState>();
+  /**
+   * qcq-04b: every process this adapter spawns runs in the scope the plane names (plane lane) or
+   * in the agent wrapper's scope (agent lane), so the scope is the provider's whole tree.
+   */
+  readonly scopedSpawn = true;
+  /** Ended runs: the process spawned for each, or null when the spawn seam was never invoked. */
+  private closed = new Map<string, ClaudeRunState["process"] | null>();
 
   /** `queryFn` is injectable for deterministic scripted-stream tests. */
   constructor(
@@ -171,6 +186,9 @@ export class ClaudeAdapter implements AgentAdapter {
   private async launch(run: RunSpec, resumeRef: ProviderSessionRef | undefined): Promise<RunHandle> {
     requireProfileHarness(run.profile, "claude-code"); // before any state or process exists
     const agent = agentLaunch(run, this.options.agentLauncher); // refuses before any state or process exists
+    if (run.scope && (agent || !SCOPE_UNIT.test(run.scope.unit))) {
+      throw new Error(agent ? "a run as the agent user runs in its wrapper's scope; it takes no plane scope" : "scope unit is not an aos-att unit name");
+    }
     // MCP secret values travel only in the provider's environment: `--mcp-config` is argv.
     const secretEnv = mcpSecretEnv(run.profile, run.secretEnv);
     const runId = newRunId();
@@ -181,6 +199,7 @@ export class ClaudeAdapter implements AgentAdapter {
       pendingTools: new Map(),
       ...(run.profile ? { profile: run.profile } : {}),
       ...(agent ? { agent } : {}),
+      ...(run.scope ? { scope: run.scope.unit } : {}),
     };
     this.runs.set(runId, state);
 
@@ -270,7 +289,19 @@ export class ClaudeAdapter implements AgentAdapter {
     } finally {
       closeLive(state);
       this.runs.delete(String(runId));
+      this.closed.set(String(runId), state.process ?? null);
+      if (this.closed.size > CLOSED_RUNS_KEPT) this.closed.delete(this.closed.keys().next().value!);
     }
+  }
+
+  /**
+   * qcq-04b: the stream has ended (the SDK spawns only inside the query, so it cannot spawn for
+   * this handle again) and no process spawned for it is still running.
+   */
+  spawnClosed(handle: RunHandle): boolean {
+    if (!this.closed.has(handle.runId)) return false;
+    const proc = this.closed.get(handle.runId);
+    return !proc || proc.failed === true || proc.child.exitCode !== null || proc.child.signalCode !== null;
   }
 
   /**
@@ -584,9 +615,14 @@ export class ClaudeAdapter implements AgentAdapter {
     const agent = state.agent;
     // P0-A2: as the agent user, the command line is the wrapper's. sudo resets the environment
     // (the sudoers rule sets env_reset), so nothing of the plane's reaches the provider.
+    // qcq-04b: on the plane lane, `systemd-run --scope` registers the scope and then execs the
+    // command inside it (or fails without running it), so the pid is the provider's and every
+    // descendant stays in the scope's cgroup.
     const [command, args] = agent
       ? [agent.launcher.sudo, [...agentSudoArgs(agent.launcher), "run", agent.unit, String(agent.maxSeconds), options.cwd ?? agent.cwd, "--", options.command, ...options.args]]
-      : [options.command, options.args];
+      : state.scope
+        ? [this.options.systemdRun ?? "systemd-run", ["--user", "--scope", "--quiet", "--collect", `--unit=${state.scope}`, "--", options.command, ...options.args]]
+        : [options.command, options.args];
     const child = spawn(command, args, {
       cwd: options.cwd,
       env: agent ? agentSudoEnv() : options.env,
@@ -597,12 +633,14 @@ export class ClaudeAdapter implements AgentAdapter {
       // provider's tree and leave a daemon its hooks detached (F2).
       detached: process.platform !== "win32",
     });
-    const proc = { child, spawnedAt: new Date().toISOString(), stderrTail: "" };
+    const proc: NonNullable<ClaudeRunState["process"]> = { child, spawnedAt: new Date().toISOString(), stderrTail: "" };
     child.stderr?.setEncoding("utf8");
     child.stderr?.on("data", (chunk: string) => {
       proc.stderrTail = (proc.stderrTail + chunk).slice(-STDERR_TAIL_CHARS);
     });
-    child.on("error", () => {}); // surfaced by the SDK through the stream; never an unhandled 'error'
+    // Surfaced by the SDK through the stream; never an unhandled 'error'. A spawn that errored never
+    // ran, so it does not hold the spawn path open (qcq-04b `spawnClosed`).
+    child.on("error", () => { if (child.pid === undefined) proc.failed = true; });
     state.process = proc;
     return child as unknown as SpawnedProcess;
   }
@@ -612,9 +650,12 @@ export class ClaudeAdapter implements AgentAdapter {
     if (!child?.child.pid) return undefined;
     const c = child.child;
     const agent = this.runs.get(handle.runId)?.agent;
+    const scope = this.runs.get(handle.runId)?.scope;
     return {
       pid: c.pid!, spawnedAt: child.spawnedAt, alive: () => c.exitCode === null && c.signalCode === null,
-      ...(agent ? { stop: () => stopAgentUnit(agent.launcher, agent.unit), agentUnit: agent.unit } : {}),
+      ...(agent ? { stop: () => stopAgentUnit(agent.launcher, agent.unit), agentUnit: agent.unit }
+        // The scope is the provider's whole tree: terminating the run stops all of it.
+        : scope ? { stop: () => stopUserScope(this.options.systemctl ?? "systemctl", scope) } : {}),
     };
   }
 
@@ -683,6 +724,24 @@ export function stopAgentUnit(launcher: AgentLauncher, unit: string, timeoutMs =
   });
 }
 
+/** qcq-04b: stop the plane user's transient scope by name. Bounded; never throws (it may be gone). */
+export function stopUserScope(systemctl: string, unit: string, timeoutMs = 10_000): Promise<void> {
+  return new Promise((done) => {
+    if (!SCOPE_UNIT.test(unit)) return done();
+    let child: ChildProcess;
+    try {
+      child = spawn(systemctl, ["--user", "stop", `${unit}.scope`], { stdio: "ignore" });
+    } catch {
+      return done();
+    }
+    const timer = setTimeout(() => { child.kill("SIGKILL"); done(); }, timeoutMs);
+    timer.unref();
+    const end = () => { clearTimeout(timer); done(); };
+    child.on("error", end);
+    child.on("exit", end);
+  });
+}
+
 /** Options that change how a run is launched. Everything here defaults OFF. */
 export interface ClaudeAdapterOptions {
   /**
@@ -704,6 +763,10 @@ export interface ClaudeAdapterOptions {
    * is set; every other run launches exactly as before. Without it such a run is refused.
    */
   agentLauncher?: AgentLauncher;
+  /** qcq-04b: `systemd-run` used for a plane-lane scope (`RunSpec.scope`). Default from PATH. */
+  systemdRun?: string;
+  /** qcq-04b: `systemctl` used to stop a plane-lane scope. Default from PATH. */
+  systemctl?: string;
 }
 
 export interface ClaudeLaunchProfile {

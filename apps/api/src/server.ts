@@ -988,6 +988,23 @@ export function buildServer(deps: ServerDeps): BuiltServer {
     return reply.status(result.outcome === 'stale' ? 409 : 200).send(result);
   });
 
+  // qcq-04b (API 2.20, packet 2.6.1): the operator's exit proof for one attempt, and the stop that precedes it.
+  app.post<{ Params: { id: string } }>('/api/attempts/:id/confirm-stopped', write, (req, reply) => {
+    const result = scheduler.confirmStopped(req.params.id);
+    if (result.ok) return { attemptId: result.attempt.attempt_id, state: result.attempt.state, proof: result.attempt.exit_proof, released: result.released.length };
+    if (result.code === 'unknown') return reply.status(404).send({ error: 'not found' });
+    if (result.code === 'unit_populated') {
+      return reply.status(409).send({ error: 'unit_populated', unit: result.unit,
+        stop: { method: 'POST', path: `/api/attempts/${encodeURIComponent(req.params.id)}/stop-unit` } });
+    }
+    return reply.status(409).send({ error: result.code });
+  });
+  app.post<{ Params: { id: string } }>('/api/attempts/:id/stop-unit', write, async (req, reply) => {
+    const result = await scheduler.stopUnit(req.params.id);
+    if (result.ok) return { attemptId: req.params.id, unit: result.unit, stopRequested: true };
+    return reply.status(result.code === 'unknown' ? 404 : 409).send({ error: result.code === 'unknown' ? 'not found' : result.code });
+  });
+
   app.post<{ Params: { id: string }; Body: { assistantId?: AssistantId } }>(
     "/api/tasks/:id/route", write,
     (req, reply) => {

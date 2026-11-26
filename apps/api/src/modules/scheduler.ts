@@ -10,6 +10,7 @@ import { ScheduleService } from './schedules.js';
 import { AutopilotLaunchRefused, type AutopilotPark, type AutopilotRefusalReason } from './autopilot.js';
 import type { TaskEventBus } from './sse.js';
 import { AttemptStore, announceReleased, attemptStatuses, onClaimsReleased, type AttemptStatus, type Released } from './attempts.js';
+import { exitEvidence } from './exit-evidence.js';
 
 const RECHECK_MS = 60_000;
 const RECOVERY_WINDOW_MS = 60_000;
@@ -413,10 +414,10 @@ export class Scheduler {
 
   /**
    * Releases what the task no longer needs, and wakes the next FIFO waiter. qcq-04a (packet 2.12):
-   * per attempt, at exactly the points K4b released before. A terminal task never runs again, so
-   * every attempt of it settles (`task_terminal_unverified`) regardless of how its run row settled;
-   * otherwise an attempt whose run, session or dispatch no longer owns execution settles at its
-   * stream's end, and a `held` one is dropped `never_entered`. Each release frees its claims in the
+   * per attempt, at exactly the points K4b released before. A `held` attempt whose task is terminal
+   * or that nothing owns is dropped `never_entered`. An entered one meets its exit-proof test
+   * (qcq-04b, packet 2.6.1): a task's terminal transition alone releases nothing that entered
+   * (2.13 item 4); the attempt's unit, or with none the end of its stream, decides. Each release frees its claims in the
    * same transaction. That makes leaks impossible to express rather than merely unlikely: every park,
    * abort, cancel, settle and boot path already ends with no owner, and the sweep re-checks anything
    * that missed its event.
@@ -424,6 +425,29 @@ export class Scheduler {
   releaseIfIdle(taskId: string, reason: string, mode: 'runtime' | 'boot' = 'runtime'): void {
     const released = this.d.db.transaction((): Released[] => this.attempts.settleIdle(taskId, mode, reason))();
     this.afterRelease(released);
+  }
+
+  /**
+   * qcq-04b (packet 2.6.1): the operator's `operator_confirmed` proof for one attempt. Refused while
+   * its unit reads populated (stop it first, `stopUnit`) or while a live execution still owns it.
+   */
+  confirmStopped(attemptId: string): ReturnType<AttemptStore['confirmStopped']> {
+    const result = this.d.db.transaction(() => this.attempts.confirmStopped(attemptId, 'operator confirmed the provider stopped'))();
+    if (result.ok) { this.afterRelease(result.released); this.publish(result.attempt.task_id); }
+    return result;
+  }
+
+  /** qcq-04b: stops an attempt's registered unit (the operator's step before `confirmStopped`). */
+  async stopUnit(attemptId: string): Promise<{ ok: true; unit: string } | { ok: false; code: 'unknown' | 'no_unit' | 'not_open' }> {
+    const a = this.attempts.get(attemptId);
+    if (!a) return { ok: false, code: 'unknown' };
+    if (!a.provider_unit) return { ok: false, code: 'no_unit' };
+    if (!['starting', 'live', 'stopping', 'ambiguous'].includes(a.state)) return { ok: false, code: 'not_open' };
+    this.d.db.transaction(() => this.attempts.requestStop(a, 'operator stopped the unit'))();
+    await exitEvidence(this.d.db).stopUnit(a.provider_unit, a.run_as === 'agent' ? 'agent' : 'plane');
+    // The proof follows on the next read: the exit watch, or the sweep.
+    this.releaseIfIdle(a.task_id, 'operator stopped the unit');
+    return { ok: true, unit: a.provider_unit };
   }
 
   /** After commit: the board update and the freed pools' next waiters. */
@@ -978,9 +1002,14 @@ export class Scheduler {
         // #264 review finding 4: the evidence that refuses is a run row of THIS dispatch. A run of an
         // earlier dispatch (an ended handoff predecessor) is not execution of the ambiguous start.
         if (this.condition(taskId)?.generation !== generation || this.d.db.prepare('SELECT 1 FROM runs WHERE dispatch_id = ?').get(ambiguous.dispatch_id)) return false;
-        // The operator's confirmation is the exit proof of the ambiguous attempt (packet 2.6.1).
+        // The operator's confirmation is the exit proof of the ambiguous attempt, through the same
+        // check as `POST /api/attempts/:id/confirm-stopped`.
         const attempt = this.attempts.forDispatch(ambiguous.dispatch_id);
-        if (attempt) announceReleased(this.d.db, this.attempts.finalize(attempt, attempt.state === 'held' ? 'never_entered' : 'operator_confirmed', 'Operator confirmed no live execution owner'));
+        if (attempt) {
+          const confirmed = this.attempts.confirmStopped(attempt.attempt_id, 'Operator confirmed no live execution owner');
+          if (!confirmed.ok && confirmed.code !== 'not_open') return false;
+          if (confirmed.ok) announceReleased(this.d.db, confirmed.released);
+        }
         this.repark(ambiguous, 'start_ambiguous');
         return true;
       })();

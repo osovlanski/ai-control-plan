@@ -57,6 +57,8 @@ interface FakeRunState {
   compacted?: boolean;
   /** Env var names an MCP secret was resolved into at launch (M3 S4). Never values. */
   mcpSecretsDelivered?: string[];
+  /** qcq-04b: the stream has ended. */
+  ended?: boolean;
 }
 
 const FAKE_CONTEXT_WINDOW = 200_000;
@@ -177,6 +179,12 @@ export interface FakeOptions {
    * known at start). The `[FAKE:LATE_SESSION]` prompt marker does the same per run.
    */
   sessionRefAfterStart?: boolean;
+  /**
+   * TEST-ONLY (qcq-04b). Declare `scopedSpawn`, so the plane assigns the run a cgroup unit whose
+   * state a test controls through the exit-evidence seam. The fake spawns no process, so its
+   * spawn path is closed as soon as its stream ends. Default off.
+   */
+  scopedSpawn?: boolean;
 }
 
 const DEFAULT_MODELS: FakeOptions["models"] = [{ id: "fake-1", displayName: "Fake model" }];
@@ -189,6 +197,8 @@ export class FakeAdapter implements AgentAdapter {
   private runs = new Map<string, FakeRunState>();
   /** The harness this fake presents as. Test-only; see {@link FakeOptions.harness}. */
   readonly harness: FakeHarness;
+  /** qcq-04b: see {@link FakeOptions.scopedSpawn}. */
+  readonly scopedSpawn: boolean;
 
   constructor(
     readonly id: AssistantId,
@@ -200,6 +210,12 @@ export class FakeAdapter implements AgentAdapter {
       throw new Error(`Unknown fake harness ${JSON.stringify(harness)} for assistant ${id} (expected one of: ${FAKE_HARNESSES.join(", ")})`);
     }
     this.harness = harness;
+    this.scopedSpawn = options.scopedSpawn === true;
+  }
+
+  /** The fake never spawns a process, so its spawn path closes with its stream. */
+  spawnClosed(handle: RunHandle): boolean {
+    return this.runs.get(handle.runId)?.ended === true;
   }
 
   async describe(): Promise<CapabilityManifest> {
@@ -417,6 +433,7 @@ export class FakeAdapter implements AgentAdapter {
   private finish(state: FakeRunState, emit: (e: EmittedEvent) => void, ok: boolean, reason?: string): void {
     emit({ type: "run.ended", summary: ok ? "Run completed" : `Run ended (${reason})`, payload: { ok, reason } });
     state.queue.end();
+    state.ended = true;
   }
 
   events(handle: RunHandle): AsyncIterable<NormalizedEvent> {

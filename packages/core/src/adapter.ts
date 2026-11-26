@@ -45,6 +45,22 @@ export interface AgentAdapter {
    */
   providerProcess?(handle: RunHandle): ProviderProcess | undefined;
 
+  /**
+   * qcq-04b (review packet 2.6.1): true when the adapter launches its provider inside the cgroup
+   * scope the plane names (`RunSpec.scope` on the plane lane, the agent wrapper's scope on the
+   * agent lane), so every process the provider starts, whatever its parentage, is in that scope.
+   * Absent or false: the plane assigns no unit and the run has no strong exit evidence.
+   */
+  readonly scopedSpawn?: boolean;
+
+  /**
+   * qcq-04b: the spawn path of this run is closed. The run's event stream has ended and no
+   * process the adapter spawned for it is still running (it never spawned one, or that one has
+   * exited), so the adapter can no longer spawn for this handle. Only a closed spawn path lets
+   * the plane read an absent, never-registered scope as `unscoped_exit`.
+   */
+  spawnClosed?(handle: RunHandle): boolean;
+
   cancel(handle: RunHandle): Promise<void>;
 
   /**
@@ -120,6 +136,15 @@ export interface RunSpec {
    * launch this way refuses to start rather than run as the plane user.
    */
   runAs?: { kind: "agent"; unit: string };
+  /**
+   * qcq-04b (review packet 2.6.1): on the plane lane, launch the provider as
+   * `systemd-run --user --scope --unit=<unit>`, so the run has one cgroup that
+   * holds every process it starts. Set by the Harness at provider entry, only
+   * for an adapter that declares `scopedSpawn` on a host with a user manager
+   * and cgroup v2. Never set together with `runAs`, whose wrapper already
+   * creates the scope.
+   */
+  scope?: { unit: string };
 }
 
 export type PermissionPolicy =

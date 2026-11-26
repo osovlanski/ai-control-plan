@@ -1,6 +1,6 @@
 import { HandoffService } from './handoff.js';
 import { runSessionRefStored } from '../usage.js';
-import { AttemptStore, announceReleased, enterProvider, type EntryResult, type Released } from '../attempts.js';
+import { AttemptStore, announceReleased, enterProvider, registerSpawn, watchExit, type AttemptRow, type EntryResult, type Released } from '../attempts.js';
 /**
  * SessionStore — durable substrate for the Execution Harness (Phase 1).
  *
@@ -353,8 +353,26 @@ export class SessionStore {
    * The provider-entry commit for this session (packet 2.4.1, ownership-only in qcq-04a). The
    * runner's next statement is the adapter call, guarded by `.ok`.
    */
-  enterProvider(sessionId: string, leaseToken: string): EntryResult {
-    return enterProvider(this.db, { sessionId, path: "harness", leaseToken }, this.now);
+  enterProvider(sessionId: string, leaseToken: string, providerUnit?: string): EntryResult {
+    const entry = enterProvider(this.db, { sessionId, path: "harness", leaseToken, ...(providerUnit ? { providerUnit } : {}) }, this.now);
+    // qcq-04b: an attempt with a unit is watched from entry, so its registration is seen while it runs.
+    if (entry.ok && entry.attempt.provider_unit) watchExit(this.db, entry.attempt.attempt_id, this.now);
+    return entry;
+  }
+
+  /** qcq-04b: the unit this attempt's provider will run in (`AttemptStore.unitFor`). */
+  unitFor(attemptId: string, scopedSpawn: boolean): string | undefined {
+    return new AttemptStore(this.db, this.now).unitFor(attemptId, scopedSpawn);
+  }
+
+  /** qcq-04b: the adapter's spawn-closed report for an entered attempt with a unit. */
+  registerSpawn(attemptId: string, closed: () => boolean): void {
+    registerSpawn(this.db, attemptId, closed);
+  }
+
+  /** The attempt carrying this session, if any. */
+  attemptOf(sessionId: string): AttemptRow | undefined {
+    return new AttemptStore(this.db, this.now).forSession(sessionId);
   }
 
   get(sessionId: string): ExecutionSession | undefined {
@@ -479,15 +497,16 @@ export class SessionStore {
     let released: Released[] = [];
     const tx = this.db.transaction(() => {
       this.transition(sessionId, { ...input, claimSettlement: input.settlementOwner });
-      // The session-terminal rule (packet 2.1): a session that ends without the provider-entry commit
-      // drops its `held` attempt and releases its claims, in this same transaction.
-      released = new AttemptStore(this.db, this.now).sessionEnded(sessionId);
       this.db
         .prepare(
           `INSERT INTO execution_results (session_id, terminal_state, outcome, result, at)
            VALUES (?, ?, ?, ?, ?)`,
         )
         .run(sessionId, input.to, input.result.outcome, JSON.stringify(input.result), this.iso());
+      // The session-terminal rule (packet 2.1): a session that ends without the provider-entry commit
+      // drops its `held` attempt and releases its claims, in this same transaction. After the result
+      // row, so an entered attempt with no unit reads its session as no longer owning it (qcq-04b).
+      released = new AttemptStore(this.db, this.now).sessionEnded(sessionId);
       this.settlePendingApprovals(sessionId, input.to);
       input.extra?.(this.db);
     });
@@ -637,13 +656,21 @@ export class SessionStore {
    */
   requestCancel(sessionId: string): boolean {
     const placeholders = SESSION_TERMINAL_STATES.map(() => "?").join(", ");
-    const info = this.db
-      .prepare(
-        `UPDATE runs SET cancel_requested = 1, version = version + 1
-         WHERE id = ? AND cancel_requested = 0 AND session_state NOT IN (${placeholders})`,
-      )
-      .run(sessionId, ...SESSION_TERMINAL_STATES);
-    return info.changes === 1;
+    return this.db.transaction(() => {
+      const info = this.db
+        .prepare(
+          `UPDATE runs SET cancel_requested = 1, version = version + 1
+           WHERE id = ? AND cancel_requested = 0 AND session_state NOT IN (${placeholders})`,
+        )
+        .run(sessionId, ...SESSION_TERMINAL_STATES);
+      // qcq-04b (packet 2.6.1): an entered attempt goes `stopping` with its claims held until its proof.
+      if (info.changes === 1) {
+        const attempts = new AttemptStore(this.db, this.now);
+        const a = attempts.forSession(sessionId);
+        if (a) attempts.requestStop(a, "session cancel requested");
+      }
+      return info.changes === 1;
+    })();
   }
 
   // --- leases with fencing (§9) --------------------------------------

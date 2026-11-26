@@ -3,9 +3,16 @@ import { openDb } from "./db/index.js";
 import { buildServer } from "./server.js";
 import { EventRetention } from "./modules/retention.js";
 import { scheduleDailyJobs } from "./modules/jobs.js";
+import { setExitEvidence, SystemExitEvidence } from "./modules/exit-evidence.js";
+import { stopExitWatches } from "./modules/attempts.js";
 
 const config = loadConfig();
 const db = openDb(config.dbPath);
+// qcq-04b (packet 2.6.1): this host's exit evidence, installed before anything reconciles, so the
+// boot sweep reads the real boot id and units. Only the real entry installs it: buildServer (tests)
+// keeps NO_EXIT_EVIDENCE, where every attempt is released at the end of its stream.
+const exitEvidence = new SystemExitEvidence({ agentUser: config.execution.agentUser, disabled: process.env.AGENT_PLANE_PROVIDER_SCOPES === "off" });
+setExitEvidence(db, exitEvidence);
 const { app, registry, orchestrator, scheduler, modelCatalog, registryFederation, memoryFederation, acceptance, dispatcher, restore } = buildServer({ config, db });
 
 registry.init();
@@ -41,6 +48,8 @@ app.log.info(
     db: config.dbPath,
     assistants: Object.keys(config.assistants),
     reconciledOrphans: reconciled,
+    // Why a lane has no strong exit evidence (null: provider units are assigned there).
+    providerScopes: { plane: exitEvidence.unavailable("plane") ?? null, agent: config.execution.agentUser ? exitEvidence.unavailable("agent") ?? null : "no agent user" },
   },
   "workspace instance booting",
 );
@@ -72,6 +81,7 @@ if (listenRemote) {
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.once(signal, () => {
     stopJobs();
+    stopExitWatches(db);
     if (remoteRetry) clearTimeout(remoteRetry);
     void app.close().then(() => {
       db.close();

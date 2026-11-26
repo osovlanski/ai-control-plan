@@ -1301,9 +1301,15 @@ export class Orchestrator {
 
   /** Decides what happens after a run's stream drains: finish, or fail over. */
   private async settleRun(run: ActiveRun, ok: boolean): Promise<void> {
-    this.db
-      .prepare("UPDATE runs SET state = ?, ended_at = ? WHERE id = ?")
-      .run(ok ? "ENDED_OK" : "ENDED_ERROR", new Date().toISOString(), run.runId);
+    // qcq-04b (packet 2.13 item 4): the stream has drained, so a legacy run (never a unit) is released
+    // here, in the transaction that writes its end, not at the task's terminal transition.
+    const released = this.db.transaction(() => {
+      this.db
+        .prepare("UPDATE runs SET state = ?, ended_at = ? WHERE id = ?")
+        .run(ok ? "ENDED_OK" : "ENDED_ERROR", new Date().toISOString(), run.runId);
+      return new AttemptStore(this.db).streamClosed(run.runId);
+    })();
+    announceReleased(this.db, released);
 
     if (run.handingOff) return; // a handoff owns this task's next transition
     const row = this.tasks.get(run.taskId);
@@ -2268,6 +2274,8 @@ export class Orchestrator {
         AND NOT EXISTS (SELECT 1 FROM runs WHERE execution_request_id = execution_requests.id)`).run(taskId);
       // A composed comparison has a live session per candidate; every one is cancelled.
       for (const sid of this.sessionsToCancel(taskId)) this.harnessBridge!.requestCancel(sid);
+      // qcq-04b (packet 2.6.1): every entered attempt goes `stopping`, claims held until its proof.
+      new AttemptStore(this.db).stopTask(taskId, "task cancelled");
       this.tasks.transition(taskId, "CANCELLED");
       const condition = this.db.prepare('SELECT generation FROM wait_conditions WHERE task_id = ? ORDER BY generation DESC LIMIT 1').get(taskId) as { generation: number } | undefined;
       if (condition) this.db.prepare("INSERT INTO scheduler_events(task_id,generation,type,at,payload) VALUES(?,?,'wait.cancelled',?,'{}')").run(taskId, condition.generation, new Date().toISOString());

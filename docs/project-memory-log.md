@@ -1075,3 +1075,10 @@ Migration 041 adds `runs.harness_cli_version` (TEXT NULL, forward only, no backf
 - `Scheduler.publish` sends the newest non-`attempt.*` scheduler event, so `attempt.*` rows are history only on the live stream.
 - Migration 059 (`059_attempt_guards.sql`): owner move by task or slot is guarded, claim `claim_id`/`claimed_at`/`generation` are immutable, and an insert that would REPLACE a claim is refused. Migration 058 was edited for the terminal-task row-1 case: a box that already applied 058 keeps its one-time classification.
 - `ackHandle` marks the session's `starting` attempt `live` in the same transaction (packet 8.1 note 5).
+
+## qcq-04b part 1 exit proofs (2026-11-25)
+
+- A Harness attempt whose adapter declares `scopedSpawn` runs in `aos-att-<attempt>.scope` (plane lane, `RunSpec.scope`) or `aos-run-<attempt>.scope` (agent lane, the wrapper's scope); `provider_unit` records it. Legacy runs never get a unit.
+- Strong proofs: `cgroup_empty`, `unscoped_exit`, `host_rebooted`, `operator_confirmed`. A task's terminal transition no longer releases an entered attempt; the stream end does (no unit) or the cgroup does (unit). Unproven 65 s after a stop or the execution's end: `ambiguous` plus `attempt.stop_unconfirmed`.
+- The host reader is `SystemExitEvidence`, installed only in `apps/api/src/index.ts`; `buildServer` and tests default to no evidence (no unit). Tests use `FakeExitEvidence` via `setExitEvidence(db, ...)` and `configureExitProofs` for timings. `AGENT_PLANE_PROVIDER_SCOPES=off` disables units.
+- API 2.20: `POST /api/attempts/:id/confirm-stopped` (409 `unit_populated` with a stop link) and `POST /api/attempts/:id/stop-unit`. Packet section 8.2 records where part 1 differs from the packet.

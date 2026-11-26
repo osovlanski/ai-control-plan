@@ -67,7 +67,8 @@ describe("cancel during preparation (packet 2.4.1 step 1)", () => {
     const real = orch.requestedModel.bind(orch);
     vi.spyOn(orch, "requestedModel").mockImplementationOnce((...a: unknown[]) => { void built.orchestrator.cancelTask(id); return real(...a); });
     built.tasks.transition(id, "ROUTING"); // as the start route does before startTask
-    await expect(built.orchestrator.startTask(id, A)).rejects.toThrow(/Provider entry refused: task_cancelled/);
+    // qcq-04b: the cancel asks the held attempt to stop, which the commit refuses first.
+    await expect(built.orchestrator.startTask(id, A)).rejects.toThrow(/Provider entry refused: stop_requested/);
     expect(start).not.toHaveBeenCalled();
     expect(attempts(id)).toEqual([expect.objectContaining({ kind: "direct", state: "dropped", exit_proof: "never_entered", entered_at: null })]);
   });
@@ -114,7 +115,7 @@ describe("cancel during preparation (packet 2.4.1 step 1)", () => {
     });
     await s.tick(); await drain();
     // The refused start surfaces as the dispatch's error, as K4b's own phase check does.
-    errors = errors.filter((e) => !/Provider entry refused: task_cancelled/.test(String(e)));
+    errors = errors.filter((e) => !/Provider entry refused: (task_cancelled|stop_requested)/.test(String(e)));
     expect(start).not.toHaveBeenCalled();
     expect(startB).not.toHaveBeenCalled();
     expect(built.tasks.get(id)?.state).toBe("CANCELLED");
@@ -220,7 +221,9 @@ describe("claim readers and the attempts projection (packet 2.3.2)", () => {
       account: { key: null, source: "none" }, claims: [expect.objectContaining({ resource: "gpu", units: 1 })] })]);
     await built.orchestrator.cancelTask(id); await drain();
     expect(liveClaims(id)).toEqual([]);
-    expect(attempts(id)[0]).toMatchObject({ state: "settled", exit_proof: "task_terminal_unverified" });
+    // qcq-04b (packet 2.13 item 4): released at the end of the cancelled run's stream, not at the task's terminal transition.
+    await until(() => attempts(id)[0]?.state === "settled", "the attempt to settle");
+    expect(attempts(id)[0]).toMatchObject({ state: "settled", exit_proof: "stream_closed_unverified" });
 
     // A direct-owner pool claim (no dispatch): resourceClaim is null, the claim is listed under attempts.
     const d = task();
@@ -251,6 +254,6 @@ describe("claim readers and the attempts projection (packet 2.3.2)", () => {
     const [first] = attempts(id);
     expect(first).toMatchObject({ kind: "direct", candidate_slot: 0, session_id: expect.any(String), entered_at: expect.any(String) });
     expect(["settled"]).toContain(first!.state);
-    expect(["task_terminal_unverified", "stream_closed_unverified"]).toContain(first!.exit_proof);
+    expect(first!.exit_proof).toBe("stream_closed_unverified");
   });
 });

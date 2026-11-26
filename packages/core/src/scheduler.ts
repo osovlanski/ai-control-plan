@@ -229,7 +229,9 @@ export interface SchedulerEvent {
     /** P0-2: a launch the autopilot refused, with its reason and the wait that was written. */
     | 'autopilot.parked'
     /** qcq-04a: an attempt passed the provider-entry commit, or became final (packet 2.1). */
-    | 'attempt.entered' | 'attempt.dropped' | 'attempt.settled' | 'attempt.ambiguous';
+    | 'attempt.entered' | 'attempt.dropped' | 'attempt.settled' | 'attempt.ambiguous'
+    /** qcq-04b: an entered attempt was asked to stop, or has had no exit proof for `stopEvidenceMs`. */
+    | 'attempt.stopping' | 'attempt.stop_unconfirmed';
   at: string;
   payload: Record<string, unknown>;
 }
