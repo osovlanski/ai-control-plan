@@ -97,7 +97,11 @@
 // (capability `commands.write`) writes `operator_confirmed`, refused 409 `unit_populated` while the
 // unit reads populated (the body offers `POST /api/attempts/:id/stop-unit`). A pool slot is now
 // released at the attempt's exit proof, not at the task's terminal transition (packet 2.13 item 4).
-export const CONTROL_PLANE_API_VERSION = "2.20";
+// 2.21 (additive, cockpit-autopilot-view plane half, autopilot-state v1,
+// docs/contracts/autopilot-state-v1.md): `GET /api/autopilot/state` (`tasks.read`), the versioned,
+// redacted, schema-validated snapshot of the autopilot that Cockpit vendors SHA-pinned. It projects
+// the readers behind `GET /api/autopilot`, which keeps its own shape. No new capability.
+export const CONTROL_PLANE_API_VERSION = "2.21";
 export const NORMALIZED_EVENT_VERSION = "1.0";
 
 export const OBSERVABILITY_CAPABILITIES = [

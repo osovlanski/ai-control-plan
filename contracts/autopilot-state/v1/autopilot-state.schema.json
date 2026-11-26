@@ -1,0 +1,520 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-plane.local/contracts/autopilot-state/v1/autopilot-state.schema.json",
+  "title": "AutopilotState",
+  "description": "Autopilot state v1: the read-only snapshot of the autopilot served on GET /api/autopilot/state (tasks.read) from API 2.21. A projection of the plane's autopilot, dispatcher and restore readers; free text is redacted (secrets, filesystem paths, URLs). Normative text: docs/contracts/autopilot-state-v1.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "observedAt",
+    "status",
+    "stopReason",
+    "startedBy",
+    "updatedAt",
+    "window",
+    "nextWindowOpensAt",
+    "windows",
+    "billingAttestation",
+    "settingProblems",
+    "currentAttempt",
+    "recentAttempts",
+    "dispatcher",
+    "restore",
+    "openExternals"
+  ],
+  "$defs": {
+    "window": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "opensAt",
+        "closesAt",
+        "maxItems",
+        "charged",
+        "exhaustedByRestore"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "opensAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "closesAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "maxItems": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "charged": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "exhaustedByRestore": {
+          "type": "boolean"
+        }
+      }
+    },
+    "attempt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "itemId",
+        "attemptNo",
+        "state",
+        "final",
+        "reason",
+        "repo",
+        "taskId",
+        "runtimeBudgetMs",
+        "runtimeUsedMs",
+        "deadlineAt",
+        "deadlineBound",
+        "createdAt",
+        "updatedAt",
+        "finalAt",
+        "requeuedAt"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "itemId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "attemptNo": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "state": {
+          "enum": [
+            "reserving",
+            "admitted",
+            "running",
+            "suspended",
+            "settled",
+            "accepting",
+            "accepted",
+            "publishing",
+            "publish_uncertain",
+            "published",
+            "closed",
+            "failed",
+            "blocked",
+            "cancelled",
+            "conflict",
+            "external"
+          ]
+        },
+        "final": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "repo": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "taskId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "runtimeBudgetMs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "runtimeUsedMs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "deadlineAt": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "deadlineBound": {
+          "enum": [
+            "budget",
+            "window",
+            null
+          ]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "finalAt": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "requeuedAt": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        }
+      },
+      "if": {
+        "properties": {
+          "state": {
+            "enum": [
+              "published",
+              "closed",
+              "failed",
+              "blocked",
+              "cancelled",
+              "conflict",
+              "external"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "final": {
+            "const": true
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "final": {
+            "const": false
+          }
+        }
+      }
+    },
+    "problem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "setting",
+        "detail"
+      ],
+      "properties": {
+        "setting": {
+          "type": "string",
+          "minLength": 1
+        },
+        "detail": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  "properties": {
+    "schemaVersion": {
+      "const": "1.0"
+    },
+    "observedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "status": {
+      "enum": [
+        "stopped",
+        "draining",
+        "running"
+      ]
+    },
+    "stopReason": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "startedBy": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "updatedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "window": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/window"
+        }
+      ]
+    },
+    "nextWindowOpensAt": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    },
+    "windows": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/window"
+      }
+    },
+    "billingAttestation": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "attestedAt",
+            "expiresAt",
+            "current"
+          ],
+          "properties": {
+            "attestedAt": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "expiresAt": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "current": {
+              "type": "boolean"
+            }
+          }
+        }
+      ]
+    },
+    "settingProblems": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/problem"
+      }
+    },
+    "currentAttempt": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/attempt"
+        }
+      ]
+    },
+    "recentAttempts": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "$ref": "#/$defs/attempt"
+      }
+    },
+    "dispatcher": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "problems",
+        "inFlight",
+        "selection",
+        "lastTick"
+      ],
+      "properties": {
+        "problems": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "inFlight": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "selection": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "itemId",
+              "status",
+              "reason"
+            ],
+            "properties": {
+              "itemId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "status": {
+                "enum": [
+                  "queued",
+                  "retryable",
+                  "running",
+                  "in review",
+                  "done",
+                  "blocked",
+                  "skipped"
+                ]
+              },
+              "reason": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "lastTick": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "at",
+                "action",
+                "itemId",
+                "attemptId",
+                "detail"
+              ],
+              "properties": {
+                "at": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "action": {
+                  "enum": [
+                    "idle",
+                    "reserved",
+                    "drove"
+                  ]
+                },
+                "itemId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "attemptId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "detail": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "restore": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pending",
+        "reconciling",
+        "restoreId",
+        "detectedAt",
+        "reconciledAt",
+        "reconcileError",
+        "reportComplete",
+        "reportReadCurrent",
+        "startBlockedBy"
+      ],
+      "properties": {
+        "pending": {
+          "type": "boolean"
+        },
+        "reconciling": {
+          "type": "boolean"
+        },
+        "restoreId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "detectedAt": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "reconciledAt": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "reconcileError": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reportComplete": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "reportReadCurrent": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "startBlockedBy": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/problem"
+            }
+          ]
+        }
+      }
+    },
+    "openExternals": {
+      "type": "integer",
+      "minimum": 0
+    }
+  }
+}

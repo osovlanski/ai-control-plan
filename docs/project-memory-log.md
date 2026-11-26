@@ -1089,3 +1089,9 @@ Migration 041 adds `runs.harness_cli_version` (TEXT NULL, forward only, no backf
 - With enforcement on (tests only: set `config.accounts`), `account:<group>` capacity is the group limit, and a legacy start with an account key is refused `account_requires_harness` (task `WAITING_INPUT` `intervention_required`).
 - An account claim needs a strong proof: tests give fake members a unit with `Object.defineProperty(adapter, "scopedSpawn", { value: true })` plus `FakeExitEvidence` (absent unit at stream end = `unscoped_exit`). A unitless account attempt goes `ambiguous`, never a weak proof.
 - Two schedulers on one DB both hear releases; a test that builds its own scheduler must `built.scheduler.stop()` first (stop now unlistens). Packet section 8.3.
+
+## 2026-11-26 — autopilot-state v1 contract, API 2.21 (SHIPPED)
+
+- **New contract `contracts/autopilot-state/v1`** (`docs/contracts/autopilot-state-v1.md`): `GET /api/autopilot/state` (`tasks.read`) serves a versioned, redacted snapshot of the autopilot, projected only in core `projectAutopilotState` from the readers behind `GET /api/autopilot` (which keeps its own unversioned shape for the web UI). The body is validated against the schema before it leaves (500 on mismatch). Cockpit vendors it SHA-pinned for `cockpit-autopilot-view`.
+- Redaction: paths, refs, SHAs, backup names and the restore report are left out; free text passes `redactText`, then `token=`/`auth=` values, URLs (`[url]`) and absolute or `~/` paths (`[path]`) are replaced; `/api/...` routes are kept. The shared core rules do not catch a bare `token=value`; the autopilot redactor adds that rule locally.
+- The contract types live in core as plain TypeScript; validation is ajv in `apps/api` like every other contract (core has no runtime dependencies, so no zod).
