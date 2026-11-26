@@ -21,7 +21,7 @@ import { credentialPath, readCredential } from "../src/auth/credential-file.js";
 import { generateOperateSecret, operateSecretPath, writeOperateSecretHash } from "../src/auth/operate-secret.js";
 import { loadConfig } from "../src/config.js";
 import { openDb, type Db } from "../src/db/index.js";
-import { GitHubError, GitHubRestClient, gitCli, markerOf, type PublicationGit, type PublicationGitHub, type PullRequest } from "../src/modules/publications.js";
+import { GitHubError, GitHubRestClient, PublicationService, gitCli, markerOf, type PublicationGit, type PublicationGitHub, type PullRequest } from "../src/modules/publications.js";
 import { buildServer, type BuiltServer } from "../src/server.js";
 
 // The container's commit-signing server is not part of what is tested.
@@ -421,5 +421,16 @@ describe("GitHubRestClient", () => {
     expect(await client(answer(404, { message: "Not Found" })).getBranchSha(REPO, HEAD)).toBeNull();
     expect(seen.every((i) => i.redirect === "error")).toBe(true);
     expect((seen[0]!.headers as Record<string, string>).authorization).toBe("Bearer FAKE-token-not-real");
+  });
+});
+
+describe("configured", () => {
+  // G15 attempt 17: production wires a GitHub client but never a git port, and an accepted attempt sat unpublished.
+  it("needs a GitHub client only; the git port falls back to the CLI", () => {
+    const configured = (d: object) => (Object.getOwnPropertyDescriptor(PublicationService.prototype, "configured")!.get as () => boolean).call({ d });
+    expect(configured({ github: {} })).toBe(true);
+    expect(configured({ github: {}, git: {} })).toBe(true);
+    expect(configured({ git: {} })).toBe(false);
+    expect(configured({})).toBe(false);
   });
 });
