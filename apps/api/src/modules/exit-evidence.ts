@@ -60,7 +60,8 @@ export interface ExitEvidence {
   /**
    * Stops the unit under `owner`'s manager (the recorded launch-time identity, else today's
    * configuration). Resolves true once a stop command was issued, false when none could be: no
-   * manager the plane can reach (another uid on the plane lane, no agent identity at all). Never throws.
+   * manager the plane can reach (another uid on the plane lane, no agent identity at all), or the
+   * command failed or hung (an unreachable systemd manager, a refused sudo). Never throws.
    */
   stopUnit(unit: string, lane: UnitLane, owner?: UnitOwner): Promise<boolean>;
 }
@@ -282,13 +283,18 @@ export class SystemExitEvidence implements ExitEvidence {
       if (!agent) return Promise.resolve(false);
       [cmd, args] = [agent.sudo, ["-n", "-u", agent.user, "-g", agent.group, "--", agent.wrapper, "stop", unit.replace(/^aos-run-/, "").replace(/\.scope$/, "")]];
     }
+    // A stop was issued only if a manager answered it (#272 review): exit 0, or systemctl's 5 (unit
+    // not loaded: it is already gone). Any other exit (no bus, sudo refused, a bad id), a signal or
+    // a hang leaves the unit unstopped, so the caller keeps its retry. The agent wrapper itself
+    // swallows a failed `systemctl stop`; only the commands around it can be told apart here.
+    const accepted = lane === "plane" ? [0, 5] : [0];
     return new Promise((done) => {
       try {
         const child = spawn(cmd, args, { stdio: "ignore", ...(lane === "agent" ? { env: { PATH: "/usr/local/bin:/usr/bin:/bin", LANG: "C.UTF-8" } } : {}) });
-        const timer = setTimeout(() => { child.kill("SIGKILL"); done(true); }, 10_000);
+        const timer = setTimeout(() => { child.kill("SIGKILL"); done(false); }, 10_000);
         timer.unref();
         child.on("error", () => { clearTimeout(timer); done(false); });
-        child.on("exit", () => { clearTimeout(timer); done(true); });
+        child.on("exit", (code) => { clearTimeout(timer); done(code !== null && accepted.includes(code)); });
       } catch {
         done(false);
       }

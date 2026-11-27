@@ -945,7 +945,7 @@ class RunContext {
    * transition, so that settles the attempt as before). Otherwise (#272 review) `iter.return()` is
    * asked at once, beside any `next()` still in flight, since a `return()` may be what unblocks it.
    * The stream is closed when that `next()` finishes the stream or fails, or `return()` settles
-   * without yielding (`done !== false`) or fails. If neither closed it (a `return()` that yields a
+   * with `done: true` (a result that omits `done`, or yields, is not a close) or fails. If neither closed it (a `return()` that yields a
    * cleanup event), the stream is read to its end. Never awaited by a caller for longer than a
    * tick: a hung provider stays unproven, and its attempt goes `ambiguous` past `stopEvidenceMs`.
    * Idempotent.
@@ -965,7 +965,7 @@ class RunContext {
         const iter = s.iter ?? s.adapter.events(s.handle)[Symbol.asyncIterator]();
         const signals: Promise<boolean>[] = [];
         if (s.inFlight) signals.push(s.inFlight.then((r) => r.done === true, () => true));
-        if (iter.return) signals.push(Promise.resolve(iter.return(undefined)).then((r) => r?.done !== false, () => true));
+        if (iter.return) signals.push(Promise.resolve(iter.return(undefined)).then((r) => r?.done === true, () => true));
         const closed = await new Promise<boolean>((resolve) => {
           let left = signals.length;
           if (!left) return resolve(false);

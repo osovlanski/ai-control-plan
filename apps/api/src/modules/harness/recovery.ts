@@ -103,6 +103,11 @@ export class HarnessRecovery {
     this.maxAttempts = deps.maxDirectiveAttempts ?? 3;
   }
 
+  /** Another live plane incarnation holds this session (its lease, or its entered attempt): boot leaves it alone. */
+  heldElsewhere(sessionId: string): boolean {
+    return this.deps.liveElsewhere?.(sessionId) ?? false;
+  }
+
   /** Boot: void all leases, then decide every live session's fate (§9). */
   async reconcileOnBoot(): Promise<SessionRecoveryOutcome[]> {
     await this.deps.reapStrays?.();

@@ -15,3 +15,7 @@ CREATE TABLE plane_incarnations (
 -- 2. The manager the unit was assigned under, recorded at entry: { uid, user?, wrapper? }. Recovery
 --    reads and stops the unit there, not under whatever the agent user is configured as later.
 ALTER TABLE execution_attempts ADD COLUMN provider_unit_owner TEXT;
+-- 3. The plane incarnation that holds a session's lease, written with the lease (before any provider
+--    entry). Boot recovery leaves a session whose lease holder is another live incarnation alone.
+--    NULL = a lease taken before this migration: a dead incarnation's.
+ALTER TABLE runs ADD COLUMN lease_incarnation TEXT;

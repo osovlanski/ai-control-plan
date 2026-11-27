@@ -251,8 +251,8 @@ describe("findings 4 and 7: stops", () => {
     const unit = row(db, id).provider_unit!;
     ev.ownedUnits.set(`2002:${unit}`, "populated");
     // The boot reaper reaches the unit first (by its recorded agent unit id, the attempt id).
-    expect(recoveryStopFor(db, id)).toEqual({ attempt: true, stop: true, owner });
-    expect(recoveryStopFor(db, id)).toEqual({ attempt: true, stop: false, owner });
+    expect(recoveryStopFor(db, id)).toEqual({ attempt: true, stop: true, attemptId: id, unit, owner });
+    expect(recoveryStopFor(db, id)).toEqual({ attempt: true, stop: false, attemptId: id, unit, owner });
     sweep(db, "boot");
     await sleep(20);
     expect(row(db, id).state).toBe("stopping");

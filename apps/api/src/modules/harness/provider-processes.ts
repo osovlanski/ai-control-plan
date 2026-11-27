@@ -279,7 +279,7 @@ export async function reapStrayProviders(
  */
 export async function reapStrayAgentUnits(
   workspaceDir: string,
-  stop: (unit: string) => Promise<void>,
+  stop: (unit: string) => Promise<boolean | void>,
   opts: { log?: ProcessLog; procRoot?: string } = {},
 ): Promise<string[]> {
   const procRoot = opts.procRoot ?? "/proc";
@@ -290,11 +290,15 @@ export async function reapStrayAgentUnits(
     const owner = Number(file);
     if (!/^\d+$/.test(file) || owner === process.pid || ownerAlive(owner, procRoot)) continue;
     const units = readFileSync(join(dir, file), "utf8").split("\n").filter((u) => AGENT_UNIT.test(u));
+    let unstopped = false;
     for (const unit of new Set(units)) {
-      await stop(unit).catch(() => undefined);
+      // A stop that reports `false` was never issued (no reachable manager, no agent identity): the
+      // record stays, so a later boot with the manager back stops it (#272 review).
+      const issued = await stop(unit).catch(() => false);
+      if (issued === false) { unstopped = true; continue; }
       stopped.push(unit);
     }
-    rmSync(join(dir, file), { force: true });
+    if (!unstopped) rmSync(join(dir, file), { force: true });
   }
   if (stopped.length) opts.log?.("stopped agent-user units from a dead incarnation", { workspaceDir, units: stopped });
   return stopped;

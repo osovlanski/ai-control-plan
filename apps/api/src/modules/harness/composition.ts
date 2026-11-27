@@ -24,9 +24,8 @@ import { deriveEnvelopeUpdate } from "./envelope-derivation.js";
 import { EventRecorder } from "./event-recorder.js";
 import { snapshotQuota } from "./quota-snapshot.js";
 import { ProviderProcessTracker, markIncarnation, reapStrayAgentUnits, reapStrayProviders } from "./provider-processes.js";
-import { stopAgentUnit } from "@agent-plane/adapters";
-import { heldByLiveIncarnation, recoveryStopFor } from "../attempts.js";
-import { agentStopLauncher } from "../exit-evidence.js";
+import { heldByLiveIncarnation, recoveryStopFor, releaseRecoveryStop } from "../attempts.js";
+import { exitEvidence } from "../exit-evidence.js";
 import { HarnessRecovery } from "./recovery.js";
 import { SessionRunner, type RunnerDeps } from "./session-runner.js";
 import { SessionStore } from "./session-store.js";
@@ -124,15 +123,17 @@ export function buildHarnessComposition(deps: HarnessCompositionDeps): HarnessCo
       bootSweepPending = true; // only reconcileOnBoot reaps, and it sweeps profiles last
       // P0-A2: agent-user units first. They are not this user's to signal, so they are stopped
       // by name through the wrapper; the process reap below then finds their sudo parents gone.
-      // #272 review: an attempt's unit is stopped through the wrapper recorded at its entry (also
-      // once `execution.agentUser` is gone), and only once: the proof test's recovery stop that
-      // follows at the scheduler's boot sweep sees this one and does not repeat it.
-      const agent = config.execution.agentUser;
-      const units = reapStrayAgentUnits(config.dir, (unit) => {
-        const target = recoveryStopFor(db, unit);
-        if (!target.stop) return Promise.resolve();
-        const launcher = agentStopLauncher(target.owner, agent);
-        return launcher ? stopAgentUnit({ ...launcher, executable: agent?.executable ?? "" }, unit) : Promise.resolve();
+      // #272 review: a unit is stopped through the wrapper recorded at its attempt's entry (also once
+      // `execution.agentUser` is gone), and once: the proof test's recovery stop at the scheduler's
+      // boot sweep sees this claim and does not repeat it. A stop that could not be issued gives its
+      // claim back and keeps the tracking record, so the next sweep or boot tries again.
+      const evidence = exitEvidence(db);
+      const units = reapStrayAgentUnits(config.dir, async (unitId) => {
+        const target = recoveryStopFor(db, unitId);
+        if (!target.stop) return true; // a live incarnation holds it, or this one already stopped it
+        const issued = await evidence.stopUnit(target.unit ?? `aos-run-${unitId}.scope`, "agent", target.owner);
+        if (!issued && target.attemptId) releaseRecoveryStop(db, target.attemptId);
+        return issued;
       }, { log: deps.onInfo });
       return units.then(() => reapStrayProviders(config.dir, { log: deps.onInfo }));
     },

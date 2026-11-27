@@ -162,6 +162,47 @@ function incarnation(db: Db): Incarnation {
   }
   return inc;
 }
+/**
+ * Writes this handle's incarnation row (idempotent): its pid, process start time and boot. Written at
+ * the first lease or entry commit, whichever comes first, so a second plane that boots meanwhile
+ * can tell this one is alive (#272 review). Runs inside the caller's transaction when there is one.
+ */
+export function ensureIncarnationRow(db: Db, nowIso: string): string {
+  const inc = incarnation(db);
+  const ev = exitEvidence(db);
+  const boot = ev.bootId();
+  const start = ev.processStart(process.pid);
+  db.prepare("INSERT OR IGNORE INTO plane_incarnations (incarnation_id, pid, proc_start, boot_id, started_at) VALUES (?, ?, ?, ?, ?)")
+    .run(inc.id, process.pid, start === null || start === "unreadable" ? null : start, boot === "unavailable" ? currentBootId() : boot, nowIso);
+  return inc.id;
+}
+
+/**
+ * Who a recorded incarnation is, from this handle's point of view: this one, another that is still
+ * running (another open handle in this process, or a process whose pid still has the start time it
+ * recorded on this boot), or a dead one. A process whose start time cannot be read is taken as
+ * alive: nothing proves it gone. An unknown id is dead.
+ */
+export function incarnationState(db: Db, id: string | null | undefined): "here" | "alive" | "dead" {
+  if (!id) return "dead";
+  const inc = incarnation(db);
+  if (id === inc.id) return "here";
+  const local = processIncarnations.get(id)?.deref();
+  if (local?.open) return "alive";
+  const row = db.prepare("SELECT pid, proc_start, boot_id FROM plane_incarnations WHERE incarnation_id = ?")
+    .get(id) as { pid: number; proc_start: string | null; boot_id: string } | undefined;
+  if (!row) return "dead";
+  const ev = exitEvidence(db);
+  const boot = ev.bootId();
+  if (row.boot_id !== "unavailable" && boot !== "unavailable" && row.boot_id !== boot) return "dead";
+  // This process's own pid: a handle it opened is in the map above, so any other is gone.
+  if (row.pid === process.pid) return "dead";
+  const start = ev.processStart(row.pid);
+  if (start === null) return "dead";
+  if (start === "unreadable" || row.proc_start === null) return "alive";
+  return start === row.proc_start ? "alive" : "dead";
+}
+
 /** Test and host tuning of the exit-proof timings for this database's plane. */
 export function configureExitProofs(db: Db, opts: { stopEvidenceMs?: number; watchMs?: number }): void {
   const inc = incarnation(db);
@@ -186,35 +227,47 @@ export function claimRecoveryStop(db: Db, attemptId: string): boolean {
   inc.stopsIssued.add(attemptId);
   return true;
 }
-/** A recovery stop that could not be issued: the next proof test may try again. */
-function unclaimRecoveryStop(db: Db, attemptId: string): void {
+/** A recovery stop that could not be issued: the next proof test, or the next boot's reaper, may try again. */
+export function releaseRecoveryStop(db: Db, attemptId: string): void {
   incarnation(db).stopsIssued.delete(attemptId);
 }
 
 /**
  * The boot reaper's view of one recorded agent unit id (the attempt id, or a pre-attempt session
  * id): the attempt's recorded unit owner, and whether this incarnation may stop it now. An attempt
- * a live incarnation holds is never stopped by recovery.
+ * a live incarnation holds is never stopped by recovery. The claim is the caller's to give back
+ * (`releaseRecoveryStop`) when its stop command could not be issued.
  */
-export function recoveryStopFor(db: Db, unitId: string): { attempt: boolean; stop: boolean; owner?: UnitOwner } {
+export function recoveryStopFor(db: Db, unitId: string): { attempt: boolean; stop: boolean; attemptId?: string; unit?: string; owner?: UnitOwner } {
   const store = new AttemptStore(db);
   const a = store.get(unitId);
   if (!a || !a.provider_unit) return { attempt: false, stop: true };
   if (store.incarnationOf(a) === "alive") return { attempt: true, stop: false };
   const owner = store.unitOwner(a.attempt_id);
-  return { attempt: true, stop: claimRecoveryStop(db, a.attempt_id), ...(owner ? { owner } : {}) };
+  return { attempt: true, stop: claimRecoveryStop(db, a.attempt_id), attemptId: a.attempt_id, unit: a.provider_unit, ...(owner ? { owner } : {}) };
 }
 
 /**
- * #272 review: a Harness session whose entered attempt another live plane incarnation holds. Boot
- * recovery leaves it (its lease, its state) to that incarnation. A session that has not entered yet
- * needs no such guard: its entry commit requires a current lease, so a voided one is refused
- * (`not_owner`) and the runner unwinds before any provider starts.
+ * #272 review: a Harness session another live plane incarnation still holds, so boot recovery
+ * leaves its lease and its state alone. The holder is the incarnation that took the session's lease
+ * (`runs.lease_incarnation`, written with the lease, before any provider entry), so a session still
+ * waiting for a provider start slot is held too. An entered attempt of a live incarnation counts as
+ * well. A lease no incarnation recorded (a row from before migration 060) is a dead one's.
  */
 export function heldByLiveIncarnation(db: Db, sessionId: string): boolean {
+  const lease = db.prepare("SELECT lease_token, lease_incarnation FROM runs WHERE id = ?").get(sessionId) as { lease_token: string | null; lease_incarnation: string | null } | undefined;
+  if (lease?.lease_token && incarnationState(db, lease.lease_incarnation) === "alive") return true;
   const store = new AttemptStore(db);
   const a = store.forSession(sessionId);
   return !!a && ENTERED_STATES.includes(a.state) && store.incarnationOf(a) === "alive";
+}
+
+/** A task whose open attempt or latest Harness session a live plane incarnation holds: boot reconciliation of the task is that plane's. */
+export function taskHeldByLiveIncarnation(db: Db, taskId: string): boolean {
+  const store = new AttemptStore(db);
+  if (store.ofTask(taskId, true).some((a) => ENTERED_STATES.includes(a.state) && store.incarnationOf(a) === "alive")) return true;
+  const sessions = db.prepare("SELECT id FROM runs WHERE task_id = ? AND execution_request_id IS NOT NULL AND ended_at IS NULL").all(taskId) as { id: string }[];
+  return sessions.some((r) => heldByLiveIncarnation(db, r.id));
 }
 
 /**
@@ -595,23 +648,7 @@ export class AttemptStore {
    * proves it gone.
    */
   incarnationOf(a: AttemptRow): "here" | "alive" | "dead" {
-    const inc = incarnation(this.db);
-    if (!a.entered_incarnation) return "dead";
-    if (a.entered_incarnation === inc.id) return "here";
-    const local = processIncarnations.get(a.entered_incarnation)?.deref();
-    if (local?.open) return "alive";
-    const row = this.db.prepare("SELECT pid, proc_start, boot_id FROM plane_incarnations WHERE incarnation_id = ?")
-      .get(a.entered_incarnation) as { pid: number; proc_start: string | null; boot_id: string } | undefined;
-    if (!row) return "dead";
-    const ev = exitEvidence(this.db);
-    const boot = ev.bootId();
-    if (row.boot_id !== "unavailable" && boot !== "unavailable" && row.boot_id !== boot) return "dead";
-    // This process's own pid: a handle it opened is in the map above, so any other is gone.
-    if (row.pid === process.pid) return "dead";
-    const start = ev.processStart(row.pid);
-    if (start === null) return "dead";
-    if (start === "unreadable" || row.proc_start === null) return "alive";
-    return start === row.proc_start ? "alive" : "dead";
+    return incarnationState(this.db, a.entered_incarnation);
   }
 
   /** The manager the attempt's unit was assigned under, as recorded at entry. */
@@ -773,7 +810,7 @@ export class AttemptStore {
           const db = this.db, now = this.now, id = a.attempt_id, unit = a.provider_unit, stopOwner = owner;
           if (claimRecoveryStop(db, id)) {
             queueMicrotask(() => {
-              void ev.stopUnit(unit, lane, stopOwner).then((issued) => { if (!issued) unclaimRecoveryStop(db, id); }, () => unclaimRecoveryStop(db, id));
+              void ev.stopUnit(unit, lane, stopOwner).then((issued) => { if (!issued) releaseRecoveryStop(db, id); }, () => releaseRecoveryStop(db, id));
             });
           }
           queueMicrotask(() => watchExit(db, id, now));
@@ -924,9 +961,7 @@ export class AttemptStore {
     const enteredBoot = boot === "unavailable" ? currentBootId() : boot;
     const inc = incarnation(this.db);
     // In this transaction, every entry: a rolled-back first entry must not leave the row unwritten.
-    const start = ev.processStart(process.pid);
-    this.db.prepare("INSERT OR IGNORE INTO plane_incarnations (incarnation_id, pid, proc_start, boot_id, started_at) VALUES (?, ?, ?, ?, ?)")
-      .run(inc.id, process.pid, start === null || start === "unreadable" ? null : start, enteredBoot, nowIso);
+    ensureIncarnationRow(this.db, nowIso);
     // The manager the unit is assigned under, so recovery reads and stops it there (finding 4).
     const owner = unit ? ev.unitOwner(a.run_as === "agent" ? "agent" : "plane") : undefined;
     this.db.prepare(`UPDATE execution_attempts SET state = 'starting', entered_at = ?, entered_boot_id = ?, entered_incarnation = ?, provider_unit = ?,

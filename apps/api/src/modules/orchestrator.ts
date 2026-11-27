@@ -67,7 +67,7 @@ import type { Registry } from "./registry.js";
 import { persistRoutingDecision, routeTask } from "./router.js";
 import { decideContextContinuation } from "./context-continuation.js";
 import { runSessionRefStored } from "./usage.js";
-import { AttemptStore, announceReleased, enterProvider, providerStreamClosed } from "./attempts.js";
+import { AttemptStore, announceReleased, enterProvider, providerStreamClosed, taskHeldByLiveIncarnation } from "./attempts.js";
 import { conformanceBlock } from "./runtime-lifecycle.js";
 import type { TaskEventBus } from "./sse.js";
 import type { TaskStore } from "./tasks.js";
@@ -547,6 +547,7 @@ export class Orchestrator {
     if (this.harnessBridge && this.harnessRecovery) {
       for (const row of this.tasks.runningTasks()) {
         if (!this.hasLiveLegacyRun(row.id) || !this.hasLiveHarnessSession(row.id)) continue;
+        if (taskHeldByLiveIncarnation(this.db, row.id)) continue; // another live plane's: not ours to quarantine
         const sid = this.harnessBridge.latestSessionId(row.id);
         try {
           if (sid) await this.harnessRecovery.quarantineSession(sid);
@@ -569,6 +570,9 @@ export class Orchestrator {
       for (const row of this.tasks.runningTasks()) {
         if (!this.harnessOwns(row.id)) continue;
         if (this.db.prepare("SELECT 1 FROM dispatches WHERE task_id = ? AND phase IN ('reserved','start_attempted') AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.dispatch_id = dispatches.dispatch_id)").get(row.id)) continue;
+        // #272 review: recovery left this task's session to the live plane that holds it, so the
+        // task is still running there: neither settled nor parked from here.
+        if (taskHeldByLiveIncarnation(this.db, row.id)) continue;
         const sid = this.harnessBridge.latestSessionId(row.id);
         const assistantId = this.lastAssistant(row.id) ?? "";
         const result = sid ? this.harnessBridge.result(sid) : undefined;
@@ -599,6 +603,7 @@ export class Orchestrator {
     let reconciled = 0;
     for (const row of this.tasks.runningTasks()) {
       if (this.harnessOwns(row.id)) continue;
+      if (taskHeldByLiveIncarnation(this.db, row.id)) continue; // a live plane's legacy run is not a crash's
       if (this.db.prepare(`SELECT 1 FROM dispatches d WHERE d.task_id = ? AND d.phase IN ('reserved','start_attempted')
         AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.dispatch_id = d.dispatch_id)`).get(row.id)) continue;
       try {
@@ -1195,10 +1200,12 @@ export class Orchestrator {
     let awaitingApproval = false;
     // #272 review: only the stream's own end or failure closes it. A failure while recording an
     // event leaves the provider's stream open: it is cancelled and drained before the attempt's
-    // stream is reported closed (`drainUnconsumed`).
-    const iter = run.adapter.events(run.handle)[Symbol.asyncIterator]();
+    // stream is reported closed (`drainUnconsumed`). An `events()` that throws before it hands out
+    // an iterator (an adapter whose run already finished) hands out no stream: nothing is open.
+    let iter: AsyncIterator<NormalizedEvent> | undefined;
     let streamEnded = false;
     try {
+      try { iter = run.adapter.events(run.handle)[Symbol.asyncIterator](); } catch (err) { streamEnded = true; throw err; }
       for (;;) {
         let step: IteratorResult<NormalizedEvent>;
         try { step = await iter.next(); } catch (err) { streamEnded = true; throw err; }
@@ -1250,7 +1257,7 @@ export class Orchestrator {
       clearTimeout(run.timeout);
       this.active.delete(run.runId);
       const ok = endedOk ?? false;
-      if (!streamEnded) this.drainUnconsumed(run, iter);
+      if (!streamEnded && iter) this.drainUnconsumed(run, iter);
       void this.settleRun(run, ok, streamEnded).catch(() => {
         // Settling is best-effort: a shutting-down process must not raise here.
       });

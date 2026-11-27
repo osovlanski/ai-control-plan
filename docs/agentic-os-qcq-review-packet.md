@@ -1833,6 +1833,34 @@ trigger tests. Where part 1 and the sections above differ:
     7. The two runtime-conformance tests that timed out at 5 s on a slow machine now run with a 30 s
        timeout.
 
+12. **Review fixes, round 3 (#272 Codex review of 76a067d, FAIL, same branch).** One regression test
+    per reproduced failure in `apps/api/test/qcq-04b-part1-review-r3.test.ts` (10, all fail on
+    76a067d). Note 11's claim that a session which has not entered needs no overlap guard was wrong:
+    a second plane's boot cleared the lease between its read and the first plane's entry, and failed
+    a healthy runner still waiting for a provider start slot.
+    1. *Lease holder (1, 2).* Migration 060 adds `runs.lease_incarnation`, written with the lease by
+       `acquireLease`, which also writes the incarnation's `plane_incarnations` row (before any
+       entry). `heldByLiveIncarnation` is true when the lease holder, or the attempt's entering
+       incarnation, is another live one. Boot recovery skips such a session, `voidAllLeases` clears a
+       lease only by compare-and-clear on the token it read, and `Orchestrator.reconcileOnBoot` skips
+       the task (quarantine, Harness park and legacy blanket-fail) while `taskHeldByLiveIncarnation`.
+       A lease from before 060 records no holder and is a dead incarnation's. A session with no lease
+       yet is still recovered.
+    2. *Cleanup yield (3).* A `return()` result closes the stream only with `done: true`; a result
+       that omits `done` or yields a value is read on to the end.
+    3. *Legacy subscription (4).* `consume` takes the iterator inside its `try`: an `events()` that
+       throws hands out no stream, so the run still ends and settles.
+    4. *Stop results (5).* `stopUnit` is true only when a manager answered: exit 0, or `systemctl`'s
+       5 (unit not loaded). Any other exit, a signal, a hang or a missing binary is false, so the
+       operator route answers 409 `stop_unavailable` and moves nothing. The agent wrapper itself
+       swallows a failed `systemctl stop` (`|| true`), so on that lane only a refused sudo or a bad id
+       is visible; making the wrapper report it is a host change for a later setup run.
+    5. *Boot reaper (6).* It stops through `ExitEvidence.stopUnit` (recorded owner, today's
+       configuration for a pre-attempt unit), gives its `claimRecoveryStop` back when no stop was
+       issued, and `reapStrayAgentUnits` keeps a dead incarnation's tracking file while any of its
+       units was not stopped, so a later boot with the manager back stops it.
+    6. The two remote-auth tests that timed out at 5 s on a slow machine run with a 30 s timeout.
+
 ### 8.3 qcq-04b part 2a as built
 
 Part 2 ships in three PRs. Part 2a is W, R and G with the grant pass (2.5) and the Harness-only
