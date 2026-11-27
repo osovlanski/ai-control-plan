@@ -1844,8 +1844,8 @@ trigger tests. Where part 1 and the sections above differ:
        incarnation, is another live one. Boot recovery skips such a session, `voidAllLeases` clears a
        lease only by compare-and-clear on the token it read, and `Orchestrator.reconcileOnBoot` skips
        the task (quarantine, Harness park and legacy blanket-fail) while `taskHeldByLiveIncarnation`.
-       A lease from before 060 records no holder and is a dead incarnation's. A session with no lease
-       yet is still recovered.
+       A lease from before 060 records no holder (note 13 supersedes this: it is held until it
+       expires). A session with no lease yet is still recovered.
     2. *Cleanup yield (3).* A `return()` result closes the stream only with `done: true`; a result
        that omits `done` or yields a value is read on to the end.
     3. *Legacy subscription (4).* `consume` takes the iterator inside its `try`: an `events()` that
@@ -1860,6 +1860,31 @@ trigger tests. Where part 1 and the sections above differ:
        issued, and `reapStrayAgentUnits` keeps a dead incarnation's tracking file while any of its
        units was not stopped, so a later boot with the manager back stops it.
     6. The two remote-auth tests that timed out at 5 s on a slow machine run with a 30 s timeout.
+
+13. **Review fixes, round 4 (#272 Codex review of 31f4dd0, FAIL, same branch).** One regression test
+    per reproduced failure in `apps/api/test/qcq-04b-part1-review-r4.test.ts` (7, all fail on
+    31f4dd0). The five failures are one family: whether another plane is alive was the arbiter, and
+    that read is racy and can be unreadable. Round 4 makes the lease the arbiter and leaves
+    alive/dead as a hint that only decides whether an *unexpired* lease may be cleared.
+    1. *Held (2, 4).* `heldByLiveIncarnation` is true only for an unexpired lease whose recorded
+       holder is another live incarnation, or unknown. An expired lease is never held, whatever its
+       holder reads as, and the entering incarnation of an attempt no longer holds a Harness
+       session (a legacy run, which has no lease, is still held by its open attempt's incarnation).
+       A lease taken before migration 060 records no holder: it is unknown, left until it expires
+       (at most one lease TTL), then recovered by the sweeper. **Deploy by stopping the old plane
+       first**, or accept that its live runner is recovered once its lease lapses.
+    2. *Atomic boot (1).* The legacy blanket-fail and the Harness park each re-check ownership inside
+       the write transaction (`BEGIN IMMEDIATE`), so a plane that takes a lease after the first
+       check is not failed from under. A lease taken after the write commits cannot be protected:
+       the task is already terminal.
+    3. *No /proc (3).* `processStart` reads ENOENT as gone only when this process itself is listed
+       in the same procfs; otherwise every pid is `unreadable` (alive).
+    4. *Sweeper settles (4).* `Orchestrator.settleSweptSessions` runs after each lease sweep and
+       settles or parks the task of a session the sweep recovered, as boot step 2 does (the step 2
+       body is now `settleRecoveredHarnessTask`). A task whose session a live runner holds is left.
+    5. *Wrapper (5).* `setup/run-as-agent stop` still returns success for a failed `systemctl stop`
+       (a host change for a later setup run). The boot reaper no longer trusts it: after an issued
+       stop it reads the unit and deletes the tracking file only when the unit is absent or empty.
 
 ### 8.3 qcq-04b part 2a as built
 

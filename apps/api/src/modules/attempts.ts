@@ -248,24 +248,32 @@ export function recoveryStopFor(db: Db, unitId: string): { attempt: boolean; sto
 }
 
 /**
- * #272 review: a Harness session another live plane incarnation still holds, so boot recovery
- * leaves its lease and its state alone. The holder is the incarnation that took the session's lease
- * (`runs.lease_incarnation`, written with the lease, before any provider entry), so a session still
- * waiting for a provider start slot is held too. An entered attempt of a live incarnation counts as
- * well. A lease no incarnation recorded (a row from before migration 060) is a dead one's.
+ * #272 review: a Harness session another plane still holds, so boot recovery leaves its lease and
+ * state alone. The lease is the arbiter (round 4): held means an unexpired lease whose recorded
+ * holder (`runs.lease_incarnation`, written with the lease, before any provider entry) is a live
+ * incarnation, or is unknown. An expired lease is never held, whatever the holder looks like: its
+ * runner stopped renewing, and the sweeper and boot recover it alike, so no session can sit
+ * unrecoverable behind a holder that cannot be proven dead. A lease taken before migration 060 has
+ * no holder recorded: it is unknown, so it is left to expire (at most one lease TTL) and then
+ * recovered by the sweeper. Deploy by stopping the old plane first.
  */
-export function heldByLiveIncarnation(db: Db, sessionId: string): boolean {
-  const lease = db.prepare("SELECT lease_token, lease_incarnation FROM runs WHERE id = ?").get(sessionId) as { lease_token: string | null; lease_incarnation: string | null } | undefined;
-  if (lease?.lease_token && incarnationState(db, lease.lease_incarnation) === "alive") return true;
-  const store = new AttemptStore(db);
-  const a = store.forSession(sessionId);
-  return !!a && ENTERED_STATES.includes(a.state) && store.incarnationOf(a) === "alive";
+export function heldByLiveIncarnation(db: Db, sessionId: string, nowIso: string = new Date().toISOString()): boolean {
+  const lease = db.prepare("SELECT lease_token, lease_expires_at, lease_incarnation FROM runs WHERE id = ?")
+    .get(sessionId) as { lease_token: string | null; lease_expires_at: string | null; lease_incarnation: string | null } | undefined;
+  if (!lease?.lease_token || !lease.lease_expires_at || lease.lease_expires_at <= nowIso) return false;
+  if (lease.lease_incarnation === null) return true; // unknown holder: not ours to clear before it expires
+  // This incarnation's own lease is never another plane's: boot recovery of its own database handle is its own business.
+  return incarnationState(db, lease.lease_incarnation) === "alive";
 }
 
-/** A task whose open attempt or latest Harness session a live plane incarnation holds: boot reconciliation of the task is that plane's. */
+/**
+ * A task a live plane incarnation holds: boot reconciliation of the task is that plane's. A legacy
+ * run is held by its open attempt's incarnation; a Harness session by its lease alone (round 4), so
+ * a session whose lease expired is recovered and its task settled whatever its attempt's holder.
+ */
 export function taskHeldByLiveIncarnation(db: Db, taskId: string): boolean {
   const store = new AttemptStore(db);
-  if (store.ofTask(taskId, true).some((a) => ENTERED_STATES.includes(a.state) && store.incarnationOf(a) === "alive")) return true;
+  if (store.ofTask(taskId, true).some((a) => a.execution_path === "legacy" && ENTERED_STATES.includes(a.state) && store.incarnationOf(a) === "alive")) return true;
   const sessions = db.prepare("SELECT id FROM runs WHERE task_id = ? AND execution_request_id IS NOT NULL AND ended_at IS NULL").all(taskId) as { id: string }[];
   return sessions.some((r) => heldByLiveIncarnation(db, r.id));
 }

@@ -131,9 +131,15 @@ export function buildHarnessComposition(deps: HarnessCompositionDeps): HarnessCo
       const units = reapStrayAgentUnits(config.dir, async (unitId) => {
         const target = recoveryStopFor(db, unitId);
         if (!target.stop) return true; // a live incarnation holds it, or this one already stopped it
-        const issued = await evidence.stopUnit(target.unit ?? `aos-run-${unitId}.scope`, "agent", target.owner);
+        const unit = target.unit ?? `aos-run-${unitId}.scope`;
+        const issued = await evidence.stopUnit(unit, "agent", target.owner);
         if (!issued && target.attemptId) releaseRecoveryStop(db, target.attemptId);
-        return issued;
+        if (!issued) return false;
+        // Round 4: the installed wrapper reports success for a `systemctl stop` that failed, so an
+        // issued stop is not a stopped unit. The tracking record goes only once the unit reads absent
+        // or empty; any other read keeps it for the next boot.
+        const after = evidence.readUnit(unit, "agent", target.owner);
+        return after === "absent" || after === "empty";
       }, { log: deps.onInfo });
       return units.then(() => reapStrayProviders(config.dir, { log: deps.onInfo }));
     },

@@ -1839,7 +1839,8 @@ export function buildServer(deps: ServerDeps): BuiltServer {
   // fencing lease has expired to recovery. ponytail: fixed 60s = the lease TTL;
   // make it config if a deployment ever needs a different cadence.
   const leaseSweep = setInterval(() => {
-    void harnessRecovery.sweepExpiredLeases().catch((err) => app.log.error(err, "lease sweep failed"));
+    // #272 round 4: a session the sweep recovered leaves its task settled or parked, as boot would.
+    void harnessRecovery.sweepExpiredLeases().then((outcomes) => orchestrator.settleSweptSessions(outcomes)).catch((err) => app.log.error(err, "lease sweep failed"));
   }, 60_000);
   leaseSweep.unref();
   // P0-5: publications reconcile on the same cadence (uncertain creates, interrupted publishes,

@@ -263,6 +263,7 @@ describe("finding 3 and 4: incomplete reads, the recorded manager and wrapper (h
     const fields = Array.from({ length: 50 }, (_, i) => String(i + 3)); // fields 3.. (field 22 is "22")
     writeFileSync(join(proc, "300", "stat"), `300 (node (a b)) ${fields.join(" ")}\n`);
     expect(reader().processStart(300)).toBe("22");
+    mkdirSync(join(proc, String(process.pid)), { recursive: true }); // a mounted /proc holds this process
     expect(reader().processStart(301)).toBeNull();
   });
 

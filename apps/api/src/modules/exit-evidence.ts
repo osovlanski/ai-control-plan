@@ -258,7 +258,10 @@ export class SystemExitEvidence implements ExitEvidence {
       if (fields[0] === "Z" || fields[0] === "X") return null;
       return fields[19] ?? "unreadable"; // field 22 overall
     } catch (err) {
-      return isGone(err) ? null : "unreadable";
+      if (!isGone(err)) return "unreadable";
+      // ENOENT is "that pid is gone" only while /proc itself is mounted: this process must be in it.
+      // An absent or hidden procfs (a container without the mount) proves nothing about anyone.
+      return existsSync(join(this.procRoot, String(process.pid))) ? null : "unreadable";
     }
   }
 
