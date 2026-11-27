@@ -95,7 +95,8 @@
 // and `exitPending` (true once the attempt is stopping or ambiguous). Scheduler events gain
 // `attempt.stopping` and `attempt.stop_unconfirmed`. `POST /api/attempts/:id/confirm-stopped`
 // (capability `commands.write`) writes `operator_confirmed`, refused 409 `unit_populated` while the
-// unit reads populated (the body offers `POST /api/attempts/:id/stop-unit`). A pool slot is now
+// unit reads populated (the body offers `POST /api/attempts/:id/stop-unit`, which answers 409
+// `stop_unavailable`, moving nothing, when no manager could be asked to stop it). A pool slot is now
 // released at the attempt's exit proof, not at the task's terminal transition (packet 2.13 item 4).
 // 2.21 (additive, cockpit-autopilot-view plane half, autopilot-state v1,
 // docs/contracts/autopilot-state-v1.md): `GET /api/autopilot/state` (`tasks.read`), the versioned,

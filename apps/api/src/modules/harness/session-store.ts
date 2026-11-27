@@ -1,6 +1,6 @@
 import { HandoffService } from './handoff.js';
 import { runSessionRefStored } from '../usage.js';
-import { AttemptStore, announceReleased, enterProvider, registerSpawn, watchExit, type AttemptRow, type EntryResult, type Released } from '../attempts.js';
+import { AttemptStore, announceReleased, ensureIncarnationRow, enterProvider, providerStreamClosed, registerSpawn, watchExit, type AttemptRow, type EntryResult, type Released } from '../attempts.js';
 /**
  * SessionStore — durable substrate for the Execution Harness (Phase 1).
  *
@@ -67,6 +67,7 @@ interface RunRow {
   version: number;
   lease_token: string | null;
   lease_expires_at: string | null;
+  lease_incarnation?: string | null;
   heartbeat_seq: number;
   provider_session_ref: string | null;
   provider_start_acked: number;
@@ -368,6 +369,11 @@ export class SessionStore {
   /** qcq-04b: the adapter's spawn-closed report for an entered attempt with a unit. */
   registerSpawn(attemptId: string, closed: () => boolean): void {
     registerSpawn(this.db, attemptId, closed);
+  }
+
+  /** #268 review finding 5: the attempt's provider call settled and its event stream has closed. */
+  providerStreamClosed(attemptId: string): void {
+    providerStreamClosed(this.db, attemptId, this.now);
   }
 
   /** The attempt carrying this session, if any. */
@@ -680,12 +686,15 @@ export class SessionStore {
     const token = `lease_${cryptoRandom()}`;
     const nowIso = this.iso();
     const expiresIso = new Date(this.now().getTime() + ttlMs).toISOString();
+    // The holder is recorded with the lease (#272 review): a second plane's boot reads it to leave
+    // this session alone, whether or not a provider was entered yet.
+    const holder = ensureIncarnationRow(this.db, nowIso);
     const info = this.db
       .prepare(
-        `UPDATE runs SET lease_token = ?, lease_expires_at = ?, heartbeat_seq = heartbeat_seq + 1
+        `UPDATE runs SET lease_token = ?, lease_expires_at = ?, lease_incarnation = ?, heartbeat_seq = heartbeat_seq + 1
          WHERE id = ? AND (lease_token IS NULL OR lease_expires_at < ?)`,
       )
-      .run(token, expiresIso, sessionId, nowIso);
+      .run(token, expiresIso, holder, sessionId, nowIso);
     return info.changes === 1 ? token : undefined;
   }
 
@@ -882,13 +891,9 @@ export class SessionStore {
    */
   voidAllLeases(): number {
     const placeholders = SESSION_TERMINAL_STATES.map(() => "?").join(", ");
-    const info = this.db
-      .prepare(
-        `UPDATE runs SET lease_token = NULL, lease_expires_at = NULL
-         WHERE lease_token IS NOT NULL AND session_state NOT IN (${placeholders})`,
-      )
-      .run(...SESSION_TERMINAL_STATES);
-    return info.changes;
+    return this.db
+      .prepare(`UPDATE runs SET lease_token = NULL, lease_expires_at = NULL, lease_incarnation = NULL WHERE lease_token IS NOT NULL AND session_state NOT IN (${placeholders})`)
+      .run(...SESSION_TERMINAL_STATES).changes;
   }
 
   private iso(): string {

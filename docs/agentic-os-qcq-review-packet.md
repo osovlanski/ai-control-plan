@@ -1731,11 +1731,12 @@ trigger tests. Where part 1 and the sections above differ:
    `unreadable`, and `unreadable` proves nothing.
 3. **Proof order** (`AttemptStore.settleEntered`): `host_rebooted` first, for an attempt another
    incarnation entered on a different, known `boot_id`. Then, with a unit: `populated` registers
-   it (`provider_unit_seen_at`) and holds; `empty`, or `absent` once registered, is `cgroup_empty`
-   (an existing empty unit counts too, because systemd created it). `absent` and never registered is
-   `unscoped_exit` only when the spawn path is closed, the launcher scan finds nothing, and a second
-   read is still `absent`. Without a unit, the end of the stream (`stream_closed_unverified`), or
-   `boot_unverified` for a dead incarnation's attempt.
+   it (`provider_unit_seen_at`) and holds; `empty` or `absent` once registered is `cgroup_empty`.
+   Never registered, `empty` or `absent` is `unscoped_exit` only when the spawn path is closed, the
+   launcher scan finds nothing, and a second read is still `empty` or `absent` (an empty scope may
+   exist before systemd moves the launcher into it: #268 review, note 10). Without a unit, the end of
+   the provider stream (`stream_closed_unverified`), or `boot_unverified` for a dead incarnation's
+   attempt.
 4. **Spawn path.** In this incarnation, the runner registers the adapter's `spawnClosed` once its
    start call settled; until then the path is open. For the Claude adapter, `spawnClosed` is true
    when the query stream has ended and the CLI either never spawned, exited, or failed to spawn. The
@@ -1760,6 +1761,157 @@ trigger tests. Where part 1 and the sections above differ:
 9. **Not exercised here.** The real scope on a systemd host (OCI), and the agent wrapper's stop on
    that host. The cgroup and `/proc` reads are tested against fake trees, and the Claude adapter's
    `systemd-run` argv against a recording stub.
+10. **Review fixes (#268 Codex review, FAIL, fixed in their own PR).** One regression test per finding
+    in `apps/api/test/qcq-04b-part1-review.test.ts`.
+    1. *Registration first.* `cgroup_empty` needs `provider_unit_seen_at`. A never-registered empty
+       unit is treated like an absent one (note 3).
+    2. *Incarnation identity.* Migration 060 records, per entry, the plane incarnation
+       (`entered_incarnation`, a row in `plane_incarnations` with pid, `/proc/<pid>/stat` start time
+       and `boot_id`). `AttemptStore.incarnationOf` answers here, alive or dead. Another open handle
+       in this process, or another process whose pid still has the recorded start time on this boot,
+       is alive, and its attempts are left to it (the sweep and confirm-stopped do nothing). A start
+       time the plane cannot read is alive. A different boot, a gone pid, a reused pid, or this
+       process's own pid with no open handle is dead. Rows from before 060 read as dead, as before.
+    3. *Incomplete reads prove nothing.* A cgroup search that hits a stat or readdir error other than
+       ENOENT (ENOTDIR included, round 2) is `unreadable`, and a launcher scan that cannot read some process's argv
+       reports the launcher alive.
+    4. *Launch-time manager.* Entry records `provider_unit_owner` (`{ uid, user?, group?, wrapper? }`,
+       `ExitEvidence.unitOwner(lane)`). Reads, the launcher scan and stops (recovery and
+       `stop-unit`) use it, not today's agent user. The scan matches `run-as-agent`, the recorded
+       wrapper and the configured wrapper, by basename or full path.
+    5. *The provider stream decides.* Entry opens the attempt's provider stream in this incarnation.
+       It closes when the adapter call rejects, an iterator `next()` finishes or fails, or
+       `return()` settles: the runner reports it through `providerStreamClosed`, the legacy path at
+       `settleRun`, `startFailed`, a rejected call (`legacyCall`) and the abandon drain, even a late
+       one. While it is open, a unitless attempt is never settled `stream_closed_unverified`: a
+       legacy dispatch cancelled with `adapter.start` pending, and a session that ended on the
+       `run.ended` grace, both hold their claims until the stream closes. A stream that never closes
+       goes `ambiguous` after `stopEvidenceMs`. After an early return (cancel after start, profile or
+       isolation failure) the runner drains the stream once the provider tree is terminated.
+    6. *confirm-stopped.* Refused `attempt_live` while this incarnation's stream is open on a
+       `starting`, `live` or `stopping` attempt, or while another live incarnation holds it.
+       `ambiguous` stays the operator's.
+    7. *Recovery stop.* A dead incarnation's populated unit is stopped in any entered state
+       (`stopping` and `ambiguous` too), once per attempt and incarnation.
+    8. *Spawn report.* The exit watch stops at `ambiguous`, but the spawn-closed report stays until
+       the attempt is final (`finalize` drops it), so a later `unscoped_exit` is still provable.
+
+11. **Review fixes, round 2 (#272 Codex review, FAIL, fixed on the same branch).** One regression
+    test per reproduced failure in `apps/api/test/qcq-04b-part1-review-r2.test.ts` (16, all fail on
+    the first fix). Codex did not reproduce findings 1, 6 and 8.
+    1. *Pre-060 rows (4).* An attempt with no recorded `provider_unit_owner` is read under today's
+       manager, but only a populated read counts: it records that manager and carries on. Empty,
+       absent or unreadable proves nothing (the unit may live under the manager it was assigned
+       under, which a renamed agent user no longer is), so the attempt waits.
+    2. *Stops (4, 7).* `ExitEvidence.stopUnit` resolves true only when a command was issued. The
+       wrapper is the recorded one (`agentStopLauncher`), also with `execution.agentUser` removed;
+       the plane lane never stops another uid's unit. `Scheduler.stopUnit` issues first, and
+       answers 409 `stop_unavailable` (nothing moved) when no manager could be asked. The boot
+       reaper always runs, stops through the recorded owner, and shares `claimRecoveryStop` with the
+       proof test, so one attempt is stopped once per incarnation; a stop that was not issued is
+       claimed again on the next proof test. A unit id with no attempt is stopped as before.
+    3. *Legacy stream (5).* `consume` iterates by hand: only the iterator's own end or failure marks
+       the stream closed. A failure while recording an event cancels the run and drains the stream in
+       the background, reporting `providerStreamClosed` when it ends (`streamClosed(runId, false)`
+       keeps the stream open meanwhile). An entered direct or candidate start with no run row is
+       owned only while this incarnation holds its stream, so a drain that ends after the abandon
+       deadline settles the attempt instead of leaving it `ambiguous`. `legacyCall` takes a thunk,
+       so a synchronous throw from `adapter.start` is a rejected call.
+    4. *Harness stream (5).* `closeProviderStream` asks `return()` at once, beside any pending
+       `next()`. The stream is closed when that `next()` finishes or fails, or `return()` settles
+       without a yielded value (`done !== false`) or fails. Otherwise it is read to its end. A close
+       that races the provider call waits for the handle. A synchronous `adapter.start` throw is a
+       rejected call (`callOf`). The exit watch now also covers unitless attempts, and `awaitProof`
+       starts it, so a held-open stream reaches `ambiguous` (and the operator can confirm it)
+       without a scheduler sweep.
+    5. *Overlapping boot (2).* `HarnessRecovery.reconcileOnBoot` skips, and `voidAllLeases` keeps the
+       lease of, a session whose entered attempt a live incarnation holds (`liveElsewhere`, wired to
+       `heldByLiveIncarnation`). A session that has not entered needs no guard: the entry commit
+       requires a current lease. A zombie or dead process (`/proc/<pid>/stat` state `Z` or `X`)
+       counts as gone.
+    6. *Reads (3).* ENOTDIR is incomplete everywhere (cgroup search, launcher scan, start time).
+    7. The two runtime-conformance tests that timed out at 5 s on a slow machine now run with a 30 s
+       timeout.
+
+12. **Review fixes, round 3 (#272 Codex review of 76a067d, FAIL, same branch).** One regression test
+    per reproduced failure in `apps/api/test/qcq-04b-part1-review-r3.test.ts` (10, all fail on
+    76a067d). Note 11's claim that a session which has not entered needs no overlap guard was wrong:
+    a second plane's boot cleared the lease between its read and the first plane's entry, and failed
+    a healthy runner still waiting for a provider start slot.
+    1. *Lease holder (1, 2).* Migration 060 adds `runs.lease_incarnation`, written with the lease by
+       `acquireLease`, which also writes the incarnation's `plane_incarnations` row (before any
+       entry). `heldByLiveIncarnation` is true when the lease holder, or the attempt's entering
+       incarnation, is another live one. Boot recovery skips such a session, `voidAllLeases` clears a
+       lease only by compare-and-clear on the token it read, and `Orchestrator.reconcileOnBoot` skips
+       the task (quarantine, Harness park and legacy blanket-fail) while `taskHeldByLiveIncarnation`.
+       A lease from before 060 records no holder (note 13 supersedes this: it is held until it
+       expires). A session with no lease yet is still recovered.
+    2. *Cleanup yield (3).* A `return()` result closes the stream only with `done: true`; a result
+       that omits `done` or yields a value is read on to the end.
+    3. *Legacy subscription (4).* `consume` takes the iterator inside its `try`: an `events()` that
+       throws hands out no stream, so the run still ends and settles.
+    4. *Stop results (5).* `stopUnit` is true only when a manager answered: exit 0, or `systemctl`'s
+       5 (unit not loaded). Any other exit, a signal, a hang or a missing binary is false, so the
+       operator route answers 409 `stop_unavailable` and moves nothing. The agent wrapper itself
+       swallows a failed `systemctl stop` (`|| true`), so on that lane only a refused sudo or a bad id
+       is visible; making the wrapper report it is a host change for a later setup run.
+    5. *Boot reaper (6).* It stops through `ExitEvidence.stopUnit` (recorded owner, today's
+       configuration for a pre-attempt unit), gives its `claimRecoveryStop` back when no stop was
+       issued, and `reapStrayAgentUnits` keeps a dead incarnation's tracking file while any of its
+       units was not stopped, so a later boot with the manager back stops it.
+    6. The two remote-auth tests that timed out at 5 s on a slow machine run with a 30 s timeout.
+
+13. **Review fixes, round 4 (#272 Codex review of 31f4dd0, FAIL, same branch). Items 1, 2 and 4 are superseded by note 14.** One regression test
+    per reproduced failure in `apps/api/test/qcq-04b-part1-review-r4.test.ts` (7, all fail on
+    31f4dd0). The five failures are one family: whether another plane is alive was the arbiter, and
+    that read is racy and can be unreadable. Round 4 makes the lease the arbiter and leaves
+    alive/dead as a hint that only decides whether an *unexpired* lease may be cleared.
+    1. *Held (2, 4).* `heldByLiveIncarnation` is true only for an unexpired lease whose recorded
+       holder is another live incarnation, or unknown. An expired lease is never held, whatever its
+       holder reads as, and the entering incarnation of an attempt no longer holds a Harness
+       session (a legacy run, which has no lease, is still held by its open attempt's incarnation).
+       A lease taken before migration 060 records no holder: it is unknown, left until it expires
+       (at most one lease TTL), then recovered by the sweeper. **Deploy by stopping the old plane
+       first**, or accept that its live runner is recovered once its lease lapses.
+    2. *Atomic boot (1).* The legacy blanket-fail and the Harness park each re-check ownership inside
+       the write transaction (`BEGIN IMMEDIATE`), so a plane that takes a lease after the first
+       check is not failed from under. A lease taken after the write commits cannot be protected:
+       the task is already terminal.
+    3. *No /proc (3).* `processStart` reads ENOENT as gone only when this process itself is listed
+       in the same procfs; otherwise every pid is `unreadable` (alive).
+    4. *Sweeper settles (4).* `Orchestrator.settleSweptSessions` runs after each lease sweep and
+       settles or parks the task of a session the sweep recovered, as boot step 2 does (the step 2
+       body is now `settleRecoveredHarnessTask`). A task whose session a live runner holds is left.
+    5. *Wrapper (5).* `setup/run-as-agent stop` still returns success for a failed `systemctl stop`
+       (a host change for a later setup run). The boot reaper no longer trusts it: after an issued
+       stop it reads the unit and deletes the tracking file only when the unit is absent or empty.
+
+14. **Review fixes, round 5 (#272 Codex review of 63d366f, FAIL, same branch; itay chose the lock).**
+    Seven reproduced cases (a renewal racing boot, a pre-060 runner under a scoped boot, a lease taken
+    after the quarantine check, a handoff racing a result, a sweep beside a healthy sibling, a runner
+    killed beside a surviving API, expiry between boot phases) all needed a second live plane on one
+    database. Notes 12 and 13 made each overlap safe case by case; round 5 removes the overlap.
+    1. *Workspace lock.* `src/plane-lock.ts`: the entry (`src/index.ts`) takes an exclusive SQLite
+       transaction on `<workspace>/plane.lock.db` and exits 1 when another process holds it. The
+       kernel drops the file lock when the holder dies, so there is no stale lock and no pid or
+       start-time read. `buildServer` takes no lock: it composes whatever it is given, and a test
+       that opens two handles is simulating what the entry now refuses.
+    2. *Boot as before.* `HarnessRecovery.reconcileOnBoot`, `SessionStore.voidAllLeases` and
+       `Orchestrator.reconcileOnBoot` are back to clearing every lease and deciding every live session:
+       `liveElsewhere`, `heldByLiveIncarnation`, `taskHeldByLiveIncarnation`, the held checks of the
+       quarantine, park and legacy steps, and `settleSweptSessions` are removed. `voidAllLeases` also
+       clears `lease_incarnation`.
+    3. *Pre-060 plane.* The lock cannot see a plane that predates it. `waitForPre060Planes` (entry,
+       before anything reconciles) waits out the latest unexpired lease that records no holder
+       (migration 060 always records one), and refuses to boot when that lease was renewed meanwhile,
+       so a live pre-060 Harness runner is not failed. A pre-060 legacy run holds no lease and cannot
+       be seen: **stop the old plane first**.
+    4. *Kept from round 4:* an unreadable procfs reads every pid as unreadable (note 13.3), and the
+       boot reaper deletes a unit's tracking file only once the unit reads absent or empty (13.5).
+    Tests: `qcq-04b-part1-review-r5.test.ts` (8: lock in one process, across processes incl. SIGKILL,
+    after garbage collection, the real entry; the pre-060 wait and refusal; boot clears the holder).
+    The tests of the removed overlap behaviour (r2 finding 2, r3 findings 1 and 2, r4 findings 1, 2
+    and 4) are removed with it.
 
 ### 8.3 qcq-04b part 2a as built
 

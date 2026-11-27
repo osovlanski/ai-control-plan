@@ -25,21 +25,45 @@ export type UnitLane = "plane" | "agent";
 /** `cgroup.events` says `populated 1` / `populated 0`; the unit's cgroup does not exist; or it cannot be read. */
 export type UnitState = "populated" | "empty" | "absent" | "unreadable";
 
+/**
+ * The manager a unit was assigned under, recorded on the attempt at entry (#268 review): recovery
+ * reads, scans for and stops the unit there, not under whatever the agent user is configured as by
+ * then. `wrapper` is the agent lane's launcher path; `user` is who the stop runs as.
+ */
+export interface UnitOwner { uid: number; user?: string; group?: string; wrapper?: string }
+
 export interface ExitEvidence {
   /** Why this host has no strong evidence on `lane`, or undefined when it has. */
   unavailable(lane: UnitLane): string | undefined;
-  /** The unit's state, read from its cgroup. `unit` carries its `.scope` suffix. */
-  readUnit(unit: string, lane: UnitLane): UnitState;
+  /** Who a unit assigned now on `lane` belongs to, for the attempt to record. */
+  unitOwner(lane: UnitLane): UnitOwner | undefined;
+  /**
+   * The unit's state, read from its cgroup under `owner`'s manager (the lane's current one when the
+   * attempt recorded none). `unit` carries its `.scope` suffix. A search or read the plane could not
+   * complete (permissions) is `unreadable`, never `absent`.
+   */
+  readUnit(unit: string, lane: UnitLane, owner?: UnitOwner): UnitState;
   /**
    * Whether a live process on this boot carries the attempt id in any launcher form, matched as an
    * argv token: `--unit=aos-att-<id>`, `--unit=aos-run-<id>` (the agent wrapper after its
-   * `exec systemd-run`), or `run-as-agent run <id>` (the wrapper itself, and sudo in front of it).
+   * `exec systemd-run`), or `<wrapper> run <id>` (the wrapper itself, and sudo in front of it), for
+   * `run-as-agent` and the recorded wrapper path. A scan that could not read every process says true.
    */
-  launcherAlive(attemptId: string): boolean;
+  launcherAlive(attemptId: string, owner?: UnitOwner): boolean;
   /** `/proc/sys/kernel/random/boot_id`: changes exactly at boot. */
   bootId(): string;
-  /** Stops the unit (the operator's stop). Resolves once asked; never throws. */
-  stopUnit(unit: string, lane: UnitLane): Promise<void>;
+  /**
+   * A process's start time (`/proc/<pid>/stat` field 22), so a reused pid is told from the plane
+   * that entered an attempt: null when no such process exists, `unreadable` when it cannot be told.
+   */
+  processStart(pid: number): string | null | "unreadable";
+  /**
+   * Stops the unit under `owner`'s manager (the recorded launch-time identity, else today's
+   * configuration). Resolves true once a stop command was issued, false when none could be: no
+   * manager the plane can reach (another uid on the plane lane, no agent identity at all), or the
+   * command failed or hung (an unreachable systemd manager, a refused sudo). Never throws.
+   */
+  stopUnit(unit: string, lane: UnitLane, owner?: UnitOwner): Promise<boolean>;
 }
 
 /** The unit an attempt's provider runs in, on its lane. */
@@ -50,11 +74,22 @@ export function attemptUnit(attemptId: string, lane: UnitLane): string {
 /** No strong evidence anywhere: no unit is ever assigned. The default until a host installs one. */
 export const NO_EXIT_EVIDENCE: ExitEvidence = {
   unavailable: () => "no exit-evidence reader is installed",
+  unitOwner: () => undefined,
   readUnit: () => "unreadable",
   launcherAlive: () => true,
   bootId: () => "unavailable",
-  stopUnit: async () => {},
+  processStart: () => "unreadable",
+  stopUnit: async () => false,
 };
+
+/** The agent wrapper a stop goes through: the recorded launch-time identity, else today's configuration. */
+export function agentStopLauncher(owner: UnitOwner | undefined, configured: Pick<AgentUserConfig, "user" | "sudo" | "wrapper" | "group"> | undefined):
+  { sudo: string; user: string; group: string; wrapper: string } | undefined {
+  if (owner?.user && owner.wrapper) {
+    return { sudo: configured?.sudo ?? "/usr/bin/sudo", user: owner.user, group: owner.group ?? configured?.group ?? "aos", wrapper: owner.wrapper };
+  }
+  return configured ? { sudo: configured.sudo, user: configured.user, group: configured.group, wrapper: configured.wrapper } : undefined;
+}
 
 const registry = new WeakMap<Db, ExitEvidence>();
 /** Installs the host's evidence reader for this database's plane. */
@@ -135,9 +170,20 @@ export class SystemExitEvidence implements ExitEvidence {
     return existsSync(dir) ? dir : undefined;
   }
 
-  /** The unit's cgroup directory, searched under the user manager (scopes land in `app.slice` or at its root). */
-  private unitDir(unit: string, lane: UnitLane): string | undefined | null {
-    const uid = lane === "plane" ? this.planeUid : this.opts.agentUser ? this.uidOf(this.opts.agentUser.user) : undefined;
+  unitOwner(lane: UnitLane): UnitOwner | undefined {
+    if (lane === "plane") return this.planeUid >= 0 ? { uid: this.planeUid } : undefined;
+    const agent = this.opts.agentUser;
+    const uid = agent ? this.uidOf(agent.user) : undefined;
+    return agent && uid !== undefined ? { uid, user: agent.user, group: agent.group, wrapper: agent.wrapper } : undefined;
+  }
+
+  /**
+   * The unit's cgroup directory, searched under the user manager (scopes land in `app.slice` or at
+   * its root). `undefined`: the whole search completed and found nothing. `null`: it could not be
+   * completed (no manager, a directory or entry the plane may not read), so nothing is proven absent.
+   */
+  private unitDir(unit: string, lane: UnitLane, owner?: UnitOwner): string | undefined | null {
+    const uid = owner?.uid ?? (lane === "plane" ? this.planeUid : this.opts.agentUser ? this.uidOf(this.opts.agentUser.user) : undefined);
     if (uid === undefined || uid < 0) return null;
     const root = this.managerDir(uid);
     if (!root) return null;
@@ -145,13 +191,19 @@ export class SystemExitEvidence implements ExitEvidence {
     for (let depth = 0; depth < 3 && level.length; depth++) {
       const next: string[] = [];
       for (const dir of level) {
-        const hit = join(dir, unit);
-        if (existsSync(hit)) return hit;
-        let entries: string[] = [];
-        try { entries = readdirSync(dir); } catch { continue; }
+        const hit = statKind(join(dir, unit));
+        if (hit === "dir") return join(dir, unit);
+        if (hit === "unreadable") return null;
+        let entries: string[];
+        try { entries = readdirSync(dir); } catch (err) {
+          if (isGone(err)) continue; // the slice itself went away mid-search
+          return null;
+        }
         for (const e of entries) {
           if (!e.endsWith(".slice")) continue;
-          try { if (statSync(join(dir, e)).isDirectory()) next.push(join(dir, e)); } catch { /* raced away */ }
+          const kind = statKind(join(dir, e));
+          if (kind === "dir") next.push(join(dir, e));
+          else if (kind === "unreadable") return null;
         }
       }
       level = next;
@@ -159,9 +211,9 @@ export class SystemExitEvidence implements ExitEvidence {
     return undefined;
   }
 
-  readUnit(unit: string, lane: UnitLane): UnitState {
+  readUnit(unit: string, lane: UnitLane, owner?: UnitOwner): UnitState {
     if (!/^aos-(att|run)-[A-Za-z0-9_-]{1,64}\.scope$/.test(unit)) return "unreadable";
-    const dir = this.unitDir(unit, lane);
+    const dir = this.unitDir(unit, lane, owner);
     if (dir === null) return "unreadable";
     if (dir === undefined) return "absent";
     try {
@@ -174,7 +226,7 @@ export class SystemExitEvidence implements ExitEvidence {
     }
   }
 
-  launcherAlive(attemptId: string): boolean {
+  launcherAlive(attemptId: string, owner?: UnitOwner): boolean {
     // An id we cannot match safely is never declared gone.
     if (!ATTEMPT_ID.test(attemptId)) return true;
     let pids: string[];
@@ -183,16 +235,34 @@ export class SystemExitEvidence implements ExitEvidence {
     } catch {
       return true; // no /proc: nothing can be proven absent
     }
+    const wrappers = [owner?.wrapper, this.opts.agentUser?.wrapper].filter((w): w is string => !!w);
     for (const pid of pids) {
       let argv: string[];
       try {
         argv = readFileSync(join(this.procRoot, pid, "cmdline"), "utf8").split("\0");
-      } catch {
-        continue; // exited between the listing and the read
+      } catch (err) {
+        if (isGone(err)) continue; // exited between the listing and the read
+        return true; // a process the plane may not read could be the launcher: the scan is incomplete
       }
-      if (launcherArgv(argv, attemptId)) return true;
+      if (launcherArgv(argv, attemptId, wrappers)) return true;
     }
     return false;
+  }
+
+  processStart(pid: number): string | null | "unreadable" {
+    try {
+      const stat = readFileSync(join(this.procRoot, String(pid), "stat"), "utf8");
+      // The command name (field 2) is parenthesised and may hold spaces: fields resume after its last ')'.
+      const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+      // Field 3: an exited process awaiting its parent's reap (Z) or dead (X) runs nothing (#272 review).
+      if (fields[0] === "Z" || fields[0] === "X") return null;
+      return fields[19] ?? "unreadable"; // field 22 overall
+    } catch (err) {
+      if (!isGone(err)) return "unreadable";
+      // ENOENT is "that pid is gone" only while /proc itself is mounted: this process must be in it.
+      // An absent or hidden procfs (a container without the mount) proves nothing about anyone.
+      return existsSync(join(this.procRoot, String(process.pid))) ? null : "unreadable";
+    }
   }
 
   bootId(): string {
@@ -203,38 +273,63 @@ export class SystemExitEvidence implements ExitEvidence {
     }
   }
 
-  stopUnit(unit: string, lane: UnitLane): Promise<void> {
-    if (!/^aos-(att|run)-[A-Za-z0-9_-]{1,64}\.scope$/.test(unit)) return Promise.resolve();
-    const agent = this.opts.agentUser;
-    const [cmd, args] = lane === "plane"
-      ? ["systemctl", ["--user", "stop", unit]]
-      : agent
-        ? [agent.sudo, ["-n", "-u", agent.user, "-g", agent.group, "--", agent.wrapper, "stop", unit.replace(/^aos-run-/, "").replace(/\.scope$/, "")]]
-        : [undefined, []];
-    if (!cmd) return Promise.resolve();
+  stopUnit(unit: string, lane: UnitLane, owner?: UnitOwner): Promise<boolean> {
+    if (!/^aos-(att|run)-[A-Za-z0-9_-]{1,64}\.scope$/.test(unit)) return Promise.resolve(false);
+    let cmd: string, args: string[];
+    if (lane === "plane") {
+      // `systemctl --user` reaches only this process's own manager: a unit recorded under another
+      // uid cannot be stopped from here (#272 review).
+      if (owner && owner.uid !== this.planeUid) return Promise.resolve(false);
+      [cmd, args] = ["systemctl", ["--user", "stop", unit]];
+    } else {
+      const agent = agentStopLauncher(owner, this.opts.agentUser);
+      if (!agent) return Promise.resolve(false);
+      [cmd, args] = [agent.sudo, ["-n", "-u", agent.user, "-g", agent.group, "--", agent.wrapper, "stop", unit.replace(/^aos-run-/, "").replace(/\.scope$/, "")]];
+    }
+    // A stop was issued only if a manager answered it (#272 review): exit 0, or systemctl's 5 (unit
+    // not loaded: it is already gone). Any other exit (no bus, sudo refused, a bad id), a signal or
+    // a hang leaves the unit unstopped, so the caller keeps its retry. The agent wrapper itself
+    // swallows a failed `systemctl stop`; only the commands around it can be told apart here.
+    const accepted = lane === "plane" ? [0, 5] : [0];
     return new Promise((done) => {
       try {
-        const child = spawn(cmd, args as string[], { stdio: "ignore", ...(lane === "agent" ? { env: { PATH: "/usr/local/bin:/usr/bin:/bin", LANG: "C.UTF-8" } } : {}) });
-        const timer = setTimeout(() => { child.kill("SIGKILL"); done(); }, 10_000);
+        const child = spawn(cmd, args, { stdio: "ignore", ...(lane === "agent" ? { env: { PATH: "/usr/local/bin:/usr/bin:/bin", LANG: "C.UTF-8" } } : {}) });
+        const timer = setTimeout(() => { child.kill("SIGKILL"); done(false); }, 10_000);
         timer.unref();
-        const end = () => { clearTimeout(timer); done(); };
-        child.on("error", end);
-        child.on("exit", end);
+        child.on("error", () => { clearTimeout(timer); done(false); });
+        child.on("exit", (code) => { clearTimeout(timer); done(code !== null && accepted.includes(code)); });
       } catch {
-        done();
+        done(false);
       }
     });
   }
 }
 
-/** One process's argv carries the attempt in a launcher form. Exported for tests. */
-export function launcherArgv(argv: string[], attemptId: string): boolean {
+/**
+ * One process's argv carries the attempt in a launcher form. `wrappers` are the configured or
+ * recorded wrapper paths, matched by full path or basename beside `run-as-agent`. Exported for tests.
+ */
+export function launcherArgv(argv: string[], attemptId: string, wrappers: string[] = []): boolean {
+  const names = new Set(["run-as-agent", ...wrappers.map((w) => basename(w))]);
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
     if (a === `--unit=aos-att-${attemptId}` || a === `--unit=aos-run-${attemptId}`) return true;
-    if (basename(a) === "run-as-agent" && argv[i + 1] === "run" && argv[i + 2] === attemptId) return true;
+    if ((names.has(basename(a)) || wrappers.includes(a)) && argv[i + 1] === "run" && argv[i + 2] === attemptId) return true;
   }
   return false;
+}
+
+/**
+ * The path no longer exists (ENOENT, or ESRCH for a process that just exited). Every other error,
+ * ENOTDIR included, leaves the read incomplete (#272 review).
+ */
+function isGone(err: unknown): boolean {
+  const code = (err as NodeJS.ErrnoException)?.code;
+  return code === "ENOENT" || code === "ESRCH";
+}
+/** A directory, nothing there, or a path the plane may not inspect. */
+function statKind(path: string): "dir" | "none" | "unreadable" {
+  try { return statSync(path).isDirectory() ? "dir" : "none"; } catch (err) { return isGone(err) ? "none" : "unreadable"; }
 }
 
 function hidepid(procRoot: string): string | undefined {
@@ -261,8 +356,25 @@ export class FakeExitEvidence implements ExitEvidence {
   boot = "boot-fake-1";
   lanes: Record<UnitLane, string | undefined> = { plane: undefined, agent: undefined };
   unavailable(lane: UnitLane): string | undefined { return this.lanes[lane]; }
-  readUnit(unit: string): UnitState { return this.units.get(unit) ?? "absent"; }
+  /** Units read per owner uid, when a test sets them that way: `${uid}:${unit}`. */
+  readonly ownedUnits = new Map<string, UnitState>();
+  /** Live processes and their start times; a pid not listed does not exist. */
+  readonly processes = new Map<number, string>([[process.pid, "self"]]);
+  owners: Record<UnitLane, UnitOwner | undefined> = { plane: { uid: 1000 }, agent: { uid: 1001, user: "aos-agent", wrapper: "/usr/local/bin/run-as-agent" } };
+  unitOwner(lane: UnitLane): UnitOwner | undefined { return this.owners[lane]; }
+  readUnit(unit: string, _lane?: UnitLane, owner?: UnitOwner): UnitState {
+    return (owner ? this.ownedUnits.get(`${owner.uid}:${unit}`) : undefined) ?? this.units.get(unit) ?? "absent";
+  }
   launcherAlive(attemptId: string): boolean { return this.launchers.has(attemptId); }
   bootId(): string { return this.boot; }
-  async stopUnit(unit: string): Promise<void> { this.stopped.push(unit); }
+  processStart(pid: number): string | null | "unreadable" { return this.processes.get(pid) ?? null; }
+  /** The owner each stop was asked under, beside `stopped`. */
+  readonly stopOwners: (UnitOwner | undefined)[] = [];
+  /** Whether a stop can be issued; false models a host with no reachable manager. */
+  stoppable = true;
+  async stopUnit(unit: string, _lane?: UnitLane, owner?: UnitOwner): Promise<boolean> {
+    if (!this.stoppable) return false;
+    this.stopped.push(unit); this.stopOwners.push(owner);
+    return true;
+  }
 }

@@ -455,13 +455,16 @@ export class Scheduler {
   }
 
   /** qcq-04b: stops an attempt's registered unit (the operator's step before `confirmStopped`). */
-  async stopUnit(attemptId: string): Promise<{ ok: true; unit: string } | { ok: false; code: 'unknown' | 'no_unit' | 'not_open' }> {
+  async stopUnit(attemptId: string): Promise<{ ok: true; unit: string } | { ok: false; code: 'unknown' | 'no_unit' | 'not_open' | 'stop_unavailable' }> {
     const a = this.attempts.get(attemptId);
     if (!a) return { ok: false, code: 'unknown' };
     if (!a.provider_unit) return { ok: false, code: 'no_unit' };
     if (!['starting', 'live', 'stopping', 'ambiguous'].includes(a.state)) return { ok: false, code: 'not_open' };
-    this.d.db.transaction(() => this.attempts.requestStop(a, 'operator stopped the unit'))();
-    await exitEvidence(this.d.db).stopUnit(a.provider_unit, a.run_as === 'agent' ? 'agent' : 'plane');
+    // Under the manager the unit was assigned under at entry, not today's configuration (#268
+    // review). A stop no manager could be asked for is refused, not reported done (#272 review).
+    const issued = await exitEvidence(this.d.db).stopUnit(a.provider_unit, a.run_as === 'agent' ? 'agent' : 'plane', this.attempts.unitOwner(attemptId));
+    if (!issued) return { ok: false, code: 'stop_unavailable' };
+    this.d.db.transaction(() => { const now = this.attempts.get(attemptId); if (now) this.attempts.requestStop(now, 'operator stopped the unit'); })();
     // The proof follows on the next read: the exit watch, or the sweep.
     this.releaseIfIdle(a.task_id, 'operator stopped the unit');
     return { ok: true, unit: a.provider_unit };

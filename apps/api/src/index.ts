@@ -5,9 +5,19 @@ import { EventRetention } from "./modules/retention.js";
 import { scheduleDailyJobs } from "./modules/jobs.js";
 import { setExitEvidence, SystemExitEvidence } from "./modules/exit-evidence.js";
 import { stopExitWatches } from "./modules/attempts.js";
+import { PlaneLockHeldError, acquirePlaneLock, waitForPre060Planes } from "./plane-lock.js";
 
 const config = loadConfig();
+// One live plane per workspace database: boot recovery presumes every lease it finds is a dead plane's.
+try {
+  acquirePlaneLock(config.dir); // held until this process exits
+} catch (err) {
+  if (!(err instanceof PlaneLockHeldError)) throw err;
+  console.error(err.message);
+  process.exit(1);
+}
 const db = openDb(config.dbPath);
+await waitForPre060Planes(db);
 // qcq-04b (packet 2.6.1): this host's exit evidence, installed before anything reconciles, so the
 // boot sweep reads the real boot id and units. Only the real entry installs it: buildServer (tests)
 // keeps NO_EXIT_EVIDENCE, where every attempt is released at the end of its stream.

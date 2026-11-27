@@ -100,6 +100,7 @@ export class HarnessRecovery {
   /** Boot: void all leases, then decide every live session's fate (§9). */
   async reconcileOnBoot(): Promise<SessionRecoveryOutcome[]> {
     await this.deps.reapStrays?.();
+    // The entry holds the workspace lock (`plane-lock.ts`): every lease found here is a dead plane's.
     this.deps.store.voidAllLeases();
     const out: SessionRecoveryOutcome[] = [];
     for (const s of this.deps.store.liveSessions()) {

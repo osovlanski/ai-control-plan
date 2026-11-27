@@ -8,7 +8,7 @@ import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { request as httpsRequest } from "node:https";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { mintBootstrapToken } from "../src/auth/bootstrap-token.js";
 import { credentialPath, readCredential } from "../src/auth/credential-file.js";
 import { canonicalIp, checkProxyContract } from "../src/auth/remote/proxy.js";
@@ -17,6 +17,9 @@ import {
   ALL_REMOTE_GRANTS, CANONICAL_HOST, TAILSCALE_LOGIN, command, cookieOf, oidcLogin, ownerSession, rawRequest, sameOrigin,
   startRemoteRig, viaProxy, type RemoteRig,
 } from "./helpers/remote-rig.js";
+
+// Each test builds a server; the 5 s default timed out twice on a slow reviewer machine (#272 review).
+vi.setConfig({ testTimeout: 30_000 });
 
 let rig: RemoteRig | undefined;
 afterEach(async () => { await rig?.close(); rig = undefined; });

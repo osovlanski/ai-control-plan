@@ -205,7 +205,7 @@ describe("provider-entry call-site allowlist (packet 2.4.2)", () => {
     ].sort());
     expect(sites.filter((s) => s.kind === "adapter" && s.file === "modules/runtime-conformance.ts")).toHaveLength(2);
     expect(sites.filter((s) => s.kind === "bridge" && s.text === "this.harnessBridge!.start")).toHaveLength(2);
-  });
+  }, 30_000); // the whole-tree parse took 6.2 s on a slow reviewer machine (#268 review)
 
   it("puts the guarded commit immediately before each of the five credentialed calls", () => {
     const credentialed = scan((f) => f !== FIXTURE).filter((s) => s.kind === "adapter" && s.file !== "modules/runtime-conformance.ts");
