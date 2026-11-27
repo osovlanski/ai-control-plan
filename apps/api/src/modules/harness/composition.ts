@@ -24,7 +24,7 @@ import { deriveEnvelopeUpdate } from "./envelope-derivation.js";
 import { EventRecorder } from "./event-recorder.js";
 import { snapshotQuota } from "./quota-snapshot.js";
 import { ProviderProcessTracker, markIncarnation, reapStrayAgentUnits, reapStrayProviders } from "./provider-processes.js";
-import { heldByLiveIncarnation, recoveryStopFor, releaseRecoveryStop } from "../attempts.js";
+import { recoveryStopFor, releaseRecoveryStop } from "../attempts.js";
 import { exitEvidence } from "../exit-evidence.js";
 import { HarnessRecovery } from "./recovery.js";
 import { SessionRunner, type RunnerDeps } from "./session-runner.js";
@@ -118,7 +118,6 @@ export function buildHarnessComposition(deps: HarnessCompositionDeps): HarnessCo
     verification: verificationStore,
     shouldTerminalizeOnRecovery: (sessionId) => shouldTerminalizeOnRecovery(db, config, sessionId),
     processes,
-    liveElsewhere: (sessionId) => heldByLiveIncarnation(db, sessionId),
     reapStrays: () => {
       bootSweepPending = true; // only reconcileOnBoot reaps, and it sweeps profiles last
       // P0-A2: agent-user units first. They are not this user's to signal, so they are stopped

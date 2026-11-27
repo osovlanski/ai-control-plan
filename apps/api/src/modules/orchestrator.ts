@@ -67,7 +67,7 @@ import type { Registry } from "./registry.js";
 import { persistRoutingDecision, routeTask } from "./router.js";
 import { decideContextContinuation } from "./context-continuation.js";
 import { runSessionRefStored } from "./usage.js";
-import { AttemptStore, announceReleased, enterProvider, providerStreamClosed, taskHeldByLiveIncarnation } from "./attempts.js";
+import { AttemptStore, announceReleased, enterProvider, providerStreamClosed } from "./attempts.js";
 import { conformanceBlock } from "./runtime-lifecycle.js";
 import type { TaskEventBus } from "./sse.js";
 import type { TaskRow, TaskStore } from "./tasks.js";
@@ -531,10 +531,8 @@ export class Orchestrator {
   }
 
   /**
-   * A Harness task whose session recovery has decided (boot, or a lease sweep): settle it from the
-   * session's terminal result, or park it for a manual restart when there is none. The park is one
-   * write transaction with its re-check, so a plane that took the session's lease meanwhile is
-   * never overwritten (#272 round 4).
+   * A Harness task whose session boot recovery has decided: settle it from the session's terminal
+   * result, or park it for a manual restart when there is none.
    */
   private async settleRecoveredHarnessTask(row: TaskRow): Promise<void> {
     const sid = this.harnessBridge!.latestSessionId(row.id);
@@ -547,11 +545,7 @@ export class Orchestrator {
     // Crashed mid-ROUTING/HANDING_OFF, or a resume_offered session this pass cannot act on — park,
     // never leave in an in-flight state, never blanket-fail (same shape as settleFromResult(..., null)).
     try {
-      const envelope = this.db.transaction(() => {
-        if (taskHeldByLiveIncarnation(this.db, row.id)) return undefined;
-        return this.tasks.transition(row.id, "WAITING_INPUT", "harness_error");
-      }).immediate();
-      if (!envelope) return;
+      const envelope = this.tasks.transition(row.id, "WAITING_INPUT", "harness_error");
       this.publishState(row.id, envelope);
       this.notice(
         row.id,
@@ -560,23 +554,6 @@ export class Orchestrator {
       );
     } catch {
       // already moved on by step 1 / a concurrent settle
-    }
-  }
-
-  /**
-   * #272 round 4: sessions the lease sweeper recovered (their lease had expired, so their runner was
-   * another plane's, or gone) leave their task as boot would: settled from the result, or parked.
-   * A task whose session a live runner holds, or one already settled, is left alone.
-   */
-  async settleSweptSessions(outcomes: readonly { sessionId: string; action: string }[]): Promise<void> {
-    if (!this.harnessBridge) return;
-    for (const o of outcomes) {
-      if (o.action === "skipped") continue;
-      const t = this.db.prepare("SELECT task_id FROM runs WHERE id = ?").get(o.sessionId) as { task_id: string } | undefined;
-      const row = t ? this.tasks.runningTasks().find((r) => r.id === t.task_id) : undefined;
-      if (!row || !this.harnessOwns(row.id) || taskHeldByLiveIncarnation(this.db, row.id)) continue;
-      if (this.harnessBridge.latestSessionId(row.id) !== o.sessionId) continue;
-      await this.settleRecoveredHarnessTask(row);
     }
   }
 
@@ -597,7 +574,6 @@ export class Orchestrator {
     if (this.harnessBridge && this.harnessRecovery) {
       for (const row of this.tasks.runningTasks()) {
         if (!this.hasLiveLegacyRun(row.id) || !this.hasLiveHarnessSession(row.id)) continue;
-        if (taskHeldByLiveIncarnation(this.db, row.id)) continue; // another live plane's: not ours to quarantine
         const sid = this.harnessBridge.latestSessionId(row.id);
         try {
           if (sid) await this.harnessRecovery.quarantineSession(sid);
@@ -620,9 +596,6 @@ export class Orchestrator {
       for (const row of this.tasks.runningTasks()) {
         if (!this.harnessOwns(row.id)) continue;
         if (this.db.prepare("SELECT 1 FROM dispatches WHERE task_id = ? AND phase IN ('reserved','start_attempted') AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.dispatch_id = dispatches.dispatch_id)").get(row.id)) continue;
-        // #272 review: recovery left this task's session to the live plane that holds it, so the
-        // task is still running there: neither settled nor parked from here.
-        if (taskHeldByLiveIncarnation(this.db, row.id)) continue;
         await this.settleRecoveredHarnessTask(row);
       }
     }
@@ -633,26 +606,19 @@ export class Orchestrator {
     let reconciled = 0;
     for (const row of this.tasks.runningTasks()) {
       if (this.harnessOwns(row.id)) continue;
-      if (taskHeldByLiveIncarnation(this.db, row.id)) continue; // a live plane's legacy run is not a crash's
       if (this.db.prepare(`SELECT 1 FROM dispatches d WHERE d.task_id = ? AND d.phase IN ('reserved','start_attempted')
         AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.dispatch_id = d.dispatch_id)`).get(row.id)) continue;
-      // One write transaction with its re-check: a plane that took a lease or entered a provider
-      // after the check above would otherwise be failed from under (#272 round 4).
-      const failed = this.db.transaction(() => {
-        if (this.harnessOwns(row.id) || taskHeldByLiveIncarnation(this.db, row.id)) return false;
-        try {
-          this.tasks.transition(row.id, "FAILED");
-        } catch {
-          return false;
-        }
-        this.db
-          .prepare(
-            "UPDATE runs SET state = 'ENDED_ERROR', ended_at = ? WHERE task_id = ? AND ended_at IS NULL AND execution_request_id IS NULL",
-          )
-          .run(new Date().toISOString(), row.id);
-        return true;
-      }).immediate();
-      if (failed) reconciled += 1;
+      try {
+        this.tasks.transition(row.id, "FAILED");
+      } catch {
+        continue;
+      }
+      this.db
+        .prepare(
+          "UPDATE runs SET state = 'ENDED_ERROR', ended_at = ? WHERE task_id = ? AND ended_at IS NULL AND execution_request_id IS NULL",
+        )
+        .run(new Date().toISOString(), row.id);
+      reconciled += 1;
     }
     // K19k: scratch left by a task that went terminal while the plane was down.
     sweepScratch(this.config.dir, (taskId) => {

@@ -13,7 +13,7 @@
  *   4,7. Stops: the recorded wrapper without `execution.agentUser`; one recovery stop per attempt
  *        (the boot reaper and the proof test share it, and an unissued one is retried); a refused
  *        operator stop is not reported done; the plane lane never stops another uid's unit.
- *   2.   Boot recovery leaves a session a live incarnation still holds.
+ *   2.   (Overlapping boot: superseded in round 5 by the workspace lock, `qcq-04b-part1-review-r5.test.ts`.)
  *   3.   ENOTDIR and a zombie process are not proof of exit.
  */
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -21,15 +21,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentAdapter, AssistantId, CapabilityManifest, ExecutionRequest, NormalizedEvent, RunHandle, RunId, TaskId } from "@agent-plane/core";
-import { FakeAdapter } from "@agent-plane/adapters";
 import { credentialPath, readCredential } from "../src/auth/credential-file.js";
 import { loadConfig, type ResolvedConfig } from "../src/config.js";
 import { openDb, type Db } from "../src/db/index.js";
-import { AttemptStore, configureExitProofs, heldByLiveIncarnation, recoveryStopFor, stopExitWatches } from "../src/modules/attempts.js";
+import { AttemptStore, configureExitProofs, recoveryStopFor, stopExitWatches } from "../src/modules/attempts.js";
 import { FakeExitEvidence, SystemExitEvidence, agentStopLauncher, attemptUnit, setExitEvidence } from "../src/modules/exit-evidence.js";
 import { ApprovalService } from "../src/modules/harness/approval-service.js";
 import { EventRecorder } from "../src/modules/harness/event-recorder.js";
-import { HarnessRecovery } from "../src/modules/harness/recovery.js";
 import { SessionRunner, type RunnerDeps } from "../src/modules/harness/session-runner.js";
 import { SessionStore } from "../src/modules/harness/session-store.js";
 import { buildServer, type BuiltServer } from "../src/server.js";
@@ -305,37 +303,6 @@ describe("findings 4 and 7: stops", () => {
       await built.orchestrator.shutdown(); await built.app.close();
       rmSync(home, { recursive: true, force: true });
     }
-  });
-});
-
-describe("finding 2: boot recovery and a live incarnation", () => {
-  it("a second plane's boot leaves the first one's STARTING session, its lease and its attempt alone", async () => {
-    let openStart!: () => void;
-    const gate = new Promise<void>((r) => { openStart = r; });
-    const fake = new FakeAdapter("a1" as AssistantId);
-    const real = fake.start.bind(fake);
-    fake.start = async (spec) => { await gate; return real(spec); };
-    const run = new SessionRunner(deps(fake)).run(request());
-    await until(() => attempt()?.state === "starting", "the entry commit");
-    const sessionId = attempt().session_id!;
-    const lease = db.prepare("SELECT lease_token FROM runs WHERE id = ?").get(sessionId) as { lease_token: string };
-
-    const other = open();
-    setExitEvidence(other, ev);
-    const otherStore = new SessionStore(other);
-    await new HarnessRecovery({
-      store: otherStore, approvals: new ApprovalService(other),
-      checkpoints: { create: async () => ({ id: "ckpt_r", gitRef: null }) },
-      registry: { adapter: () => fake, manifest: () => MANIFEST },
-      liveElsewhere: (id) => heldByLiveIncarnation(other, id),
-    }).reconcileOnBoot();
-    // Before the fix: the lease was voided and the session failed, and the first runner's ackHandle CAS then conflicted.
-    expect(other.prepare("SELECT lease_token FROM runs WHERE id = ?").get(sessionId)).toEqual(lease);
-    expect(otherStore.get(sessionId)!.state).toBe("STARTING");
-    expect(heldByLiveIncarnation(other, sessionId)).toBe(true);
-    openStart();
-    expect((await run).outcome).toBe("completed");
-    await until(() => attempt().state === "settled", "the first plane's own proof");
   });
 });
 

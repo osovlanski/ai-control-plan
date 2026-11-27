@@ -2,9 +2,7 @@
  * #272 review (Codex, 2026-11-27, round 3): one regression test per failure Codex reproduced on
  * the round-2 fix.
  *
- *   1. A second plane's boot leaves a session whose lease another live incarnation holds, also one
- *      still waiting for a provider start slot (the lease records its holder before any entry).
- *   2. Its task is not parked or failed either.
+ *   1, 2. (Overlapping boot: superseded in round 5 by the workspace lock, `qcq-04b-part1-review-r5.test.ts`.)
  *   3. A `return()` result without `done` (a yielded cleanup value) is not a close.
  *   4. A legacy `events()` that throws before handing out an iterator still settles the run.
  *   5. A stop command that exits nonzero (no bus, sudo refused) is not an issued stop.
@@ -16,16 +14,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentAdapter, AssistantId, CapabilityManifest, ExecutionRequest, NormalizedEvent, RunHandle, RunId, TaskId } from "@agent-plane/core";
-import { FakeAdapter } from "@agent-plane/adapters";
 import { credentialPath, readCredential } from "../src/auth/credential-file.js";
-import { loadConfig, type ResolvedConfig } from "../src/config.js";
+import { loadConfig } from "../src/config.js";
 import { openDb, type Db } from "../src/db/index.js";
-import { AttemptStore, configureExitProofs, heldByLiveIncarnation, stopExitWatches } from "../src/modules/attempts.js";
+import { AttemptStore, configureExitProofs, stopExitWatches } from "../src/modules/attempts.js";
 import { FakeExitEvidence, SystemExitEvidence, attemptUnit, setExitEvidence } from "../src/modules/exit-evidence.js";
 import { AGENT_UNITS_DIR } from "../src/modules/harness/provider-processes.js";
 import { ApprovalService } from "../src/modules/harness/approval-service.js";
 import { EventRecorder } from "../src/modules/harness/event-recorder.js";
-import { HarnessRecovery } from "../src/modules/harness/recovery.js";
 import { SessionRunner, type RunnerDeps } from "../src/modules/harness/session-runner.js";
 import { SessionStore } from "../src/modules/harness/session-store.js";
 import { buildServer, type BuiltServer } from "../src/server.js";
@@ -120,110 +116,6 @@ function entered(d: Db, over: { runAs?: "plane" | "agent"; seen?: boolean; state
   return id;
 }
 
-
-const request2 = (n: number): ExecutionRequest => ({ ...request(), executionRequestId: `erq_${n}`, taskId: `AG-${n}` as TaskId,
-  runSpec: { ...request().runSpec, taskId: `AG-${n}` as TaskId } });
-
-describe("findings 1 and 2: a second plane's boot and a session another live plane holds", () => {
-  it("leaves a session still waiting for a provider start slot: lease, state and outcome", async () => {
-    db.prepare("INSERT INTO tasks (id, goal, envelope, created_at, updated_at) VALUES ('AG-2','g','{}','t','t')").run();
-    let openStart!: () => void;
-    const gate = new Promise<void>((r) => { openStart = r; });
-    const fake = new FakeAdapter("a1" as AssistantId);
-    const real = fake.start.bind(fake);
-    fake.start = async (spec) => { await gate; return real(spec); };
-    const runner = new SessionRunner(deps(fake, { maxConcurrentProviderStarts: 1 }));
-    const x = runner.run(request());
-    await until(() => attempt()?.state === "starting", "the first session's entry");
-    const y = runner.run(request2(2));
-    const waiting = () => db.prepare("SELECT id, session_state, lease_token, lease_incarnation FROM runs WHERE task_id = 'AG-2'").get() as { id: string; session_state: string; lease_token: string | null; lease_incarnation: string | null } | undefined;
-    await until(() => !!waiting()?.lease_token, "the second session's lease");
-    const before = waiting()!;
-    expect(before.lease_incarnation).toMatch(/^inc_/);
-    expect(db.prepare("SELECT COUNT(*) n FROM execution_attempts WHERE task_id = 'AG-2' AND state != 'held'").get()).toEqual({ n: 0 });
-
-    const other = open();
-    setExitEvidence(other, ev);
-    const otherStore = new SessionStore(other);
-    await new HarnessRecovery({
-      store: otherStore, approvals: new ApprovalService(other),
-      checkpoints: { create: async () => ({ id: "ckpt_r", gitRef: null }) },
-      registry: { adapter: () => fake, manifest: () => MANIFEST },
-      liveElsewhere: (id) => heldByLiveIncarnation(other, id),
-    }).reconcileOnBoot();
-    // Before the fix: the lease was cleared and the waiting session FAILED before it entered.
-    expect(waiting()).toEqual(before);
-    expect(otherStore.get(before.id)!.state).not.toBe("FAILED");
-
-    openStart();
-    expect((await x).outcome).toBe("completed");
-    expect((await y).outcome).toBe("completed"); // its ackHandle CAS still holds
-  });
-
-  it("a lease recorded by a dead incarnation is voided and recovered as before", () => {
-    const sid = "run_dead_lease";
-    db.prepare("INSERT INTO runs (id, task_id, assistant_id, state, started_at, execution_request_id, session_state, lease_token, lease_expires_at, lease_incarnation) VALUES (?, 'AG-1', 'a1', 'ACTIVE', 't', 'erq_dead', 'RUNNING', 'lease_x', '2999-01-01T00:00:00Z', 'inc_gone')").run(sid);
-    expect(heldByLiveIncarnation(db, sid)).toBe(false);
-    expect(store.voidAllLeases(() => false)).toBe(1);
-    expect(db.prepare("SELECT lease_token, lease_incarnation FROM runs WHERE id = ?").get(sid)).toEqual({ lease_token: null, lease_incarnation: null });
-  });
-
-  it("voidAllLeases clears only the lease it read: one taken since is left", () => {
-    const sid = "run_race";
-    db.prepare("INSERT INTO runs (id, task_id, assistant_id, state, started_at, execution_request_id, session_state, lease_token, lease_expires_at) VALUES (?, 'AG-1', 'a1', 'ACTIVE', 't', 'erq_race', 'STARTING', 'lease_old', '2999-01-01T00:00:00Z')").run(sid);
-    // The keep predicate runs after the read: a runner takes the lease there.
-    const cleared = store.voidAllLeases(() => { db.prepare("UPDATE runs SET lease_token = 'lease_new' WHERE id = ?").run(sid); return false; });
-    expect(cleared).toBe(0);
-    expect(db.prepare("SELECT lease_token FROM runs WHERE id = ?").get(sid)).toEqual({ lease_token: "lease_new" });
-  });
-});
-
-describe("finding 2: a full boot parks nothing a live plane still runs", () => {
-  let home: string; let config: ResolvedConfig; let built1: BuiltServer | undefined; let built2: BuiltServer | undefined; let d1: Db; let d2: Db;
-  const A = "fake-a" as AssistantId;
-  afterEach(async () => {
-    for (const b of [built1, built2]) if (b) { await b.orchestrator.shutdown(); await b.app.close(); }
-    built1 = built2 = undefined;
-    for (const d of [d1, d2]) if (d?.open) { stopExitWatches(d); d.close(); }
-    if (home) rmSync(home, { recursive: true, force: true });
-  });
-  const reaches = (b: BuiltServer, id: string, states: string[]) => new Promise<string>((resolve) => {
-    const now = b.tasks.get(id)?.state;
-    if (now && states.includes(now)) return resolve(now);
-    const off = b.bus.subscribe(id, (p) => { if (p.kind === "state" && states.includes(p.state!.state)) { off(); resolve(p.state!.state); } });
-  });
-
-  it("the second plane leaves the RUNNING task and its session; the first runner then completes", async () => {
-    home = mkdtempSync(join(tmpdir(), "qcq-04b-r272-boot-"));
-    config = loadConfig({ AGENT_PLANE_HOME: home });
-    config.assistants = { [A]: { provider: "fake" } };
-    config.execution.harnessModes.single = true;
-    d1 = openDb(config.dbPath); built1 = buildServer({ config, db: d1 });
-    built1.registry.init(); await built1.registry.syncAll();
-    setExitEvidence(d1, ev);
-    const adapter = built1.registry.adapter(A);
-    const real = adapter.start.bind(adapter);
-    let openStart!: () => void;
-    const gate = new Promise<void>((r) => { openStart = r; });
-    vi.spyOn(adapter, "start").mockImplementation(async (spec) => { await gate; return real(spec); });
-    const id = built1.tasks.create({ goal: "do the work" }).taskId;
-    built1.tasks.transition(id, "ROUTING");
-    await built1.orchestrator.startTask(id, A);
-    const session = () => d1.prepare("SELECT id, session_state, lease_token FROM runs WHERE task_id = ? AND execution_request_id IS NOT NULL").get(id) as { id: string; session_state: string; lease_token: string | null };
-    await until(() => !!session()?.lease_token, "the first plane's session lease");
-    const before = session();
-
-    d2 = openDb(config.dbPath); built2 = buildServer({ config, db: d2 });
-    setExitEvidence(d2, ev);
-    await built2.orchestrator.reconcileOnBoot();
-    // Before the fix: the task went WAITING_INPUT (harness_error) while the first plane still ran it.
-    expect(built1.tasks.get(id)!.state).toBe("RUNNING");
-    expect(session()).toEqual(before);
-
-    openStart();
-    expect(await reaches(built1, id, ["COMPLETED", "FAILED", "WAITING_INPUT"])).toBe("COMPLETED");
-  });
-});
 
 describe("finding 3: a return() result that omits done is not a close", () => {
   it("a cleanup value yielded by return() without `done` keeps the stream open until it ends", async () => {

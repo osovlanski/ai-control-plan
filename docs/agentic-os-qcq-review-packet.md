@@ -1861,7 +1861,7 @@ trigger tests. Where part 1 and the sections above differ:
        units was not stopped, so a later boot with the manager back stops it.
     6. The two remote-auth tests that timed out at 5 s on a slow machine run with a 30 s timeout.
 
-13. **Review fixes, round 4 (#272 Codex review of 31f4dd0, FAIL, same branch).** One regression test
+13. **Review fixes, round 4 (#272 Codex review of 31f4dd0, FAIL, same branch). Items 1, 2 and 4 are superseded by note 14.** One regression test
     per reproduced failure in `apps/api/test/qcq-04b-part1-review-r4.test.ts` (7, all fail on
     31f4dd0). The five failures are one family: whether another plane is alive was the arbiter, and
     that read is racy and can be unreadable. Round 4 makes the lease the arbiter and leaves
@@ -1885,6 +1885,33 @@ trigger tests. Where part 1 and the sections above differ:
     5. *Wrapper (5).* `setup/run-as-agent stop` still returns success for a failed `systemctl stop`
        (a host change for a later setup run). The boot reaper no longer trusts it: after an issued
        stop it reads the unit and deletes the tracking file only when the unit is absent or empty.
+
+14. **Review fixes, round 5 (#272 Codex review of 63d366f, FAIL, same branch; itay chose the lock).**
+    Seven reproduced cases (a renewal racing boot, a pre-060 runner under a scoped boot, a lease taken
+    after the quarantine check, a handoff racing a result, a sweep beside a healthy sibling, a runner
+    killed beside a surviving API, expiry between boot phases) all needed a second live plane on one
+    database. Notes 12 and 13 made each overlap safe case by case; round 5 removes the overlap.
+    1. *Workspace lock.* `src/plane-lock.ts`: the entry (`src/index.ts`) takes an exclusive SQLite
+       transaction on `<workspace>/plane.lock.db` and exits 1 when another process holds it. The
+       kernel drops the file lock when the holder dies, so there is no stale lock and no pid or
+       start-time read. `buildServer` takes no lock: it composes whatever it is given, and a test
+       that opens two handles is simulating what the entry now refuses.
+    2. *Boot as before.* `HarnessRecovery.reconcileOnBoot`, `SessionStore.voidAllLeases` and
+       `Orchestrator.reconcileOnBoot` are back to clearing every lease and deciding every live session:
+       `liveElsewhere`, `heldByLiveIncarnation`, `taskHeldByLiveIncarnation`, the held checks of the
+       quarantine, park and legacy steps, and `settleSweptSessions` are removed. `voidAllLeases` also
+       clears `lease_incarnation`.
+    3. *Pre-060 plane.* The lock cannot see a plane that predates it. `waitForPre060Planes` (entry,
+       before anything reconciles) waits out the latest unexpired lease that records no holder
+       (migration 060 always records one), and refuses to boot when that lease was renewed meanwhile,
+       so a live pre-060 Harness runner is not failed. A pre-060 legacy run holds no lease and cannot
+       be seen: **stop the old plane first**.
+    4. *Kept from round 4:* an unreadable procfs reads every pid as unreadable (note 13.3), and the
+       boot reaper deletes a unit's tracking file only once the unit reads absent or empty (13.5).
+    Tests: `qcq-04b-part1-review-r5.test.ts` (8: lock in one process, across processes incl. SIGKILL,
+    after garbage collection, the real entry; the pre-060 wait and refusal; boot clears the holder).
+    The tests of the removed overlap behaviour (r2 finding 2, r3 findings 1 and 2, r4 findings 1, 2
+    and 4) are removed with it.
 
 ### 8.3 qcq-04b part 2a as built
 

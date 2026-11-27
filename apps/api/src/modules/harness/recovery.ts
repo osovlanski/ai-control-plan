@@ -67,12 +67,6 @@ export interface RecoveryDeps {
   processes?: ProviderProcessTracker;
   /** F2: boot reap of provider processes a dead incarnation left behind. Runs before any session is decided. */
   reapStrays?: () => Promise<unknown>;
-  /**
-   * qcq-04b (#272 review): the session's entered attempt is held by another plane incarnation that
-   * is still running (a second handle or process on the same database). Boot recovery leaves its
-   * lease and state alone: that incarnation's runner still owns it.
-   */
-  liveElsewhere?: (sessionId: string) => boolean;
   /** M3 S3: sweep owned terminal/unknown profiles after boot recovery and periodic lease recovery. Live sessions retain their profiles. */
   sweepProfiles?: () => unknown;
 }
@@ -103,19 +97,13 @@ export class HarnessRecovery {
     this.maxAttempts = deps.maxDirectiveAttempts ?? 3;
   }
 
-  /** Another live plane incarnation holds this session (its lease, or its entered attempt): boot leaves it alone. */
-  heldElsewhere(sessionId: string): boolean {
-    return this.deps.liveElsewhere?.(sessionId) ?? false;
-  }
-
   /** Boot: void all leases, then decide every live session's fate (§9). */
   async reconcileOnBoot(): Promise<SessionRecoveryOutcome[]> {
     await this.deps.reapStrays?.();
-    const liveElsewhere = this.deps.liveElsewhere ?? (() => false);
-    this.deps.store.voidAllLeases(liveElsewhere);
+    // The entry holds the workspace lock (`plane-lock.ts`): every lease found here is a dead plane's.
+    this.deps.store.voidAllLeases();
     const out: SessionRecoveryOutcome[] = [];
     for (const s of this.deps.store.liveSessions()) {
-      if (liveElsewhere(s.sessionId)) continue;
       out.push(await this.recoverSession(s.sessionId));
     }
     this.deps.store.reconcileHandoffClaims();
